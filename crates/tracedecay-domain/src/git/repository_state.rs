@@ -162,6 +162,14 @@ pub struct RepositoryStateSnapshotV1 {
     pub worktree_id: Option<WorktreeId>,
     pub observation_epoch: u64,
     pub object_format: GitObjectFormatV1,
+    /// Exact native Git implementation observed by the fixed adapter. A
+    /// read-only partial snapshot may omit this, but omitted native evidence
+    /// is never mutation eligible.
+    pub git_version: Option<String>,
+    /// Revision of the fixed native adapter that interpreted this state.
+    pub adapter_revision: Option<String>,
+    /// Digest of the complete native ref namespace at capture time.
+    pub refs_digest: Option<ManifestDigest>,
     pub head: GitHeadStateV1,
     pub index: RepositoryIndexSnapshotV1,
     pub working_tree: RepositoryWorkingTreeSnapshotV1,
@@ -200,6 +208,9 @@ impl RepositoryStateSnapshotV1 {
             worktree_id,
             observation_epoch,
             object_format,
+            git_version: None,
+            adapter_revision: None,
+            refs_digest: None,
             head,
             index,
             working_tree,
@@ -216,6 +227,26 @@ impl RepositoryStateSnapshotV1 {
         Ok(snapshot)
     }
 
+    /// Bind native implementation and ref-namespace identity to a freshly
+    /// captured snapshot. The snapshot ID is re-derived so callers cannot add
+    /// this evidence after a preview has been issued.
+    pub fn with_native_identity(
+        mut self,
+        git_version: String,
+        adapter_revision: String,
+        refs_digest: ManifestDigest,
+    ) -> Result<Self, DomainError> {
+        validate_native_identity(&git_version, "repository git version")?;
+        validate_native_identity(&adapter_revision, "repository git adapter revision")?;
+        refs_digest.validate()?;
+        self.git_version = Some(git_version);
+        self.adapter_revision = Some(adapter_revision);
+        self.refs_digest = Some(refs_digest);
+        self.validate_fields()?;
+        self.snapshot_id = self.derive_snapshot_id()?;
+        Ok(self)
+    }
+
     pub fn snapshot_id(&self) -> &RepositoryStateSnapshotId {
         &self.snapshot_id
     }
@@ -224,7 +255,14 @@ impl RepositoryStateSnapshotV1 {
     /// operation layer for a mutation preview. This does not itself grant or
     /// perform mutation authority.
     pub fn is_mutation_eligible(&self) -> bool {
-        self.coverage.is_complete()
+        self.git_version.is_some()
+            && self.adapter_revision.is_some()
+            && self.refs_digest.is_some()
+            && self.attributes_digest.is_some()
+            && self.sparse_digest.is_some()
+            && self.submodule_digest.is_some()
+            && self.filesystem_capabilities_digest.is_some()
+            && self.coverage.is_complete()
             && !matches!(
                 self.index.state,
                 RepositoryIndexStateV1::Unmerged
@@ -262,6 +300,22 @@ impl RepositoryStateSnapshotV1 {
                 field: "repository observation epoch",
             });
         }
+        if let Some(version) = &self.git_version {
+            validate_native_identity(version, "repository git version")?;
+        }
+        if let Some(revision) = &self.adapter_revision {
+            validate_native_identity(revision, "repository git adapter revision")?;
+        }
+        self.refs_digest
+            .as_ref()
+            .map_or(Ok(()), ManifestDigest::validate)?;
+        if self.git_version.is_some() != self.adapter_revision.is_some()
+            || self.git_version.is_some() != self.refs_digest.is_some()
+        {
+            return Err(DomainError::NonCanonical {
+                field: "repository native identity completeness",
+            });
+        }
         self.head.validate()?;
         if let Some(commit) = self.head.commit() {
             commit.validate()?;
@@ -296,6 +350,9 @@ impl RepositoryStateSnapshotV1 {
             worktree_id: Option<&'a WorktreeId>,
             observation_epoch: u64,
             object_format: GitObjectFormatV1,
+            git_version: Option<&'a str>,
+            adapter_revision: Option<&'a str>,
+            refs_digest: Option<&'a ManifestDigest>,
             head: &'a GitHeadStateV1,
             index: &'a RepositoryIndexSnapshotV1,
             working_tree: &'a RepositoryWorkingTreeSnapshotV1,
@@ -316,6 +373,9 @@ impl RepositoryStateSnapshotV1 {
                 worktree_id: self.worktree_id.as_ref(),
                 observation_epoch: self.observation_epoch,
                 object_format: self.object_format,
+                git_version: self.git_version.as_deref(),
+                adapter_revision: self.adapter_revision.as_deref(),
+                refs_digest: self.refs_digest.as_ref(),
                 head: &self.head,
                 index: &self.index,
                 working_tree: &self.working_tree,
@@ -352,6 +412,9 @@ impl<'de> Deserialize<'de> for RepositoryStateSnapshotV1 {
             worktree_id: Option<WorktreeId>,
             observation_epoch: u64,
             object_format: GitObjectFormatV1,
+            git_version: Option<String>,
+            adapter_revision: Option<String>,
+            refs_digest: Option<ManifestDigest>,
             head: GitHeadStateV1,
             index: RepositoryIndexSnapshotV1,
             working_tree: RepositoryWorkingTreeSnapshotV1,
@@ -365,7 +428,7 @@ impl<'de> Deserialize<'de> for RepositoryStateSnapshotV1 {
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        let snapshot = Self::new(
+        let mut snapshot = Self::new(
             wire.project_id,
             wire.repository_id,
             wire.worktree_id,
@@ -383,6 +446,15 @@ impl<'de> Deserialize<'de> for RepositoryStateSnapshotV1 {
             wire.coverage,
         )
         .map_err(serde::de::Error::custom)?;
+        snapshot.git_version = wire.git_version;
+        snapshot.adapter_revision = wire.adapter_revision;
+        snapshot.refs_digest = wire.refs_digest;
+        snapshot
+            .validate_fields()
+            .map_err(serde::de::Error::custom)?;
+        snapshot.snapshot_id = snapshot
+            .derive_snapshot_id()
+            .map_err(serde::de::Error::custom)?;
         if snapshot.snapshot_id != wire.snapshot_id {
             return Err(serde::de::Error::custom(
                 "repository state snapshot id does not match its canonical state",
@@ -390,4 +462,15 @@ impl<'de> Deserialize<'de> for RepositoryStateSnapshotV1 {
         }
         Ok(snapshot)
     }
+}
+
+fn validate_native_identity(value: &str, field: &'static str) -> Result<(), DomainError> {
+    if value.is_empty()
+        || value.len() > 512
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return Err(DomainError::NonCanonical { field });
+    }
+    Ok(())
 }

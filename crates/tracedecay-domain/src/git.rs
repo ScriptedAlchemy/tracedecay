@@ -1182,6 +1182,10 @@ pub struct GitIndexPreviewV1 {
     pub repository_snapshot_digest: ManifestDigest,
     pub selected_hunks: Vec<HunkRefV1>,
     pub candidate_index_tree: Option<GitOidV1>,
+    /// Full canonical commit input. It is present exactly for `commit_index`
+    /// and participates in preview identity; apply never accepts a replacement
+    /// message, identity, timestamp, key, or signing policy.
+    pub commit_intent: Option<GitIndexCommitIntentV1>,
     pub disposition: GitIndexPreviewDispositionV1,
     pub created_at: UtcMicros,
     pub expires_at: UtcMicros,
@@ -1197,6 +1201,7 @@ struct GitIndexPreviewDigestMaterial<'a> {
     repository_snapshot_digest: &'a ManifestDigest,
     selected_hunk_digests: &'a [ManifestDigest],
     candidate_index_tree: Option<&'a GitOidV1>,
+    commit_intent: Option<&'a GitIndexCommitIntentV1>,
     disposition: &'a GitIndexPreviewDispositionV1,
     created_at: UtcMicros,
     expires_at: UtcMicros,
@@ -1215,6 +1220,33 @@ impl GitIndexPreviewV1 {
         created_at: UtcMicros,
         expires_at: UtcMicros,
     ) -> Result<Self, DomainError> {
+        Self::new_with_commit_intent(
+            preview_id,
+            operation,
+            repository_snapshot,
+            repository_snapshot_digest,
+            selected_hunks,
+            candidate_index_tree,
+            None,
+            disposition,
+            created_at,
+            expires_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_commit_intent(
+        preview_id: GitIndexPreviewId,
+        operation: GitIndexTransactionOperationV1,
+        repository_snapshot: RepositoryStateSnapshotV1,
+        repository_snapshot_digest: ManifestDigest,
+        selected_hunks: Vec<HunkRefV1>,
+        candidate_index_tree: Option<GitOidV1>,
+        commit_intent: Option<GitIndexCommitIntentV1>,
+        disposition: GitIndexPreviewDispositionV1,
+        created_at: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
         let mut preview = Self {
             preview_id,
             operation,
@@ -1222,6 +1254,7 @@ impl GitIndexPreviewV1 {
             repository_snapshot_digest,
             selected_hunks,
             candidate_index_tree,
+            commit_intent,
             disposition,
             created_at,
             expires_at,
@@ -1261,6 +1294,7 @@ impl GitIndexPreviewV1 {
             repository_snapshot_digest: &self.repository_snapshot_digest,
             selected_hunk_digests: &hunk_digests,
             candidate_index_tree: self.candidate_index_tree.as_ref(),
+            commit_intent: self.commit_intent.as_ref(),
             disposition: &self.disposition,
             created_at: self.created_at,
             expires_at: self.expires_at,
@@ -1324,6 +1358,9 @@ impl GitIndexPreviewV1 {
                 });
             }
         }
+        if let Some(intent) = &self.commit_intent {
+            intent.validate()?;
+        }
 
         match (&self.disposition, self.operation) {
             (
@@ -1336,6 +1373,7 @@ impl GitIndexPreviewV1 {
                         GitHeadStateV1::Attached { .. }
                     )
                     || !self.selected_hunks.is_empty()
+                    || self.commit_intent.is_none()
                     || self.candidate_index_tree.as_ref()
                         != self.repository_snapshot.index.tree_id.as_ref()
                 {
@@ -1347,6 +1385,7 @@ impl GitIndexPreviewV1 {
             (GitIndexPreviewDispositionV1::Applicable, _) => {
                 if !self.repository_snapshot.is_mutation_eligible()
                     || self.selected_hunks.is_empty()
+                    || self.commit_intent.is_some()
                     || self.candidate_index_tree.is_none()
                 {
                     return Err(DomainError::NonCanonical {
@@ -1355,7 +1394,11 @@ impl GitIndexPreviewV1 {
                 }
             }
             (GitIndexPreviewDispositionV1::Unsupported(_), _) => {
-                if !self.selected_hunks.is_empty() || self.candidate_index_tree.is_some() {
+                if !self.selected_hunks.is_empty()
+                    || self.candidate_index_tree.is_some()
+                    || (self.operation == GitIndexTransactionOperationV1::CommitIndex)
+                        != self.commit_intent.is_some()
+                {
                     return Err(DomainError::NonCanonical {
                         field: "unsupported git index preview mutation payload",
                     });
@@ -1380,6 +1423,7 @@ impl<'de> Deserialize<'de> for GitIndexPreviewV1 {
             repository_snapshot_digest: ManifestDigest,
             selected_hunks: Vec<HunkRefV1>,
             candidate_index_tree: Option<GitOidV1>,
+            commit_intent: Option<GitIndexCommitIntentV1>,
             disposition: GitIndexPreviewDispositionV1,
             created_at: UtcMicros,
             expires_at: UtcMicros,
@@ -1387,13 +1431,14 @@ impl<'de> Deserialize<'de> for GitIndexPreviewV1 {
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        let preview = Self::new(
+        let preview = Self::new_with_commit_intent(
             wire.preview_id,
             wire.operation,
             wire.repository_snapshot,
             wire.repository_snapshot_digest,
             wire.selected_hunks,
             wire.candidate_index_tree,
+            wire.commit_intent,
             wire.disposition,
             wire.created_at,
             wire.expires_at,

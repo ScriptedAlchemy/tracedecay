@@ -6,6 +6,7 @@
 
 pub mod configuration;
 pub mod diagnostics;
+pub mod git_index_transactions;
 pub mod memory;
 pub mod observation;
 pub mod projection;
@@ -19,6 +20,11 @@ pub use configuration::{
 pub use diagnostics::{
     DiagnosticPublicationDispositionV1, DiagnosticPublicationReceiptV1, DiagnosticStore,
     DiagnosticStoreError, DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1,
+};
+pub use git_index_transactions::{
+    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,
+    GitIndexTransactionRecordV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
+    GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
 };
 pub use memory::{
     CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,

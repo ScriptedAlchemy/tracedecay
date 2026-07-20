@@ -1,0 +1,514 @@
+//! Application-port implementation for daemon-owned Git index transactions.
+
+use tracedecay_application::{
+    EffectId, EffectTermination, GitIndexApplyPortResultV1, GitIndexApplyRequestV1,
+    GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
+    GitIndexTransactionPort, GitIndexTransactionPortError, OperationBudgetUsage, OperationReceipt,
+    OperationTermination, ReconciliationState,
+};
+use tracedecay_domain::{
+    GitIndexJournalPhaseV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
+    GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    ManifestDigest, canonical_sha256,
+};
+use tracedecay_policy::{
+    GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassificationInputV1,
+    GitEffectClassifier, GitEffectDispositionV1, GitIndexEffectV1, GitPreviewPreconditionV1,
+    GitRepositoryStateFactV1,
+};
+use tracedecay_store::{
+    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1, GitIndexTransactionStore,
+    GitIndexTransactionStoreError,
+};
+
+use super::{
+    DurableGitIndexJournal, GitIndexJournalError, GitIndexRecoveryCoordinator,
+    GitIndexRecoveryExecutor, RepositoryMutationQueue, RepositoryMutationQueueError,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CurrentGitIndexPolicyStateV1 {
+    pub authorization: GitEffectAuthorizationV1,
+    pub conflict_risk: GitConflictRiskV1,
+    pub policy_revision: u64,
+    pub policy_digest: ManifestDigest,
+    pub configuration_digest: ManifestDigest,
+    pub evaluated_at: tracedecay_domain::UtcMicros,
+}
+
+/// Current grant, scope, policy, and configuration authority resolved
+/// immediately before the durable native effect boundary.
+pub(crate) trait GitIndexPolicyRecheckPort {
+    fn recheck(
+        &self,
+        request: &GitIndexApplyRequestV1,
+        preview: &GitIndexPreviewV1,
+    ) -> Result<CurrentGitIndexPolicyStateV1, GitIndexTransactionPortError>;
+}
+
+/// Result of one native apply pass after it has revalidated the exact preview
+/// and repository snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeGitIndexApplyResult {
+    pub receipt: GitIndexTransactionReceiptV1,
+    pub execution: OperationReceipt,
+}
+
+/// Fixed native boundary used by the daemon transaction coordinator.
+///
+/// Implementations may use only the internal PR11 stage/unstage/commit
+/// adapters. A native error represents an indeterminate post-admission state;
+/// the coordinator quarantines the repository instead of retrying it.
+pub(crate) trait GitIndexNativeExecutor {
+    fn preview(
+        &self,
+        request: &GitIndexPreviewRequestV1,
+    ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError>;
+
+    fn apply(
+        &self,
+        transaction_id: &GitIndexTransactionId,
+        preview: &GitIndexPreviewV1,
+        request: &GitIndexApplyRequestV1,
+    ) -> Result<NativeGitIndexApplyResult, GitIndexTransactionPortError>;
+}
+
+/// One daemon instance owns the queue, journal transitions, policy recheck,
+/// idempotency replay, and recovery quarantine for its Git index operations.
+pub(crate) struct DaemonGitIndexTransactionPort<S, N, C, A> {
+    store: S,
+    native: N,
+    classifier: C,
+    authorization: A,
+    queue: RepositoryMutationQueue,
+}
+
+impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A> {
+    pub(crate) fn new(store: S, native: N, classifier: C, authorization: A) -> Self {
+        Self {
+            store,
+            native,
+            classifier,
+            authorization,
+            queue: RepositoryMutationQueue::default(),
+        }
+    }
+}
+
+impl<S, N, C, A> GitIndexTransactionPort for DaemonGitIndexTransactionPort<S, N, C, A>
+where
+    S: GitIndexTransactionStore,
+    N: GitIndexNativeExecutor + GitIndexRecoveryExecutor,
+    C: GitEffectClassifier,
+    A: GitIndexPolicyRecheckPort,
+{
+    fn preview(
+        &self,
+        request: &GitIndexPreviewRequestV1,
+    ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError> {
+        request
+            .validate()
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        let result = self.native.preview(request)?;
+        result
+            .validate_for(request)
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        self.store
+            .save_preview(result.preview.clone())
+            .map_err(map_store_error)?;
+        Ok(result)
+    }
+
+    fn apply(
+        &self,
+        request: &GitIndexApplyRequestV1,
+    ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
+        request
+            .validate()
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        let preview = self
+            .store
+            .read_preview(&request.preview_id)
+            .map_err(map_store_error)?
+            .ok_or(GitIndexTransactionPortError::StalePreview)?;
+        preview
+            .validate()
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        if preview.preview_digest != request.preview_digest
+            || preview.is_expired_at(request.observed_at)
+        {
+            return Err(GitIndexTransactionPortError::StalePreview);
+        }
+        let repository_id = preview.repository_snapshot.repository_id.clone();
+        self.queue
+            .with_repository(&repository_id, || self.apply_serialized(request, &preview))
+            .map_err(map_queue_error)?
+    }
+
+    fn recover(
+        &self,
+        request: &GitIndexRecoveryRequestV1,
+    ) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError> {
+        request
+            .repository_id
+            .validate()
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        request
+            .transaction_id
+            .validate()
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        self.queue
+            .with_repository(&request.repository_id, || {
+                let coordinator = GitIndexRecoveryCoordinator::new(&self.store, &self.native);
+                let receipts = coordinator
+                    .recover_repository(&request.repository_id, request.observed_at)
+                    .map_err(|_| GitIndexTransactionPortError::NeedsInspection)?;
+                receipts
+                    .into_iter()
+                    .find(|receipt| receipt.transaction_id == request.transaction_id)
+                    .ok_or(GitIndexTransactionPortError::StalePreview)
+            })
+            .map_err(map_queue_error)?
+    }
+}
+
+impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A>
+where
+    S: GitIndexTransactionStore,
+    N: GitIndexNativeExecutor,
+    C: GitEffectClassifier,
+    A: GitIndexPolicyRecheckPort,
+{
+    fn apply_serialized(
+        &self,
+        request: &GitIndexApplyRequestV1,
+        preview: &GitIndexPreviewV1,
+    ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
+        self.recheck_policy(request, preview)?;
+        let idempotency_key = request
+            .native_idempotency_key()
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        let transaction_id = transaction_id(request, &preview.preview_digest)?;
+        let journal = GitIndexTransactionJournalV1::prepared(
+            transaction_id.clone(),
+            preview,
+            request.observed_at,
+        )
+        .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        let begin = GitIndexTransactionBeginRequestV1 {
+            idempotency_key: idempotency_key.clone(),
+            input_digest: request
+                .input_digest()
+                .map_err(|_| GitIndexTransactionPortError::StalePreview)?,
+            preview: preview.clone(),
+            journal,
+        };
+        let durable = DurableGitIndexJournal::new(&self.store);
+        let record = match durable.begin_or_replay(begin).map_err(map_journal_error)? {
+            GitIndexTransactionBeginResultV1::Replay(receipt) => {
+                return replay_result(request, &receipt);
+            }
+            GitIndexTransactionBeginResultV1::Started(record) => record,
+        };
+        let started = durable
+            .advance(
+                &idempotency_key,
+                &record.journal,
+                GitIndexJournalPhaseV1::NativeApplyStarted,
+                request.observed_at,
+            )
+            .map_err(map_journal_error)?;
+        let Ok(native) = self.native.apply(&transaction_id, preview, request) else {
+            self.store
+                .quarantine_repository(&preview.repository_snapshot.repository_id, &transaction_id)
+                .map_err(map_store_error)?;
+            return Err(GitIndexTransactionPortError::NeedsInspection);
+        };
+        native
+            .receipt
+            .validate()
+            .map_err(|_| GitIndexTransactionPortError::NeedsInspection)?;
+        if native.receipt.transaction_id != transaction_id
+            || native.receipt.preview_id != preview.preview_id
+            || native.receipt.operation != preview.operation
+        {
+            self.store
+                .quarantine_repository(&preview.repository_snapshot.repository_id, &transaction_id)
+                .map_err(map_store_error)?;
+            return Err(GitIndexTransactionPortError::NeedsInspection);
+        }
+
+        let final_journal = advance_for_native_outcome(
+            &durable,
+            &idempotency_key,
+            &started,
+            native.receipt.outcome,
+            request.observed_at,
+        )
+        .map_err(map_journal_error)?;
+        let receipt = durable
+            .write_terminal(
+                &idempotency_key,
+                &final_journal,
+                native.receipt,
+                request.observed_at,
+            )
+            .map_err(map_journal_error)?;
+        result_from_receipt(
+            request,
+            deterministic_effect_id(&transaction_id)?,
+            receipt,
+            native.execution,
+        )
+    }
+
+    fn recheck_policy(
+        &self,
+        request: &GitIndexApplyRequestV1,
+        preview: &GitIndexPreviewV1,
+    ) -> Result<(), GitIndexTransactionPortError> {
+        let effect = match request.binding.operation {
+            GitIndexTransactionOperationV1::StageHunks => GitIndexEffectV1::StageHunks,
+            GitIndexTransactionOperationV1::UnstageHunks => GitIndexEffectV1::UnstageHunks,
+            GitIndexTransactionOperationV1::CommitIndex => GitIndexEffectV1::CommitIndex,
+        };
+        let current = self.authorization.recheck(request, preview)?;
+        if current.policy_digest != request.proof.policy_digest
+            || current.configuration_digest != request.proof.configuration_digest
+            || current.policy_revision != request.authority.policy.revision
+        {
+            return Err(GitIndexTransactionPortError::PolicyDenied);
+        }
+        let decision = self.classifier.evaluate(&GitEffectClassificationInputV1 {
+            effect,
+            authorization: current.authorization,
+            repository_state: GitRepositoryStateFactV1::from_snapshot(&preview.repository_snapshot),
+            expected_preview_digest: Some(request.preview_digest.clone()),
+            preview: Some(GitPreviewPreconditionV1 {
+                preview_digest: preview.preview_digest.clone(),
+                repository_state_id: preview.repository_snapshot.snapshot_id().clone(),
+            }),
+            conflict_risk: current.conflict_risk,
+            policy_revision: current.policy_revision,
+            policy_digest: current.policy_digest,
+            configuration_digest: current.configuration_digest,
+            evaluated_at: current.evaluated_at,
+        });
+        if decision.disposition == GitEffectDispositionV1::Allow {
+            Ok(())
+        } else {
+            Err(GitIndexTransactionPortError::PolicyDenied)
+        }
+    }
+}
+
+impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A>
+where
+    S: GitIndexTransactionStore,
+    N: GitIndexRecoveryExecutor,
+{
+    /// Reconcile every non-terminal durable record before the daemon admits
+    /// any new transaction for the affected repositories.
+    pub(crate) fn recover_startup(
+        &self,
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> Result<Vec<GitIndexTransactionReceiptV1>, GitIndexTransactionPortError> {
+        let mut receipts = Vec::new();
+        for repository_id in self
+            .store
+            .recovery_repositories()
+            .map_err(map_store_error)?
+        {
+            let recovered = self
+                .queue
+                .with_repository(&repository_id, || {
+                    GitIndexRecoveryCoordinator::new(&self.store, &self.native)
+                        .recover_repository(&repository_id, observed_at)
+                        .map_err(|_| GitIndexTransactionPortError::NeedsInspection)
+                })
+                .map_err(map_queue_error)??;
+            receipts.extend(recovered);
+        }
+        Ok(receipts)
+    }
+}
+
+fn transaction_id(
+    request: &GitIndexApplyRequestV1,
+    preview_digest: &ManifestDigest,
+) -> Result<GitIndexTransactionId, GitIndexTransactionPortError> {
+    let input_digest = request
+        .input_digest()
+        .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+    let digest = canonical_sha256(&(
+        "tracedecay.daemon.git-index-transaction.v1",
+        request.idempotency_key.as_str(),
+        input_digest,
+        preview_digest,
+    ))
+    .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+    let encoded = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or(GitIndexTransactionPortError::StalePreview)?;
+    GitIndexTransactionId::new(format!("git-index-transaction.v1.{encoded}"))
+        .map_err(|_| GitIndexTransactionPortError::StalePreview)
+}
+
+fn deterministic_effect_id(
+    transaction_id: &GitIndexTransactionId,
+) -> Result<EffectId, GitIndexTransactionPortError> {
+    EffectId::new(format!("git-index-effect.v1.{}", transaction_id.as_str()))
+        .map_err(|_| GitIndexTransactionPortError::StalePreview)
+}
+
+fn advance_for_native_outcome<S>(
+    durable: &DurableGitIndexJournal<'_, S>,
+    idempotency_key: &tracedecay_domain::GitIndexIdempotencyKey,
+    journal: &GitIndexTransactionJournalV1,
+    outcome: GitIndexReceiptOutcomeV1,
+    observed_at: tracedecay_domain::UtcMicros,
+) -> Result<GitIndexTransactionJournalV1, GitIndexJournalError>
+where
+    S: GitIndexTransactionStore,
+{
+    let mut journal = journal.clone();
+    let phases: &[GitIndexJournalPhaseV1] = match outcome {
+        GitIndexReceiptOutcomeV1::AbortedNoChange | GitIndexReceiptOutcomeV1::NeedsInspection => {
+            &[]
+        }
+        GitIndexReceiptOutcomeV1::Committed => {
+            if journal.operation == GitIndexTransactionOperationV1::CommitIndex {
+                &[
+                    GitIndexJournalPhaseV1::IndexCommitted,
+                    GitIndexJournalPhaseV1::RefCommitted,
+                    GitIndexJournalPhaseV1::Verifying,
+                ]
+            } else {
+                &[
+                    GitIndexJournalPhaseV1::IndexCommitted,
+                    GitIndexJournalPhaseV1::Verifying,
+                ]
+            }
+        }
+    };
+    for phase in phases {
+        journal = durable.advance(idempotency_key, &journal, *phase, observed_at)?;
+    }
+    Ok(journal)
+}
+
+fn replay_result(
+    request: &GitIndexApplyRequestV1,
+    receipt: &GitIndexTransactionReceiptV1,
+) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
+    result_from_receipt(
+        request,
+        deterministic_effect_id(&receipt.transaction_id)?,
+        receipt.clone(),
+        terminal_execution(
+            request,
+            match receipt.outcome {
+                GitIndexReceiptOutcomeV1::Committed => EffectTermination::Completed,
+                GitIndexReceiptOutcomeV1::AbortedNoChange => EffectTermination::Failed,
+                GitIndexReceiptOutcomeV1::NeedsInspection => EffectTermination::EffectUnknown,
+            },
+        ),
+    )
+}
+
+fn result_from_receipt(
+    request: &GitIndexApplyRequestV1,
+    effect_id: EffectId,
+    receipt: GitIndexTransactionReceiptV1,
+    execution: OperationReceipt,
+) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
+    let (termination, reconciliation) = match receipt.outcome {
+        GitIndexReceiptOutcomeV1::Committed => (
+            EffectTermination::Completed,
+            ReconciliationState::Reconciled,
+        ),
+        GitIndexReceiptOutcomeV1::AbortedNoChange => {
+            (EffectTermination::Failed, ReconciliationState::Reconciled)
+        }
+        GitIndexReceiptOutcomeV1::NeedsInspection => (
+            EffectTermination::EffectUnknown,
+            ReconciliationState::Pending,
+        ),
+    };
+    if execution.termination != operation_termination(termination) {
+        return Err(GitIndexTransactionPortError::NeedsInspection);
+    }
+    Ok(GitIndexApplyPortResultV1 {
+        effect_id,
+        idempotency_key: request.idempotency_key.clone(),
+        preview_digest: request.preview_digest.clone(),
+        receipt,
+        execution,
+        reconciliation,
+    })
+}
+
+fn terminal_execution(
+    request: &GitIndexApplyRequestV1,
+    termination: EffectTermination,
+) -> OperationReceipt {
+    OperationReceipt {
+        started_at: request.observed_at,
+        ended_at: request.observed_at,
+        effective_deadline: request.context.deadline().clone(),
+        cancellation: None,
+        budget: OperationBudgetUsage::default(),
+        termination: operation_termination(termination),
+    }
+}
+
+const fn operation_termination(termination: EffectTermination) -> OperationTermination {
+    match termination {
+        EffectTermination::Completed => OperationTermination::Completed,
+        EffectTermination::Cancelled => OperationTermination::Cancelled,
+        EffectTermination::TimedOut => OperationTermination::TimedOut,
+        EffectTermination::Failed => OperationTermination::Failed,
+        EffectTermination::Partial => OperationTermination::Partial,
+        EffectTermination::EffectUnknown => OperationTermination::EffectUnknown,
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn map_store_error(error: GitIndexTransactionStoreError) -> GitIndexTransactionPortError {
+    match error {
+        GitIndexTransactionStoreError::IdempotencyConflict => {
+            GitIndexTransactionPortError::IdempotencyConflict
+        }
+        GitIndexTransactionStoreError::RepositoryQuarantined => {
+            GitIndexTransactionPortError::RecoveryRequired
+        }
+        GitIndexTransactionStoreError::Unavailable => {
+            GitIndexTransactionPortError::DaemonUnavailable
+        }
+        GitIndexTransactionStoreError::PreviewConflict
+        | GitIndexTransactionStoreError::JournalConflict
+        | GitIndexTransactionStoreError::ReceiptConflict
+        | GitIndexTransactionStoreError::InvalidData(_) => {
+            GitIndexTransactionPortError::StalePreview
+        }
+    }
+}
+
+fn map_journal_error(error: GitIndexJournalError) -> GitIndexTransactionPortError {
+    match error {
+        GitIndexJournalError::Store(error) => map_store_error(error),
+        GitIndexJournalError::Domain(_) | GitIndexJournalError::InvalidTerminalOutcome => {
+            GitIndexTransactionPortError::NeedsInspection
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn map_queue_error(error: RepositoryMutationQueueError) -> GitIndexTransactionPortError {
+    match error {
+        RepositoryMutationQueueError::Unavailable => {
+            GitIndexTransactionPortError::DaemonUnavailable
+        }
+    }
+}
