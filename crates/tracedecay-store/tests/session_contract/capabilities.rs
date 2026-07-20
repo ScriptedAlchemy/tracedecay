@@ -20,134 +20,132 @@ impl SessionTemporalCapabilityProvider for CapabilityDeniedSessionPorts {
 }
 
 impl SessionRetrievalStore for CapabilityDeniedSessionPorts {
-    fn freeze_session_temporal_snapshot_supported(
+    async fn freeze_session_temporal_snapshot_supported(
         &self,
         _permit: SessionSnapshotFreezePermit,
         _request: SessionTemporalSnapshotRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionTemporalSnapshotV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionTemporalSnapshotV1> {
+        panic!("capability guard was bypassed")
     }
 
-    fn retrieve_session_temporal_page_supported(
+    async fn retrieve_session_temporal_page_supported(
         &self,
         _permit: SessionTemporalPageRetrievePermit,
         _request: SessionTemporalRetrievalRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRetrievalPageV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionRetrievalPageV1> {
+        panic!("capability guard was bypassed")
     }
 }
 
 impl SessionTemporalProjectionStore for CapabilityDeniedSessionPorts {
-    fn begin_session_generation_rebuild_supported(
+    async fn begin_session_generation_rebuild_supported(
         &self,
         _permit: SessionGenerationRebuildBeginPermit,
         _request: SessionGenerationRebuildRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionGenerationRebuildReceiptV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionGenerationRebuildReceiptV1> {
+        panic!("capability guard was bypassed")
     }
 
-    fn persist_session_temporal_projection_batch_supported(
+    async fn persist_session_temporal_projection_batch_supported(
         &self,
         _permit: SessionProjectionBatchPersistPermit,
         _batch: SessionTemporalProjectionBatchV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionTemporalProjectionBatchReceiptV1>> + Send
-    {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
+        panic!("capability guard was bypassed")
     }
 
-    fn activate_session_temporal_generation_supported(
+    async fn activate_session_temporal_generation_supported(
         &self,
         _permit: SessionGenerationActivatePermit,
         _request: SessionGenerationActivationRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionGenerationActivationReceiptV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionGenerationActivationReceiptV1> {
+        panic!("capability guard was bypassed")
     }
 }
 
 impl SessionSummaryStore for CapabilityDeniedSessionPorts {
-    fn publish_immutable_session_summary_supported(
+    async fn publish_immutable_session_summary_supported(
         &self,
         _permit: SessionSummaryPublishOrReplayPermit,
         _request: SessionSummaryPublicationRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionSummaryPublicationReceiptV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionSummaryPublicationReceiptV1> {
+        panic!("capability guard was bypassed")
     }
 }
 
 impl SessionRefreshStore for CapabilityDeniedSessionPorts {
-    fn begin_or_join_session_refresh_supported(
+    async fn begin_or_join_session_refresh_supported(
         &self,
         _permit: SessionRefreshBeginOrJoinPermit,
         _request: SessionRefreshBeginOrJoinRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRefreshBeginOrJoinReceiptV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionRefreshBeginOrJoinReceiptV1> {
+        panic!("capability guard was bypassed")
     }
 
-    fn persist_session_refresh_progress_supported(
+    async fn persist_session_refresh_progress_supported(
         &self,
         _permit: SessionRefreshProgressPersistPermit,
         _progress: SessionRefreshProgressV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRefreshProgressV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionRefreshProgressV1> {
+        panic!("capability guard was bypassed")
     }
 
-    fn session_refresh_progress_supported(
+    async fn session_refresh_progress_supported(
         &self,
         _permit: SessionRefreshProgressReadPermit,
         _request: SessionRefreshProgressRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<Option<SessionRefreshProgressV1>>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<Option<SessionRefreshProgressV1>> {
+        panic!("capability guard was bypassed")
     }
 
-    fn complete_session_refresh_supported(
+    async fn complete_session_refresh_supported(
         &self,
         _permit: SessionRefreshCompletePermit,
         _request: SessionRefreshCompletionRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRefreshReceiptV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        panic!("capability guard was bypassed")
     }
 
-    fn fail_session_refresh_supported(
+    async fn fail_session_refresh_supported(
         &self,
         _permit: SessionRefreshFailPermit,
         _request: SessionRefreshFailureRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRefreshReceiptV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        panic!("capability guard was bypassed")
     }
 
-    fn cancel_session_refresh_supported(
+    async fn cancel_session_refresh_supported(
         &self,
         _permit: SessionRefreshCancelPermit,
         _request: SessionRefreshCancellationRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRefreshReceiptV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        panic!("capability guard was bypassed")
     }
 
-    fn session_refresh_receipt_supported(
+    async fn session_refresh_receipt_supported(
         &self,
         _permit: SessionRefreshReceiptReadPermit,
         _request: SessionRefreshReceiptRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<Option<SessionRefreshReceiptV1>>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<Option<SessionRefreshReceiptV1>> {
+        panic!("capability guard was bypassed")
     }
 }
 
 impl SessionTemporalMigrationStore for CapabilityDeniedSessionPorts {
-    fn apply_session_temporal_migration_batch_supported(
+    async fn apply_session_temporal_migration_batch_supported(
         &self,
         _permit: SessionTemporalMigrationBatchApplyPermit,
         _batch: SessionTemporalMigrationBatchV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionTemporalMigrationReceiptV1>> + Send {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<SessionTemporalMigrationReceiptV1> {
+        panic!("capability guard was bypassed")
     }
 
-    fn session_temporal_migration_receipt_supported(
+    async fn session_temporal_migration_receipt_supported(
         &self,
         _permit: SessionTemporalMigrationReceiptReadPermit,
         _request: SessionTemporalMigrationReceiptRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<Option<SessionTemporalMigrationReceiptV1>>> + Send
-    {
-        async { panic!("capability guard was bypassed") }
+    ) -> SessionStoreResult<Option<SessionTemporalMigrationReceiptV1>> {
+        panic!("capability guard was bypassed")
     }
 }
 
