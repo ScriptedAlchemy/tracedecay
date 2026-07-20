@@ -2,6 +2,20 @@
 //! handshake handling, resources, and `tools/call` execution.
 
 use super::*;
+use crate::mcp::ToolResult;
+
+struct PreparedToolCall {
+    tool_name: String,
+    arguments: Value,
+    analytics_arguments: Value,
+    analytics_session_id: Option<String>,
+}
+
+struct DispatchedToolCall {
+    cg: Arc<TraceDecay>,
+    outcome: Result<ToolResult>,
+    elapsed_us: Option<u64>,
+}
 
 /// Hand-maintained schema documentation for the `tracedecay://schema` resource.
 /// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
@@ -567,43 +581,53 @@ impl McpServer {
         )
     }
 
-    /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
-    pub(crate) async fn handle_tools_call(
-        &self,
-        id: Value,
+    fn prepare_tool_call(
+        id: &Value,
         params: Option<&Value>,
-        timings_enabled: bool,
-        route_cache: &HookProjectRouteCache,
-        implicit_project_path: Option<&Path>,
-        memory_request_scope: &str,
-    ) -> JsonRpcResponse {
+    ) -> std::result::Result<PreparedToolCall, JsonRpcResponse> {
         let Some(params) = params else {
-            return JsonRpcResponse::error(
-                id,
+            return Err(JsonRpcResponse::error(
+                id.clone(),
                 ErrorCode::InvalidParams,
                 "missing params for tools/call".to_string(),
-            );
+            ));
         };
 
         let Some(tool_name) = params.get("name").and_then(|v| v.as_str()) else {
-            return JsonRpcResponse::error(
-                id,
+            return Err(JsonRpcResponse::error(
+                id.clone(),
                 ErrorCode::InvalidParams,
                 "missing 'name' in tools/call params".to_string(),
-            );
+            ));
         };
 
         let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
         if crate::mcp::project_route::protect_tool_structural_ids(&mut arguments).is_err() {
-            return JsonRpcResponse::error(
-                id,
+            return Err(JsonRpcResponse::error(
+                id.clone(),
                 ErrorCode::InvalidParams,
                 "invalid structural identifier".to_string(),
-            );
+            ));
         }
-        let analytics_arguments = arguments.clone();
-        let analytics_session_id = mcp_analytics_session_id(&arguments);
 
+        Ok(PreparedToolCall {
+            tool_name: tool_name.to_string(),
+            analytics_arguments: arguments.clone(),
+            analytics_session_id: mcp_analytics_session_id(&arguments),
+            arguments,
+        })
+    }
+
+    async fn dispatch_tool_call(
+        &self,
+        id: &Value,
+        tool_name: &str,
+        arguments: Value,
+        timings_enabled: bool,
+        route_cache: &HookProjectRouteCache,
+        implicit_project_path: Option<&Path>,
+        memory_request_scope: &str,
+    ) -> DispatchedToolCall {
         // Branch-drift hot-swap: if the working tree switched branches since
         // the served instance opened, reopen onto the live branch's DB so
         // this call reads the right index. Cheap no-op check when no drift.
@@ -647,14 +671,14 @@ impl McpServer {
         };
         let mut handler_arguments = route_cache.apply_to_tool_arguments(tool_name, arguments);
         if crate::analytics::is_skill_view_tool(tool_name)
-            && let Some(request_id) = json_rpc_request_id_string(&id)
+            && let Some(request_id) = json_rpc_request_id_string(id)
             && let Some(map) = handler_arguments.as_object_mut()
         {
             map.insert("__mcp_request_id".to_string(), json!(request_id));
         }
         inject_trusted_memory_request_id(
             tool_name,
-            &id,
+            id,
             memory_request_scope,
             &mut handler_arguments,
         );
@@ -668,325 +692,425 @@ impl McpServer {
                 self.scope_prefix(),
             )
         });
-        let dispatch = Box::pin(handle_tool_call_with_registry_and_implicit_project(
-            &cg,
-            tool_name,
-            handler_arguments,
-            server_stats,
-            self.scope_prefix(),
-            ToolCallRegistryOptions {
-                global_db: self.registry_db.as_deref(),
-                profile_root: self.profile_root.as_deref(),
-                allow_default_registry_fallback: self.allow_default_registry_fallback,
-                implicit_project_path,
-                automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
-                automation_writer: self.dashboard_automation_writer.clone(),
-                diagnostics_cache: Some(&self.diagnostics_cache),
-                diagnostics_lsp: Some(&self.diagnostics_lsp),
-                session_authorities: crate::mcp::tools::SessionAuthorities::new(
-                    self.session_db.as_ref(),
-                    self.user_session_db.as_ref(),
-                )
-                .with_refresh_services(
-                    self.project_session_refresh_service.as_deref(),
-                    self.user_session_refresh_service.as_deref(),
-                )
-                .with_retrieval_services(
-                    self.project_session_retrieval_service.as_deref(),
-                    self.user_session_retrieval_service.as_deref(),
-                ),
-            },
-        ));
-        let dispatch_outcome = if let Some(read_flight) = read_flight {
-            match read_flight {
-                ReadFlightClaim::Leader(leader) => match dispatch.await {
-                    Ok(result) => Ok((*leader.complete(result)).clone()),
-                    Err(error) => Err(error),
+        let outcome = {
+            let dispatch = Box::pin(handle_tool_call_with_registry_and_implicit_project(
+                &cg,
+                tool_name,
+                handler_arguments,
+                server_stats,
+                self.scope_prefix(),
+                ToolCallRegistryOptions {
+                    global_db: self.registry_db.as_deref(),
+                    profile_root: self.profile_root.as_deref(),
+                    allow_default_registry_fallback: self.allow_default_registry_fallback,
+                    implicit_project_path,
+                    automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
+                    automation_writer: self.dashboard_automation_writer.clone(),
+                    diagnostics_cache: Some(&self.diagnostics_cache),
+                    diagnostics_lsp: Some(&self.diagnostics_lsp),
+                    session_authorities: crate::mcp::tools::SessionAuthorities::new(
+                        self.session_db.as_ref(),
+                        self.user_session_db.as_ref(),
+                    )
+                    .with_refresh_services(
+                        self.project_session_refresh_service.as_deref(),
+                        self.user_session_refresh_service.as_deref(),
+                    )
+                    .with_retrieval_services(
+                        self.project_session_retrieval_service.as_deref(),
+                        self.user_session_retrieval_service.as_deref(),
+                    ),
                 },
-                ReadFlightClaim::Follower(follower) => match follower.wait().await {
-                    Some(result) => Ok((*result).clone()),
-                    None => dispatch.await,
-                },
+            ));
+            if let Some(read_flight) = read_flight {
+                match read_flight {
+                    ReadFlightClaim::Leader(leader) => match dispatch.await {
+                        Ok(result) => Ok((*leader.complete(result)).clone()),
+                        Err(error) => Err(error),
+                    },
+                    ReadFlightClaim::Follower(follower) => match follower.wait().await {
+                        Some(result) => Ok((*result).clone()),
+                        None => dispatch.await,
+                    },
+                }
+            } else {
+                dispatch.await
             }
-        } else {
-            dispatch.await
         };
-        let handler_elapsed_us = handler_start.map(|t| t.elapsed().as_micros() as u64);
-        let request_id = id.clone();
-        match dispatch_outcome {
-            Ok(mut result) => {
-                if let Some(us) = handler_elapsed_us {
-                    let obj = result.value.as_object_mut();
-                    if let Some(map) = obj {
-                        let meta = map.entry("_meta").or_insert_with(|| json!({}));
-                        if let Some(meta_obj) = meta.as_object_mut() {
-                            meta_obj.insert("duration_us".to_string(), json!(us));
-                        }
-                    }
-                }
-                // Estimate approximate token count of the graph response
-                // ("after"), before any banners/metrics lines are appended.
-                let response_tokens: u64 = result
-                    .value
-                    .get("content")
-                    .and_then(|c| c.as_array())
-                    .map_or(0, |arr| {
-                        let total_chars: usize = arr
-                            .iter()
-                            .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-                            .map(str::len)
-                            .sum();
-                        (total_chars / 4) as u64
-                    });
 
-                // "Before" counterfactual: reading every referenced file raw,
-                // in full. Counters credit only the net saving per call —
-                // before minus what this response actually delivered.
-                let raw_file_tokens = self.estimate_raw_file_tokens(&result.touched_files);
-                let net_saved_tokens = raw_file_tokens.saturating_sub(response_tokens);
-                self.persist_saved_tokens(net_saved_tokens).await;
-                crate::monitor::write_entry(
-                    cg.project_root(),
-                    "tracedecay",
-                    tool_name,
-                    net_saved_tokens,
+        DispatchedToolCall {
+            cg,
+            outcome,
+            elapsed_us: handler_start.map(|t| t.elapsed().as_micros() as u64),
+        }
+    }
+
+    fn attach_tool_timing(result: &mut ToolResult, elapsed_us: Option<u64>) {
+        if let Some(us) = elapsed_us
+            && let Some(map) = result.value.as_object_mut()
+        {
+            let meta = map.entry("_meta").or_insert_with(|| json!({}));
+            if let Some(meta_obj) = meta.as_object_mut() {
+                meta_obj.insert("duration_us".to_string(), json!(us));
+            }
+        }
+    }
+
+    async fn record_success_accounting(
+        &self,
+        cg: &TraceDecay,
+        tool_name: &str,
+        request_id: &Value,
+        analytics_arguments: &Value,
+        analytics_session_id: &Option<String>,
+        elapsed_us: Option<u64>,
+        result: &mut ToolResult,
+    ) {
+        // Estimate approximate token count of the graph response
+        // ("after"), before any banners/metrics lines are appended.
+        let response_tokens: u64 = result
+            .value
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map_or(0, |arr| {
+                let total_chars: usize = arr
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                    .map(str::len)
+                    .sum();
+                (total_chars / 4) as u64
+            });
+
+        // "Before" counterfactual: reading every referenced file raw,
+        // in full. Counters credit only the net saving per call —
+        // before minus what this response actually delivered.
+        let raw_file_tokens = self.estimate_raw_file_tokens(&result.touched_files);
+        let net_saved_tokens = raw_file_tokens.saturating_sub(response_tokens);
+        self.persist_saved_tokens(net_saved_tokens).await;
+        crate::monitor::write_entry(
+            cg.project_root(),
+            "tracedecay",
+            tool_name,
+            net_saved_tokens,
+            raw_file_tokens,
+        );
+        self.maybe_flush_worldwide().await;
+
+        // Append per-call token savings to the response content.
+        if raw_file_tokens > 0
+            && let Some(content) = result
+                .value
+                .get_mut("content")
+                .and_then(|c| c.as_array_mut())
+        {
+            content.push(json!({"type": "text", "text": format!(
+                "\ntracedecay_metrics: before={raw_file_tokens} after={response_tokens}"
+            )}));
+        }
+        let analytics_outcome = if tool_result_has_semantic_error(result) {
+            "error"
+        } else {
+            "success"
+        };
+
+        // Persist to the cross-project savings ledger (best-effort, non-blocking).
+        // Clone the Arc — no new connection is opened. The counters
+        // and notify make the write's completion observable to
+        // [`Self::ledger_writes_settled`] without making it awaited
+        // anywhere on the request path.
+        if let Some(gdb) = self.global_db.clone() {
+            let project_path_str = GlobalDb::canonical_project_key(cg.project_root());
+            let tool_name_owned = tool_name.to_string();
+            let ts = crate::tracedecay::current_timestamp();
+            let client_name = self.client_name();
+            let failure_reason = (analytics_outcome == "error")
+                .then(|| semantic_failure_reason(result))
+                .flatten();
+            let analytics_event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+                project_root: cg.project_root(),
+                session_id: analytics_session_id.clone(),
+                tool_name,
+                outcome: analytics_outcome,
+                raw_file_tokens,
+                response_tokens,
+                net_saved_tokens,
+                duration_us: elapsed_us,
+                timestamp: ts,
+                request_id,
+                arguments: analytics_arguments,
+                internal_analytics: result.internal_analytics(),
+                client_name: client_name.as_deref(),
+                mcp_instance_id: Some(self.mcp_instance_id.as_str()),
+                failure_reason: failure_reason.as_deref(),
+            });
+            self.spawn_observed_ledger_write(async move {
+                gdb.record_savings(
+                    &project_path_str,
+                    &tool_name_owned,
                     raw_file_tokens,
-                );
-                self.maybe_flush_worldwide().await;
-
-                // Append per-call token savings to the response content.
-                if raw_file_tokens > 0
-                    && let Some(content) = result
-                        .value
-                        .get_mut("content")
-                        .and_then(|c| c.as_array_mut())
-                {
-                    content.push(json!({"type": "text", "text": format!(
-                        "\ntracedecay_metrics: before={raw_file_tokens} after={response_tokens}"
-                    )}));
+                    response_tokens,
+                    ts,
+                )
+                .await;
+                if let Err(e) = gdb.append_analytics_event(&analytics_event).await {
+                    eprintln!("[tracedecay] analytics_events insert failed: {e}");
                 }
-                let analytics_outcome = if tool_result_has_semantic_error(&result) {
-                    "error"
-                } else {
-                    "success"
-                };
+            });
+        }
+    }
 
-                // Persist to the cross-project savings ledger (best-effort, non-blocking).
-                // Clone the Arc — no new connection is opened. The counters
-                // and notify make the write's completion observable to
-                // [`Self::ledger_writes_settled`] without making it awaited
-                // anywhere on the request path.
-                if let Some(gdb) = self.global_db.clone() {
-                    let project_path_str = GlobalDb::canonical_project_key(cg.project_root());
-                    let tool_name_owned = tool_name.to_string();
-                    let ts = crate::tracedecay::current_timestamp();
-                    let client_name = self.client_name();
-                    let failure_reason = (analytics_outcome == "error")
-                        .then(|| semantic_failure_reason(&result))
-                        .flatten();
-                    let analytics_event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
-                        project_root: cg.project_root(),
-                        session_id: analytics_session_id.clone(),
-                        tool_name,
-                        outcome: analytics_outcome,
-                        raw_file_tokens,
-                        response_tokens,
-                        net_saved_tokens,
-                        duration_us: handler_elapsed_us,
-                        timestamp: ts,
-                        request_id: &request_id,
-                        arguments: &analytics_arguments,
-                        internal_analytics: result.internal_analytics(),
-                        client_name: client_name.as_deref(),
-                        mcp_instance_id: Some(self.mcp_instance_id.as_str()),
-                        failure_reason: failure_reason.as_deref(),
-                    });
-                    self.spawn_observed_ledger_write(async move {
-                        gdb.record_savings(
-                            &project_path_str,
-                            &tool_name_owned,
-                            raw_file_tokens,
-                            response_tokens,
-                            ts,
-                        )
-                        .await;
-                        if let Err(e) = gdb.append_analytics_event(&analytics_event).await {
-                            eprintln!("[tracedecay] analytics_events insert failed: {e}");
-                        }
-                    });
-                }
-
-                // Prepend version-update warning + queue logging notification.
-                if let Some(warning) = self.check_version_update().await {
-                    if let Some(content) = result
-                        .value
-                        .get_mut("content")
-                        .and_then(|c| c.as_array_mut())
-                    {
-                        content.insert(0, json!({"type": "text", "text": &warning}));
+    async fn append_version_and_automation_notices(
+        &self,
+        cg: &TraceDecay,
+        result: &mut ToolResult,
+    ) {
+        // Prepend version-update warning + queue logging notification.
+        if let Some(warning) = self.check_version_update().await {
+            if let Some(content) = result
+                .value
+                .get_mut("content")
+                .and_then(|c| c.as_array_mut())
+            {
+                content.insert(0, json!({"type": "text", "text": &warning}));
+            }
+            if let Ok(mut pending) = self.pending_notifications.lock() {
+                pending.push(json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/message",
+                    "params": {
+                        "level": "warning",
+                        "logger": "tracedecay",
+                        "data": warning
                     }
-                    if let Ok(mut pending) = self.pending_notifications.lock() {
-                        pending.push(json!({
-                            "jsonrpc": "2.0",
-                            "method": "notifications/message",
-                            "params": {
-                                "level": "warning",
-                                "logger": "tracedecay",
-                                "data": warning
-                            }
-                        }));
-                    }
-                }
+                }));
+            }
+        }
 
-                // Staged-automation nudge (Hermes parity R5): when automation
-                // runs have queued skill drafts for review, append a one-line
-                // notice so the approval queue doesn't grow silently. Fact
-                // proposal counts stay telemetry-only in `staged_notice`.
-                if let Some(notice) = self.maybe_automation_staged_notice(&cg).await
-                    && let Some(content) = result
-                        .value
-                        .get_mut("content")
-                        .and_then(|c| c.as_array_mut())
-                {
-                    content.push(json!({"type": "text", "text": format!("\n{notice}")}));
-                }
+        // Staged-automation nudge (Hermes parity R5): when automation
+        // runs have queued skill drafts for review, append a one-line
+        // notice so the approval queue doesn't grow silently. Fact
+        // proposal counts stay telemetry-only in `staged_notice`.
+        if let Some(notice) = self.maybe_automation_staged_notice(cg).await
+            && let Some(content) = result
+                .value
+                .get_mut("content")
+                .and_then(|c| c.as_array_mut())
+        {
+            content.push(json!({"type": "text", "text": format!("\n{notice}")}));
+        }
+    }
 
-                // Per-file staleness banner (#428 design): files this response
-                // referenced that are still pending after the in-line sync
-                // attempt get a focused banner naming them with edit ages,
-                // telling the agent to Read THOSE files directly while
-                // treating the rest of the response as authoritative.
-                // Replaces the previous all-or-nothing "STALE INDEX"
-                // warning that made agents distrust the entire answer.
-                if !result.touched_files.is_empty() {
-                    let stale_files = cg.check_file_staleness(&result.touched_files).await;
-                    if !stale_files.is_empty() {
-                        let still_stale = match cg.sync_if_stale(&stale_files).await {
-                            Ok(false) => false,        // sync completed; files now fresh
-                            Ok(true) | Err(_) => true, // still stale (lock contention / sync error)
-                        };
-                        if still_stale {
-                            let banner =
-                                format_per_file_staleness_banner(cg.project_root(), &stale_files);
-                            // Machine-readable marker. Same shape as before
-                            // so existing scrapers keep working.
-                            let stale_json = serde_json::to_string(&stale_files)
-                                .unwrap_or_else(|_| "[]".to_string());
-                            let marker = format!("\ntracedecay_graph_stale: {stale_json}");
-                            debug_assert!(
-                                result.value.is_object(),
-                                "tool result must be a JSON object so graph_stale can be attached"
-                            );
-                            if let Some(obj) = result.value.as_object_mut() {
-                                obj.insert("graph_stale".to_string(), json!(stale_files));
-                            }
-                            if let Some(content) = result
-                                .value
-                                .get_mut("content")
-                                .and_then(|c| c.as_array_mut())
-                            {
-                                content.insert(0, json!({"type": "text", "text": &banner}));
-                                content.push(json!({"type": "text", "text": marker}));
-                            }
-                        }
-                    }
-                }
+    async fn append_per_file_staleness_notice(&self, cg: &TraceDecay, result: &mut ToolResult) {
+        // Per-file staleness banner (#428 design): files this response
+        // referenced that are still pending after the in-line sync
+        // attempt get a focused banner naming them with edit ages,
+        // telling the agent to Read THOSE files directly while
+        // treating the rest of the response as authoritative.
+        // Replaces the previous all-or-nothing "STALE INDEX"
+        // warning that made agents distrust the entire answer.
+        if result.touched_files.is_empty() {
+            return;
+        }
 
-                // Warn if serving from a fallback (ancestor) branch DB.
-                if let Some(warning) = cg.fallback_warning() {
-                    let warning = format!("WARNING: {warning}");
-                    if let Some(content) = result
-                        .value
-                        .get_mut("content")
-                        .and_then(|c| c.as_array_mut())
-                    {
-                        content.insert(0, json!({"type": "text", "text": &warning}));
-                    }
-                }
+        let stale_files = cg.check_file_staleness(&result.touched_files).await;
+        if stale_files.is_empty() {
+            return;
+        }
 
-                // Check overall index age (warn if older than 1 hour).
-                // Uses `last_sync_timestamp` (sync execution time) not the
-                // max file `indexed_at` — a no-change sync still updates the
-                // sync metadata even though no file gets a fresh `indexed_at`,
-                // so a per-file fallback fires the warning forever on quiet
-                // repos (#86).
-                //
-                // D7 staleness-warning UX: with auto-sync on (the normal
-                // case), a stale index self-heals — the D4 background refresh
-                // above was already kicked for this read. So instead of the
-                // old "Run `tracedecay sync`" nag, we emit an informational
-                // "refresh in progress" note (or nothing at all if a refresh
-                // just completed). The manual-sync instruction is reserved
-                // for the cases where auto-repair genuinely can't help:
-                //   - serving a read-only fallback/ancestor store, or
-                //   - the user disabled both auto_watch and read_refresh.
-                {
-                    let last_time = cg.last_sync_timestamp().await;
-                    let now = crate::tracedecay::current_timestamp();
-                    let age_secs = now - last_time;
-                    if last_time > 0 && age_secs > 3600 {
-                        let refreshed_recently = {
-                            let done = self.last_background_refresh_done_at.load(Ordering::Acquire);
-                            done > 0
-                                && now.saturating_sub(done)
-                                    < self.sync_config.read_cooldown_secs as i64
-                        };
-                        let banner = staleness_banner(StalenessBannerInputs {
-                            age_secs,
-                            // Auto-sync is "on" when either the daemon watcher
-                            // or sync-on-read can repair this.
-                            auto_sync_on: self.sync_config.auto_watch
-                                || self.sync_config.read_refresh,
-                            // A read-only fallback store can never be written,
-                            // so no background refresh can heal it.
-                            fallback_store: cg.fallback_warning().is_some(),
-                            refresh_running: self
-                                .background_refresh_running
-                                .load(Ordering::Acquire),
-                            refreshed_recently,
-                        });
+        let still_stale = match cg.sync_if_stale(&stale_files).await {
+            Ok(false) => false,        // sync completed; files now fresh
+            Ok(true) | Err(_) => true, // still stale (lock contention / sync error)
+        };
+        if !still_stale {
+            return;
+        }
 
-                        if let Some(banner) = banner
-                            && let Some(content) = result
-                                .value
-                                .get_mut("content")
-                                .and_then(|c| c.as_array_mut())
-                        {
-                            content.insert(0, json!({"type": "text", "text": &banner}));
-                        }
-                    }
-                }
+        let banner = format_per_file_staleness_banner(cg.project_root(), &stale_files);
+        // Machine-readable marker. Same shape as before
+        // so existing scrapers keep working.
+        let stale_json = serde_json::to_string(&stale_files).unwrap_or_else(|_| "[]".to_string());
+        let marker = format!("\ntracedecay_graph_stale: {stale_json}");
+        debug_assert!(
+            result.value.is_object(),
+            "tool result must be a JSON object so graph_stale can be attached"
+        );
+        if let Some(obj) = result.value.as_object_mut() {
+            obj.insert("graph_stale".to_string(), json!(stale_files));
+        }
+        if let Some(content) = result
+            .value
+            .get_mut("content")
+            .and_then(|c| c.as_array_mut())
+        {
+            content.insert(0, json!({"type": "text", "text": &banner}));
+            content.push(json!({"type": "text", "text": marker}));
+        }
+    }
 
-                // Borrowed-worktree heads-up (#312). Inserted LAST so it
-                // appears FIRST in the response — the index serving the
-                // wrong branch is the most serious of these warnings to
-                // surface to the agent.
-                if let Some(ref m) = self.worktree_mismatch {
-                    let notice = crate::worktree::worktree_mismatch_notice(m);
-                    if let Some(content) = result
-                        .value
-                        .get_mut("content")
-                        .and_then(|c| c.as_array_mut())
-                    {
-                        content.insert(0, json!({"type": "text", "text": notice}));
-                    }
-                }
+    async fn prepend_index_warnings(&self, cg: &TraceDecay, result: &mut ToolResult) {
+        // Warn if serving from a fallback (ancestor) branch DB.
+        if let Some(warning) = cg.fallback_warning() {
+            let warning = format!("WARNING: {warning}");
+            if let Some(content) = result
+                .value
+                .get_mut("content")
+                .and_then(|c| c.as_array_mut())
+            {
+                content.insert(0, json!({"type": "text", "text": &warning}));
+            }
+        }
 
+        // Check overall index age (warn if older than 1 hour).
+        // Uses `last_sync_timestamp` (sync execution time) not the
+        // max file `indexed_at` — a no-change sync still updates the
+        // sync metadata even though no file gets a fresh `indexed_at`,
+        // so a per-file fallback fires the warning forever on quiet
+        // repos (#86).
+        //
+        // D7 staleness-warning UX: with auto-sync on (the normal
+        // case), a stale index self-heals — the D4 background refresh
+        // above was already kicked for this read. So instead of the
+        // old "Run `tracedecay sync`" nag, we emit an informational
+        // "refresh in progress" note (or nothing at all if a refresh
+        // just completed). The manual-sync instruction is reserved
+        // for the cases where auto-repair genuinely can't help:
+        //   - serving a read-only fallback/ancestor store, or
+        //   - the user disabled both auto_watch and read_refresh.
+        let last_time = cg.last_sync_timestamp().await;
+        let now = crate::tracedecay::current_timestamp();
+        let age_secs = now - last_time;
+        if last_time > 0 && age_secs > 3600 {
+            let refreshed_recently = {
+                let done = self.last_background_refresh_done_at.load(Ordering::Acquire);
+                done > 0 && now.saturating_sub(done) < self.sync_config.read_cooldown_secs as i64
+            };
+            let banner = staleness_banner(StalenessBannerInputs {
+                age_secs,
+                // Auto-sync is "on" when either the daemon watcher
+                // or sync-on-read can repair this.
+                auto_sync_on: self.sync_config.auto_watch || self.sync_config.read_refresh,
+                // A read-only fallback store can never be written,
+                // so no background refresh can heal it.
+                fallback_store: cg.fallback_warning().is_some(),
+                refresh_running: self.background_refresh_running.load(Ordering::Acquire),
+                refreshed_recently,
+            });
+
+            if let Some(banner) = banner
+                && let Some(content) = result
+                    .value
+                    .get_mut("content")
+                    .and_then(|c| c.as_array_mut())
+            {
+                content.insert(0, json!({"type": "text", "text": &banner}));
+            }
+        }
+
+        // Borrowed-worktree heads-up (#312). Inserted LAST so it
+        // appears FIRST in the response — the index serving the
+        // wrong branch is the most serious of these warnings to
+        // surface to the agent.
+        if let Some(ref m) = self.worktree_mismatch {
+            let notice = crate::worktree::worktree_mismatch_notice(m);
+            if let Some(content) = result
+                .value
+                .get_mut("content")
+                .and_then(|c| c.as_array_mut())
+            {
+                content.insert(0, json!({"type": "text", "text": notice}));
+            }
+        }
+    }
+
+    async fn complete_tool_call(
+        &self,
+        id: Value,
+        tool_name: String,
+        analytics_arguments: Value,
+        analytics_session_id: Option<String>,
+        dispatch: DispatchedToolCall,
+    ) -> JsonRpcResponse {
+        let DispatchedToolCall {
+            cg,
+            outcome,
+            elapsed_us,
+        } = dispatch;
+        let request_id = id.clone();
+
+        match outcome {
+            Ok(mut result) => {
+                Self::attach_tool_timing(&mut result, elapsed_us);
+                self.record_success_accounting(
+                    &cg,
+                    &tool_name,
+                    &request_id,
+                    &analytics_arguments,
+                    &analytics_session_id,
+                    elapsed_us,
+                    &mut result,
+                )
+                .await;
+                self.append_version_and_automation_notices(&cg, &mut result)
+                    .await;
+                self.append_per_file_staleness_notice(&cg, &mut result)
+                    .await;
+                self.prepend_index_warnings(&cg, &mut result).await;
                 mark_semantic_tool_error(&mut result);
                 JsonRpcResponse::success(id, result.value)
             }
-            Err(e) => {
+            Err(error) => {
                 self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
                     project_root: cg.project_root(),
                     session_id: analytics_session_id,
-                    tool_name,
+                    tool_name: &tool_name,
                     request_id: &request_id,
                     arguments: &analytics_arguments,
-                    duration_us: handler_elapsed_us,
-                    error: &e,
+                    duration_us: elapsed_us,
+                    error: &error,
                 });
-                tool_error_response(id, tool_name, &e)
+                tool_error_response(id, &tool_name, &error)
             }
         }
+    }
+
+    /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
+    pub(crate) async fn handle_tools_call(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        timings_enabled: bool,
+        route_cache: &HookProjectRouteCache,
+        implicit_project_path: Option<&Path>,
+        memory_request_scope: &str,
+    ) -> JsonRpcResponse {
+        let PreparedToolCall {
+            tool_name,
+            arguments,
+            analytics_arguments,
+            analytics_session_id,
+        } = match Self::prepare_tool_call(&id, params) {
+            Ok(call) => call,
+            Err(response) => return response,
+        };
+
+        let dispatch = self
+            .dispatch_tool_call(
+                &id,
+                &tool_name,
+                arguments,
+                timings_enabled,
+                route_cache,
+                implicit_project_path,
+                memory_request_scope,
+            )
+            .await;
+        self.complete_tool_call(
+            id,
+            tool_name,
+            analytics_arguments,
+            analytics_session_id,
+            dispatch,
+        )
+        .await
     }
 }

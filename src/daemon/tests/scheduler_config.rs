@@ -1,6 +1,11 @@
 use super::*;
 
 #[cfg(unix)]
+use crate::automation::config::{
+    AutomationBackend, AutomationConfigPatch, AutomationTaskPatch, save_project_config,
+};
+
+#[cfg(unix)]
 struct AutomationExitBarrierRelease(Arc<AutomationSchedulerExitBarrier>);
 
 #[cfg(unix)]
@@ -171,6 +176,121 @@ async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
         .lock()
         .await;
     assert!(!schedulers.contains_key(&key));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_scheduler_discovery_without_work_does_not_wait_for_writer_gate() {
+    let dir = TempDir::new().expect("temp dir");
+    let project = dir.path().canonicalize().expect("canonical temp dir");
+    let client_identity = test_client_identity_for(project.join("profile"));
+    std::fs::create_dir_all(project.join("src")).expect("src dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let cg = Arc::new(
+        crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
+            .await
+            .expect("project init"),
+    );
+    let engine = super::super::DaemonEngine::default();
+    let key =
+        super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+
+    let store_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        store_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release writer gate");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    let discovery = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        engine.activate_automation_scheduler_for_open_project(key, project, handshake, cg),
+    )
+    .await;
+
+    release_writer.send(()).expect("signal writer gate release");
+    blocker.await.expect("writer gate blocker task");
+    discovery.expect("read-only scheduler discovery must not wait for the writer gate");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
+    let dir = TempDir::new().expect("temp dir");
+    let project = dir.path().canonicalize().expect("canonical temp dir");
+    let client_identity = test_client_identity_for(project.join("profile"));
+    std::fs::create_dir_all(project.join("src")).expect("src dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+    let project_graph = crate::tracedecay::TraceDecay::init_with_options(
+        &project,
+        crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(client_identity.profile_root.clone()),
+            global_db_path: Some(client_identity.global_db_path.clone()),
+        },
+    )
+    .await
+    .expect("project init");
+    let server = crate::mcp::McpServer::new_with_global_db(project_graph, None, None).await;
+    let cg = server.cg().await;
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let engine = super::super::DaemonEngine::default();
+    let stale_key = super::super::ProjectServerKey::from_open_project(&cg, &handshake)
+        .expect("stale owner key");
+
+    save_project_config(
+        &cg.store_layout().dashboard_root,
+        &AutomationConfigPatch {
+            enabled: Some(true),
+            backend: Some(AutomationBackend::CodexAppServer),
+            memory_curator: AutomationTaskPatch {
+                enabled: Some(true),
+                schedule: Some(Some("every:5m".to_string())),
+                ..AutomationTaskPatch::default()
+            },
+            ..AutomationConfigPatch::default()
+        },
+    )
+    .await
+    .expect("save automation config");
+
+    let mut current_key = stale_key.clone();
+    current_key.scope_prefix = Some("rekeyed".to_string());
+    {
+        let mut owners = engine.store_administration.project_servers().lock().await;
+        owners.insert(stale_key.clone(), server);
+        assert!(owners.rekey(&stale_key, &current_key));
+    }
+
+    engine
+        .activate_automation_scheduler_for_open_project(stale_key.clone(), project, handshake, cg)
+        .await;
+
+    let schedulers = engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await;
+    assert!(
+        !schedulers.contains_key(&stale_key),
+        "scheduler discovery must not start under a key that no longer owns the project server"
+    );
+    assert!(schedulers.is_empty());
 }
 
 #[cfg(unix)]

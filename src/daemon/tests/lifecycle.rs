@@ -533,6 +533,16 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     };
     tokio::join!(request(1), request(2));
     server.await.expect("broker server");
+    tokio::time::timeout(tokio::time::Duration::from_secs(20), async {
+        loop {
+            if owners.lock().await.get_route(&route).is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("portable project warmup timed out");
 
     assert_eq!(
         attempts.load(std::sync::atomic::Ordering::Relaxed),

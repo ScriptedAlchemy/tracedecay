@@ -315,6 +315,29 @@ pub fn get_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<Tool
     defs
 }
 
+/// Returns tool definitions with a conservative temporary context budget while
+/// a daemon opens the project graph needed to calculate the exact node count.
+pub fn get_tool_definitions_with_warming_budget(budget: u8) -> Vec<ToolDefinition> {
+    let mut defs = get_tool_definitions();
+    for def in &mut defs {
+        if def.name == "tracedecay_context" {
+            def.description = format!(
+                "Build an AI-ready context for a task description. Returns relevant symbols, \
+                 relationships, up to three untracked project memory matches when available, \
+                 and optionally code snippets.\n\n\
+                 CALL BUDGET (applies to tracedecay_context ONLY): {budget} calls maximum while \
+                 this project graph is warming. The narrow follow-up tools — tracedecay_search, \
+                 tracedecay_grep, tracedecay_callers, tracedecay_callees, tracedecay_body, \
+                 tracedecay_read, tracedecay_outline — are cheap and UNBUDGETED; call them freely. \
+                 When the context budget is spent, keep going with those narrow tracedecay tools \
+                 to drill in; do NOT fall back to native grep/glob/file reads. Only re-run \
+                 tracedecay_context if you genuinely need another broad semantic sweep."
+            );
+        }
+    }
+    defs
+}
+
 /// Returns the list of all tool definitions exposed by this MCP server.
 ///
 /// Tools whose backing dependency is missing on the current host are

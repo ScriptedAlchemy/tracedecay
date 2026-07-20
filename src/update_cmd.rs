@@ -9,10 +9,15 @@
 //! `--no-reinstall` to skip that agent-integration refresh.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::cli::PostUpdateMode;
 use tracedecay::upgrade::UpgradeOutcome;
 use tracedecay::user_config::UserConfig;
+
+// Exceeds the daemon's sequential 15s client drain, 2s task abort, and 45s
+// server-shutdown bounds with margin for service-manager/process-exit latency.
+const DAEMON_RESTART_LEASE_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
     let home = tracedecay_home_dir()?;
@@ -132,6 +137,44 @@ fn refresh_daemon_service_after_update(
     Ok(())
 }
 
+#[cfg(test)]
+fn restart_daemon_service_with<Lease, Quiesce, Acquire, Refresh, Restore>(
+    quiesce: Quiesce,
+    acquire: Acquire,
+    refresh: Refresh,
+    restore: Restore,
+) -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>>
+where
+    Quiesce: FnOnce() -> tracedecay::errors::Result<tracedecay::daemon::DaemonServiceState>,
+    Acquire: FnOnce() -> tracedecay::errors::Result<Lease>,
+    Refresh: FnOnce(
+        tracedecay::daemon::DaemonServiceState,
+    ) -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>>,
+    Restore: FnOnce(tracedecay::daemon::DaemonServiceState) -> tracedecay::errors::Result<()>,
+{
+    let previous_state = quiesce()?;
+    let _lifecycle_lease = match acquire() {
+        Ok(lease) => lease,
+        Err(acquire_error) => {
+            if matches!(
+                previous_state,
+                tracedecay::daemon::DaemonServiceState::RunningEnabled
+                    | tracedecay::daemon::DaemonServiceState::RunningDisabled
+            ) {
+                if let Err(restore_error) = restore(previous_state) {
+                    return Err(tracedecay::errors::TraceDecayError::Config {
+                        message: format!(
+                            "{acquire_error}; additionally failed to restore the managed daemon service: {restore_error}"
+                        ),
+                    });
+                }
+            }
+            return Err(acquire_error);
+        }
+    };
+    refresh(tracedecay::daemon::DaemonServiceState::RunningEnabled)
+}
+
 fn refresh_forward_only_daemon_service_after_update(
     previous_state: tracedecay::daemon::DaemonServiceState,
     spec: &tracedecay::daemon::DaemonServiceSpec,
@@ -160,7 +203,10 @@ fn refresh_forward_only_daemon_service_after_update(
 }
 
 pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
-    let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire("daemon restart")?;
+    let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire_with_timeout(
+        "daemon restart",
+        DAEMON_RESTART_LEASE_TIMEOUT,
+    )?;
     let (stopped_state, desired_state) = match guard.previous_state() {
         tracedecay::daemon::DaemonServiceState::RunningEnabled
         | tracedecay::daemon::DaemonServiceState::StoppedEnabled => (
@@ -873,11 +919,97 @@ mod tests {
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
         dogfood_forward_only_target_state, health_pass_failure_result, normalize_bin_path,
         partition_reinstall_results, post_update_binary, post_update_binary_from,
-        prepare_post_update_lease, reinstall_failure_result, run_install_then_refresh,
-        verify_forward_only_binary_version,
+        prepare_post_update_lease, reinstall_failure_result, restart_daemon_service_with,
+        run_install_then_refresh, verify_forward_only_binary_version,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
+
+    #[test]
+    fn daemon_restart_quiesces_service_before_acquiring_exclusive_lease() {
+        let order = RefCell::new(Vec::new());
+        let result = restart_daemon_service_with(
+            || {
+                order.borrow_mut().push("quiesce");
+                Ok(tracedecay::daemon::DaemonServiceState::RunningEnabled)
+            },
+            || {
+                assert_eq!(order.borrow().as_slice(), ["quiesce"]);
+                order.borrow_mut().push("acquire");
+                Ok(())
+            },
+            |state| {
+                assert_eq!(
+                    state,
+                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                );
+                order.borrow_mut().push("refresh");
+                Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
+            },
+            |_| panic!("successful lease acquisition must not restore the old service"),
+        )
+        .expect("restart orchestration");
+
+        assert_eq!(
+            result,
+            Some((PathBuf::from("service"), PathBuf::from("socket")))
+        );
+        assert_eq!(order.into_inner(), ["quiesce", "acquire", "refresh"]);
+    }
+
+    #[test]
+    fn daemon_restart_forces_stopped_service_running() {
+        let result = restart_daemon_service_with(
+            || Ok(tracedecay::daemon::DaemonServiceState::StoppedEnabled),
+            || Ok(()),
+            |state| {
+                assert_eq!(
+                    state,
+                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                );
+                Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
+            },
+            |_| panic!("successful lease acquisition must not restore the old service"),
+        )
+        .expect("restart orchestration");
+
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn daemon_restart_restores_running_service_when_exclusive_lease_acquisition_fails() {
+        let order = RefCell::new(Vec::new());
+        let result = restart_daemon_service_with(
+            || {
+                order.borrow_mut().push("quiesce");
+                Ok(tracedecay::daemon::DaemonServiceState::RunningEnabled)
+            },
+            || -> tracedecay::errors::Result<()> {
+                order.borrow_mut().push("acquire");
+                Err(config_err("lifecycle lease busy"))
+            },
+            |_| {
+                order.borrow_mut().push("refresh");
+                Ok(None)
+            },
+            |state| {
+                assert_eq!(
+                    state,
+                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                );
+                order.borrow_mut().push("restore");
+                Ok(())
+            },
+        );
+
+        assert!(
+            result
+                .expect_err("lease acquisition should fail")
+                .to_string()
+                .contains("lifecycle lease busy")
+        );
+        assert_eq!(order.into_inner(), ["quiesce", "acquire", "restore"]);
+    }
 
     #[test]
     fn post_update_lease_handoff_matches_platform_contract() {

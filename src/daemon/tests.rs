@@ -22,6 +22,7 @@ use super::{
     ProjectServerKey, StoreAdministration, StoreOwnerKey,
 };
 
+mod bootstrap;
 mod compatibility;
 mod handshake;
 mod lifecycle;

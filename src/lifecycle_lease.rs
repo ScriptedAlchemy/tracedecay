@@ -3,11 +3,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::errors::{Result, TraceDecayError};
 
 const LIFECYCLE_LOCK_FILENAME: &str = "lifecycle.lock";
+const EXCLUSIVE_LEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 static LEASE_NONCE: AtomicU64 = AtomicU64::new(0);
 static PROCESS_LEASE_TOKENS: LazyLock<Mutex<Vec<String>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
@@ -122,6 +123,16 @@ impl Drop for LifecycleLease {
 
 pub fn acquire_exclusive(operation: &str) -> Result<LifecycleLease> {
     acquire_exclusive_at(&lifecycle_lock_path()?, operation)
+}
+
+/// Waits up to `timeout` for existing lifecycle readers or writers to release
+/// before acquiring exclusive ownership. Non-contention errors still fail
+/// immediately.
+pub fn acquire_exclusive_with_timeout(
+    operation: &str,
+    timeout: Duration,
+) -> Result<LifecycleLease> {
+    acquire_exclusive_at_with_timeout(&lifecycle_lock_path()?, operation, timeout)
 }
 
 /// Acquires the lifecycle lease rooted in an explicit profile. Migration
@@ -333,15 +344,29 @@ fn lifecycle_lock_path_for_profile(profile_root: &Path) -> Result<PathBuf> {
 }
 
 fn acquire_exclusive_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
-    let file = open_lock_file(path)?;
-    match fs2::FileExt::try_lock_exclusive(&file) {
-        Ok(()) => own_exclusive(file, path, operation),
-        Err(error) if is_lock_contended(&error) => {
-            let mut file = file;
-            let owner = read_owner(&mut file, path);
-            Err(busy_error(operation, owner.as_deref()))
+    acquire_exclusive_at_with_timeout(path, operation, Duration::ZERO)
+}
+
+fn acquire_exclusive_at_with_timeout(
+    path: &Path,
+    operation: &str,
+    timeout: Duration,
+) -> Result<LifecycleLease> {
+    let mut file = open_lock_file(path)?;
+    let started = Instant::now();
+    loop {
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => return own_exclusive(file, path, operation),
+            Err(error) if is_lock_contended(&error) => {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    let owner = read_owner(&mut file, path);
+                    return Err(busy_error(operation, owner.as_deref()));
+                }
+                std::thread::sleep(remaining.min(EXCLUSIVE_LEASE_POLL_INTERVAL));
+            }
+            Err(error) => return Err(lock_error(path, operation, &error)),
         }
-        Err(error) => Err(lock_error(path, operation, &error)),
     }
 }
 
@@ -594,11 +619,14 @@ fn owner_write_error(error: &std::io::Error) -> TraceDecayError {
 mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use super::{
-        SharedLeaseAttempt, acquire_exclusive_at, acquire_exclusive_or_inherited_at,
-        acquire_shared_at, acquire_shared_or_inherited_at, try_acquire_shared_at,
-        try_acquire_shared_or_inherited_at, try_acquire_shared_or_inherited_for_profile,
+        SharedLeaseAttempt, acquire_exclusive_at, acquire_exclusive_at_with_timeout,
+        acquire_exclusive_or_inherited_at, acquire_shared_at, acquire_shared_or_inherited_at,
+        try_acquire_shared_at, try_acquire_shared_or_inherited_at,
+        try_acquire_shared_or_inherited_for_profile,
     };
 
     #[test]
@@ -612,6 +640,41 @@ mod tests {
         assert!(error.to_string().contains("upgrade"));
         drop(held);
         acquire_exclusive_at(&path, "update").unwrap();
+    }
+
+    #[test]
+    fn exclusive_lease_waits_for_a_shared_holder_to_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lifecycle.lock");
+        let holder_path = path.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let held = acquire_shared_at(&holder_path, "daemon run").unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            drop(held);
+        });
+        ready_rx.recv().unwrap();
+
+        let acquired =
+            acquire_exclusive_at_with_timeout(&path, "daemon restart", Duration::from_secs(1))
+                .unwrap();
+
+        assert!(acquired.is_exclusive());
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn exclusive_lease_wait_timeout_preserves_the_active_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lifecycle.lock");
+        let _held = acquire_exclusive_at(&path, "service install").unwrap();
+
+        let error =
+            acquire_exclusive_at_with_timeout(&path, "daemon restart", Duration::from_millis(40))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("service install"));
     }
 
     #[test]

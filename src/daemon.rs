@@ -20,6 +20,10 @@ use tokio::time::{Duration, timeout};
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
+use crate::mcp::server::{McpMethod, SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result};
+use crate::mcp::tools::{
+    explore_call_budget, get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
+};
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
@@ -162,10 +166,30 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         });
     }
     lifecycle.begin_draining();
+    let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
+        .await
+        .is_ok();
     clients.abort_all();
     while clients.join_next().await.is_some() {}
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
     store_administration.shutdown_host_admission_replay().await;
+    if !in_flight_drained {
+        log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", "client_drain_timeout".to_string()),
+                (
+                    "deadline_secs",
+                    DAEMON_CLIENT_DRAIN_DEADLINE.as_secs().to_string(),
+                ),
+                (
+                    "checkpoint",
+                    "skipped_active_clients_were_aborted".to_string(),
+                ),
+            ],
+        );
+        return endpoint_cleanup;
+    }
     shutdown_project_servers(&store_administration).await;
     endpoint_cleanup
 }
@@ -956,11 +980,67 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<Arc<crate::mcp::McpServer>> {
+        let (project_path, route) = Self::project_route(handshake)?;
+        let cached = {
+            let mut servers = self.store_administration.project_servers().lock().await;
+            servers
+                .get_route_and_touch(&route)
+                .map(|(_, server)| Arc::clone(server))
+        };
+        if let Some(server) = cached {
+            return Ok(self.activate_project_server(project_path, server).await);
+        }
+
         let (_key, project_path, server, _inserted) = self
             .store_administration
             .with_writer(|| self.open_project_server(handshake))
             .await?;
         Ok(self.activate_project_server(project_path, server).await)
+    }
+
+    fn spawn_project_server_warmup(
+        &self,
+        handshake: DaemonHandshake,
+        initialize_request: JsonRpcRequest,
+    ) {
+        let engine = self.clone();
+        spawn_lifecycle_project_server_warmup(
+            self.lifecycle.clone(),
+            initialize_request,
+            async move { Box::pin(engine.project_server(&handshake)).await },
+        );
+    }
+
+    fn spawn_direct_project_server_open(
+        &self,
+        handshake: DaemonHandshake,
+    ) -> JoinHandle<Result<Arc<crate::mcp::McpServer>>> {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let Some(activity) = engine.lifecycle.try_enter() else {
+                return Err(TraceDecayError::Config {
+                    message: "daemon is draining before project warm-up".to_string(),
+                });
+            };
+            let _activity = activity;
+            let result = tokio::select! {
+                biased;
+                () = engine.lifecycle.wait_for_draining() => Err(TraceDecayError::Config {
+                    message: "daemon began draining during project warm-up".to_string(),
+                }),
+                result = Box::pin(engine.project_server(&handshake)) => result,
+            };
+            if let Err(error) = &result {
+                log_daemon_event(
+                    "project_server_warmup",
+                    &[
+                        ("outcome", "error".to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+            }
+            result
+        })
     }
 
     /// Opens or resolves a project server while writer administration is held.
@@ -1118,9 +1198,23 @@ impl DaemonEngine {
                 key.clone(),
                 canonical_project_path.clone(),
                 handshake.clone(),
+                Arc::clone(&server),
             );
         }
         Ok((key, canonical_project_path, server, inserted))
+    }
+
+    fn project_route(handshake: &DaemonHandshake) -> Result<(PathBuf, ProjectRouteKey)> {
+        let Some(project_path) = handshake.project_path.as_ref() else {
+            return Err(TraceDecayError::Config {
+                message: "project server requested without project_path".to_string(),
+            });
+        };
+        let canonical_project_path = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.clone());
+        let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake)?;
+        Ok((canonical_project_path, route))
     }
 
     async fn activate_project_server(
@@ -1139,11 +1233,22 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
+        server: Arc<crate::mcp::McpServer>,
     ) {
+        let repair_key = key.clone();
+        let repair_project_path = project_path.clone();
+        let repair_handshake = handshake.clone();
         let engine = self.clone();
-        tokio::spawn(async move {
+        spawn_lifecycle_automation_scheduler_activation(self.lifecycle.clone(), async move {
             engine
-                .activate_project_maintenance(key, project_path, handshake)
+                .activate_project_maintenance(repair_key, repair_project_path, repair_handshake)
+                .await;
+        });
+        let engine = self.clone();
+        spawn_lifecycle_automation_scheduler_activation(self.lifecycle.clone(), async move {
+            let cg = server.cg().await;
+            engine
+                .activate_automation_scheduler_for_open_project(key, project_path, handshake, cg)
                 .await;
         });
     }
@@ -1174,8 +1279,6 @@ impl DaemonEngine {
                     handshake.clone(),
                 )
                 .await;
-                self.reconcile_automation_scheduler_locked(key, project_path, handshake)
-                    .await;
             })
             .await;
     }
@@ -1516,6 +1619,144 @@ fn attach_initialize_route_metadata(
     result["_meta"]["tracedecayInitializeRoute"] = json!(route);
 }
 
+/// Returns `None` for project-dependent requests, `Some(None)` for handled
+/// notifications, and `Some(Some(response))` for static MCP bootstrap calls.
+fn daemon_bootstrap_response(
+    request: &JsonRpcRequest,
+    route: Option<&InitializeRouteMetadata>,
+    project_node_count: Option<u64>,
+) -> Option<Option<JsonRpcResponse>> {
+    match classify_mcp_method(&request.method) {
+        McpMethod::Initialize => Some(request.id.clone().map(|id| {
+            let mut response = JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS));
+            if let Some(route) = route {
+                attach_initialize_route_metadata(&mut response, route);
+            }
+            response
+        })),
+        McpMethod::InitializedAck => Some(None),
+        McpMethod::ToolsList => Some(request.id.clone().map(|id| {
+            let tools = project_node_count.map_or_else(
+                || get_tool_definitions_with_warming_budget(10),
+                |node_count| {
+                    let budget = explore_call_budget(node_count);
+                    get_tool_definitions_with_budget(node_count, budget)
+                },
+            );
+            JsonRpcResponse::success(id, json!({ "tools": tools }))
+        })),
+        _ => None,
+    }
+}
+
+async fn cached_project_node_count(
+    store_administration: &StoreAdministration,
+    handshake: &DaemonHandshake,
+) -> Option<u64> {
+    let project_path = handshake.project_path.as_ref()?;
+    let canonical_project_path = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.clone());
+    let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake).ok()?;
+    let server = {
+        let servers = store_administration.project_servers().lock().await;
+        servers
+            .get_route(&route)
+            .map(|(_, server)| Arc::clone(server))
+    }?;
+    server
+        .cg()
+        .await
+        .get_stats()
+        .await
+        .ok()
+        .map(|stats| stats.node_count)
+}
+
+fn spawn_lifecycle_project_server_warmup<OpenFuture>(
+    lifecycle: DaemonLifecycle,
+    initialize_request: JsonRpcRequest,
+    open_project_server: OpenFuture,
+) where
+    OpenFuture: std::future::Future<Output = Result<Arc<crate::mcp::McpServer>>> + Send + 'static,
+{
+    let Some(activity) = lifecycle.try_enter() else {
+        return;
+    };
+    let _warmup = tokio::spawn(async move {
+        let _activity = activity;
+        let project_server = tokio::select! {
+            biased;
+            () = lifecycle.wait_for_draining() => return,
+            result = Box::pin(open_project_server) => result,
+        };
+        match project_server {
+            Ok(server) => {
+                // Preserve the regular initialize side effect that records
+                // the negotiated MCP client name on the real server.
+                let _ = server.handle_request(&initialize_request).await;
+            }
+            Err(error) => log_daemon_event(
+                "project_server_warmup",
+                &[
+                    ("outcome", "error".to_string()),
+                    ("error", error.to_string()),
+                ],
+            ),
+        }
+    });
+}
+
+fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
+    lifecycle: DaemonLifecycle,
+    activation: ActivationFuture,
+) where
+    ActivationFuture: std::future::Future<Output = ()> + Send + 'static,
+{
+    let Some(activity) = lifecycle.try_enter() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let _activity = activity;
+        tokio::select! {
+            biased;
+            () = lifecycle.wait_for_draining() => {}
+            () = activation => {}
+        }
+    });
+}
+
+#[cfg(any(not(unix), test))]
+fn spawn_portable_project_server_warmup(
+    lifecycle: DaemonLifecycle,
+    store_administration: StoreAdministration,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    handshake: DaemonHandshake,
+    initialize_request: JsonRpcRequest,
+    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+) {
+    let Some(project_path) = handshake.project_path.clone() else {
+        return;
+    };
+    spawn_lifecycle_project_server_warmup(lifecycle, initialize_request, async move {
+        let canonical_project_path = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.clone());
+        store_administration
+            .with_writer(|| {
+                portable_project_server(
+                    &store_administration,
+                    &project_open_gates,
+                    &canonical_project_path,
+                    &handshake,
+                    #[cfg(test)]
+                    project_open_attempts.as_ref(),
+                )
+            })
+            .await
+    });
+}
+
 async fn write_routed_initialize_response(
     server: &crate::mcp::McpServer,
     transport: &mut impl McpTransport,
@@ -1644,12 +1885,72 @@ async fn serve_broker_socket_client(
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
     }
-    let server = if handshake.project_path.is_some() {
-        let server = match Box::pin(engine.project_server(&handshake)).await {
-            Ok(server) => server,
-            Err(e) => {
-                write_project_open_error(&mut transport, &first_request_line, &e).await?;
-                return Err(e);
+    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
+        let project_node_count =
+            if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
+                if handshake.project_path.is_some() {
+                    cached_project_node_count(&engine.store_administration, &handshake).await
+                } else {
+                    Some(0)
+                }
+            } else {
+                None
+            };
+        if let Some(response) =
+            daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
+        {
+            // Keep catalog-refresh bookkeeping consistent with the regular MCP
+            // server path: initialize and tools/list mark this catalog current.
+            if let Some(key) = engine
+                .claim_catalog_refresh(&handshake, &first_request_line)
+                .await
+                && let Err(error) = write_tool_list_changed_notification(&mut transport).await
+            {
+                engine.release_catalog_refresh(key).await;
+                return Err(error);
+            }
+            if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                && handshake.project_path.is_some()
+            {
+                engine.spawn_project_server_warmup(handshake.clone(), request);
+            }
+            drop(setup_activity);
+            if let Some(response) = response {
+                write_json_rpc_response(&mut transport, &response).await?;
+            }
+            return Ok(());
+        }
+    }
+    let server = if let Some(project_path) = handshake.project_path.as_ref() {
+        let mut project_open = engine.spawn_direct_project_server_open(handshake.clone());
+        let server = match tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            &mut project_open,
+        )
+        .await
+        {
+            Ok(Ok(Ok(server))) => server,
+            Ok(Ok(Err(error))) => {
+                write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                return Err(error);
+            }
+            Ok(Err(error)) => {
+                let error = TraceDecayError::Config {
+                    message: format!("project warm-up task failed: {error}"),
+                };
+                write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                return Err(error);
+            }
+            Err(_) => {
+                let error = TraceDecayError::Config {
+                    message: format!(
+                        "TraceDecay project '{}' is warming in the background; retry the same tool shortly",
+                        project_path.display()
+                    ),
+                };
+                drop(setup_activity);
+                write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                return Ok(());
             }
         };
         Some(server)
@@ -1818,6 +2119,40 @@ async fn serve_windows_broker_client_with_class(
         drop(setup_activity);
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
+    }
+    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
+        let project_node_count =
+            if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
+                if handshake.project_path.is_some() {
+                    cached_project_node_count(&store_administration, &handshake).await
+                } else {
+                    Some(0)
+                }
+            } else {
+                None
+            };
+        if let Some(response) =
+            daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
+        {
+            if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                && handshake.project_path.is_some()
+            {
+                spawn_portable_project_server_warmup(
+                    lifecycle.clone(),
+                    store_administration.clone(),
+                    Arc::clone(&project_open_gates),
+                    handshake.clone(),
+                    request,
+                    #[cfg(test)]
+                    project_open_attempts.clone(),
+                );
+            }
+            drop(setup_activity);
+            if let Some(response) = response {
+                write_json_rpc_response(&mut transport, &response).await?;
+            }
+            return Ok(());
+        }
     }
     if let Some(project_path) = handshake.project_path.as_deref() {
         let canonical_project_path = project_path

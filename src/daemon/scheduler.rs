@@ -348,6 +348,75 @@ mod automation_scheduler_exit_barrier_tests {
 }
 
 impl DaemonEngine {
+    pub(super) async fn activate_automation_scheduler_for_open_project(
+        &self,
+        key: ProjectServerKey,
+        project_path: PathBuf,
+        handshake: DaemonHandshake,
+        cg: Arc<crate::tracedecay::TraceDecay>,
+    ) {
+        if !self.lifecycle.accepting() {
+            return;
+        }
+
+        #[cfg(test)]
+        self.automation_config_probe_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let configured = match async {
+            let config =
+                effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
+            automation_scheduler_has_work(&cg, &config).await
+        }
+        .await
+        {
+            Ok(configured) => configured,
+            Err(error) => {
+                log_daemon_event(
+                    "scheduler_config",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "error".to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                false
+            }
+        };
+        if !configured {
+            log_daemon_event(
+                "scheduler_config",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "skipped".to_string()),
+                    ("reason", "not_configured".to_string()),
+                ],
+            );
+            return;
+        }
+
+        let transition = self.maintenance_transition_gate(&key).await;
+        let _transition = transition.lock().await;
+        self.store_administration
+            .with_writer(|| async move {
+                if !self.lifecycle.accepting() {
+                    return;
+                }
+                let owner_is_current = self
+                    .store_administration
+                    .project_servers()
+                    .lock()
+                    .await
+                    .get(&key)
+                    .is_some();
+                if !owner_is_current {
+                    return;
+                }
+                self.start_automation_scheduler(key, project_path, handshake)
+                    .await;
+            })
+            .await;
+    }
+
     pub(super) async fn ensure_automation_scheduler(
         &self,
         key: ProjectServerKey,
@@ -528,7 +597,7 @@ impl DaemonEngine {
         })
     }
 
-    async fn start_automation_scheduler(
+    pub(super) async fn start_automation_scheduler(
         &self,
         key: ProjectServerKey,
         project_path: PathBuf,

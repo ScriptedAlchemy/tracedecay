@@ -291,6 +291,7 @@ fn user_service_runs_daemon_with_socket_path() {
     );
     assert!(unit.contains("Environment=\"PATH="));
     assert!(unit.contains("Restart=on-failure"));
+    assert!(unit.contains("LimitNOFILE=8192"));
 }
 
 // The launchd render tests use Unix-style absolute binary paths, which
@@ -332,6 +333,9 @@ fn render_launchd_plist_includes_program_arguments_socket_logs_and_label() {
     assert!(plist.contains("<key>TRACEDECAY_DATA_DIR</key>"));
     assert!(plist.contains("<key>RunAtLoad</key>"));
     assert!(plist.contains("<key>KeepAlive</key>"));
+    assert!(plist.contains("<key>SoftResourceLimits</key>"));
+    assert!(plist.contains("<key>NumberOfFiles</key>"));
+    assert!(plist.contains("<integer>8192</integer>"));
 }
 
 #[cfg(unix)]
@@ -1244,6 +1248,54 @@ fn refresh_installed_service_preserves_existing_socket_path() {
     assert_eq!(
         std::fs::read_to_string(log).expect("systemctl log"),
         "--user is-active --quiet tracedecay.service\n--user is-enabled tracedecay.service\n--user stop tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let fake_bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let systemctl = fake_bin.join("systemctl");
+    let log = dir.path().join("systemctl.log");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _data_guard =
+        EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+    let service_path = config_home
+        .join("systemd/user")
+        .join(crate::daemon::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    let original_unit =
+        "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n";
+    std::fs::write(&service_path, original_unit).expect("existing service unit");
+
+    super::restore_installed_service_after_update(DaemonServiceState::RunningEnabled)
+        .expect("restore service");
+
+    assert_eq!(
+        std::fs::read_to_string(service_path).expect("service unit"),
+        original_unit
+    );
+    assert_eq!(
+        std::fs::read_to_string(log).expect("systemctl log"),
+        "--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
     );
 }
 

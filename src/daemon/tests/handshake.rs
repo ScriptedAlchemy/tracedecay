@@ -6,7 +6,7 @@ fn test_client_instance_id(value: u128) -> String {
 }
 
 #[cfg(unix)]
-async fn daemon_round_trip(
+pub(super) async fn daemon_round_trip(
     engine: super::super::DaemonEngine,
     handshake: &DaemonHandshake,
     request: Value,
@@ -433,6 +433,37 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     .await;
     assert_eq!(second.len(), 1, "the refresh must not loop");
     assert_eq!(second[0]["id"], json!(4));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn initialized_ack_preserves_pending_catalog_refresh_notification() {
+    let engine = super::super::DaemonEngine::default();
+    let mut handshake = test_handshake_defaults();
+    handshake.client_instance_id = test_client_instance_id(5);
+    handshake.tool_list_changed_capable = true;
+    handshake.catalog_version = "0.0.0-old".to_string();
+
+    let initialized = daemon_round_trip(
+        engine.clone(),
+        &handshake,
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    )
+    .await;
+    assert_eq!(initialized.len(), 1);
+    assert_eq!(
+        initialized[0]["method"],
+        json!("notifications/tools/list_changed")
+    );
+
+    let ping = daemon_round_trip(
+        engine,
+        &handshake,
+        json!({"jsonrpc": "2.0", "id": 6, "method": "ping"}),
+    )
+    .await;
+    assert_eq!(ping.len(), 1, "refresh notification must be deduplicated");
+    assert_eq!(ping[0]["id"], json!(6));
 }
 
 #[cfg(unix)]

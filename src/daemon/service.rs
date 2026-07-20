@@ -1,6 +1,7 @@
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -27,6 +28,10 @@ use unit_file::{
 const LAUNCHD_LABEL: &str = "com.tracedecay.daemon";
 const LAUNCHD_PLIST_NAME: &str = "com.tracedecay.daemon.plist";
 static SERVICE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+// Cached project owners retain SQLite families and coordination locks. The
+// platform default of 256 descriptors is too small for multi-worktree use.
+const DAEMON_OPEN_FILE_LIMIT: u32 = 8_192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonServiceSpec {
@@ -55,8 +60,25 @@ pub struct QuiescedDaemonLifecycle {
 
 impl QuiescedDaemonLifecycle {
     pub fn acquire(operation: &str) -> Result<Self> {
+        Self::acquire_with(operation, || {
+            crate::lifecycle_lease::acquire_exclusive(operation)
+        })
+    }
+
+    /// Stops the managed daemon, then waits up to `timeout` for its shared
+    /// lifecycle lease to release before taking exclusive ownership.
+    pub fn acquire_with_timeout(operation: &str, timeout: Duration) -> Result<Self> {
+        Self::acquire_with(operation, || {
+            crate::lifecycle_lease::acquire_exclusive_with_timeout(operation, timeout)
+        })
+    }
+
+    fn acquire_with(
+        operation: &str,
+        acquire: impl FnOnce() -> Result<crate::lifecycle_lease::LifecycleLease>,
+    ) -> Result<Self> {
         let previous_state = quiesce_installed_service_before_lease()?;
-        match crate::lifecycle_lease::acquire_exclusive(operation) {
+        match acquire() {
             Ok(lifecycle_lease) => {
                 let mut guard = Self {
                     previous_state,
@@ -255,12 +277,14 @@ impl DaemonServiceSpec {
              ExecStart={} daemon run --socket {}\n\
              Restart=on-failure\n\
              RestartSec=2\n\
+             LimitNOFILE={}\n\
              \n\
              [Install]\n\
              WantedBy=default.target\n",
             systemd_escape_env_value(&service_path),
             self.tracedecay_bin.display(),
-            self.socket_path.display()
+            self.socket_path.display(),
+            DAEMON_OPEN_FILE_LIMIT,
         )
     }
 
@@ -338,6 +362,12 @@ impl DaemonServiceSpec {
                <key>ThrottleInterval</key>\n\
                <integer>2</integer>\n\
              \n\
+               <key>SoftResourceLimits</key>\n\
+               <dict>\n\
+                 <key>NumberOfFiles</key>\n\
+                 <integer>{open_file_limit}</integer>\n\
+               </dict>\n\
+             \n\
                <key>StandardOutPath</key>\n\
                <string>{stdout}</string>\n\
              \n\
@@ -348,6 +378,7 @@ impl DaemonServiceSpec {
             label = plist_xml_escape(LAUNCHD_LABEL),
             bin = plist_xml_escape(&self.tracedecay_bin.display().to_string()),
             socket = plist_xml_escape(&self.socket_path.display().to_string()),
+            open_file_limit = DAEMON_OPEN_FILE_LIMIT,
             stdout = plist_xml_escape(&data_dir.join("daemon.out.log").display().to_string()),
             stderr = plist_xml_escape(&data_dir.join("daemon.err.log").display().to_string()),
         ))

@@ -1035,10 +1035,11 @@ async fn a_third_matching_shard_is_left_for_its_own_pass() {
         !third_retired.exists(),
         "the untouched third shard must not be folded into this pass's destination"
     );
-    let claimants = storage::matching_legacy_profile_layouts(
+    let (claimants, _) = storage::matching_legacy_profile_layouts(
         &fixture.project,
         &fixture.profile,
         Some(applied.destination_project_id.as_str()),
+        false,
     )
     .unwrap();
     assert_eq!(
