@@ -21,7 +21,7 @@ use serde_json::Value as JsonValue;
 
 pub use tracedecay_store::ParseOffset;
 
-use crate::db::{Database, DatabaseAuthority};
+use crate::db::DatabaseAuthority;
 use crate::errors::TraceDecayError;
 use crate::sessions::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
@@ -388,8 +388,18 @@ pub async fn repair_session_temporal_store(db_path: &Path) -> crate::errors::Res
         })?;
     }
     let authority = DatabaseAuthority::for_runtime(db_path, "repair session temporal store")?;
-    let (db, _) = Database::open(db_path, &authority).await?;
-    db.repair_session_temporal_schema().await
+    let canonical_path = authority.canonical_database_path().to_path_buf();
+    let db = Builder::new_local(&canonical_path)
+        .build()
+        .await
+        .map_err(|error| global_db_operation_error("open session temporal repair store", error))?;
+    let conn = db.connect().map_err(|error| {
+        global_db_operation_error("connect session temporal repair store", error)
+    })?;
+    session_temporal::ensure_session_temporal_schema(&conn).await?;
+    schema_contract::ensure_authority_invariant_schema(&conn)
+        .await
+        .map(|_| ())
 }
 
 pub(crate) struct GlobalDbWriterConnection<'a> {
