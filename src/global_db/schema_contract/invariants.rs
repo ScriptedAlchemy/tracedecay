@@ -56,7 +56,7 @@ async fn projection_checkpoint(conn: &Connection) -> crate::errors::Result<i64> 
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
-pub(in crate::global_db) async fn ensure_authority_invariant_schema(
+pub(crate) async fn ensure_authority_invariant_schema(
     conn: &Connection,
 ) -> crate::errors::Result<bool> {
     ensure_audit_checkpoint_schema(conn).await?;
@@ -69,7 +69,7 @@ pub(in crate::global_db) async fn ensure_authority_invariant_schema(
     Ok(trigger_contracts_were_intact)
 }
 
-pub(in crate::global_db) async fn ensure_authority_invariants(
+pub(crate) async fn ensure_authority_invariants(
     conn: &Connection,
     force_exhaustive: bool,
 ) -> crate::errors::Result<()> {

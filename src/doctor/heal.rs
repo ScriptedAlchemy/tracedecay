@@ -139,6 +139,17 @@ async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
     report.quarantined_branch_meta = quarantined;
     report.warnings.extend(warnings);
 
+    if let Ok(project_root) = std::env::current_dir()
+        && let Ok(layout) = crate::storage::resolve_layout(&project_root, profile_root)
+        && layout.sessions_db_path.is_file()
+        && let Err(error) =
+            crate::global_db::repair_session_temporal_store(&layout.sessions_db_path).await
+    {
+        report.warnings.push(format!(
+            "could not repair the current project session store: {error}"
+        ));
+    }
+
     // Opening the global DB applies its idempotent schema migrations — the
     // same lazy upgrade every normal open path performs.
     let global_db = match GlobalDb::try_open().await {

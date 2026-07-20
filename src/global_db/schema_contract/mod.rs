@@ -12,11 +12,11 @@ fn normalize_trigger_sql(sql: &str) -> String {
 }
 
 pub(super) use invariants::{
-    authority_invariant_triggers_intact, ensure_authority_invariant_schema,
-    ensure_authority_invariants, restore_immutability_after_canonical_repair,
+    authority_invariant_triggers_intact, restore_immutability_after_canonical_repair,
     suspend_immutability_for_canonical_repair, suspend_session_invariants_for_schema_upgrade,
     validate_authority_rows_exhaustive,
 };
+pub(crate) use invariants::{ensure_authority_invariant_schema, ensure_authority_invariants};
 pub(super) use validation::{
     validate_authority_schema_contract, validate_observation_migration_source,
     validate_registry_schema_contract,

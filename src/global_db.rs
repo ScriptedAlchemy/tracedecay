@@ -35,7 +35,7 @@ mod observation;
 mod observation_projection;
 mod observation_store;
 mod project_registry;
-mod schema_contract;
+pub(crate) mod schema_contract;
 pub(crate) mod schema_stages;
 pub(crate) mod session_temporal;
 pub(crate) use session_temporal::operations as session_temporal_operations;
