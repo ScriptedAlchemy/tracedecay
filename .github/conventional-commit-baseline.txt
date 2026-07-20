@@ -5,3 +5,32 @@
 c4d4ce4c427988701cde38915f4f3a5b5fa7d52d # PR #101 split/mcp-tool-surface
 5b4eeb1b9d279bfe64f289a80292bfd83fd852a1 # PR #102 split/daemon-transport
 deb256e4276da2c7be8729a4db767e56ebffd4ca # PR #178 subject 86 chars; published before lint caught it, unrewritable without force-push
+# PR #421 codex/tracedecay-total-redesign-plan historical commits; over-72 subjects
+# published on the long-running integration branch before the lint reached them.
+02b54cc3c4304851152e4626af74933eaf4e0bbb # refactor(facts): collapse project-memory route boilerplate into one accessor
+0c0bdc38176724493e16e100e58ab9de4350b6dc # fix(memory): scope replay identities per connection and carry legacy usage counters through cutover
+13c17a05ad47b37a3f38e633daf36483a4d868e4 # fix(db,memory): self-healing FTS bulk load; canonical exclusive-start list cursor
+1926a731989c474ad1c195ea3f431fd7b74cbb8f # refactor(store-crate): split compatibility curation into directory module
+23015356c1ec189a83614918b8771b5d4e651344 # refactor(store): drop dead repair-const re-export after saturation cutover
+295058f6c6ba0af3593875dbcd663c61d55bf3e1 # chore(observability): log swallowed causes behind degradation reason codes
+356b4f81e1f8297212d7eea0aaaab56ae67e99cf # fix(memory): close the last P1.4 sites and tombstone-tolerant V1 listings
+3dd34bd7c8aa537c6c4e4a5db0d7d4591afb3cd4 # fix(observation): let the anchor backfill tolerate native alias collisions
+519c50bf298f67f721f4be2c8a59d9419e97b0de # docs(v2): PR8 temporal kernel stays in root under the query-crate contract; PR9 gates extraction
+546d4395b1d8aa0c80447bef2985667cbc1e78ee # refactor(store,global_db): single-authority ObservationCoverageReason parsing
+63f21295226b1ab86cc0bd61d179c0310d99c078 # fix(projection): reconcile session rows across symlinked project-path families
+73b02d1eaf8e249e1fe3f398cbe507c2121c5368 # refactor(projection): collapse output-collision handling into one mechanism
+7576eb9124b8387657fdaa71acd198ef22665fad # fix(scripts): stop swallowing touched-unit timing metrics in pr7-build-feedback
+7b91cdf6e7e95a12b79f431abc736b00acc553b4 # docs(skill): dogfood guardrail for build wrappers; verify upgrade on live profile
+7e7f04513df237bf38014d43e1bfa5e311b582da # fix(dashboard): restore V1 fact-detail entities and canonical graph links
+93c3535824514f16829b3a4ff4627399cfc36179 # fix(memory): converge HRR banks and refused admissions on migrated stores
+975ace4c23499072d77420305960002fb530e28e # fix(memory): read-only status, atomic idempotent remove, one convergence policy
+9c2c1181c3825900afdaa6b16cf4af67e527bd81 # fix(errors): stop doubling self-displaying source layers in database_operation
+9cacc19e3e40eb66e7cfe2a3e1a9306f9f3e93c3 # fix(dashboard): warn instead of silently exhausting derived-memory repair
+ba22dd1dd66d6af1d6cbdf73a7c7842a2c12728d # docs(v2): encode PR7 dogfooding weak points as normative plan requirements
+c3090e079fd794993643829c93df5e487d11b271 # fix(storage): let writable open recover hot journals under a dirty sentinel
+c3d041af1fa97ab45ab5ad01628080fd7f994aa4 # fix(projection): rebuild instead of failing when predecessor lineage is unmigratable
+c433c08adcbed8ba568e2fab8311e99ebe412061 # fix(memory): route branch-serving instances to the project-wide fact store
+d05e52a5db8d39c40ed2f52689e6a8aee4141fb3 # refactor(observation): report anchor alias collisions as data, drop the policy enum
+ddee57411e12653ce6d8679ce260c12af0f8aaee # fix(global-db): stop swallowing storage errors as row skips in registry listing
+e0efef8d24823ce04356adf118de8189a80459f4 # refactor(memory): unify project-memory DB handles into one store-owned authority
+f81d399d6302674788fec5ce217e70c60f5410cd # fix(memory): public explicit-repair entry; align status tests and docs with pure reads
