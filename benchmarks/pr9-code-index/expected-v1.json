@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "workload_id": "pr9-code-index-v1",
+  "scales": [
+    {
+      "name": "current",
+      "cases": [
+        {
+          "name": "clean",
+          "files_parsed": 9,
+          "chunks_added_or_changed": 1505,
+          "chunks_deleted": 0,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "input_bytes": 116543,
+          "output_bytes": 5067582
+        },
+        {
+          "name": "warm_one_file",
+          "files_parsed": 1,
+          "chunks_added_or_changed": 1,
+          "chunks_deleted": 1,
+          "chunks_reused": 1504,
+          "projection_calls": 1,
+          "input_bytes": 13616,
+          "output_bytes": 5216520
+        },
+        {
+          "name": "deletion",
+          "files_parsed": 0,
+          "chunks_added_or_changed": 0,
+          "chunks_deleted": 549,
+          "chunks_reused": 956,
+          "projection_calls": 1,
+          "input_bytes": 0,
+          "output_bytes": 3809077
+        },
+        {
+          "name": "no_op",
+          "files_parsed": 0,
+          "chunks_added_or_changed": 0,
+          "chunks_deleted": 0,
+          "chunks_reused": 1505,
+          "projection_calls": 0,
+          "input_bytes": 0,
+          "output_bytes": 5215104
+        },
+        {
+          "name": "chunker_replay",
+          "files_parsed": 9,
+          "chunks_added_or_changed": 1505,
+          "chunks_deleted": 1505,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "input_bytes": 116543,
+          "output_bytes": 6577125
+        },
+        {
+          "name": "incompatible_rebuild",
+          "files_parsed": 9,
+          "chunks_added_or_changed": 1505,
+          "chunks_deleted": 1505,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "input_bytes": 116543,
+          "output_bytes": 6586155
+        }
+      ]
+    },
+    {
+      "name": "10x",
+      "cases": [
+        {
+          "name": "clean",
+          "files_parsed": 90,
+          "chunks_added_or_changed": 15050,
+          "chunks_deleted": 0,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "input_bytes": 1165430,
+          "output_bytes": 50668926
+        },
+        {
+          "name": "warm_one_file",
+          "files_parsed": 1,
+          "chunks_added_or_changed": 1,
+          "chunks_deleted": 1,
+          "chunks_reused": 15049,
+          "projection_calls": 1,
+          "input_bytes": 13616,
+          "output_bytes": 52145275
+        },
+        {
+          "name": "deletion",
+          "files_parsed": 0,
+          "chunks_added_or_changed": 0,
+          "chunks_deleted": 549,
+          "chunks_reused": 14501,
+          "projection_calls": 1,
+          "input_bytes": 0,
+          "output_bytes": 50737833
+        },
+        {
+          "name": "no_op",
+          "files_parsed": 0,
+          "chunks_added_or_changed": 0,
+          "chunks_deleted": 0,
+          "chunks_reused": 15050,
+          "projection_calls": 0,
+          "input_bytes": 0,
+          "output_bytes": 52143859
+        },
+        {
+          "name": "chunker_replay",
+          "files_parsed": 90,
+          "chunks_added_or_changed": 15050,
+          "chunks_deleted": 15050,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "input_bytes": 1165430,
+          "output_bytes": 65764104
+        },
+        {
+          "name": "incompatible_rebuild",
+          "files_parsed": 90,
+          "chunks_added_or_changed": 15050,
+          "chunks_deleted": 15050,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "input_bytes": 1165430,
+          "output_bytes": 65854404
+        }
+      ]
+    }
+  ]
+}

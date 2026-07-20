@@ -867,29 +867,6 @@ async fn persist_compression_transaction_writes(
     })
 }
 
-pub(crate) async fn maintenance_debt_count(
-    conn: &Connection,
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<i64, LcmError> {
-    let session_value = util::opt_text(session_id);
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_maintenance_debt d
-             JOIN lcm_lifecycle_state s
-               ON s.provider = d.provider AND s.conversation_id = d.conversation_id
-             WHERE d.provider = ?1 AND (?2 IS NULL OR s.current_session_id = ?2)",
-            params![provider, session_value],
-        )
-        .await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("maintenance debt count returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
-}
-
 async fn upsert_lifecycle_state(
     conn: &Connection,
     update: &LcmLifecycleUpdate,

@@ -423,6 +423,24 @@ impl TraceDecay {
             Err(e) => return Err(e),
         };
 
+        // Validation before Database::open cannot observe FTS damage on a
+        // retained shared handle because the open reuses that connection.
+        // Classify its complete quick-check report after open and schedule the
+        // existing rebuild through the canonical writer lane. Non-FTS damage
+        // fails closed without entering either repair path.
+        match db.repair_fts_after_open().await {
+            Ok(Some(problem)) => {
+                eprintln!(
+                    "[tracedecay] repaired FTS index after post-open health check ({problem})"
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                print_corruption_warning(&db_path);
+                return Err(recovery_required_error(&db_path, error));
+            }
+        }
+
         // If the sentinel was set but the database opened successfully, run a
         // quick integrity check.
         if crashed {
@@ -1240,7 +1258,8 @@ fn count_tree_files(root: &Path) -> u64 {
 /// main.nodes_fts"). Such damage is fully derivable from the content table via
 /// [`crate::db::Database::rebuild_fts`] and never requires offline recovery.
 pub(crate) fn is_fts_only_corruption(problem: &str) -> bool {
-    problem.contains("FTS5 table") && problem.contains("nodes_fts")
+    problem.contains("malformed inverted index for FTS5 table main.nodes_fts")
+        || problem.contains("malformed inverted index for FTS5 table nodes_fts")
 }
 
 /// Whether a read-only preflight failure means the store needs ordinary

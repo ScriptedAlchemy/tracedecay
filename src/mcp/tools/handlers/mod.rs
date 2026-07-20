@@ -35,7 +35,9 @@ pub(crate) use session::message_search::{
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
     SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
     SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalStoreScope, SessionTemporalMetadataView, SessionTemporalWatermarksView,
+    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
+    SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
+    SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
 pub(crate) use session::{
     SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,

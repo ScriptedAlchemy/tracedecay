@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -21,6 +22,7 @@ use tracedecay_store::{
 
 use super::{MESSAGE_SEARCH_ROOT_SESSION_ID, McpServer, McpServerConstructionContext};
 use crate::config::PinnedUserDataDir;
+use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 use crate::global_db::GlobalDb;
 use crate::mcp::transport::JsonRpcRequest;
 use crate::sessions::{SessionMessageRecord, SessionRecord};
@@ -62,6 +64,18 @@ async fn server_with_authorities() -> (
     Arc<GlobalDb>,
     Arc<GlobalDb>,
 ) {
+    server_with_project_refresh_wake(None).await
+}
+
+async fn server_with_project_refresh_wake(
+    project_refresh_wake: Option<SessionTemporalRefreshWake>,
+) -> (
+    Arc<McpServer>,
+    TempDir,
+    PinnedUserDataDir,
+    Arc<GlobalDb>,
+    Arc<GlobalDb>,
+) {
     let (cg, dir, pin) = indexed_project().await;
     let registry = Arc::new(GlobalDb::open().await.expect("registry"));
     let project = Arc::new(
@@ -87,6 +101,7 @@ async fn server_with_authorities() -> (
         false,
     );
     context.profile_root = Some(profile_root);
+    context.project_session_refresh_wake = project_refresh_wake;
     (
         McpServer::new_with_context(context).await,
         dir,
@@ -423,6 +438,39 @@ async fn retained_project_and_profile_handles_construct_retrieval_services() {
     let (server, _dir, _pin, _project, _profile) = server_with_authorities().await;
     assert!(server.project_session_retrieval_service.is_some());
     assert!(server.user_session_retrieval_service.is_some());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn unavailable_project_worker_rejects_before_expensive_reads() {
+    let (server, dir, _pin, _project, _profile) =
+        server_with_project_refresh_wake(Some(SessionTemporalRefreshWake::unavailable())).await;
+
+    let payload = tokio::time::timeout(
+        Duration::from_millis(100),
+        message_search(
+            &server,
+            json!({
+                "query": "database backup",
+                "project_path": dir.path(),
+                "format": "json",
+            }),
+        ),
+    )
+    .await
+    .expect("unavailable retrieval should reject within the fast-path budget");
+
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(payload["error"]["reason"], "refresh_worker_missing");
+    assert_eq!(payload["service_status"]["backlog"], 0);
+    assert_eq!(payload["service_status"]["blocker"], "worker_missing");
+    assert_eq!(
+        server
+            .project_session_retrieval_calls
+            .load(Ordering::Relaxed),
+        0,
+        "unavailable status must reject before temporal retrieval starts"
+    );
     server.shutdown().await;
 }
 

@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "workload_id": "pr9-code-index-v1",
+  "harness_revision": "code-index-chunks.v1",
+  "seed": 1784509200,
+  "repetitions": {
+    "warmups": 5,
+    "measured": 30
+  },
+  "corpus": {
+    "source_files": [
+      "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/integration.rs",
+      "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/repository.rs",
+      "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/canonical.rs",
+      "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/coverage.rs",
+      "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/error.rs",
+      "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/id.rs",
+      "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/time.rs",
+      "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs",
+      "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs"
+    ],
+    "content_digest": "sha256:da792d990ea60aa311c4be2ec58a68f1a9e86a6520ee7a50e433d1f9d22b0fd9",
+    "descriptor_digest": "sha256:5aecc3b0c4b0d2c7dce830c192ef7267c4792586d6cb11fbd3e2f2e321a424b0",
+    "language_strata": [
+      {
+        "language": "rust",
+        "files": 9,
+        "bytes": 116543,
+        "chunks": 1505
+      }
+    ]
+  },
+  "scales": [
+    {
+      "name": "current",
+      "factor": 1,
+      "files": 9,
+      "bytes": 116543,
+      "chunks": 1505
+    },
+    {
+      "name": "10x",
+      "factor": 10,
+      "files": 90,
+      "bytes": 1165430,
+      "chunks": 15050
+    }
+  ],
+  "cases": [
+    {
+      "name": "clean",
+      "cache_state": "no_prior_generation"
+    },
+    {
+      "name": "warm_one_file",
+      "cache_state": "prior_generation_loaded"
+    },
+    {
+      "name": "deletion",
+      "cache_state": "prior_generation_loaded"
+    },
+    {
+      "name": "no_op",
+      "cache_state": "prior_generation_loaded"
+    },
+    {
+      "name": "chunker_replay",
+      "cache_state": "extraction_batches_reused"
+    },
+    {
+      "name": "incompatible_rebuild",
+      "cache_state": "forced_full_rebuild"
+    }
+  ],
+  "runtime": {
+    "cargo_command": "cargo bench --bench code_index_chunks -- --run",
+    "profile": "bench",
+    "platform": "linux",
+    "arrival_model": "closed_loop_single_process",
+    "concurrency": 1,
+    "page_cache": "uncontrolled_report_only",
+    "parser_registry": "initialized_before_sample",
+    "clock": "std_instant_plus_proc_self_stat",
+    "peak_rss": "proc_self_status_vmhwm_after_clear_refs",
+    "io_bytes": "proc_self_io_read_bytes_and_write_bytes",
+    "hardware_manifest": "captured_in_result"
+  }
+}

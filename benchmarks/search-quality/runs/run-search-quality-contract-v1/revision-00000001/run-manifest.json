@@ -1,0 +1,113 @@
+{
+  "run_id": "run-search-quality-contract-v1",
+  "revision": 1,
+  "scope": "development",
+  "authority": "contract_only",
+  "fixture_manifest_digest": "sha256:3ed1e38d41625e0bbe113ff894756b119044c0dc15a11e1706a76b22219fcbc1",
+  "workload_file_digest": "sha256:00dec5af9054f472e3902c484a0cb9e0869fbf98e9ab3de6dd002377b542ebb9",
+  "development_label_file_digest": "sha256:2f091bd88586fb558b94773c997f77a97a4afd31c6569474d943126b76295276",
+  "holdout_seal_digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de",
+  "artifact_files": [
+    {
+      "path": "queries-v1.jsonl",
+      "byte_len": 18717,
+      "digest": "sha256:00dec5af9054f472e3902c484a0cb9e0869fbf98e9ab3de6dd002377b542ebb9"
+    },
+    {
+      "path": "judgments-development-v1.jsonl",
+      "byte_len": 13595,
+      "digest": "sha256:2f091bd88586fb558b94773c997f77a97a4afd31c6569474d943126b76295276"
+    },
+    {
+      "path": "snapshots-v1.jsonl",
+      "byte_len": 2094,
+      "digest": "sha256:416168d8e8178f83cc99918ad823ce450f027db90a84226835906978fb58fa86"
+    },
+    {
+      "path": "temporal-events-v1.jsonl",
+      "byte_len": 2052,
+      "digest": "sha256:117d75f090ec6106391ef4e5b430ef8c02ae2d506cfbcca40ec449fe2093880e"
+    },
+    {
+      "path": "context-spans-v1.jsonl",
+      "byte_len": 1587,
+      "digest": "sha256:8bd1d7dbeb183cb69fcf3b2768114efec05e5da4a36127afd339647d1ca85a39"
+    },
+    {
+      "path": "tasks-v1.jsonl",
+      "byte_len": 1201,
+      "digest": "sha256:3550214c5065f634227696a9abb9a8fc97ec33767ad4aba050c7d8a277a28f9e"
+    },
+    {
+      "path": "authorization-canaries-v1.jsonl",
+      "byte_len": 295,
+      "digest": "sha256:1570061b67df22a1f2a07e024bcc3d527480f87ccec9ee42c2a9d08f8ab48fd0"
+    },
+    {
+      "path": "exact-admission-oracles-v1.jsonl",
+      "byte_len": 1003,
+      "digest": "sha256:96003373b2421816a922e2b74932020d5eeae98455be7556bf9a3ff1a71a1222"
+    },
+    {
+      "path": "contamination-partitions-v1.json",
+      "byte_len": 1633,
+      "digest": "sha256:3cdbf748bd31509c523f16b3041ad33e7b481ff5970938a0a54b8055a75e2243"
+    }
+  ],
+  "candidate_revision": "contract-only-no-candidate-or-profile-selection",
+  "profile_matrix": [
+    "contract-only-schema-validation;no-profile-selection"
+  ],
+  "model_revision": "not-applicable-no-semantic-execution",
+  "tokenizer_revision": "fixture-byte-tokenizer-v1",
+  "runtime_revision": "not-executed-contract-schema-only",
+  "command_revision": "search-quality-fixture-validator-v1",
+  "budget": {
+    "candidate_limit_per_lane": 32,
+    "context_byte_limit": 65536,
+    "context_token_limit": 16384,
+    "deadline_millis": 120000
+  },
+  "cache_states": [
+    "not_executed_contract_only"
+  ],
+  "execution_order": [
+    "q-dev-001",
+    "q-dev-002",
+    "q-dev-003",
+    "q-dev-004",
+    "q-dev-005",
+    "q-dev-006",
+    "q-dev-007",
+    "q-dev-008",
+    "q-dev-009",
+    "q-dev-010",
+    "q-dev-011",
+    "q-dev-012",
+    "q-dev-013",
+    "q-dev-014",
+    "q-dev-015",
+    "q-dev-016",
+    "q-dev-017",
+    "q-dev-018",
+    "q-dev-019",
+    "q-dev-020",
+    "q-dev-021",
+    "q-dev-022"
+  ],
+  "sample_size_rationale": "Schema and fixture-integrity validation only; no quality, resource, latency, or promotion estimate is made.",
+  "measurement_tools": [
+    "sha256 raw-byte integrity",
+    "typed cross-artifact validator"
+  ],
+  "statistical_procedures": [
+    "not_applicable_contract_only"
+  ],
+  "output_schema": "tracedecay.search-quality.contract-evidence.v1",
+  "locked_outcomes_accessed": false,
+  "decision_expression": "contract_only && locked_outcomes_accessed == false && acceptance_authority == false",
+  "decision_owners": [
+    "owner-search-quality-lead"
+  ],
+  "digest": "sha256:bb0c5281ead36f99e0bf97b8ace70ae1743939639e883c814d57f2963175c749"
+}

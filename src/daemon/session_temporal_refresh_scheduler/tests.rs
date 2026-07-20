@@ -1007,7 +1007,7 @@ impl SessionTemporalRefreshProjector for PanicOnceProjector {
 }
 
 #[tokio::test]
-async fn worker_panic_is_supervised_and_durable_work_resumes_automatically() {
+async fn worker_recovery_exposes_blocker_and_drains_backlog() {
     let temp = TempDir::new().unwrap();
     let db = Arc::new(
         crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
@@ -1025,6 +1025,28 @@ async fn worker_panic_is_supervised_and_durable_work_resumes_automatically() {
         wake.request(request("session.worker.restart", 0)),
         SessionTemporalRefreshWakeDisposition::Enqueued
     );
+    let recovering = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let status = registry.profile_worker_status(db.db_path()).await;
+            if status.unavailable_reason
+                == Some(SessionTemporalRefreshUnavailableReason::Recovering)
+            {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker should expose its supervised recovery");
+    assert_eq!(recovering.backlog, 1);
+    assert_eq!(
+        recovering.blocker,
+        Some(SessionTemporalRefreshBlocker::WorkerPanicked)
+    );
+    assert_eq!(
+        recovering.retry_class,
+        Some(SessionTemporalRefreshRetryClass::Projector)
+    );
     assert!(
         registry
             .wait_profile_idle(db.db_path(), Duration::from_secs(2))
@@ -1032,6 +1054,12 @@ async fn worker_panic_is_supervised_and_durable_work_resumes_automatically() {
     );
     let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
     assert!(store.running_session_refreshes().await.unwrap().is_empty());
+    let recovered = registry.profile_worker_status(db.db_path()).await;
+    assert!(recovered.is_available());
+    assert_eq!(recovered.backlog, 0);
+    assert_eq!(recovered.blocker, None);
+    assert_eq!(recovered.retry_class, None);
+    assert!(recovered.last_progress_at_unix_micros.is_some());
     registry.shutdown().await;
 }
 

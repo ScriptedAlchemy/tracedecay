@@ -94,6 +94,94 @@ fn daemon_admission_preserves_reserved_health_capacity() {
 }
 
 #[test]
+fn daemon_per_client_admission_is_fair_and_reconnects_after_release() {
+    let admission = super::super::DaemonPerClientAdmission::new(2);
+    let mut client_a = test_handshake_defaults();
+    client_a.client_instance_id = "a".repeat(32);
+    let mut client_b = test_handshake_defaults();
+    client_b.client_instance_id = "b".repeat(32);
+
+    let first = admission
+        .try_admit(&client_a)
+        .expect("first client-a request");
+    let second = admission
+        .try_admit(&client_a)
+        .expect("second client-a request");
+    let response = admission
+        .try_admit(&client_a)
+        .expect_err("one client must not consume an unbounded share");
+    assert_eq!(
+        response,
+        super::super::DaemonClientSaturationResponse {
+            kind: super::super::DaemonClientSaturationKind::PerClientCapacityReached,
+            retryable: true,
+            capacity: 2,
+        }
+    );
+
+    let other = admission
+        .try_admit(&client_b)
+        .expect("another client retains a fair share");
+    drop(first);
+    assert!(
+        admission.try_admit(&client_a).is_ok(),
+        "released leases must allow reconnects"
+    );
+    drop(second);
+    drop(other);
+}
+
+#[test]
+fn daemon_per_client_admission_leaves_legacy_clients_compatible() {
+    let admission = super::super::DaemonPerClientAdmission::new(1);
+    let mut legacy = test_handshake_defaults();
+    legacy.client_instance_id.clear();
+
+    assert!(admission.try_admit(&legacy).is_ok());
+    assert!(admission.try_admit(&legacy).is_ok());
+    assert_eq!(
+        admission.tracked_client_count(),
+        0,
+        "an absent stable instance id cannot be used as a fair identity"
+    );
+}
+
+#[test]
+fn daemon_per_client_fairness_never_blocks_reserved_health_requests() {
+    let admission = super::super::DaemonPerClientAdmission::new(1);
+    let mut client = test_handshake_defaults();
+    client.client_instance_id = "c".repeat(32);
+    let _bulk = admission.try_admit(&client).expect("initial bulk lease");
+    let status_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "tracedecay_status", "arguments": {}},
+    })
+    .to_string();
+    let context_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "tracedecay_context", "arguments": {"task": "x"}},
+    })
+    .to_string();
+
+    assert!(
+        admission
+            .try_admit_request(&client, &status_request)
+            .is_ok(),
+        "reserved health requests must bypass per-client bulk fairness"
+    );
+    assert!(
+        admission
+            .try_admit_request(&client, &context_request)
+            .is_err(),
+        "bulk requests remain bounded"
+    );
+}
+
+#[test]
 fn daemon_client_saturation_response_is_typed_json_rpc_data() {
     let response = super::super::DaemonClientSaturationResponse {
         kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
@@ -110,6 +198,25 @@ fn daemon_client_saturation_response_is_typed_json_rpc_data() {
     assert_eq!(data["kind"], "client_capacity_reached");
     assert_eq!(data["retryable"], true);
     assert_eq!(data["capacity"], 3);
+}
+
+#[test]
+fn daemon_per_client_saturation_response_is_typed_json_rpc_data() {
+    let response = super::super::DaemonClientSaturationResponse {
+        kind: super::super::DaemonClientSaturationKind::PerClientCapacityReached,
+        retryable: true,
+        capacity: 8,
+    }
+    .into_json_rpc_with_id(serde_json::Value::Null);
+    let data = response
+        .error
+        .expect("error response")
+        .data
+        .expect("typed data");
+
+    assert_eq!(data["kind"], "per_client_capacity_reached");
+    assert_eq!(data["retryable"], true);
+    assert_eq!(data["capacity"], 8);
 }
 
 #[test]
@@ -171,6 +278,7 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
             Arc::new(tokio::sync::Mutex::new(
                 super::super::ProjectOpenGates::default(),
             )),
+            super::super::DaemonPerClientAdmission::default(),
             reserved.class(),
             None,
         )

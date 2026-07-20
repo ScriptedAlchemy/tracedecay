@@ -12,6 +12,7 @@ use crate::common;
 use crate::support;
 
 use std::io::{Seek, Write};
+use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay::db::Database;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, try_acquire_sync_lock_at};
@@ -632,6 +633,183 @@ async fn open_self_heals_fts_corruption_without_dirty_sentinel()
     let results = ts.db().search_nodes("process_data", 10).await?;
     assert_eq!(results[0].node.id, "a1");
     ts.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_repairs_post_open_fts_corruption_with_search_parity()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    ts.db()
+        .insert_nodes(&[
+            sample_node("a1", "process_data"),
+            sample_node("a2", "process_data_helper"),
+            sample_node("a3", "unrelated"),
+        ])
+        .await?;
+    let expected = ts
+        .db()
+        .search_nodes("process_data", 10)
+        .await?
+        .into_iter()
+        .map(|result| (result.node.id, result.score.to_bits()))
+        .collect::<Vec<_>>();
+
+    ts.db()
+        .execute_write_batch(
+            "clear post-open FTS corruption fixture",
+            "DELETE FROM nodes_fts_data WHERE id > 10;",
+        )
+        .await?;
+    assert!(
+        ts.db().quick_check_report().await?.is_some(),
+        "fixture must corrupt the retained connection's FTS index"
+    );
+
+    let reopened = TraceDecay::open_with_options(&project_root, open_options)
+        .await
+        .expect("a reused post-open connection must schedule FTS repair");
+    assert!(
+        reopened.db().quick_check_report().await?.is_none(),
+        "post-open FTS repair must restore quick_check"
+    );
+    let actual = reopened
+        .db()
+        .search_nodes("process_data", 10)
+        .await?
+        .into_iter()
+        .map(|result| (result.node.id, result.score.to_bits()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "post-repair FTS search order and scores must match the healthy baseline"
+    );
+
+    reopened.close();
+    ts.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_open_fts_repair_waits_for_concurrent_writer()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    ts.db()
+        .insert_nodes(&[sample_node("a1", "process_data")])
+        .await?;
+    ts.db()
+        .execute_write_batch(
+            "clear concurrent FTS corruption fixture",
+            "DELETE FROM nodes_fts_data WHERE id > 10;",
+        )
+        .await?;
+    let writer = ts.db().memory_writer().await?;
+
+    let repair_project_root = project_root.clone();
+    let mut repair = tokio::spawn(async move {
+        TraceDecay::open_with_options(&repair_project_root, open_options).await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut repair)
+            .await
+            .is_err(),
+        "FTS repair must wait for the canonical writer lane"
+    );
+
+    drop(writer);
+    let reopened = tokio::time::timeout(Duration::from_secs(5), repair).await???;
+    assert!(reopened.db().quick_check_report().await?.is_none());
+    let results = reopened.db().search_nodes("process_data", 10).await?;
+    assert_eq!(results[0].node.id, "a1");
+
+    reopened.close();
+    ts.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_never_repairs_or_replaces_whole_database_corruption()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.db()
+        .insert_nodes(&[sample_node("whole-db", "whole_db_probe")])
+        .await?;
+
+    let mut rows = ts
+        .db()
+        .conn()
+        .query(
+            "SELECT block FROM nodes_fts_data WHERE id > 10 ORDER BY id DESC LIMIT 1",
+            (),
+        )
+        .await?;
+    let segment = rows
+        .next()
+        .await?
+        .expect("FTS segment row")
+        .get::<Vec<u8>>(0)?;
+    drop(rows);
+    let mut rows = ts
+        .db()
+        .conn()
+        .query(
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'edges'",
+            (),
+        )
+        .await?;
+    let root_page = rows.next().await?.expect("edges root page").get::<i64>(0)? as u64;
+    drop(rows);
+    let mut rows = ts.db().conn().query("PRAGMA page_size", ()).await?;
+    let page_size = rows.next().await?.expect("page size").get::<i64>(0)? as u64;
+    drop(rows);
+    ts.checkpoint().await?;
+    ts.close();
+
+    let mut bytes = std::fs::read(&layout.graph_db_path)?;
+    let fts_offset = bytes
+        .windows(segment.len())
+        .position(|candidate| candidate == segment)
+        .expect("FTS segment must be present in the checkpointed database");
+    bytes[fts_offset..fts_offset + 8].fill(0xff);
+    bytes[((root_page - 1) * page_size) as usize] = 0xff;
+    std::fs::write(&layout.graph_db_path, &bytes)?;
+    let corrupted = std::fs::read(&layout.graph_db_path)?;
+
+    let result = TraceDecay::open_with_options(&project_root, open_options).await;
+    assert!(
+        result.is_err(),
+        "whole-database corruption must require offline recovery"
+    );
+    assert_eq!(
+        std::fs::read(&layout.graph_db_path)?,
+        corrupted,
+        "ordinary open must not rebuild or replace a whole-database corruption fixture"
+    );
     Ok(())
 }
 

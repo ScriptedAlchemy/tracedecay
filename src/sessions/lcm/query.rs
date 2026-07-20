@@ -37,8 +37,8 @@ use super::{
     LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage, LcmRawMessageOverview,
     LcmRecentSession, LcmReplayMessage, LcmReplaySummaryNode, LcmScope, LcmSessionReplayRequest,
     LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmStorageKind, LcmStoreStatus,
-    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview, compression, dag, gc, maintenance,
-    payload, raw, schema, util,
+    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview, dag, gc, maintenance, payload,
+    raw, schema, util,
 };
 
 const MAX_PAGE_LIMIT: usize = 100;
@@ -620,22 +620,6 @@ async fn count_external_payloads(
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
     util::count_by_provider_session(conn, "lcm_external_payloads", provider, session_id).await
-}
-
-async fn count_lifecycle_states_for_current_session(
-    conn: &Connection,
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<i64, LcmError> {
-    util::fetch_i64(
-        conn,
-        "SELECT COUNT(*)
-             FROM lcm_lifecycle_state
-             WHERE provider = ?1 AND (?2 IS NULL OR current_session_id = ?2)",
-        params![provider, util::opt_text(session_id)],
-        "lifecycle count query returned no rows",
-    )
-    .await
 }
 
 fn scoped_session_filter(scope: LcmScope, session_id: Option<&str>) -> Option<&str> {

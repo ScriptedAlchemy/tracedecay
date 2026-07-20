@@ -46,6 +46,7 @@ mod hook_writes;
 mod ledger;
 mod lifecycle;
 mod protocol;
+mod read_coalescing;
 mod requests;
 mod routing;
 mod session_refresh;
@@ -60,6 +61,7 @@ pub(crate) use lifecycle::VersionCheckState;
 #[cfg(test)]
 use lifecycle::run_startup_session_catch_up;
 pub(crate) use protocol::*;
+use read_coalescing::*;
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use session_retrieval::*;
@@ -102,6 +104,7 @@ pub struct McpServer {
     method_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
+    identical_read_coalescer: IdenticalReadCoalescer,
     diagnostics_cache: crate::diagnostics::DiagnosticsCache,
     diagnostics_lsp: tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
@@ -534,6 +537,7 @@ impl McpServer {
                     Arc::clone(database),
                     root,
                     Arc::clone(&project_session_retrieval_calls),
+                    project_session_refresh_wake.clone(),
                 )
             })
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
@@ -545,6 +549,7 @@ impl McpServer {
                     Arc::clone(database),
                     root,
                     Arc::clone(&user_session_retrieval_calls),
+                    None,
                 )
             })
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
@@ -555,6 +560,7 @@ impl McpServer {
             method_call_counts: std::sync::Mutex::new(HashMap::new()),
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),
             tool_call_counts: std::sync::Mutex::new(HashMap::new()),
+            identical_read_coalescer: IdenticalReadCoalescer::default(),
             diagnostics_cache: crate::diagnostics::DiagnosticsCache::default(),
             diagnostics_lsp: tokio::sync::Mutex::new(diagnostics_lsp),
             file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
@@ -760,6 +766,12 @@ impl McpServer {
             .lock()
             .map(|counts| json!(*counts))
             .unwrap_or(json!({}));
+        let read_coalescing = self.identical_read_coalescer.snapshot();
+        let file_token_entries = self
+            .file_token_map
+            .lock()
+            .map(|tokens| tokens.len())
+            .unwrap_or_default();
         let ratio = |n: u64| {
             if total_requests == 0 {
                 0.0
@@ -777,6 +789,20 @@ impl McpServer {
             "method_call_counts": method_counts,
             "resource_read_counts": resource_counts,
             "tool_call_counts": tool_counts,
+            "identical_read_coalescing": {
+                "leaders": read_coalescing.leaders,
+                "followers": read_coalescing.followers,
+                "active_flights": read_coalescing.active_flights,
+            },
+            "retained_state_proxy": {
+                "file_token_entries": file_token_entries,
+                "database_authorities": {
+                    "accounting": self.global_db.is_some(),
+                    "registry": self.registry_db.is_some(),
+                    "project_sessions": self.session_db.is_some(),
+                    "user_sessions": self.user_session_db.is_some(),
+                },
+            },
             "ratios": {
                 "tool_calls_per_jsonrpc_message": ratio(tool_calls),
                 "errors_per_jsonrpc_message": ratio(errors),

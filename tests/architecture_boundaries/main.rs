@@ -14,6 +14,7 @@
 //! - `dependency_boundaries`: forbidden-path layering guards for
 //!   application/domain/store session code.
 
+mod compile_isolation;
 mod dependency_boundaries;
 mod manifest;
 mod module_scanner;

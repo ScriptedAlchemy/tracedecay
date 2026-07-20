@@ -147,6 +147,34 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         0,
         "cache hits must not re-probe unchanged automation config"
     );
+    const PARALLEL_CLIENT_IDENTITIES: usize = 16;
+    for client_index in 0..PARALLEL_CLIENT_IDENTITIES {
+        let mut client = direct.clone();
+        client.client_instance_id = format!("{client_index:032x}");
+        let shared = engine
+            .project_server(&client)
+            .await
+            .expect("same-worktree client server");
+        assert!(std::sync::Arc::ptr_eq(&direct_server, &shared));
+    }
+    let retained_servers = engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .servers
+        .len();
+    assert_eq!(retained_servers, 1);
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    eprintln!(
+        "same_worktree_live_engine_proxy clients={} open_attempts=1 retained_servers={retained_servers} cache_hits={}",
+        PARALLEL_CLIENT_IDENTITIES, PARALLEL_CLIENT_IDENTITIES
+    );
     drop(cached);
     drop(alias_server);
     drop(direct_server);
@@ -268,6 +296,93 @@ fn store_owner_key_collapses_profile_and_store_aliases() {
     .expect("aliased owner");
 
     assert_eq!(direct, aliased);
+}
+
+#[cfg(unix)]
+#[test]
+fn parallel_client_instances_share_one_engine_but_scope_and_profile_do_not() {
+    const REPRESENTATIVE_CLIENTS: usize = 32;
+
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile = temp.path().join("profile");
+    let other_profile = temp.path().join("other-profile");
+    let store = temp.path().join("store");
+    std::fs::create_dir_all(&project).expect("project dir");
+    std::fs::create_dir_all(&profile).expect("profile dir");
+    std::fs::create_dir_all(&other_profile).expect("other profile dir");
+    std::fs::create_dir_all(&store).expect("store dir");
+
+    let owner = StoreOwnerKey::from_paths(
+        &profile,
+        &profile.join("global.db"),
+        Some("project-id".to_string()),
+        &store,
+        &store.join("graph.db"),
+    )
+    .expect("owner");
+    let shared_key = ProjectServerKey {
+        owner: owner.clone(),
+        scope_prefix: None,
+    };
+    let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
+
+    for client_index in 0..REPRESENTATIVE_CLIENTS {
+        let mut handshake = test_handshake_defaults();
+        handshake.project_path = Some(project.clone());
+        handshake.client_identity = test_client_identity_for(profile.clone());
+        handshake.client_instance_id = format!("{client_index:032x}");
+        let route = ProjectRouteKey::from_handshake(&project, &handshake).expect("route");
+        let (_, inserted) =
+            registry.bind_or_insert_route(route, shared_key.clone(), Arc::new(client_index as u8));
+        assert_eq!(inserted, client_index == 0);
+    }
+
+    assert_eq!(
+        registry.servers.len(),
+        1,
+        "transient client identities must not multiply heavy engines"
+    );
+    eprintln!(
+        "same_worktree_retained_engine_proxy unshared_baseline_servers={} shared_servers={} reduction_percent={:.3}",
+        REPRESENTATIVE_CLIENTS,
+        registry.servers.len(),
+        100.0 * (REPRESENTATIVE_CLIENTS - registry.servers.len()) as f64
+            / REPRESENTATIVE_CLIENTS as f64
+    );
+
+    let scoped_key = ProjectServerKey {
+        owner: owner.clone(),
+        scope_prefix: Some("private".to_string()),
+    };
+    let mut scoped = test_handshake_defaults();
+    scoped.project_path = Some(project.clone());
+    scoped.scope_prefix = Some("private".to_string());
+    scoped.client_identity = test_client_identity_for(profile.clone());
+    let scoped_route = ProjectRouteKey::from_handshake(&project, &scoped).expect("scoped route");
+    let (_, inserted) = registry.bind_or_insert_route(scoped_route, scoped_key, Arc::new(u8::MAX));
+    assert!(inserted, "distinct scope must retain an isolated engine");
+
+    let other_owner = StoreOwnerKey::from_paths(
+        &other_profile,
+        &other_profile.join("global.db"),
+        Some("project-id".to_string()),
+        &store,
+        &store.join("graph.db"),
+    )
+    .expect("other owner");
+    let other_key = ProjectServerKey {
+        owner: other_owner,
+        scope_prefix: None,
+    };
+    let mut other = test_handshake_defaults();
+    other.project_path = Some(project.clone());
+    other.client_identity = test_client_identity_for(other_profile);
+    let other_route = ProjectRouteKey::from_handshake(&project, &other).expect("other route");
+    let (_, inserted) =
+        registry.bind_or_insert_route(other_route, other_key, Arc::new(u8::MAX - 1));
+    assert!(inserted, "distinct profile authority must never share");
+    assert_eq!(registry.servers.len(), 3);
 }
 
 #[cfg(unix)]

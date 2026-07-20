@@ -1,0 +1,39 @@
+{
+  "index_id": "evidence-index-run-search-quality-contract-v1-revision-1",
+  "revision": 1,
+  "authority": "contract_only",
+  "entries": [
+    {
+      "claim_id": "claim-run-search-quality-contract-v1-revision-1-outcome",
+      "claim": "Run run-search-quality-contract-v1 revision 1 ended with terminal outcome blocked.",
+      "fixture_artifacts": [
+        "fixture-manifest-v1.json",
+        "queries-v1.jsonl",
+        "judgments-development-v1.jsonl",
+        "snapshots-v1.jsonl",
+        "temporal-events-v1.jsonl",
+        "context-spans-v1.jsonl",
+        "tasks-v1.jsonl",
+        "authorization-canaries-v1.jsonl",
+        "exact-admission-oracles-v1.jsonl",
+        "contamination-partitions-v1.json",
+        "locked-judgments-v1.json",
+        "run-manifest.json"
+      ],
+      "run_manifest_digest": "sha256:bb0c5281ead36f99e0bf97b8ace70ae1743939639e883c814d57f2963175c749",
+      "aggregate_artifacts": [
+        {
+          "path": "report.json",
+          "byte_len": 1534,
+          "digest": "sha256:150326b7b2f493fdbccdf8a1c9bb21a47cc59a4ae4ab7f73a5a6c15da47189ce"
+        }
+      ],
+      "immutable_result_anchors": [
+        "sha256:150326b7b2f493fdbccdf8a1c9bb21a47cc59a4ae4ab7f73a5a6c15da47189ce",
+        "authorized-store://search-quality/holdout/judgments-v1"
+      ],
+      "acceptance_authority": false
+    }
+  ],
+  "digest": "sha256:4c41b5af9f56e33ae0f30c88e97c98473a746155c99feb51002d3d463db97672"
+}

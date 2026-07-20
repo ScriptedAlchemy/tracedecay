@@ -119,6 +119,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let store_administration = StoreAdministration::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
+    let per_client_admission = DaemonPerClientAdmission::default();
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
     loop {
         let stream = tokio::select! {
@@ -143,6 +144,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         let client_lifecycle = lifecycle.clone();
         let store_administration = store_administration.clone();
         let project_open_gates = Arc::clone(&project_open_gates);
+        let per_client_admission = per_client_admission.clone();
         clients.spawn(async move {
             let _permit = permit;
             Box::pin(serve_windows_broker_client_with_class(
@@ -151,6 +153,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 &client_lifecycle,
                 store_administration,
                 project_open_gates,
+                per_client_admission,
                 admission_class,
                 #[cfg(test)]
                 None,
@@ -428,6 +431,9 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
 #[derive(Clone, Default)]
 struct DaemonEngine {
     lifecycle: DaemonLifecycle,
+    /// Lightweight per-proxy leases keep one reconnecting client from
+    /// consuming every bulk slot while preserving reserved control capacity.
+    per_client_admission: DaemonPerClientAdmission,
     /// One coordinator owns the project-server registry, scheduler registry,
     /// and the writer gate that orders all mutations of either identity map.
     store_administration: StoreAdministration,
@@ -804,18 +810,6 @@ impl CatalogRefreshClientKey {
             client_instance_id: handshake.client_instance_id.clone(),
         }
     }
-}
-
-#[cfg(unix)]
-fn valid_client_instance_id(client_instance_id: &str) -> bool {
-    let bytes = client_instance_id.as_bytes();
-    (bytes.len() == 32
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)))
-        || client_instance_id.strip_prefix("mcp-").is_some_and(|tail| {
-            !tail.is_empty() && tail.len() <= 20 && tail.bytes().all(|byte| byte.is_ascii_digit())
-        })
 }
 
 impl ProjectServerKey {
@@ -1589,9 +1583,8 @@ async fn serve_broker_socket_client(
     let Some(first_request_line) = first_request_line else {
         return Ok(());
     };
-    if admission_class == DaemonClientAdmissionClass::ReservedControl
-        && !is_reserved_control_request(&first_request_line)
-    {
+    let reserved_control_request = is_reserved_control_request(&first_request_line);
+    if admission_class == DaemonClientAdmissionClass::ReservedControl && !reserved_control_request {
         drop(setup_activity);
         reject_reserved_bulk_request(
             &mut transport,
@@ -1601,6 +1594,21 @@ async fn serve_broker_socket_client(
         .await?;
         return Ok(());
     }
+    let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
+        match engine
+            .per_client_admission
+            .try_admit_request(&handshake, &first_request_line)
+        {
+            Ok(permit) => Some(permit),
+            Err(response) => {
+                drop(setup_activity);
+                reject_admitted_request(&mut transport, &first_request_line, response).await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
     if let Some(request) = doctor_runtime_request(&first_request_line) {
         drop(setup_activity);
         write_doctor_runtime_response(&mut transport, &handshake, request).await?;
@@ -1714,6 +1722,7 @@ async fn serve_windows_broker_client(
         lifecycle,
         store_administration,
         project_open_gates,
+        DaemonPerClientAdmission::default(),
         DaemonClientAdmissionClass::General,
         #[cfg(test)]
         project_open_attempts,
@@ -1728,6 +1737,7 @@ async fn serve_windows_broker_client_with_class(
     lifecycle: &DaemonLifecycle,
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    per_client_admission: DaemonPerClientAdmission,
     admission_class: DaemonClientAdmissionClass,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
@@ -1754,9 +1764,8 @@ async fn serve_windows_broker_client_with_class(
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
-    if admission_class == DaemonClientAdmissionClass::ReservedControl
-        && !is_reserved_control_request(&first_request_line)
-    {
+    let reserved_control_request = is_reserved_control_request(&first_request_line);
+    if admission_class == DaemonClientAdmissionClass::ReservedControl && !reserved_control_request {
         drop(setup_activity);
         reject_reserved_bulk_request(
             &mut transport,
@@ -1766,6 +1775,18 @@ async fn serve_windows_broker_client_with_class(
         .await?;
         return Ok(());
     }
+    let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
+        match per_client_admission.try_admit_request(&handshake, &first_request_line) {
+            Ok(permit) => Some(permit),
+            Err(response) => {
+                drop(setup_activity);
+                reject_admitted_request(&mut transport, &first_request_line, response).await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
     if let Some(request) = doctor_runtime_request(&first_request_line) {
         drop(setup_activity);
         write_doctor_runtime_response(&mut transport, &handshake, request).await?;

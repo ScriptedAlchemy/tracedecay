@@ -27,3 +27,6 @@ pub use self::ports::{
     ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
 };
 pub use self::unavailable::{CapabilityReportedLane, UnavailableLaneReportV1};
+
+#[cfg(test)]
+mod tests;

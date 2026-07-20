@@ -1,13 +1,95 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 
 use super::MAX_PENDING_REFRESH_REQUESTS;
 use crate::store::SessionRefreshRecoveryV1;
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionTemporalRefreshRetryClass {
+    Storage,
+    Projector,
+    Deadline,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionTemporalRefreshUnavailableReason {
+    Missing,
+    Recovering,
+    Stopped,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionTemporalRefreshBlocker {
+    WorkerMissing,
+    WorkerPanicked,
+    WorkerStopped,
+    Storage,
+    Projector,
+    Deadline,
+}
+
+impl From<SessionTemporalRefreshRetryClass> for SessionTemporalRefreshBlocker {
+    fn from(value: SessionTemporalRefreshRetryClass) -> Self {
+        match value {
+            SessionTemporalRefreshRetryClass::Storage => Self::Storage,
+            SessionTemporalRefreshRetryClass::Projector => Self::Projector,
+            SessionTemporalRefreshRetryClass::Deadline => Self::Deadline,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SessionTemporalRefreshWorkerStatus {
+    pub(crate) last_progress_at_unix_micros: Option<i64>,
+    pub(crate) backlog: usize,
+    pub(crate) blocker: Option<SessionTemporalRefreshBlocker>,
+    pub(crate) retry_class: Option<SessionTemporalRefreshRetryClass>,
+    pub(crate) unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
+}
+
+impl SessionTemporalRefreshWorkerStatus {
+    fn missing() -> Self {
+        Self {
+            last_progress_at_unix_micros: None,
+            backlog: 0,
+            blocker: Some(SessionTemporalRefreshBlocker::WorkerMissing),
+            retry_class: None,
+            unavailable_reason: Some(SessionTemporalRefreshUnavailableReason::Missing),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_available(self) -> bool {
+        self.unavailable_reason.is_none()
+    }
+}
+
+struct SessionTemporalRefreshWorkerTelemetry {
+    last_progress_at_unix_micros: Option<i64>,
+    queued_backlog: usize,
+    durable_backlog: usize,
+    blocker: Option<SessionTemporalRefreshBlocker>,
+    retry_class: Option<SessionTemporalRefreshRetryClass>,
+    unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
+}
+
+impl Default for SessionTemporalRefreshWorkerTelemetry {
+    fn default() -> Self {
+        Self {
+            last_progress_at_unix_micros: None,
+            queued_backlog: 0,
+            durable_backlog: 0,
+            blocker: Some(SessionTemporalRefreshBlocker::WorkerStopped),
+            retry_class: None,
+            unavailable_reason: Some(SessionTemporalRefreshUnavailableReason::Stopped),
+        }
+    }
+}
+
 pub(super) struct SessionTemporalRefreshWakeState {
     pub(super) dirty: AtomicBool,
     pub(super) requests: std::sync::Mutex<VecDeque<SessionRefreshBeginOrJoinRequestV1>>,
@@ -19,6 +101,25 @@ pub(super) struct SessionTemporalRefreshWakeState {
     pub(super) idle: tokio::sync::Notify,
     pub(super) cancelled: AtomicBool,
     pub(super) cancellation: tokio::sync::Notify,
+    telemetry: std::sync::Mutex<SessionTemporalRefreshWorkerTelemetry>,
+}
+
+impl Default for SessionTemporalRefreshWakeState {
+    fn default() -> Self {
+        Self {
+            dirty: AtomicBool::new(false),
+            requests: std::sync::Mutex::new(VecDeque::new()),
+            terminal_attempts: std::sync::Mutex::new(HashSet::new()),
+            recovery_cycle_pending: std::sync::Mutex::new(VecDeque::new()),
+            busy: AtomicBool::new(false),
+            pass_count: std::sync::atomic::AtomicUsize::new(0),
+            wake: tokio::sync::Notify::new(),
+            idle: tokio::sync::Notify::new(),
+            cancelled: AtomicBool::new(false),
+            cancellation: tokio::sync::Notify::new(),
+            telemetry: std::sync::Mutex::new(SessionTemporalRefreshWorkerTelemetry::default()),
+        }
+    }
 }
 
 impl SessionTemporalRefreshWakeState {
@@ -39,7 +140,11 @@ impl SessionTemporalRefreshWakeState {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let count = limit.min(requests.len());
-        requests.drain(..count).collect()
+        let drained = requests.drain(..count).collect();
+        let remaining = requests.len();
+        drop(requests);
+        self.observe_queued_backlog(remaining);
+        drained
     }
 
     pub(super) fn requeue_request(&self, request: SessionRefreshBeginOrJoinRequestV1) {
@@ -53,6 +158,9 @@ impl SessionTemporalRefreshWakeState {
         {
             requests.push_front(request);
         }
+        let backlog = requests.len();
+        drop(requests);
+        self.observe_queued_backlog(backlog);
     }
 
     pub(super) fn transfer_requests_to(&self, target: &Self) {
@@ -66,6 +174,7 @@ impl SessionTemporalRefreshWakeState {
         for request in requests {
             target.requeue_request(request);
         }
+        self.observe_queued_backlog(0);
         if self.take_dirty() || target.has_requests() {
             target.wake();
         }
@@ -98,12 +207,93 @@ impl SessionTemporalRefreshWakeState {
         self.wake.notify_one();
     }
 
+    pub(super) fn mark_running(&self) {
+        let mut telemetry = self
+            .telemetry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        telemetry.blocker = None;
+        telemetry.retry_class = None;
+        telemetry.unavailable_reason = None;
+    }
+
+    pub(super) fn mark_recovering(
+        &self,
+        blocker: SessionTemporalRefreshBlocker,
+        retry_class: SessionTemporalRefreshRetryClass,
+    ) {
+        let mut telemetry = self
+            .telemetry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        telemetry.blocker = Some(blocker);
+        telemetry.retry_class = Some(retry_class);
+        telemetry.unavailable_reason = Some(SessionTemporalRefreshUnavailableReason::Recovering);
+    }
+
+    pub(super) fn mark_stopped(&self) {
+        let mut telemetry = self
+            .telemetry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        telemetry.blocker = Some(SessionTemporalRefreshBlocker::WorkerStopped);
+        telemetry.retry_class = None;
+        telemetry.unavailable_reason = Some(SessionTemporalRefreshUnavailableReason::Stopped);
+    }
+
+    pub(super) fn observe_durable_backlog(&self, backlog: usize) {
+        self.telemetry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .durable_backlog = backlog;
+    }
+
+    pub(super) fn record_pass(&self, durable_backlog: usize, made_progress: bool) {
+        let mut telemetry = self
+            .telemetry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        telemetry.durable_backlog = durable_backlog;
+        if made_progress {
+            let micros = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros()
+                .min(i64::MAX as u128) as i64;
+            telemetry.last_progress_at_unix_micros = Some(micros);
+        }
+    }
+
+    fn observe_queued_backlog(&self, backlog: usize) {
+        self.telemetry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .queued_backlog = backlog;
+    }
+
+    fn status(&self) -> SessionTemporalRefreshWorkerStatus {
+        let telemetry = self
+            .telemetry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        SessionTemporalRefreshWorkerStatus {
+            last_progress_at_unix_micros: telemetry.last_progress_at_unix_micros,
+            backlog: telemetry
+                .queued_backlog
+                .saturating_add(telemetry.durable_backlog),
+            blocker: telemetry.blocker,
+            retry_class: telemetry.retry_class,
+            unavailable_reason: telemetry.unavailable_reason,
+        }
+    }
+
     pub(super) fn cancel(&self) {
         let _requests = self
             .requests
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if !self.cancelled.swap(true, Ordering::AcqRel) {
+            self.mark_stopped();
             self.cancellation.notify_waiters();
             self.wake.notify_waiters();
         }
@@ -246,6 +436,14 @@ pub(crate) enum SessionTemporalRefreshWakeDisposition {
 }
 
 impl SessionTemporalRefreshWake {
+    pub(crate) fn unavailable() -> Self {
+        Self {
+            route: Arc::new(SessionTemporalRefreshWakeRoute {
+                target: std::sync::RwLock::new(std::sync::Weak::new()),
+            }),
+        }
+    }
+
     pub(super) fn target(&self) -> Option<Arc<SessionTemporalRefreshWakeState>> {
         self.route
             .target
@@ -273,6 +471,13 @@ impl SessionTemporalRefreshWake {
         }
     }
 
+    pub(crate) fn status(&self) -> SessionTemporalRefreshWorkerStatus {
+        self.target()
+            .map_or_else(SessionTemporalRefreshWorkerStatus::missing, |state| {
+                state.status()
+            })
+    }
+
     #[allow(dead_code)] // Slice 3 maps admitted source frontiers into begin requests.
     pub(crate) fn request(
         &self,
@@ -281,12 +486,12 @@ impl SessionTemporalRefreshWake {
         let Some(state) = self.target() else {
             return SessionTemporalRefreshWakeDisposition::Saturated;
         };
-        let disposition = {
+        let (disposition, backlog) = {
             let mut requests = state
                 .requests
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if state.cancelled.load(Ordering::Acquire) {
+            let disposition = if state.cancelled.load(Ordering::Acquire) {
                 SessionTemporalRefreshWakeDisposition::Saturated
             } else if requests
                 .iter()
@@ -298,9 +503,11 @@ impl SessionTemporalRefreshWake {
             } else {
                 requests.push_back(request);
                 SessionTemporalRefreshWakeDisposition::Enqueued
-            }
+            };
+            (disposition, requests.len())
         };
         if disposition != SessionTemporalRefreshWakeDisposition::Saturated {
+            state.observe_queued_backlog(backlog);
             state.wake();
         }
         disposition

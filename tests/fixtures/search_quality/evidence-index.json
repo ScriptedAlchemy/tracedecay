@@ -1,0 +1,47 @@
+{
+  "authority": "contract_only",
+  "digest": "sha256:f3c3a65ff086b0cafc9ef6cc1e2e24aa71c6654abf1fe566a2ac4f5d68bb6252",
+  "entries": [
+    {
+      "acceptance_authority": false,
+      "aggregate_artifacts": [],
+      "claim": "The sanitized corpus bytes and Plan 15 metadata are pinned to repository checkpoint eda50f53000ab4f96ef30e1f3a46b748b3fea6e0 and validate without executing retrieval.",
+      "claim_id": "claim-real-checkpoint-corpus-integrity",
+      "fixture_artifacts": [
+        "fixture-manifest-v1.json",
+        "queries-v1.jsonl",
+        "snapshots-v1.jsonl",
+        "temporal-events-v1.jsonl",
+        "context-spans-v1.jsonl",
+        "tasks-v1.jsonl",
+        "authorization-canaries-v1.jsonl",
+        "exact-admission-oracles-v1.jsonl",
+        "contamination-partitions-v1.json",
+        "judgments-development-v1.jsonl"
+      ],
+      "immutable_result_anchors": [
+        "git:eda50f53000ab4f96ef30e1f3a46b748b3fea6e0",
+        "git-tree:a29158914bc8b87b7f06fe5cf922d8186514c727"
+      ],
+      "run_manifest_digest": "sha256:bb0c5281ead36f99e0bf97b8ace70ae1743939639e883c814d57f2963175c749"
+    },
+    {
+      "acceptance_authority": false,
+      "aggregate_artifacts": [],
+      "claim": "Only an opaque authorized-store locator and seal metadata are checked in; no holdout labels, revealed outcomes, or promotion evidence are present.",
+      "claim_id": "claim-sealed-holdout-nondisclosure",
+      "fixture_artifacts": [
+        "fixture-manifest-v1.json",
+        "locked-judgments-v1.json",
+        "run-contract-v1.json"
+      ],
+      "immutable_result_anchors": [
+        "authorized-store://search-quality/holdout/judgments-v1",
+        "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de"
+      ],
+      "run_manifest_digest": "sha256:bb0c5281ead36f99e0bf97b8ace70ae1743939639e883c814d57f2963175c749"
+    }
+  ],
+  "index_id": "evidence-index-search-quality-contract-v1",
+  "revision": 1
+}

@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
+use tracedecay::types::{Edge, EdgeKind, Node, NodeKind, Visibility};
 
 // 1. tracedecay_search
 // ---------------------------------------------------------------------------
@@ -891,6 +892,143 @@ async fn test_affected() {
         "should have affected_tests key"
     );
     assert!(text.contains("count"), "should have count key");
+}
+
+fn affected_fixture_node(id: &str, name: &str, file_path: &str) -> Node {
+    Node {
+        id: id.to_string(),
+        kind: NodeKind::Function,
+        name: name.to_string(),
+        qualified_name: format!("fixture::{name}"),
+        file_path: file_path.to_string(),
+        start_line: 1,
+        attrs_start_line: 1,
+        end_line: 5,
+        start_column: 0,
+        end_column: 1,
+        signature: Some(format!("fn {name}()")),
+        docstring: None,
+        visibility: Visibility::Pub,
+        is_async: false,
+        branches: 0,
+        loops: 0,
+        returns: 0,
+        max_nesting: 0,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        updated_at: 1,
+        parent_id: None,
+    }
+}
+
+#[tokio::test]
+async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over_mcp() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let nodes = [
+        affected_fixture_node("daemon", "daemon", "src/daemon.rs"),
+        affected_fixture_node("mcp", "mcp_server", "src/mcp/server.rs"),
+        affected_fixture_node("serve", "serve", "src/serve.rs"),
+        affected_fixture_node(
+            "direct-test",
+            "daemon_direct",
+            "tests/daemon_direct_test.rs",
+        ),
+        affected_fixture_node("near-test", "mcp_near", "tests/mcp_near_test.rs"),
+        affected_fixture_node(
+            "transitive-test",
+            "serve_transitive",
+            "tests/serve_transitive_test.rs",
+        ),
+        affected_fixture_node("unrelated-test", "unrelated", "tests/unrelated_test.rs"),
+    ];
+    cg.db().insert_nodes(&nodes).await.unwrap();
+    cg.db()
+        .insert_edges(&[
+            Edge {
+                source: "direct-test".to_string(),
+                target: "daemon".to_string(),
+                kind: EdgeKind::Calls,
+                line: Some(1),
+            },
+            Edge {
+                source: "mcp".to_string(),
+                target: "daemon".to_string(),
+                kind: EdgeKind::Uses,
+                line: Some(1),
+            },
+            Edge {
+                source: "near-test".to_string(),
+                target: "mcp".to_string(),
+                kind: EdgeKind::Calls,
+                line: Some(1),
+            },
+            Edge {
+                source: "serve".to_string(),
+                target: "mcp".to_string(),
+                kind: EdgeKind::Uses,
+                line: Some(1),
+            },
+            Edge {
+                source: "transitive-test".to_string(),
+                target: "serve".to_string(),
+                kind: EdgeKind::Calls,
+                line: Some(1),
+            },
+        ])
+        .await
+        .unwrap();
+
+    let server = real_mcp_server(cg).await;
+    let result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_affected",
+        json!({"files": ["src/daemon.rs"], "depth": 5}),
+    )
+    .await;
+    let payload: Value =
+        serde_json::from_str(extract_real_server_text(&result)).expect("affected JSON payload");
+
+    assert_eq!(
+        payload["affected_tests"],
+        json!([
+            "tests/daemon_direct_test.rs",
+            "tests/mcp_near_test.rs",
+            "tests/serve_transitive_test.rs"
+        ]),
+        "the compatibility list must remain exhaustive and path-sorted"
+    );
+    assert_eq!(
+        payload["ranked_tests"],
+        json!([
+            {
+                "path": "tests/daemon_direct_test.rs",
+                "rank": 1,
+                "distance": 1,
+                "proximity": "direct"
+            },
+            {
+                "path": "tests/mcp_near_test.rs",
+                "rank": 2,
+                "distance": 2,
+                "proximity": "near"
+            },
+            {
+                "path": "tests/serve_transitive_test.rs",
+                "rank": 3,
+                "distance": 3,
+                "proximity": "transitive"
+            }
+        ])
+    );
+    assert_eq!(
+        payload["recommended_tests"],
+        json!(["tests/daemon_direct_test.rs", "tests/mcp_near_test.rs"])
+    );
+    assert_eq!(
+        payload["ranking_metadata"]["strategy"],
+        "dependency_distance_then_path"
+    );
 }
 
 // ---------------------------------------------------------------------------

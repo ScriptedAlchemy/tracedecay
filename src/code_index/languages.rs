@@ -6,8 +6,12 @@
 //! paths are forbidden; descriptors, not extractors, select grammars and
 //! capabilities.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
 use tracedecay_domain::{
+    DomainError, ExpandoBehaviorV1, ExtractorRevision, GrammarRevision, LanguageCapabilitySetV1,
     LanguageDescriptorRevision, LanguageDescriptorV1, LanguageId, LanguageRegistryRevision,
+    canonical_sha256,
 };
 
 /// The versioned language registry contract. Grammar, aliases, extensions,
@@ -31,4 +35,398 @@ pub trait LanguageRegistry {
 
     /// The descriptor revision recorded for one language.
     fn descriptor_revision(&self, language: &LanguageId) -> Option<LanguageDescriptorRevision>;
+}
+
+/// Map a human-readable extractor language name to its canonical language
+/// identity (lowercase, punctuation-free). Shared by the registry and the
+/// extractor adapter so descriptor and parser selection can never disagree
+/// about canonical identity.
+pub(crate) fn canonical_language_id(language_name: &str) -> String {
+    match language_name {
+        "C#" => "csharp".to_owned(),
+        "C++" => "cpp".to_owned(),
+        "F#" => "fsharp".to_owned(),
+        "Objective-C" => "objc".to_owned(),
+        "VB.NET" => "vbnet".to_owned(),
+        "GW-BASIC" => "gwbasic".to_owned(),
+        "MS BASIC 2.0" => "msbasic2".to_owned(),
+        other => other.to_lowercase(),
+    }
+}
+
+/// Languages whose extractors identify stable member spans, enabling
+/// `SymbolMember` child chunks (Plan 25).
+fn has_stable_member_spans(language: &str) -> bool {
+    matches!(
+        language,
+        "rust"
+            | "go"
+            | "java"
+            | "scala"
+            | "typescript"
+            | "python"
+            | "c"
+            | "cpp"
+            | "csharp"
+            | "kotlin"
+            | "swift"
+            | "svelte"
+            | "astro"
+            | "dart"
+            | "php"
+            | "ruby"
+            | "lua"
+            | "zig"
+            | "objc"
+            | "perl"
+            | "haskell"
+            | "ocaml"
+            | "clojure"
+            | "erlang"
+            | "elixir"
+            | "fsharp"
+            | "julia"
+            | "r"
+            | "pascal"
+            | "vbnet"
+    )
+}
+
+/// Root markers used by analyzer routing and host LSP projection.
+fn root_markers(language: &str) -> Vec<String> {
+    let markers: &[&str] = match language {
+        "rust" => &["Cargo.toml"],
+        "go" => &["go.mod"],
+        "java" => &["pom.xml", "build.gradle"],
+        "scala" => &["build.sbt"],
+        "kotlin" => &["build.gradle.kts", "settings.gradle.kts"],
+        "typescript" => &["package.json", "tsconfig.json"],
+        "python" => &["pyproject.toml", "setup.py"],
+        "c" => &["Makefile"],
+        "cpp" => &["CMakeLists.txt"],
+        "php" => &["composer.json"],
+        "ruby" => &["Gemfile"],
+        "dart" => &["pubspec.yaml"],
+        "elixir" => &["mix.exs"],
+        "erlang" => &["rebar.config"],
+        "haskell" => &["stack.yaml", "cabal.project"],
+        "ocaml" => &["dune-project"],
+        "clojure" => &["deps.edn", "project.clj"],
+        "julia" => &["Project.toml"],
+        "nix" => &["flake.nix"],
+        "zig" => &["build.zig"],
+        "swift" => &["Package.swift"],
+        "perl" => &["Makefile.PL", "cpanfile"],
+        "r" => &["DESCRIPTION"],
+        _ => &[],
+    };
+    let mut markers: Vec<String> = markers.iter().map(|marker| (*marker).to_owned()).collect();
+    markers.sort();
+    markers.dedup();
+    markers
+}
+
+/// Additional host language identifiers beyond the lowercase extractor name
+/// and the canonical identity.
+fn extra_aliases(language: &str) -> Vec<&'static str> {
+    match language {
+        "csharp" => vec!["c#"],
+        "cpp" => vec!["c++"],
+        "fsharp" => vec!["f#"],
+        "objc" => vec!["objective-c"],
+        "typescript" => vec!["javascript"],
+        "vbnet" => vec!["vb.net"],
+        "gwbasic" => vec!["gw-basic"],
+        _ => vec![],
+    }
+}
+
+/// The static language registry: one versioned `LanguageDescriptorV1` per
+/// language whose extractor is compiled into this build. Descriptor language
+/// facts are owned here; parser acquisition stays in
+/// `crate::extraction::LanguageRegistry`, which this registry enumerates so
+/// the descriptor set always covers exactly the compiled extractor set.
+pub struct StaticLanguageRegistry {
+    revision: LanguageRegistryRevision,
+    /// Descriptors in canonical language-identity order.
+    descriptors: Vec<LanguageDescriptorV1>,
+    by_language: HashMap<String, usize>,
+    by_extension: HashMap<String, usize>,
+    by_alias: HashMap<String, usize>,
+}
+
+impl StaticLanguageRegistry {
+    /// Build the registry from the compiled-in extraction registry. Every
+    /// extension the extraction registry dispatches on is attributed to the
+    /// extractor that would actually parse it, so descriptor extension
+    /// admission and parser selection share one dispatch order.
+    pub fn new() -> Self {
+        Self::from_extraction_registry(&crate::extraction::LanguageRegistry::new())
+    }
+
+    /// Build the registry from an existing extraction registry.
+    pub fn from_extraction_registry(extractors: &crate::extraction::LanguageRegistry) -> Self {
+        // Group each dispatched extension by the extractor that claims it,
+        // keyed by canonical language identity for deterministic ordering.
+        let mut by_language: BTreeMap<String, (String, BTreeSet<String>)> = BTreeMap::new();
+        for extension in extractors.supported_extensions() {
+            let probe = format!("probe.{extension}");
+            let extractor = extractors
+                .extractor_for_file(&probe)
+                .expect("every supported extension resolves to an extractor");
+            let language = canonical_language_id(extractor.language_name());
+            let entry = by_language
+                .entry(language)
+                .or_insert_with(|| (extractor.language_name().to_owned(), BTreeSet::new()));
+            entry.1.insert(extension.to_lowercase());
+        }
+
+        let mut descriptors = Vec::with_capacity(by_language.len());
+        for (language, (language_name, extensions)) in by_language {
+            let mut aliases: BTreeSet<String> = BTreeSet::new();
+            aliases.insert(language_name.to_lowercase());
+            aliases.insert(language.clone());
+            for alias in extra_aliases(&language) {
+                aliases.insert(alias.to_owned());
+            }
+            let descriptor = LanguageDescriptorV1 {
+                language: LanguageId::new(language.clone())
+                    .expect("canonical language identity is valid"),
+                descriptor_revision: LanguageDescriptorRevision::new(format!(
+                    "descriptor.{language}.v1"
+                ))
+                .expect("descriptor revision is canonical"),
+                grammar_revision: GrammarRevision::new(format!(
+                    "grammar.tree-sitter.{language}.v1"
+                ))
+                .expect("grammar revision is canonical"),
+                extractor_revision: ExtractorRevision::new(format!("extractor.{language}.v1"))
+                    .expect("extractor revision is canonical"),
+                aliases: aliases.into_iter().collect(),
+                extensions: extensions.into_iter().collect(),
+                root_markers: root_markers(&language),
+                expando: ExpandoBehaviorV1::MarkGenerated,
+                stable_member_spans: has_stable_member_spans(&language),
+                capabilities: LanguageCapabilitySetV1 {
+                    extraction: true,
+                    structural_search: true,
+                    outline: true,
+                    rewrite: true,
+                    analyzer_routing: false,
+                    lsp_projection: false,
+                },
+            };
+            descriptor
+                .validate()
+                .expect("static language descriptors are canonical");
+            descriptors.push(descriptor);
+        }
+        Self::from_descriptors(descriptors)
+    }
+
+    /// Build a registry from explicit descriptors (test seams and pinned
+    /// custom registries). Descriptors are sorted into canonical
+    /// language-identity order and deduplicated by language identity.
+    pub fn from_descriptors(mut descriptors: Vec<LanguageDescriptorV1>) -> Self {
+        descriptors.sort_by(|left, right| {
+            left.language.as_str().cmp(right.language.as_str()).then(
+                left.descriptor_revision
+                    .as_str()
+                    .cmp(right.descriptor_revision.as_str()),
+            )
+        });
+        descriptors.dedup_by(|left, right| left.language == right.language);
+
+        let mut by_language = HashMap::new();
+        let mut by_extension = HashMap::new();
+        let mut by_alias = HashMap::new();
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            by_language.insert(descriptor.language.as_str().to_owned(), index);
+            for extension in &descriptor.extensions {
+                by_extension.entry(extension.clone()).or_insert(index);
+            }
+            for alias in &descriptor.aliases {
+                by_alias.entry(alias.clone()).or_insert(index);
+            }
+        }
+
+        let digest = canonical_sha256(&("tracedecay.language-registry.v1", &descriptors))
+            .expect("language registry revision payload serializes canonically");
+        let short: String = digest
+            .as_str()
+            .trim_start_matches("sha256:")
+            .chars()
+            .take(16)
+            .collect();
+        let revision = LanguageRegistryRevision::new(format!("registry.v1.{short}"))
+            .expect("registry revision is canonical");
+
+        Self {
+            revision,
+            descriptors,
+            by_language,
+            by_extension,
+            by_alias,
+        }
+    }
+}
+
+impl Default for StaticLanguageRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LanguageRegistry for StaticLanguageRegistry {
+    fn registry_revision(&self) -> LanguageRegistryRevision {
+        self.revision.clone()
+    }
+
+    fn descriptor(&self, language: &LanguageId) -> Option<&LanguageDescriptorV1> {
+        self.by_language
+            .get(language.as_str())
+            .map(|index| &self.descriptors[*index])
+    }
+
+    fn descriptor_for_extension(&self, extension: &str) -> Option<&LanguageDescriptorV1> {
+        self.by_extension
+            .get(extension)
+            .map(|index| &self.descriptors[*index])
+    }
+
+    fn descriptor_for_alias(&self, alias: &str) -> Option<&LanguageDescriptorV1> {
+        self.by_alias
+            .get(alias)
+            .or_else(|| self.by_alias.get(&alias.to_lowercase()))
+            .map(|index| &self.descriptors[*index])
+    }
+
+    fn descriptors(&self) -> Vec<&LanguageDescriptorV1> {
+        self.descriptors.iter().collect()
+    }
+
+    fn descriptor_revision(&self, language: &LanguageId) -> Option<LanguageDescriptorRevision> {
+        self.descriptor(language)
+            .map(|descriptor| descriptor.descriptor_revision.clone())
+    }
+}
+
+/// Validate a full descriptor set, surfacing the first domain error.
+#[allow(dead_code)]
+pub(crate) fn validate_descriptors(
+    descriptors: &[LanguageDescriptorV1],
+) -> Result<(), DomainError> {
+    for descriptor in descriptors {
+        descriptor.validate()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn language(value: &str) -> LanguageId {
+        LanguageId::new(value).expect("valid language id")
+    }
+
+    #[test]
+    fn registry_covers_every_compiled_extractor_extension() {
+        let extractors = crate::extraction::LanguageRegistry::new();
+        let registry = StaticLanguageRegistry::from_extraction_registry(&extractors);
+        assert!(!registry.descriptors().is_empty());
+        for extension in extractors.supported_extensions() {
+            let descriptor = registry
+                .descriptor_for_extension(&extension.to_lowercase())
+                .unwrap_or_else(|| panic!("descriptor for extension {extension}"));
+            // The descriptor's language must be the language of the extractor
+            // that would actually parse the file.
+            let probe = format!("probe.{extension}");
+            let extractor = extractors
+                .extractor_for_file(&probe)
+                .expect("extractor resolves");
+            assert_eq!(
+                descriptor.language.as_str(),
+                canonical_language_id(extractor.language_name()),
+                "extension {extension} dispatched to a different language"
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_lookups_are_canonical_and_deterministic() {
+        let registry = StaticLanguageRegistry::new();
+        let again = StaticLanguageRegistry::new();
+        assert_eq!(registry.registry_revision(), again.registry_revision());
+
+        let rust = registry
+            .descriptor(&language("rust"))
+            .expect("rust descriptor");
+        assert_eq!(rust.extensions, vec!["rs".to_owned()]);
+        assert!(rust.stable_member_spans);
+        assert!(rust.capabilities.extraction);
+        assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
+
+        assert_eq!(
+            registry
+                .descriptor_for_extension("rs")
+                .map(|d| d.language.as_str()),
+            Some("rust")
+        );
+        assert_eq!(
+            registry
+                .descriptor_for_alias("rust")
+                .map(|d| d.language.as_str()),
+            Some("rust")
+        );
+        assert_eq!(
+            registry
+                .descriptor_for_alias("javascript")
+                .map(|d| d.language.as_str()),
+            Some("typescript")
+        );
+        assert!(registry.descriptor(&language("cobol-nope")).is_none());
+        assert!(registry.descriptor_for_extension("nope").is_none());
+        assert_eq!(
+            registry.descriptor_revision(&language("rust")),
+            Some(rust.descriptor_revision.clone())
+        );
+
+        // Canonical language-identity order.
+        let ids: Vec<&str> = registry
+            .descriptors()
+            .iter()
+            .map(|d| d.language.as_str())
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted);
+    }
+
+    #[test]
+    fn every_descriptor_passes_domain_validation() {
+        let registry = StaticLanguageRegistry::new();
+        for descriptor in registry.descriptors() {
+            descriptor.validate().expect("descriptor validates");
+            assert!(!descriptor.aliases.is_empty());
+            assert!(!descriptor.extensions.is_empty());
+        }
+    }
+
+    #[test]
+    fn from_descriptors_sorts_and_dedupes() {
+        let rust = StaticLanguageRegistry::new()
+            .descriptor(&language("rust"))
+            .expect("rust")
+            .clone();
+        let mut renamed = rust.clone();
+        renamed.language = language("aaa-test-language");
+        let registry = StaticLanguageRegistry::from_descriptors(vec![rust, renamed]);
+        let ids: Vec<&str> = registry
+            .descriptors()
+            .iter()
+            .map(|d| d.language.as_str())
+            .collect();
+        assert_eq!(ids, vec!["aaa-test-language", "rust"]);
+    }
 }

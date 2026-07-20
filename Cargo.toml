@@ -38,6 +38,7 @@ include = [
     "/tests/fixtures/transcript_golden/cline_like/**",
     "/benchmarks/queries/default.toml",
     "/benchmarks/pr8-temporal/**",
+    "/benchmarks/pr9-code-index/**",
     "/scripts/run-pr8-temporal-benchmark.sh",
     "/plugin/**",
     "/vendor/**",
@@ -209,6 +210,11 @@ name = "session_temporal"
 harness = false
 # The custom benchmark CLI is not a libtest harness and cannot answer the
 # `--list --format terse` probe used by `cargo test` and nextest.
+test = false
+
+[[bench]]
+name = "code_index_chunks"
+harness = false
 test = false
 
 [profile.bench]

@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::automation::backend::{AgentTaskKind, AgentTaskRequest, run_agent_task_with_retry};
+use serde::Serialize;
 use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, TemporalModeV1};
 
 use super::lcm_args::*;
@@ -12,7 +13,8 @@ use super::live_projection::upsert_live_transcript_projection;
 use super::message_search::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, LcmExpandServiceCommand,
     LcmExpandServiceOutcome, SessionRetrievalCommand, SessionRetrievalFilters,
-    SessionRetrievalPageView, SessionRetrievalServiceOutcome, SessionTemporalMetadataView,
+    SessionRetrievalPageView, SessionRetrievalServiceOutcome, SessionRetrievalUnavailable,
+    SessionTemporalMetadataView,
 };
 use super::*;
 use crate::application::session::{
@@ -38,6 +40,21 @@ async fn missing_lcm_read_store(
     }
 }
 
+fn lcm_status_payload<T: Serialize>(
+    provider: &str,
+    session_id: Option<&str>,
+    deep: bool,
+    status: T,
+) -> Value {
+    json!({
+        "status": "ok",
+        "provider": provider,
+        "session_id": session_id,
+        "deep": deep,
+        "lcm": status,
+    })
+}
+
 pub(in super::super) async fn handle_lcm_status(
     context: LcmHandlerContext<'_>,
     args: Value,
@@ -58,13 +75,7 @@ pub(in super::super) async fn handle_lcm_status(
     Ok(tool_json(
         context.project_root,
         &args,
-        &json!({
-            "status": "ok",
-            "provider": provider,
-            "session_id": session_id,
-            "deep": deep,
-            "lcm": status,
-        }),
+        &lcm_status_payload(provider, session_id, deep, status),
     ))
 }
 
@@ -289,6 +300,10 @@ fn lcm_typed_outcome(
     legacy_key: &str,
     outcome: SessionRetrievalServiceOutcome,
 ) -> ToolResult {
+    let unavailable = match &outcome {
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => Some(*unavailable),
+        _ => None,
+    };
     let (status, code, message) = match outcome {
         SessionRetrievalServiceOutcome::WrongScope => (
             "wrong_scope",
@@ -315,7 +330,7 @@ fn lcm_typed_outcome(
             "lcm_cursor_denied",
             "session retrieval or the authenticated cursor was denied",
         ),
-        SessionRetrievalServiceOutcome::Unavailable => (
+        SessionRetrievalServiceOutcome::Unavailable(_) => (
             "unavailable",
             "lcm_retrieval_service_unavailable",
             "the authorized session retrieval service is unavailable",
@@ -346,6 +361,18 @@ fn lcm_typed_outcome(
         "next_cursor": Value::Null,
         "capped_sessions": {},
     });
+    if let Some(unavailable) = unavailable {
+        payload["error"]["reason"] = json!(unavailable.reason.as_str());
+        payload["error"]["retryable"] = json!(unavailable.reason.is_retryable());
+        if let Some(worker) = unavailable.worker {
+            payload["service_status"] = json!({
+                "last_progress_at_unix_micros": worker.last_progress_at_unix_micros,
+                "backlog": worker.backlog,
+                "blocker": worker.blocker.map(|blocker| blocker.as_str()),
+                "retry_class": worker.retry_class.map(|retry_class| retry_class.as_str()),
+            });
+        }
+    }
     payload[legacy_key] = json!([]);
     tool_json(project_root, args, &payload)
 }
@@ -446,12 +473,16 @@ pub(in super::super) async fn handle_lcm_load_session(
             context.project_root,
             &args,
             "messages",
-            SessionRetrievalServiceOutcome::Unavailable,
+            SessionRetrievalServiceOutcome::Unavailable(
+                SessionRetrievalUnavailable::service_not_configured(),
+            ),
         ));
     }
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
-        None => SessionRetrievalServiceOutcome::Unavailable,
+        None => SessionRetrievalServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::service_not_configured(),
+        ),
     };
     let (page, status, omitted) = match outcome {
         SessionRetrievalServiceOutcome::Complete { page, .. } => (Some(page), "ok", 0),
@@ -607,7 +638,9 @@ pub(in super::super) async fn handle_lcm_grep(
     }
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
-        None => SessionRetrievalServiceOutcome::Unavailable,
+        None => SessionRetrievalServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::service_not_configured(),
+        ),
     };
     let (page, status, omitted) = match outcome {
         SessionRetrievalServiceOutcome::Complete { page, .. } => (page, "ok", 0),
@@ -700,7 +733,9 @@ pub(in super::super) async fn handle_lcm_describe(
                 ))
                 .await
         }
-        None => LcmDescribeServiceOutcome::Unavailable,
+        None => LcmDescribeServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::service_not_configured(),
+        ),
     };
     match outcome {
         LcmDescribeServiceOutcome::Complete {
@@ -738,12 +773,16 @@ fn describe_terminal_outcome(outcome: LcmDescribeServiceOutcome) -> SessionRetri
         LcmDescribeServiceOutcome::Redacted => SessionRetrievalServiceOutcome::Redacted,
         LcmDescribeServiceOutcome::Deleted => SessionRetrievalServiceOutcome::Deleted,
         LcmDescribeServiceOutcome::Denied => SessionRetrievalServiceOutcome::Denied,
-        LcmDescribeServiceOutcome::Unavailable => SessionRetrievalServiceOutcome::Unavailable,
+        LcmDescribeServiceOutcome::Unavailable(unavailable) => {
+            SessionRetrievalServiceOutcome::Unavailable(unavailable)
+        }
         LcmDescribeServiceOutcome::BudgetExhausted => {
             SessionRetrievalServiceOutcome::BudgetExhausted
         }
         LcmDescribeServiceOutcome::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
-        LcmDescribeServiceOutcome::Complete { .. } => SessionRetrievalServiceOutcome::Unavailable,
+        LcmDescribeServiceOutcome::Complete { .. } => SessionRetrievalServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::service_not_configured(),
+        ),
     }
 }
 
@@ -754,10 +793,14 @@ fn expand_terminal_outcome(outcome: LcmExpandServiceOutcome) -> SessionRetrieval
         LcmExpandServiceOutcome::Redacted => SessionRetrievalServiceOutcome::Redacted,
         LcmExpandServiceOutcome::Deleted => SessionRetrievalServiceOutcome::Deleted,
         LcmExpandServiceOutcome::Denied => SessionRetrievalServiceOutcome::Denied,
-        LcmExpandServiceOutcome::Unavailable => SessionRetrievalServiceOutcome::Unavailable,
+        LcmExpandServiceOutcome::Unavailable(unavailable) => {
+            SessionRetrievalServiceOutcome::Unavailable(unavailable)
+        }
         LcmExpandServiceOutcome::BudgetExhausted => SessionRetrievalServiceOutcome::BudgetExhausted,
         LcmExpandServiceOutcome::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
-        LcmExpandServiceOutcome::Complete { .. } => SessionRetrievalServiceOutcome::Unavailable,
+        LcmExpandServiceOutcome::Complete { .. } => SessionRetrievalServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::service_not_configured(),
+        ),
     }
 }
 
@@ -814,7 +857,9 @@ pub(in super::super) async fn handle_lcm_expand(
                 ))
                 .await
         }
-        None => LcmExpandServiceOutcome::Unavailable,
+        None => LcmExpandServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::service_not_configured(),
+        ),
     };
     match outcome {
         LcmExpandServiceOutcome::Complete {
@@ -1077,7 +1122,9 @@ pub(in super::super) async fn handle_lcm_expand_query(
                 context.project_root,
                 &args,
                 "context_blocks",
-                SessionRetrievalServiceOutcome::Unavailable,
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::service_not_configured(),
+                ),
             ));
         };
         let mut sources = Vec::new();
@@ -1204,7 +1251,9 @@ pub(in super::super) async fn handle_lcm_expand_query(
             )?;
             service.execute(command).await
         }
-        (Some(_), None) => SessionRetrievalServiceOutcome::Unavailable,
+        (Some(_), None) => SessionRetrievalServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::service_not_configured(),
+        ),
         (None, _) => SessionRetrievalServiceOutcome::CompleteZero {
             temporal: SessionTemporalMetadataView::default(),
             freshness: SessionDataFreshness::Fresh,
@@ -1443,7 +1492,7 @@ mod compatibility_tests {
         LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
         SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
         SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-        SessionTemporalMetadataView, SessionTemporalWatermarksView,
+        SessionRetrievalUnavailable, SessionTemporalMetadataView, SessionTemporalWatermarksView,
     };
     use super::*;
     use crate::application::session::{SessionDataFreshness, SessionRetrievalScope};
@@ -1464,9 +1513,13 @@ mod compatibility_tests {
                 commands: Mutex::new(Vec::new()),
                 outcome,
                 describe_commands: Mutex::new(Vec::new()),
-                describe_outcome: Mutex::new(LcmDescribeServiceOutcome::Unavailable),
+                describe_outcome: Mutex::new(LcmDescribeServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::service_not_configured(),
+                )),
                 expand_commands: Mutex::new(Vec::new()),
-                expand_outcome: Mutex::new(LcmExpandServiceOutcome::Unavailable),
+                expand_outcome: Mutex::new(LcmExpandServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::service_not_configured(),
+                )),
             }
         }
 
@@ -2200,5 +2253,31 @@ mod compatibility_tests {
         let synthesis = response.synthesis_prompt.expect("response needs synthesis");
         assert!(synthesis.user.contains(&response.prompt));
         assert!(!synthesis.user.contains(&prompt));
+    }
+
+    #[test]
+    fn status_envelope_preserves_exact_json_and_markdown_rendering() {
+        let status = json!({
+            "raw_message_count": 12,
+            "payload": {"externalized_count": 2}
+        });
+        let expected = json!({
+            "status": "ok",
+            "provider": "all",
+            "session_id": "session-1",
+            "deep": true,
+            "lcm": status,
+        });
+        let value = lcm_status_payload("all", Some("session-1"), true, status);
+        assert_eq!(value, expected);
+
+        let json_result = tool_json(None, &json!({"format": "json"}), &value);
+        assert_eq!(payload(json_result), expected);
+
+        let markdown_result = tool_json(None, &json!({"format": "markdown"}), &value);
+        let markdown = markdown_result.value["content"][0]["text"]
+            .as_str()
+            .expect("markdown tool result text");
+        assert_eq!(markdown, crate::mcp::tools::render::generic_md(&expected));
     }
 }

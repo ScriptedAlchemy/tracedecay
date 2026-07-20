@@ -1,0 +1,5 @@
+# Sealed holdout labels are never committed (Plan 15 locked-judgments
+# contract): only the seal digest in ../locked-judgments-v1.json is checked
+# in. A locked run proves non-access by verifying that digest over the sealed
+# bytes without parsing them.
+judgments-holdout-v1.jsonl

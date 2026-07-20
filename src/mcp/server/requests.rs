@@ -659,7 +659,16 @@ impl McpServer {
             &mut handler_arguments,
         );
 
-        let dispatch_outcome = Box::pin(handle_tool_call_with_registry_and_implicit_project(
+        let engine_identity = cg.db_path();
+        let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
+            self.identical_read_coalescer.claim(
+                engine_identity.to_string_lossy().as_ref(),
+                tool_name,
+                &handler_arguments,
+                self.scope_prefix(),
+            )
+        });
+        let dispatch = Box::pin(handle_tool_call_with_registry_and_implicit_project(
             &cg,
             tool_name,
             handler_arguments,
@@ -687,8 +696,21 @@ impl McpServer {
                     self.user_session_retrieval_service.as_deref(),
                 ),
             },
-        ))
-        .await;
+        ));
+        let dispatch_outcome = if let Some(read_flight) = read_flight {
+            match read_flight {
+                ReadFlightClaim::Leader(leader) => match dispatch.await {
+                    Ok(result) => Ok((*leader.complete(result)).clone()),
+                    Err(error) => Err(error),
+                },
+                ReadFlightClaim::Follower(follower) => match follower.wait().await {
+                    Some(result) => Ok((*result).clone()),
+                    None => dispatch.await,
+                },
+            }
+        } else {
+            dispatch.await
+        };
         let handler_elapsed_us = handler_start.map(|t| t.elapsed().as_micros() as u64);
         let request_id = id.clone();
         match dispatch_outcome {

@@ -31,9 +31,11 @@ pub(crate) use handlers::{
     SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,
     SessionRefreshServicePort, SessionRetrievalCommand, SessionRetrievalExplanationView,
     SessionRetrievalPageView, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
-    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionTemporalMetadataView,
-    SessionTemporalWatermarksView, handle_projectless_admin_cli, handle_projectless_hook_runtime,
-    replay_projectless_hermes_host_admission, utc_micros_value,
+    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
+    SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
+    SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
+    SessionTemporalMetadataView, SessionTemporalWatermarksView, handle_projectless_admin_cli,
+    handle_projectless_hook_runtime, replay_projectless_hermes_host_admission, utc_micros_value,
 };
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry,
@@ -63,7 +65,7 @@ pub struct ToolDefinition {
 
 /// The result of a tool call, including the JSON response and the file
 /// paths that were touched (used to track saved tokens).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ToolResult {
     /// The JSON-RPC result payload.
     pub value: Value,

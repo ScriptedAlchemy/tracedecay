@@ -12,12 +12,10 @@ use super::projector::{
     SessionTemporalRefreshProjectorError, SessionTemporalRefreshProjectorErrorClass,
     durable_projector_failure_code, zero_refresh_coverage,
 };
-use super::registry::{
-    SessionTemporalRefreshPassReport, SessionTemporalRefreshRetryClass, session_refresh_retry_delay,
-};
+use super::registry::{SessionTemporalRefreshPassReport, session_refresh_retry_delay};
 use super::wake::{
-    PendingBeginRequestGuard, RecoverySelectionGuard, SessionTemporalRefreshWakeState,
-    TerminalAttemptGuard,
+    PendingBeginRequestGuard, RecoverySelectionGuard, SessionTemporalRefreshRetryClass,
+    SessionTemporalRefreshWakeState, TerminalAttemptGuard,
 };
 use crate::global_db::GlobalDb;
 use crate::store::{
@@ -31,11 +29,13 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     policy: SessionTemporalRefreshPolicy,
 ) {
     let mut retry_attempt = 0u32;
+    state.mark_running();
     loop {
         if state.cancelled.load(Ordering::Acquire) {
             return;
         }
         while state.take_dirty() {
+            state.mark_running();
             state.busy.store(true, Ordering::Release);
             state.pass_count.fetch_add(1, Ordering::AcqRel);
             let pass =
@@ -49,8 +49,17 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             if state.cancelled.load(Ordering::Acquire) {
                 return;
             }
+            let made_progress = report.begun > 0
+                || report.projected_batches > 0
+                || report.completed > 0
+                || report.failed > 0
+                || report.cancelled > 0;
+            if let Some(backlog) = report.backlog {
+                state.record_pass(backlog, made_progress);
+            }
             if let Some(class) = report.retry_class {
                 retry_attempt = retry_attempt.saturating_add(1);
+                state.mark_recovering(class.into(), class);
                 state.dirty.store(true, Ordering::Release);
                 tokio::select! {
                     () = state.wait_for_cancellation() => return,
@@ -427,6 +436,7 @@ pub(super) async fn run_session_temporal_refresh_pass(
         }
     };
     recoveries.sort_by_cached_key(recovery_key);
+    state.observe_durable_backlog(recoveries.len());
     let ordered_keys = recoveries.iter().map(recovery_key).collect::<Vec<_>>();
     let current_keys = ordered_keys.iter().cloned().collect::<HashSet<_>>();
     let (selected_keys, recoveries_remaining) = {
@@ -458,6 +468,7 @@ pub(super) async fn run_session_temporal_refresh_pass(
         .into_iter()
         .filter_map(|operation| recoveries_by_key.remove(&operation))
         .collect::<Vec<_>>();
+    let selected_count = selected.len();
     report.saturated |= recoveries_remaining;
     for recovery in selected {
         let operation = recovery_key(&recovery);
@@ -493,5 +504,14 @@ pub(super) async fn run_session_temporal_refresh_pass(
         }
         selection.complete(&operation);
     }
+    let terminal = report
+        .completed
+        .saturating_add(report.failed)
+        .saturating_add(report.cancelled);
+    report.backlog = Some(
+        recoveries_by_key
+            .len()
+            .saturating_add(selected_count.saturating_sub(terminal)),
+    );
     report
 }

@@ -366,12 +366,20 @@ pub(crate) trait SessionRetrievalServicePort: Send + Sync {
         &'a self,
         _command: LcmDescribeServiceCommand,
     ) -> LcmDescribeServiceFuture<'a> {
-        Box::pin(async { LcmDescribeServiceOutcome::Unavailable })
+        Box::pin(async {
+            LcmDescribeServiceOutcome::Unavailable(
+                SessionRetrievalUnavailable::service_not_configured(),
+            )
+        })
     }
 
     #[allow(clippy::elidable_lifetime_names)]
     fn expand_lcm<'a>(&'a self, _command: LcmExpandServiceCommand) -> LcmExpandServiceFuture<'a> {
-        Box::pin(async { LcmExpandServiceOutcome::Unavailable })
+        Box::pin(async {
+            LcmExpandServiceOutcome::Unavailable(
+                SessionRetrievalUnavailable::service_not_configured(),
+            )
+        })
     }
 }
 
@@ -408,6 +416,114 @@ pub(crate) struct SessionTemporalMetadataView {
     pub(crate) authorized_root: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionRetrievalUnavailableReason {
+    ServiceNotConfigured,
+    RefreshWorkerMissing,
+    RefreshWorkerRecovering,
+    RefreshWorkerStopped,
+    UnsupportedQuery,
+    RequestContextInvalid,
+    TemporalStoreUnavailable,
+    HydrationUnavailable,
+}
+
+impl SessionRetrievalUnavailableReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ServiceNotConfigured => "service_not_configured",
+            Self::RefreshWorkerMissing => "refresh_worker_missing",
+            Self::RefreshWorkerRecovering => "refresh_worker_recovering",
+            Self::RefreshWorkerStopped => "refresh_worker_stopped",
+            Self::UnsupportedQuery => "unsupported_query",
+            Self::RequestContextInvalid => "request_context_invalid",
+            Self::TemporalStoreUnavailable => "temporal_store_unavailable",
+            Self::HydrationUnavailable => "hydration_unavailable",
+        }
+    }
+
+    pub(crate) const fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::RefreshWorkerMissing
+                | Self::RefreshWorkerRecovering
+                | Self::RefreshWorkerStopped
+                | Self::TemporalStoreUnavailable
+                | Self::HydrationUnavailable
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionRetrievalWorkerBlocker {
+    WorkerMissing,
+    WorkerPanicked,
+    WorkerStopped,
+    Storage,
+    Projector,
+    Deadline,
+}
+
+impl SessionRetrievalWorkerBlocker {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkerMissing => "worker_missing",
+            Self::WorkerPanicked => "worker_panicked",
+            Self::WorkerStopped => "worker_stopped",
+            Self::Storage => "storage",
+            Self::Projector => "projector",
+            Self::Deadline => "deadline",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionRetrievalWorkerRetryClass {
+    Storage,
+    Projector,
+    Deadline,
+}
+
+impl SessionRetrievalWorkerRetryClass {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Storage => "storage",
+            Self::Projector => "projector",
+            Self::Deadline => "deadline",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SessionRetrievalWorkerStatusView {
+    pub(crate) last_progress_at_unix_micros: Option<i64>,
+    pub(crate) backlog: usize,
+    pub(crate) blocker: Option<SessionRetrievalWorkerBlocker>,
+    pub(crate) retry_class: Option<SessionRetrievalWorkerRetryClass>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SessionRetrievalUnavailable {
+    pub(crate) reason: SessionRetrievalUnavailableReason,
+    pub(crate) worker: Option<SessionRetrievalWorkerStatusView>,
+}
+
+impl SessionRetrievalUnavailable {
+    pub(crate) const fn service_not_configured() -> Self {
+        Self {
+            reason: SessionRetrievalUnavailableReason::ServiceNotConfigured,
+            worker: None,
+        }
+    }
+
+    pub(crate) const fn without_worker(reason: SessionRetrievalUnavailableReason) -> Self {
+        Self {
+            reason,
+            worker: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)] // The injected compatibility boundary preserves every typed terminal state.
 #[allow(clippy::large_enum_variant)]
@@ -424,7 +540,7 @@ pub(crate) enum LcmDescribeServiceOutcome {
     Redacted,
     Deleted,
     Denied,
-    Unavailable,
+    Unavailable(SessionRetrievalUnavailable),
     BudgetExhausted,
     Cancelled,
 }
@@ -444,7 +560,7 @@ pub(crate) enum LcmExpandServiceOutcome {
     Redacted,
     Deleted,
     Denied,
-    Unavailable,
+    Unavailable(SessionRetrievalUnavailable),
     BudgetExhausted,
     Cancelled,
 }
@@ -480,7 +596,7 @@ pub(crate) enum SessionRetrievalServiceOutcome {
     Redacted,
     Deleted,
     Denied,
-    Unavailable,
+    Unavailable(SessionRetrievalUnavailable),
     BudgetExhausted,
     Cancelled,
 }
@@ -640,6 +756,25 @@ fn apply_typed_error(payload: &mut Value, status: &str, code: &str, message: &st
     );
 }
 
+fn apply_unavailable(payload: &mut Value, unavailable: SessionRetrievalUnavailable) {
+    apply_typed_error(
+        payload,
+        "unavailable",
+        "session_retrieval_service_unavailable",
+        "the authorized session retrieval service is unavailable",
+    );
+    payload["error"]["reason"] = json!(unavailable.reason.as_str());
+    payload["error"]["retryable"] = json!(unavailable.reason.is_retryable());
+    if let Some(worker) = unavailable.worker {
+        payload["service_status"] = json!({
+            "last_progress_at_unix_micros": worker.last_progress_at_unix_micros,
+            "backlog": worker.backlog,
+            "blocker": worker.blocker.map(SessionRetrievalWorkerBlocker::as_str),
+            "retry_class": worker.retry_class.map(SessionRetrievalWorkerRetryClass::as_str),
+        });
+    }
+}
+
 fn render_service_outcome(
     request: &MessageSearchRequest<'_>,
     outcome: SessionRetrievalServiceOutcome,
@@ -708,12 +843,9 @@ fn render_service_outcome(
             "session_retrieval_denied",
             "session retrieval was denied",
         ),
-        SessionRetrievalServiceOutcome::Unavailable => apply_typed_error(
-            &mut payload,
-            "unavailable",
-            "session_retrieval_service_unavailable",
-            "the authorized session retrieval service is unavailable",
-        ),
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+            apply_unavailable(&mut payload, unavailable);
+        }
         SessionRetrievalServiceOutcome::BudgetExhausted => apply_typed_error(
             &mut payload,
             "budget_exhausted",
@@ -874,6 +1006,22 @@ fn render_temporal_message_search_md(payload: &Value) -> String {
                 .as_str()
                 .unwrap_or("session retrieval failed"),
         );
+        if let Some(reason) = error.get("reason").and_then(Value::as_str) {
+            let _ = writeln!(markdown, "- Unavailable reason: `{reason}`");
+        }
+    }
+    if let Some(status) = payload.get("service_status") {
+        let last_progress = status
+            .get("last_progress_at_unix_micros")
+            .and_then(Value::as_i64)
+            .map_or_else(|| "none".to_string(), |value| value.to_string());
+        let _ = writeln!(
+            markdown,
+            "- Refresh worker: last progress {last_progress}, backlog {}, blocker `{}`, retry class `{}`",
+            status["backlog"].as_u64().unwrap_or_default(),
+            status["blocker"].as_str().unwrap_or("none"),
+            status["retry_class"].as_str().unwrap_or("none"),
+        );
     }
     markdown
 }
@@ -912,7 +1060,9 @@ pub(crate) async fn handle_message_search_with_service(
     let command = retrieval_command(&request, store_scope, project_selector)?;
     let outcome = match service {
         Some(service) => service.execute(command).await,
-        None => SessionRetrievalServiceOutcome::Unavailable,
+        None => SessionRetrievalServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::service_not_configured(),
+        ),
     };
     let mut payload = render_service_outcome(&request, outcome);
     payload["store_scope"] = json!(store_scope.as_str());
@@ -938,8 +1088,11 @@ mod cutover_tests {
     use super::{
         SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
         SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-        SessionRetrievalStoreScope, SessionTemporalMetadataView, SessionTemporalWatermarksView,
-        handle_message_search_with_service,
+        SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
+        SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
+        SessionRetrievalWorkerStatusView, SessionTemporalMetadataView,
+        SessionTemporalWatermarksView, handle_message_search_with_service,
+        render_temporal_message_search_md,
     };
     use crate::application::session::{
         SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope,
@@ -1517,7 +1670,9 @@ mod cutover_tests {
                 "session_retrieval_denied",
             ),
             (
-                SessionRetrievalServiceOutcome::Unavailable,
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::service_not_configured(),
+                ),
                 "unavailable",
                 "session_retrieval_service_unavailable",
             ),
@@ -1547,5 +1702,45 @@ mod cutover_tests {
             assert_eq!(payload["outcome"], status);
             assert_eq!(payload["error"]["code"], code);
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_outcome_exposes_typed_worker_status() {
+        let service = RecordingService::with_outcome(SessionRetrievalServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable {
+                reason: SessionRetrievalUnavailableReason::RefreshWorkerRecovering,
+                worker: Some(SessionRetrievalWorkerStatusView {
+                    last_progress_at_unix_micros: Some(42),
+                    backlog: 7,
+                    blocker: Some(SessionRetrievalWorkerBlocker::WorkerPanicked),
+                    retry_class: Some(SessionRetrievalWorkerRetryClass::Projector),
+                }),
+            },
+        ));
+
+        let result = handle_message_search_with_service(
+            Some(Path::new("/repo")),
+            SessionRetrievalStoreScope::Project,
+            json_args(),
+            Some(&service),
+        )
+        .await
+        .unwrap();
+        let payload = response_payload(&result);
+
+        assert_eq!(payload["error"]["reason"], "refresh_worker_recovering");
+        assert_eq!(payload["error"]["retryable"], true);
+        assert_eq!(
+            payload["service_status"]["last_progress_at_unix_micros"],
+            42
+        );
+        assert_eq!(payload["service_status"]["backlog"], 7);
+        assert_eq!(payload["service_status"]["blocker"], "worker_panicked");
+        assert_eq!(payload["service_status"]["retry_class"], "projector");
+        let markdown = render_temporal_message_search_md(&payload);
+        assert!(markdown.contains("Unavailable reason: `refresh_worker_recovering`"));
+        assert!(markdown.contains(
+            "Refresh worker: last progress 42, backlog 7, blocker `worker_panicked`, retry class `projector`"
+        ));
     }
 }

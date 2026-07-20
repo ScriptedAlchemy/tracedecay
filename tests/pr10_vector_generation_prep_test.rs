@@ -1,0 +1,631 @@
+#![forbid(unsafe_code)]
+
+use std::fmt::Write as _;
+
+#[path = "../src/code_index/projection.rs"]
+pub mod projection_impl;
+#[path = "../src/code_index/receipts.rs"]
+pub mod receipts;
+
+pub mod code_index {
+    pub mod projection {
+        pub use super::super::projection_impl::*;
+    }
+}
+
+#[path = "../src/semantic_code/projector.rs"]
+pub mod semantic_projector;
+
+pub mod semantic_code {
+    pub use crate::semantic_projector as projector;
+}
+
+#[path = "../src/store/vector_generations.rs"]
+mod vector_generations;
+
+use sha2::{Digest, Sha256};
+use tracedecay_domain::{
+    BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
+    CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
+    CodeSearchChunkV1, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
+    FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionReplayReasonV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+    SourceSpan,
+};
+
+use semantic_projector::{
+    CanonicalChunkVectorEncoderV1, SemanticProjectionErrorV1, prepare_vector_generation,
+};
+use vector_generations::{
+    FakeVectorGenerationStoreV1, VectorGenerationIdV1, VectorGenerationPlanV1,
+    VectorGenerationStoreErrorV1,
+};
+
+use crate::code_index::projection::{expected_request_digest, verify_batch_receipt};
+
+fn id<T>(value: &str) -> T
+where
+    T: TryFrom<String>,
+    T::Error: std::fmt::Debug,
+{
+    T::try_from(value.to_string()).expect("canonical fixture identity")
+}
+
+fn digest(label: u8) -> ManifestDigest {
+    id(&format!("sha256:{}", format!("{label:02x}").repeat(32)))
+}
+
+fn content_digest(bytes: &[u8]) -> tracedecay_domain::ContentDigest {
+    let mut encoded = String::from("sha256:");
+    for byte in Sha256::digest(bytes) {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string is infallible");
+    }
+    id(&encoded)
+}
+
+fn embedding_key() -> EmbeddingProjectionKeyV1 {
+    EmbeddingProjectionKeyV1 {
+        model_artifact_digest: digest(1),
+        tokenizer_digest: digest(2),
+        config_digest: digest(3),
+        query_instruction_digest: Some(digest(4)),
+        document_instruction_digest: Some(digest(5)),
+        pooling: EmbeddingPoolingV1::Mean,
+        truncation_side: EmbeddingTruncationSideV1::Right,
+        truncation_length: 512,
+        runtime_backend: "fastembed-ort".to_string(),
+        runtime_build_revision: "ort-test-rev-1".to_string(),
+        device_class: EmbeddingDeviceClassV1::Cpu,
+        dimensions: 4,
+        metric: EmbeddingMetricV1::Cosine,
+        normalization: EmbeddingNormalizationV1::L2,
+        precision: EmbeddingPrecisionV1::Fp32,
+        chunk_schema_revision: "code-search-chunk.v1".to_string(),
+        chunker_revision: id::<ChunkerRevision>("chunker.v1"),
+        privacy_domain: id::<PrivacyDomainId>("privacy.project-a"),
+        privacy_key_epoch: 7,
+    }
+}
+
+fn chunk(generation: &str, name: &str, text: &str, ordinal: u32) -> CodeSearchChunkV1 {
+    CodeSearchChunkV1 {
+        id: id::<CodeSearchChunkId>(&format!("chunk.v1.{name}")),
+        anchor: CodeSearchChunkAnchorV1 {
+            generation_id: id::<CodeGenerationId>(generation),
+            file_occurrence_id: id::<FileOccurrenceId>(&format!("file.v1.{name}")),
+            symbol_occurrence_id: None,
+            parent_chunk_id: None,
+            source_span: SourceSpan {
+                start_byte: 0,
+                end_byte: text.len() as u64,
+            },
+            grain: CodeSearchChunkGrainV1::FileWindow,
+            ordinal,
+        },
+        content_digest: content_digest(text.as_bytes()),
+        language_descriptor_revision: id::<LanguageDescriptorRevision>("descriptor.rust.v1"),
+        chunker_revision: id::<ChunkerRevision>("chunker.v1"),
+        sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
+        sensitivity: SensitivityDecision {
+            level: SensitivityLevelV1::Internal,
+            policy_revision: id::<PolicyRevisionId>("policy.v1"),
+        },
+        exact_terms: vec![],
+        subtokens: vec![],
+        sanitized_text: BoundedSanitizedText::new(text).expect("bounded fixture text"),
+    }
+}
+
+fn change(
+    chunk: &CodeSearchChunkV1,
+    prior: Option<tracedecay_domain::ContentDigest>,
+    current: Option<tracedecay_domain::ContentDigest>,
+) -> ChangedCodeChunkV1 {
+    ChangedCodeChunkV1 {
+        chunk_id: chunk.id.clone(),
+        prior_digest: prior,
+        current_digest: current,
+    }
+}
+
+fn changes(
+    from_generation: Option<&str>,
+    to_generation: &str,
+    added_or_changed: Vec<ChangedCodeChunkV1>,
+    deleted: Vec<ChangedCodeChunkV1>,
+    reused: Vec<ChangedCodeChunkV1>,
+) -> ChangedCodeChunkSetV1 {
+    let mut changes = ChangedCodeChunkSetV1 {
+        from_generation: from_generation.map(id::<CodeGenerationId>),
+        to_generation: id::<CodeGenerationId>(to_generation),
+        manifest_digest: digest(0),
+        added_or_changed,
+        deleted,
+        reused,
+    };
+    changes.manifest_digest = changes.compute_digest().expect("changed set digest");
+    changes.validate().expect("canonical changed set");
+    changes
+}
+
+fn request(
+    changes: ChangedCodeChunkSetV1,
+    previous_projection_key: Option<ProjectionKeyV1>,
+    target_projection_key: ProjectionKeyV1,
+    replay_reason: ProjectionReplayReasonV1,
+) -> ProjectionBatchRequestV1 {
+    let mut request = ProjectionBatchRequestV1 {
+        request_digest: digest(0),
+        changes,
+        previous_projection_key,
+        target_projection_key,
+        replay_reason,
+    };
+    request.request_digest = expected_request_digest(&request).expect("request digest");
+    request
+}
+
+#[derive(Default)]
+struct FakeEncoder {
+    seen: Vec<CodeSearchChunkId>,
+    dimension_delta: isize,
+    non_finite: bool,
+}
+
+impl CanonicalChunkVectorEncoderV1 for FakeEncoder {
+    fn encode(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunk: &CodeSearchChunkV1,
+    ) -> Result<Vec<f32>, String> {
+        self.seen.push(chunk.id.clone());
+        let dimensions = (key.dimensions as isize + self.dimension_delta) as usize;
+        let seed = chunk
+            .sanitized_text
+            .as_str()
+            .bytes()
+            .fold(0u32, |sum, byte| sum.wrapping_add(u32::from(byte)));
+        let mut values = (0..dimensions)
+            .map(|index| (seed.wrapping_add(index as u32) % 101) as f32 / 101.0)
+            .collect::<Vec<_>>();
+        if self.non_finite {
+            values[0] = f32::NAN;
+        }
+        Ok(values)
+    }
+}
+
+fn publish_initial_generation() -> (
+    FakeVectorGenerationStoreV1,
+    EmbeddingProjectionKeyV1,
+    VectorGenerationIdV1,
+) {
+    let key = embedding_key();
+    let projection_key = key.projection_key().expect("valid semantic key");
+    let alpha = chunk("code-generation.1", "alpha", "fn alpha() -> u8 { 1 }", 0);
+    let gone = chunk("code-generation.1", "gone", "fn gone() {}", 1);
+    let stable = chunk("code-generation.1", "stable", "fn stable() {}", 2);
+    let initial_changes = changes(
+        None,
+        "code-generation.1",
+        vec![
+            change(&alpha, None, Some(alpha.content_digest.clone())),
+            change(&gone, None, Some(gone.content_digest.clone())),
+            change(&stable, None, Some(stable.content_digest.clone())),
+        ],
+        vec![],
+        vec![],
+    );
+    let initial_request = request(
+        initial_changes,
+        None,
+        projection_key.clone(),
+        ProjectionReplayReasonV1::InitialProjection,
+    );
+    let mut encoder = FakeEncoder::default();
+    let prepared = prepare_vector_generation(
+        &key,
+        initial_request,
+        &[alpha.clone(), gone.clone(), stable.clone()],
+        &mut encoder,
+    )
+    .expect("initial fake projection");
+    assert_eq!(encoder.seen.len(), 3);
+
+    let mut store = FakeVectorGenerationStoreV1::new();
+    let build_id = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: projection_key.clone(),
+            source_generation: id("code-generation.1"),
+            source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
+            expected_chunk_ids: vec![alpha.id, gone.id, stable.id],
+            base_generation: None,
+        })
+        .expect("initial build");
+    let checkpoint = store
+        .commit_batch(&build_id, None, prepared.clone())
+        .expect("initial batch");
+    let duplicate_checkpoint = store
+        .commit_batch(&build_id, None, prepared)
+        .expect("lost-ack duplicate is an idempotent no-op");
+    assert_eq!(duplicate_checkpoint, checkpoint);
+    let publication = store
+        .publish_generation(&build_id, None)
+        .expect("initial publication");
+    let published = store
+        .generation(&publication.generation_id)
+        .expect("initial generation");
+    assert_eq!(published.generation_id(), &publication.generation_id);
+    assert_eq!(
+        publication.generation_id.as_digest(),
+        &publication.manifest_digest
+    );
+    assert_eq!(published.projection_key(), &projection_key);
+    assert_eq!(
+        published.source_generation(),
+        &id::<CodeGenerationId>("code-generation.1")
+    );
+    assert_eq!(
+        published.source_manifest_digest(),
+        &published.checkpoint().source_manifest_digest
+    );
+    assert_eq!(published.manifest_digest(), &publication.manifest_digest);
+    (store, key, publication.generation_id)
+}
+
+#[test]
+fn semantic_projection_key_is_complete_deterministic_and_maps_to_plan25() {
+    let key = embedding_key();
+    key.validate().expect("valid key");
+    let first = key.canonical_digest().expect("key digest");
+    let second = key.canonical_digest().expect("stable replay");
+    assert_eq!(first, second);
+
+    let generic = key.projection_key().expect("generic Plan25 key");
+    assert_eq!(generic.kind, ProjectionKindV1::Embedding);
+    assert_eq!(generic.profile_digest, first);
+
+    let mut changed = key.clone();
+    changed.runtime_build_revision = "ort-test-rev-2".to_string();
+    assert_ne!(
+        changed.canonical_digest().unwrap(),
+        key.canonical_digest().unwrap()
+    );
+    changed = key.clone();
+    changed.privacy_key_epoch += 1;
+    assert_ne!(
+        changed.canonical_digest().unwrap(),
+        key.canonical_digest().unwrap()
+    );
+    changed = key.clone();
+    changed.chunker_revision = id("chunker.v2");
+    assert_ne!(
+        changed.canonical_digest().unwrap(),
+        key.canonical_digest().unwrap()
+    );
+}
+
+#[test]
+fn fake_projection_uses_canonical_chunks_and_plan25_receipts() {
+    let (mut store, key, base_generation) = publish_initial_generation();
+    let projection_key = key.projection_key().unwrap();
+
+    let alpha_old = chunk("code-generation.1", "alpha", "fn alpha() -> u8 { 1 }", 0);
+    let gone_old = chunk("code-generation.1", "gone", "fn gone() {}", 1);
+    let stable_old = chunk("code-generation.1", "stable", "fn stable() {}", 2);
+    let alpha = chunk("code-generation.2", "alpha", "fn alpha() -> u8 { 2 }", 0);
+    let added = chunk("code-generation.2", "new", "fn newly_added() {}", 1);
+    let stable = chunk("code-generation.2", "stable", "fn stable() {}", 2);
+    let changed = changes(
+        Some("code-generation.1"),
+        "code-generation.2",
+        vec![
+            change(
+                &alpha,
+                Some(alpha_old.content_digest),
+                Some(alpha.content_digest.clone()),
+            ),
+            change(&added, None, Some(added.content_digest.clone())),
+        ],
+        vec![change(
+            &gone_old,
+            Some(gone_old.content_digest.clone()),
+            None,
+        )],
+        vec![change(
+            &stable,
+            Some(stable_old.content_digest.clone()),
+            Some(stable.content_digest.clone()),
+        )],
+    );
+    let projection_request = request(
+        changed,
+        Some(projection_key.clone()),
+        projection_key.clone(),
+        ProjectionReplayReasonV1::SourceEdit,
+    );
+    let mut encoder = FakeEncoder::default();
+    let prepared = prepare_vector_generation(
+        &key,
+        projection_request,
+        &[alpha.clone(), added.clone()],
+        &mut encoder,
+    )
+    .expect("changed fake projection");
+
+    assert_eq!(encoder.seen, vec![alpha.id.clone(), added.id.clone()]);
+    assert_eq!(prepared.vectors.len(), 2);
+    assert_eq!(prepared.tombstones.len(), 1);
+    assert_eq!(prepared.receipt.receipts.len(), 4);
+    verify_batch_receipt(&prepared.request, &prepared.receipt).expect("Plan25 receipt");
+
+    let build_id = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: projection_key,
+            source_generation: id("code-generation.2"),
+            source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
+            expected_chunk_ids: vec![alpha.id.clone(), added.id.clone(), stable.id.clone()],
+            base_generation: Some(base_generation.clone()),
+        })
+        .expect("changed build");
+    let checkpoint = store
+        .commit_batch(&build_id, None, prepared)
+        .expect("changed batch");
+    assert_eq!(checkpoint.completed_batches, 1);
+    assert_eq!(store.active_generation_id(), Some(&base_generation));
+
+    let publication = store
+        .publish_generation(&build_id, Some(&base_generation))
+        .expect("changed publication");
+    let published = store
+        .generation(&publication.generation_id)
+        .expect("published generation");
+    assert_eq!(published.vectors().len(), 3);
+    assert!(published.vectors().contains_key(&alpha.id));
+    assert!(published.vectors().contains_key(&added.id));
+    assert!(published.vectors().contains_key(&stable.id));
+    assert_eq!(published.tombstones(), &[gone_old.id]);
+    assert_eq!(published.receipts().len(), 1);
+}
+
+#[test]
+fn checkpoint_and_active_pointer_publish_atomically() {
+    let (mut store, key, base_generation) = publish_initial_generation();
+    let projection_key = key.projection_key().unwrap();
+    let alpha = chunk("code-generation.2", "alpha", "fn alpha() -> u8 { 2 }", 0);
+    let prepared = prepare_vector_generation(
+        &key,
+        request(
+            changes(
+                Some("code-generation.1"),
+                "code-generation.2",
+                vec![change(
+                    &alpha,
+                    Some(content_digest(b"fn alpha() -> u8 { 1 }")),
+                    Some(alpha.content_digest.clone()),
+                )],
+                vec![],
+                vec![],
+            ),
+            Some(projection_key.clone()),
+            projection_key.clone(),
+            ProjectionReplayReasonV1::SourceEdit,
+        ),
+        &[alpha.clone()],
+        &mut FakeEncoder::default(),
+    )
+    .unwrap();
+    let build_id = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: projection_key,
+            source_generation: id("code-generation.2"),
+            source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
+            expected_chunk_ids: vec![alpha.id],
+            base_generation: None,
+        })
+        .unwrap();
+    store.commit_batch(&build_id, None, prepared).unwrap();
+
+    let prior_checkpoint = store.active_checkpoint().cloned();
+    store.fail_before_publication_swap_once();
+    assert_eq!(
+        store.publish_generation(&build_id, Some(&base_generation)),
+        Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure)
+    );
+    assert_eq!(store.active_generation_id(), Some(&base_generation));
+    assert_eq!(store.active_checkpoint(), prior_checkpoint.as_ref());
+
+    let publication = store
+        .publish_generation(&build_id, Some(&base_generation))
+        .expect("retry publishes atomically");
+    assert_eq!(
+        store.active_generation_id(),
+        Some(&publication.generation_id)
+    );
+    assert_eq!(store.active_checkpoint(), Some(&publication.checkpoint));
+}
+
+#[test]
+fn unchanged_generation_reuses_vectors_without_fake_inference() {
+    let (mut store, key, base_generation) = publish_initial_generation();
+    let projection_key = key.projection_key().unwrap();
+    let alpha = chunk("code-generation.2", "alpha", "fn alpha() -> u8 { 1 }", 0);
+    let gone = chunk("code-generation.2", "gone", "fn gone() {}", 1);
+    let stable = chunk("code-generation.2", "stable", "fn stable() {}", 2);
+    let no_op = changes(
+        Some("code-generation.1"),
+        "code-generation.2",
+        vec![],
+        vec![],
+        vec![
+            change(
+                &alpha,
+                Some(alpha.content_digest.clone()),
+                Some(alpha.content_digest.clone()),
+            ),
+            change(
+                &gone,
+                Some(gone.content_digest.clone()),
+                Some(gone.content_digest.clone()),
+            ),
+            change(
+                &stable,
+                Some(stable.content_digest.clone()),
+                Some(stable.content_digest.clone()),
+            ),
+        ],
+    );
+    let mut encoder = FakeEncoder::default();
+    let prepared = prepare_vector_generation(
+        &key,
+        request(
+            no_op,
+            Some(projection_key.clone()),
+            projection_key.clone(),
+            ProjectionReplayReasonV1::VerificationReplay,
+        ),
+        &[],
+        &mut encoder,
+    )
+    .expect("no-op replay");
+    assert!(encoder.seen.is_empty());
+    assert!(prepared.vectors.is_empty());
+    assert!(prepared.tombstones.is_empty());
+
+    let build_id = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: projection_key,
+            source_generation: id("code-generation.2"),
+            source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
+            expected_chunk_ids: vec![alpha.id, gone.id, stable.id],
+            base_generation: Some(base_generation.clone()),
+        })
+        .unwrap();
+    store.commit_batch(&build_id, None, prepared).unwrap();
+    let published = store
+        .publish_generation(&build_id, Some(&base_generation))
+        .unwrap();
+    assert_eq!(
+        store
+            .generation(&published.generation_id)
+            .unwrap()
+            .vectors()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn invalid_fake_vectors_and_key_only_reuse_fail_closed() {
+    let key = embedding_key();
+    let projection_key = key.projection_key().unwrap();
+    let alpha = chunk("code-generation.1", "alpha", "fn alpha() {}", 0);
+    let initial = request(
+        changes(
+            None,
+            "code-generation.1",
+            vec![change(&alpha, None, Some(alpha.content_digest.clone()))],
+            vec![],
+            vec![],
+        ),
+        None,
+        projection_key.clone(),
+        ProjectionReplayReasonV1::InitialProjection,
+    );
+
+    let mut wrong_dimensions = FakeEncoder {
+        dimension_delta: -1,
+        ..FakeEncoder::default()
+    };
+    assert!(matches!(
+        prepare_vector_generation(
+            &key,
+            initial.clone(),
+            std::slice::from_ref(&alpha),
+            &mut wrong_dimensions
+        ),
+        Err(SemanticProjectionErrorV1::VectorDimensionMismatch { .. })
+    ));
+    let mut non_finite = FakeEncoder {
+        non_finite: true,
+        ..FakeEncoder::default()
+    };
+    assert!(matches!(
+        prepare_vector_generation(&key, initial, std::slice::from_ref(&alpha), &mut non_finite),
+        Err(SemanticProjectionErrorV1::NonFiniteVector { .. })
+    ));
+
+    let mut replacement_key = key.clone();
+    replacement_key.runtime_build_revision = "ort-test-rev-2".to_string();
+    let replacement_projection_key = replacement_key.projection_key().unwrap();
+    let key_only_replay = request(
+        changes(
+            Some("code-generation.1"),
+            "code-generation.2",
+            vec![],
+            vec![],
+            vec![change(
+                &alpha,
+                Some(alpha.content_digest.clone()),
+                Some(alpha.content_digest.clone()),
+            )],
+        ),
+        Some(projection_key),
+        replacement_projection_key,
+        ProjectionReplayReasonV1::ProjectionProfileChange,
+    );
+    let mut encoder = FakeEncoder::default();
+    assert_eq!(
+        prepare_vector_generation(&replacement_key, key_only_replay, &[], &mut encoder),
+        Err(SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds)
+    );
+    assert!(encoder.seen.is_empty());
+}
+
+#[test]
+fn duplicate_vector_rows_fail_without_advancing_the_checkpoint() {
+    let key = embedding_key();
+    let projection_key = key.projection_key().unwrap();
+    let alpha = chunk("code-generation.1", "alpha", "fn alpha() {}", 0);
+    let prepared = prepare_vector_generation(
+        &key,
+        request(
+            changes(
+                None,
+                "code-generation.1",
+                vec![change(&alpha, None, Some(alpha.content_digest.clone()))],
+                vec![],
+                vec![],
+            ),
+            None,
+            projection_key.clone(),
+            ProjectionReplayReasonV1::InitialProjection,
+        ),
+        std::slice::from_ref(&alpha),
+        &mut FakeEncoder::default(),
+    )
+    .unwrap();
+    let mut store = FakeVectorGenerationStoreV1::new();
+    let build_id = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: projection_key,
+            source_generation: id("code-generation.1"),
+            source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
+            expected_chunk_ids: vec![alpha.id],
+            base_generation: None,
+        })
+        .unwrap();
+
+    let mut duplicated = prepared.clone();
+    duplicated.vectors.push(duplicated.vectors[0].clone());
+    assert_eq!(
+        store.commit_batch(&build_id, None, duplicated),
+        Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch)
+    );
+    let checkpoint = store
+        .commit_batch(&build_id, None, prepared)
+        .expect("failed handoff left the prior checkpoint intact");
+    assert_eq!(checkpoint.completed_batches, 1);
+}

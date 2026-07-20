@@ -214,3 +214,42 @@ fn store_session_contracts_are_adapter_free() {
         violations.into_iter().collect::<Vec<_>>().join("\n")
     );
 }
+
+#[test]
+fn code_index_is_filesystem_store_model_and_transport_free() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("src/code_index")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve code-index sources");
+    assert!(!sources.is_empty(), "code-index sources must exist");
+
+    let forbidden: &[&[&str]] = &[
+        &["crate", "daemon"],
+        &["crate", "db"],
+        &["crate", "global_db"],
+        &["crate", "mcp"],
+        &["crate", "semantic_code"],
+        &["crate", "store"],
+        &["tracedecay_store"],
+        &["fastembed"],
+        &["libsql"],
+        &["rusqlite"],
+        &["sqlx"],
+        &["axum"],
+        &["ureq"],
+        &["tokio"],
+        &["async_std"],
+        &["std", "fs"],
+        &["std", "net"],
+        &["std", "process"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect code-index sources");
+    assert!(
+        violations.is_empty(),
+        "code index must accept only captured inputs and publish only through projector ports:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}

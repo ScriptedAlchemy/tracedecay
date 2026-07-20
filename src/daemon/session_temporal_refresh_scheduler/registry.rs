@@ -8,7 +8,12 @@ use super::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshPolicy,
     SessionTemporalRefreshProjector,
 };
-use super::wake::{SessionTemporalRefreshWake, SessionTemporalRefreshWakeState};
+#[cfg(test)]
+use super::wake::SessionTemporalRefreshWorkerStatus;
+use super::wake::{
+    SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass, SessionTemporalRefreshWake,
+    SessionTemporalRefreshWakeState,
+};
 use super::worker::run_session_temporal_refresh_scheduler;
 use crate::global_db::GlobalDb;
 
@@ -25,6 +30,7 @@ pub(super) struct SessionTemporalRefreshPassReport {
     pub(super) terminal_errors: usize,
     pub(super) deadline_errors: usize,
     pub(super) saturated: bool,
+    pub(super) backlog: Option<usize>,
     pub(super) retry_class: Option<SessionTemporalRefreshRetryClass>,
     pub(super) last_error: Option<String>,
 }
@@ -116,6 +122,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let state = Arc::new(SessionTemporalRefreshWakeState::default());
         let wake = route.unwrap_or_else(|| state.handle());
         wake.bind(&state);
+        state.mark_running();
         let worker_state = Arc::clone(&state);
         let projector = Arc::clone(&self.projector);
         let policy = self.policy;
@@ -131,16 +138,24 @@ impl SessionTemporalRefreshSchedulerRegistry {
                     policy,
                 ));
                 let Some(result) = workers.join_next().await else {
+                    worker_state.mark_stopped();
                     return;
                 };
                 match result {
-                    Ok(()) => return,
+                    Ok(()) => {
+                        worker_state.mark_stopped();
+                        return;
+                    }
                     Err(error)
                         if error.is_panic() && !worker_state.cancelled.load(Ordering::Acquire) =>
                     {
                         panic_attempt = panic_attempt.saturating_add(1);
                         worker_state.busy.store(false, Ordering::Release);
-                        worker_state.wake();
+                        worker_state.mark_recovering(
+                            SessionTemporalRefreshBlocker::WorkerPanicked,
+                            SessionTemporalRefreshRetryClass::Projector,
+                        );
+                        worker_state.dirty.store(true, Ordering::Release);
                         tokio::select! {
                             () = worker_state.wait_for_cancellation() => return,
                             () = tokio::time::sleep(session_refresh_retry_delay(
@@ -149,7 +164,10 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             )) => {}
                         }
                     }
-                    Err(_) => return,
+                    Err(_) => {
+                        worker_state.mark_stopped();
+                        return;
+                    }
                 }
             }
         });
@@ -358,6 +376,17 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(test)]
+    pub(super) async fn profile_worker_status(
+        &self,
+        database_path: &std::path::Path,
+    ) -> SessionTemporalRefreshWorkerStatus {
+        self.profile.lock().await.get(database_path).map_or_else(
+            || SessionTemporalRefreshWake::unavailable().status(),
+            |entry| entry.wake.status(),
+        )
+    }
+
+    #[cfg(test)]
     pub(super) async fn project_worker_count(&self) -> usize {
         self.project.lock().await.len()
     }
@@ -409,16 +438,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
 }
 
 fn inert_session_temporal_refresh_wake() -> SessionTemporalRefreshWake {
-    let state = Arc::new(SessionTemporalRefreshWakeState::default());
-    state.cancel();
-    state.handle()
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SessionTemporalRefreshRetryClass {
-    Storage,
-    Projector,
-    Deadline,
+    SessionTemporalRefreshWake::unavailable()
 }
 
 pub(super) fn session_refresh_retry_delay(

@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::research::id::{ManifestDigest, SanitizationReceiptId};
+use crate::research::id::{ManifestDigest, PrivacyDomainId, SanitizationReceiptId};
 use crate::research::{DomainError, canonical_sha256};
 
 use super::identity::{
@@ -30,6 +30,9 @@ pub const MAX_CHUNK_TEXT_BYTES: usize = 64 * 1024;
 
 const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
+const EMBEDDING_PROJECTION_KEY_DIGEST_DOMAIN: &str = "tracedecay.embedding-projection-key.v1";
+
+pub const EMBEDDING_PROJECTION_SCHEMA_V1: &str = "tracedecay.embedding-projection.v1";
 
 fn validate_sorted_unique<T: Ord>(values: &[T], field: &'static str) -> Result<(), DomainError> {
     if values.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -427,6 +430,128 @@ fn validate_changed_partition(
 /// `EmbeddingProjectionKeyV1` is the typed semantic profile whose canonical
 /// digest occupies `profile_digest`; adapters cannot define a second
 /// projection-key identity.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingPoolingV1 {
+    Mean,
+    Cls,
+    LastToken,
+    MeanSqrtLength,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingTruncationSideV1 {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingDeviceClassV1 {
+    Cpu,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingMetricV1 {
+    Cosine,
+    DotProduct,
+    EuclideanL2,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingNormalizationV1 {
+    None,
+    L2,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingPrecisionV1 {
+    Fp32,
+    Fp16,
+    Bf16,
+    Int8,
+}
+
+/// Complete identity of one embedding projection. Every vector-affecting
+/// input is pinned here; its canonical digest becomes the profile digest in
+/// Plan 25's generic [`ProjectionKeyV1`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingProjectionKeyV1 {
+    pub model_artifact_digest: ManifestDigest,
+    pub tokenizer_digest: ManifestDigest,
+    pub config_digest: ManifestDigest,
+    pub query_instruction_digest: Option<ManifestDigest>,
+    pub document_instruction_digest: Option<ManifestDigest>,
+    pub pooling: EmbeddingPoolingV1,
+    pub truncation_side: EmbeddingTruncationSideV1,
+    pub truncation_length: u32,
+    pub runtime_backend: String,
+    pub runtime_build_revision: String,
+    pub device_class: EmbeddingDeviceClassV1,
+    pub dimensions: u32,
+    pub metric: EmbeddingMetricV1,
+    pub normalization: EmbeddingNormalizationV1,
+    pub precision: EmbeddingPrecisionV1,
+    pub chunk_schema_revision: String,
+    pub chunker_revision: ChunkerRevision,
+    pub privacy_domain: PrivacyDomainId,
+    pub privacy_key_epoch: u64,
+}
+
+impl EmbeddingProjectionKeyV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.model_artifact_digest.validate()?;
+        self.tokenizer_digest.validate()?;
+        self.config_digest.validate()?;
+        if let Some(digest) = &self.query_instruction_digest {
+            digest.validate()?;
+        }
+        if let Some(digest) = &self.document_instruction_digest {
+            digest.validate()?;
+        }
+        if self.truncation_length == 0 {
+            return Err(DomainError::Empty {
+                field: "embedding truncation length",
+            });
+        }
+        if self.dimensions == 0 {
+            return Err(DomainError::Empty {
+                field: "embedding dimensions",
+            });
+        }
+        validate_revision(&self.runtime_backend, "embedding runtime backend")?;
+        validate_revision(
+            &self.runtime_build_revision,
+            "embedding runtime build revision",
+        )?;
+        validate_revision(
+            &self.chunk_schema_revision,
+            "embedding chunk schema revision",
+        )?;
+        self.chunker_revision.validate()?;
+        self.privacy_domain.validate()?;
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<ManifestDigest, DomainError> {
+        self.validate()?;
+        canonical_sha256(&(EMBEDDING_PROJECTION_KEY_DIGEST_DOMAIN, self))
+    }
+
+    pub fn projection_key(&self) -> Result<ProjectionKeyV1, DomainError> {
+        Ok(ProjectionKeyV1 {
+            kind: ProjectionKindV1::Embedding,
+            schema_revision: EMBEDDING_PROJECTION_SCHEMA_V1.to_string(),
+            profile_digest: self.canonical_digest()?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionKeyV1 {

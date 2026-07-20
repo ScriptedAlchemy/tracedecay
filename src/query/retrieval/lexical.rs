@@ -7,13 +7,33 @@
 //! The lexical lane is separate from the exact lane; exact and lexical are
 //! independently disableable and inspectable.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CodeGenerationId, ComponentRevision, RetrievalBudget, RetrievalRequest, RetrieverBatch,
-    RetrieverOutcome, ScoreDomainId,
+    CodeGenerationId, CompactCandidate, ComponentRevision, CursorPayloadDigest, FixedPointScore,
+    RetrievalBudget, RetrievalError, RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch,
+    RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId,
 };
 
-use super::ports::{CodeCandidateBindingV1, RetrievalPortError};
+use super::ports::{
+    CodeCandidateBindingV1, CompactCandidateLane, LexicalPostingReadPort, RetrievalPortError,
+};
+
+mod projection;
+
+pub use self::projection::{
+    CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1,
+};
+
+/// Hard bound on character-level typo expansions selected for one request.
+/// The projection sorts all eligible expansions before taking this prefix, so
+/// producer order and scheduler timing cannot affect the selected terms.
+pub const MAX_FUZZY_TERM_EXPANSIONS_V1: u32 = 64;
+
+/// Maximum UTF-8 bytes in one lexical whole term, subtoken, or phrase.
+pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 
 /// Typed lexical fields over code-search result grains (Plan 15: typed
 /// result grains; Plan 25: whole exact terms and language-profiled subtokens
@@ -82,3 +102,341 @@ pub trait LexicalLaneRetriever {
         request: &LexicalLaneRequest,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError>;
 }
+
+impl LexicalLaneRequest {
+    pub fn validate(&self) -> Result<(), RetrievalPortError> {
+        self.base
+            .budget
+            .validate()
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        self.budget
+            .validate()
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        self.generation
+            .validate()
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        self.lexical_profile_revision
+            .validate()
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        self.score_domain
+            .validate()
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        if self.fuzzy_budget > MAX_FUZZY_TERM_EXPANSIONS_V1 {
+            return Err(RetrievalPortError::Contract(format!(
+                "lexical fuzzy budget exceeds the v1 bound of {MAX_FUZZY_TERM_EXPANSIONS_V1}"
+            )));
+        }
+        if self.whole_terms.is_empty() && self.subtokens.is_empty() && self.phrases.is_empty() {
+            return Err(RetrievalPortError::Contract(
+                "lexical requests require at least one whole term, subtoken, or phrase".to_owned(),
+            ));
+        }
+        for term in self
+            .whole_terms
+            .iter()
+            .chain(self.subtokens.iter())
+            .chain(self.phrases.iter())
+        {
+            if term.is_empty()
+                || term.trim() != term
+                || term.len() > MAX_LEXICAL_QUERY_TERM_BYTES_V1
+                || term.chars().any(char::is_control)
+            {
+                return Err(RetrievalPortError::Contract(
+                    "lexical terms must be non-empty, trimmed, control-free, and within the v1 byte bound"
+                        .to_owned(),
+                ));
+            }
+        }
+        let mut filtered_fields = BTreeSet::new();
+        for filter in &self.field_filters {
+            if !filtered_fields.insert(filter.field) {
+                return Err(RetrievalPortError::Contract(
+                    "lexical field filters must name each field at most once".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LexicalLaneEvidence {
+    pub fn validate(&self, request: &LexicalLaneRequest) -> Result<(), RetrievalPortError> {
+        request.validate()?;
+        if self.binding.occurrence.generation != request.generation {
+            return Err(RetrievalPortError::GenerationMismatch);
+        }
+        if self.field_scores_micros.is_empty() {
+            return Err(RetrievalPortError::Contract(
+                "lexical lane evidence requires at least one field score".to_owned(),
+            ));
+        }
+        let mut scored_fields = BTreeSet::new();
+        for (field, _) in &self.field_scores_micros {
+            if !scored_fields.insert(*field) {
+                return Err(RetrievalPortError::Contract(
+                    "lexical lane evidence scores one field more than once".to_owned(),
+                ));
+            }
+        }
+        for term in &self.matched_whole_terms {
+            if !request.whole_terms.contains(term) {
+                return Err(RetrievalPortError::Contract(
+                    "lexical lane evidence matches a whole term outside the request".to_owned(),
+                ));
+            }
+        }
+        for subtoken in &self.matched_subtokens {
+            if !request.subtokens.contains(subtoken) {
+                return Err(RetrievalPortError::Contract(
+                    "lexical lane evidence matches a subtoken outside the request".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `field` survives the request's field filters: include filters
+/// form an explicit whitelist when present, and exclude filters always
+/// remove their field.
+fn field_admitted(filters: &[LexicalFieldFilterV1], field: LexicalFieldV1) -> bool {
+    let whitelisted = !filters.iter().any(|filter| filter.include)
+        || filters
+            .iter()
+            .any(|filter| filter.include && filter.field == field);
+    let excluded = filters
+        .iter()
+        .any(|filter| !filter.include && filter.field == field);
+    whitelisted && !excluded
+}
+
+/// The independent fielded lexical/BM25 lane (Plan 15: fielded BM25 over
+/// typed result grains; Plan 25: whole-term and language-profiled subtoken
+/// postings independently of the exact lane).
+///
+/// The lane composes the store-side [`LexicalPostingReadPort`]. It enforces
+/// field filters, recomputes every candidate's raw score as the checked
+/// fixed-point sum of its admitted per-field micros (no float ever crosses
+/// the candidate identity; per-field weighting belongs to the locked fusion
+/// profile, not the lane), canonicalizes the committed prefix, applies the
+/// budget cutoff, and reports typed coverage with a deterministic checkpoint
+/// digest. Exact-tier candidates and admission proofs can never enter this
+/// lane.
+#[derive(Clone, Debug)]
+pub struct LexicalLane<P> {
+    postings: P,
+}
+
+impl<P> LexicalLane<P> {
+    pub fn new(postings: P) -> Self {
+        Self { postings }
+    }
+}
+
+impl<P> LexicalLane<P>
+where
+    P: LexicalPostingReadPort,
+{
+    /// Validate one port-emitted batch against the request, apply field
+    /// filters, then rebuild the committed deterministic prefix: canonical
+    /// score order, sequential ordinals, typed coverage, budget cutoff, and
+    /// a checkpoint digest.
+    fn enforce_batch(
+        &self,
+        request: &LexicalLaneRequest,
+        batch: &RetrieverBatch<LexicalLaneEvidence>,
+    ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
+        batch
+            .validate()
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        let mut admitted: Vec<(CompactCandidate, LexicalLaneEvidence, FixedPointScore)> =
+            Vec::with_capacity(batch.candidates.len());
+        let mut excluded = 0_u64;
+        for candidate in &batch.candidates {
+            if candidate.retriever != RetrieverKind::Lexical {
+                return Err(RetrievalPortError::Contract(
+                    "the lexical lane cannot emit exact-tier or other-lane candidates".to_owned(),
+                ));
+            }
+            let evidence = batch
+                .evidence_by_occurrence
+                .get(&candidate.source_occurrence_id)
+                .ok_or_else(|| {
+                    RetrievalPortError::Contract(
+                        "lexical lane evidence is missing for a returned occurrence".to_owned(),
+                    )
+                })?;
+            evidence.validate(request)?;
+            if evidence.binding.candidate_anchor != candidate.anchor_id
+                || evidence.binding.source_occurrence != candidate.source_occurrence_id
+            {
+                return Err(RetrievalPortError::Contract(
+                    "lexical lane binding does not address its candidate".to_owned(),
+                ));
+            }
+            let mut filtered = evidence.clone();
+            filtered
+                .field_scores_micros
+                .retain(|(field, _)| field_admitted(&request.field_filters, *field));
+            if filtered.field_scores_micros.is_empty() {
+                // A candidate scored only on filtered-out fields is excluded
+                // by the typed field filters; it is accounted, never silent.
+                excluded += 1;
+                continue;
+            }
+            let mut raw_score = FixedPointScore::ZERO;
+            for (_, field_score) in &filtered.field_scores_micros {
+                raw_score = raw_score
+                    .checked_add(FixedPointScore(*field_score))
+                    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            }
+            admitted.push((candidate.clone(), filtered, raw_score));
+        }
+        // Canonical deterministic order: recomputed fixed-point score
+        // (descending), then stable occurrence identity, then the evidence
+        // anchor. Port emission order can never select a different prefix.
+        admitted.sort_by(|left, right| {
+            right
+                .2
+                .cmp(&left.2)
+                .then_with(|| {
+                    left.0
+                        .source_occurrence_id
+                        .cmp(&right.0.source_occurrence_id)
+                })
+                .then_with(|| {
+                    left.0
+                        .retriever_evidence_anchor
+                        .cmp(&right.0.retriever_evidence_anchor)
+                })
+        });
+        let cap = request
+            .budget
+            .max_candidates_per_lane
+            .min(request.base.budget.max_candidates_per_lane) as usize;
+        let examined = batch.coverage.examined.max(batch.candidates.len() as u64);
+        let truncated = admitted.len().saturating_sub(cap);
+        admitted.truncate(cap);
+        let mut candidates = Vec::with_capacity(admitted.len());
+        let mut evidence_by_occurrence = BTreeMap::new();
+        for (ordinal, (mut candidate, evidence, raw_score)) in admitted.into_iter().enumerate() {
+            candidate.ordinal_rank = ordinal as u32;
+            candidate.raw_score = raw_score;
+            evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
+            candidates.push(candidate);
+        }
+        let eligible = candidates.len() as u64 + truncated as u64;
+        let checkpoint_digest = lexical_checkpoint_digest(&request.generation, &candidates)?;
+        let rebuilt = RetrieverBatch {
+            candidates,
+            evidence_by_occurrence,
+            coverage: RetrieverCoverage {
+                examined,
+                eligible,
+                excluded: batch.coverage.excluded.saturating_add(excluded),
+                capped: truncated as u64,
+                unknown: batch.coverage.unknown,
+            },
+            continuation: Some(RetrieverContinuation {
+                lane: RetrieverKind::Lexical,
+                checkpoint_digest,
+                exhausted: truncated == 0,
+            }),
+        };
+        rebuilt
+            .validate()
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        Ok(rebuilt)
+    }
+}
+
+impl<P> LexicalLaneRetriever for LexicalLane<P>
+where
+    P: LexicalPostingReadPort,
+{
+    fn retrieve_lexical(
+        &self,
+        request: &LexicalLaneRequest,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
+        request.validate()?;
+        let outcome = match self.postings.read_lexical_postings(request) {
+            Ok(outcome) => outcome,
+            // Plan 15 pipeline step 3: a missing lexical authority rejects
+            // the request as a typed unavailable outcome, never a
+            // substitution.
+            Err(RetrievalPortError::AuthorityUnavailable(detail)) => {
+                return Ok(RetrieverOutcome::Unavailable(
+                    RetrievalFailure::AuthorityUnavailable { detail },
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        match outcome {
+            RetrieverOutcome::Complete(batch) => Ok(RetrieverOutcome::Complete(
+                self.enforce_batch(request, &batch)?,
+            )),
+            RetrieverOutcome::Partial { value, reason } => Ok(RetrieverOutcome::Partial {
+                value: self.enforce_batch(request, &value)?,
+                reason,
+            }),
+            outcome => Ok(outcome),
+        }
+    }
+}
+
+impl<P> Retriever<LexicalLaneRequest, LexicalLaneEvidence> for LexicalLane<P>
+where
+    P: LexicalPostingReadPort,
+{
+    fn retrieve(
+        &self,
+        request: &LexicalLaneRequest,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalError> {
+        self.retrieve_lexical(request)
+            .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
+    }
+}
+
+impl<P> CompactCandidateLane<LexicalLaneRequest, LexicalLaneEvidence> for LexicalLane<P>
+where
+    P: LexicalPostingReadPort,
+{
+    fn candidates(
+        &self,
+        request: &LexicalLaneRequest,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
+        self.retrieve_lexical(request)
+    }
+}
+
+/// Deterministic digest of the lexical lane's committed prefix (Plan 15: a
+/// lane contributes its admitted prefix with a committed checkpoint; cursor
+/// replay binds the completed set, it never recomputes).
+fn lexical_checkpoint_digest(
+    generation: &CodeGenerationId,
+    candidates: &[CompactCandidate],
+) -> Result<CursorPayloadDigest, RetrievalPortError> {
+    let prefix: Vec<(String, String, u64)> = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.source_occurrence_id.as_str().to_owned(),
+                candidate.retriever_evidence_anchor.as_str().to_owned(),
+                candidate.raw_score.micros(),
+            )
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&(
+        "tracedecay.retrieval-lane-checkpoint.v1",
+        RetrieverKind::Lexical.as_str(),
+        generation.as_str(),
+        prefix,
+    ))
+    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+    CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
+        .map_err(|error| RetrievalPortError::Contract(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests;

@@ -30,6 +30,15 @@ pub struct Database {
     inner: Arc<DatabaseInner>,
 }
 
+const NODES_FTS_CORRUPTION: &str = "malformed inverted index for FTS5 table main.nodes_fts";
+
+#[derive(Debug, PartialEq, Eq)]
+enum DatabaseHealth {
+    Healthy,
+    FtsOnlyCorruption(String),
+    Corrupt(String),
+}
+
 /// A writer connection that cannot outlive the canonical database's writer
 /// lane. The connection is isolated from the retained query-only handle, so
 /// cancellation cannot leave readers inside an unfinished transaction.
@@ -638,43 +647,116 @@ impl Database {
         Ok(self.quick_check_report().await?.is_none())
     }
 
-    /// Runs `PRAGMA quick_check` and returns the first problem row, if any.
+    /// Runs `PRAGMA quick_check` on a fresh reader and returns its problem
+    /// report, if any.
     ///
     /// `None` means the database is intact. A pragma that returns no rows is
     /// reported as a problem rather than silently treated as healthy.
     pub async fn quick_check_report(&self) -> Result<Option<String>> {
-        let row = integrity::quick_check_result(
-            &self.inner.conn,
-            "quick_check",
-            "failed to run quick_check",
-        )
-        .await?;
-        Ok(match row {
-            Some(row) if row == "ok" => None,
-            Some(row) => Some(row),
-            None => Some("PRAGMA quick_check returned no rows".to_string()),
+        Ok(match self.health_on_fresh_reader("quick_check").await? {
+            DatabaseHealth::Healthy => None,
+            DatabaseHealth::FtsOnlyCorruption(problem) | DatabaseHealth::Corrupt(problem) => {
+                Some(problem)
+            }
         })
     }
 
-    /// Maintenance-only: rebuilds the FTS5 index from the content table.
+    /// Rebuilds the FTS5 index from the content table under the canonical
+    /// writer lane.
     ///
     /// This fixes FTS-only corruption (e.g. from an interrupted bulk load)
     /// without requiring a full re-index of the codebase. Callers must hold
-    /// exclusive maintenance ownership; read paths must never invoke this.
+    /// managed-daemon or exclusive-maintenance authority; read paths must
+    /// never invoke this.
     pub async fn rebuild_fts(&self) -> Result<()> {
         let transaction = self.begin_write_transaction("rebuild_fts").await?;
         self.rebuild_fts_unguarded(&transaction).await?;
         transaction.commit().await
     }
 
+    /// Checks the retained post-open connection and repairs only a proven
+    /// `nodes_fts`-only failure. The existing rebuild path owns the canonical
+    /// writer lane, so concurrent writers complete before repair starts.
+    pub(crate) async fn repair_fts_after_open(&self) -> Result<Option<String>> {
+        let problem = match self.health_on_fresh_reader("post_open_health").await? {
+            DatabaseHealth::Healthy => return Ok(None),
+            DatabaseHealth::FtsOnlyCorruption(problem) => problem,
+            DatabaseHealth::Corrupt(problem) => {
+                return Err(TraceDecayError::Database {
+                    message: format!("database quick_check failed: {problem}"),
+                    operation: "post_open_health".to_string(),
+                });
+            }
+        };
+
+        self.rebuild_fts().await?;
+        match self.health_on_fresh_reader("post_repair_health").await? {
+            DatabaseHealth::Healthy => Ok(Some(problem)),
+            DatabaseHealth::FtsOnlyCorruption(remaining) | DatabaseHealth::Corrupt(remaining) => {
+                Err(TraceDecayError::Database {
+                    message: format!("FTS repair did not restore database health: {remaining}"),
+                    operation: "post_repair_health".to_string(),
+                })
+            }
+        }
+    }
+
+    async fn health_on_fresh_reader(&self, operation: &str) -> Result<DatabaseHealth> {
+        let conn = self
+            .inner
+            .db
+            .connect()
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to connect for database health check: {e}"),
+                operation: operation.to_string(),
+            })?;
+        pragmas::apply_read_only(&conn, 0).await?;
+        database_health(&conn, operation).await
+    }
+
     /// Maintenance-only: rebuilds the FTS5 index of a store whose open-time
     /// integrity validation fails with FTS-only damage, which `open` itself
-    /// rejects before any repair can run. Uses a direct connection that
-    /// bypasses open validation for exactly this one derivable-index rebuild;
-    /// callers must hold the recovery locks and writer authority.
+    /// rejects before any repair can run. The database slot excludes a
+    /// concurrent open, and a full quick-check classification proves that all
+    /// reported damage is confined to the derivable index before any write.
     pub async fn repair_fts_offline(db_path: &Path, authority: &DatabaseAuthority) -> Result<()> {
-        let _held = authority.hold_for(db_path, "fts repair")?;
-        _held.require_active_write_scope("fts repair")?;
+        let held = authority.hold_for(db_path, "fts repair")?;
+        held.require_active_write_scope("fts repair")?;
+        let slot = database_slot(held.database_identity_key());
+        let open = slot.lock().await;
+        if let Some(inner) = open.upgrade() {
+            drop(open);
+            Self { inner }.repair_fts_after_open().await?;
+            return Ok(());
+        }
+
+        let read_db = Builder::new_local(db_path)
+            .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to open database for FTS health check: {e}"),
+                operation: "repair_fts_offline".to_string(),
+            })?;
+        let read_conn = read_db.connect().map_err(|e| TraceDecayError::Database {
+            message: format!("failed to connect for FTS health check: {e}"),
+            operation: "repair_fts_offline".to_string(),
+        })?;
+        let file_size = std::fs::metadata(db_path).map_or(0, |metadata| metadata.len());
+        pragmas::apply_read_only(&read_conn, file_size).await?;
+        match database_health(&read_conn, "repair_fts_offline").await? {
+            DatabaseHealth::Healthy => return Ok(()),
+            DatabaseHealth::FtsOnlyCorruption(_) => {}
+            DatabaseHealth::Corrupt(problem) => {
+                return Err(TraceDecayError::Database {
+                    message: format!("database quick_check failed: {problem}"),
+                    operation: "repair_fts_offline".to_string(),
+                });
+            }
+        }
+        drop(read_conn);
+        drop(read_db);
+
         let db =
             Builder::new_local(db_path)
                 .build()
@@ -687,12 +769,37 @@ impl Database {
             message: format!("failed to connect for FTS repair: {e}"),
             operation: "repair_fts_offline".to_string(),
         })?;
-        conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", ())
+        pragmas::apply(&conn, file_size).await?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to begin FTS repair transaction: {e}"),
+                operation: "repair_fts_offline".to_string(),
+            })?;
+        transaction
+            .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", ())
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to rebuild FTS index: {e}"),
                 operation: "repair_fts_offline".to_string(),
             })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to commit FTS repair: {e}"),
+                operation: "repair_fts_offline".to_string(),
+            })?;
+        match database_health(&conn, "repair_fts_offline").await? {
+            DatabaseHealth::Healthy => {}
+            DatabaseHealth::FtsOnlyCorruption(problem) | DatabaseHealth::Corrupt(problem) => {
+                return Err(TraceDecayError::Database {
+                    message: format!("FTS repair did not restore database health: {problem}"),
+                    operation: "repair_fts_offline".to_string(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -807,6 +914,53 @@ impl Database {
         })?;
         Ok(())
     }
+}
+
+async fn database_health(conn: &Connection, operation: &str) -> Result<DatabaseHealth> {
+    let mut rows =
+        conn.query("PRAGMA quick_check", ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to run quick_check: {e}"),
+                operation: operation.to_string(),
+            })?;
+    let mut results = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+        message: format!("failed to read quick_check result: {e}"),
+        operation: operation.to_string(),
+    })? {
+        results.push(
+            row.get::<String>(0)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to decode quick_check result: {e}"),
+                    operation: operation.to_string(),
+                })?,
+        );
+    }
+
+    if results.as_slice() == ["ok"] {
+        return Ok(DatabaseHealth::Healthy);
+    }
+    if !results.is_empty()
+        && results
+            .iter()
+            .all(|result| is_nodes_fts_only_corruption(result))
+    {
+        return Ok(DatabaseHealth::FtsOnlyCorruption(results.join("; ")));
+    }
+    let problem = if results.is_empty() {
+        "PRAGMA quick_check returned no rows".to_string()
+    } else {
+        results.join("; ")
+    };
+    Ok(DatabaseHealth::Corrupt(problem))
+}
+
+fn is_nodes_fts_only_corruption(problem: &str) -> bool {
+    matches!(
+        problem.trim(),
+        NODES_FTS_CORRUPTION | "malformed inverted index for FTS5 table nodes_fts"
+    )
 }
 
 #[cfg(test)]

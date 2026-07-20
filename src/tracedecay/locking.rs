@@ -269,6 +269,14 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
 
 #[doc(hidden)]
 pub fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
+    // The lock may be acquired before anything else has materialized the
+    // store directory (first-touch index, fresh profile data dir); the kernel
+    // lease cannot be taken on a path whose parent does not exist.
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::SyncLock {
+            message: format!("could not create lockfile directory: {error}"),
+        })?;
+    }
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]

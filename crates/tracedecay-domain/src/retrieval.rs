@@ -28,6 +28,8 @@ use crate::session::TemporalModeV1;
 /// subpayload (Plan 15, "typed retrieval contract"). The digest field itself
 /// is excluded from the hashed bytes.
 pub const PR9_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN: &str = "tracedecay.pr9-fallback.v1";
+const RETRIEVAL_SCOPE_DIGEST_DOMAIN: &str = "tracedecay.retrieval-scope.v1";
+const RETRIEVAL_SNAPSHOT_DIGEST_DOMAIN: &str = "tracedecay.retrieval-snapshot.v1";
 
 macro_rules! retrieval_string_id {
     ($($name:ident),+ $(,)?) => {$(
@@ -213,6 +215,12 @@ pub enum RetrievalContractError {
     MixedRetrieverBatch,
     #[error("exact-class candidates require a validated exact admission proof")]
     ExactClassWithoutProof,
+    #[error("only the independent exact lane may attach an exact admission proof")]
+    ExactProofOutsideExactLane,
+    #[error("exact admission proof is not bound to the request {field}")]
+    InvalidExactAdmissionBinding { field: &'static str },
+    #[error("approximate candidates cannot carry an exact-tier admission decision")]
+    UnexpectedExactTierAdmission,
     #[error("batch evidence is missing for a returned occurrence: {field}")]
     MissingOccurrenceEvidence { field: &'static str },
     #[error("batch evidence has no returned occurrence: {field}")]
@@ -310,6 +318,24 @@ pub struct RetrievalScope {
     pub root: SingleRootScopeV1,
 }
 
+#[derive(Serialize)]
+struct RetrievalScopeDigestInput<'a> {
+    domain: &'static str,
+    scope: &'a RetrievalScope,
+}
+
+impl RetrievalScope {
+    pub fn compute_digest(&self) -> Result<CandidateSetDigest, RetrievalContractError> {
+        let input = RetrievalScopeDigestInput {
+            domain: RETRIEVAL_SCOPE_DIGEST_DOMAIN,
+            scope: self,
+        };
+        let digest = canonical_sha256(&input)
+            .map_err(|error| RetrievalContractError::CanonicalSerialization(error.to_string()))?;
+        CandidateSetDigest::new(digest.as_str())
+    }
+}
+
 /// One authorized root: the current-project repository/worktree/ref scope
 /// resolved by the application layer before any lane executes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,6 +355,24 @@ pub struct RetrievalSnapshot {
     pub freshness_digest: FreshnessVectorDigest,
     pub authorization_revision: AuthorizationRevision,
     pub captured_at: UtcMicros,
+}
+
+#[derive(Serialize)]
+struct RetrievalSnapshotDigestInput<'a> {
+    domain: &'static str,
+    snapshot: &'a RetrievalSnapshot,
+}
+
+impl RetrievalSnapshot {
+    pub fn compute_digest(&self) -> Result<CandidateSetDigest, RetrievalContractError> {
+        let input = RetrievalSnapshotDigestInput {
+            domain: RETRIEVAL_SNAPSHOT_DIGEST_DOMAIN,
+            snapshot: self,
+        };
+        let digest = canonical_sha256(&input)
+            .map_err(|error| RetrievalContractError::CanonicalSerialization(error.to_string()))?;
+        CandidateSetDigest::new(digest.as_str())
+    }
 }
 
 /// Per-request bounded work budget (Plan 15: deterministic per-lane work
@@ -473,6 +517,60 @@ pub struct ExactAdmissionProof {
     pub snapshot_digest: CandidateSetDigest,
 }
 
+impl ExactAdmissionProof {
+    /// Validate the pure proof shape before a lane may attach it to a
+    /// candidate. Request-specific scope and snapshot binding is checked by
+    /// the central admission authority before minting the proof.
+    pub fn validate(&self) -> Result<(), RetrievalContractError> {
+        self.rule_revision.validate()?;
+        self.scope_digest.validate()?;
+        self.authorization_revision.validate()?;
+        self.snapshot_digest.validate()?;
+        if self.original_bytes.is_empty() {
+            return Err(RetrievalContractError::Empty {
+                field: "exact admission original bytes",
+            });
+        }
+        if self.canonical_bytes.is_empty() {
+            return Err(RetrievalContractError::Empty {
+                field: "exact admission canonical bytes",
+            });
+        }
+        if self.normalization_steps.iter().any(|step| {
+            step.is_empty()
+                || step.trim() != step
+                || step.len() > 512
+                || step.chars().any(char::is_control)
+        }) {
+            return Err(RetrievalContractError::InvalidIdentity {
+                field: "exact admission normalization step",
+            });
+        }
+        Ok(())
+    }
+
+    /// Confirm that this proof is bound to the authoritative scope,
+    /// authorization revision, and frozen snapshot of `request`.
+    pub fn validate_for_request(
+        &self,
+        request: &RetrievalRequest,
+    ) -> Result<(), RetrievalContractError> {
+        self.validate()?;
+        if self.scope_digest != request.scope.compute_digest()? {
+            return Err(RetrievalContractError::InvalidExactAdmissionBinding { field: "scope" });
+        }
+        if self.authorization_revision != request.snapshot.authorization_revision {
+            return Err(RetrievalContractError::InvalidExactAdmissionBinding {
+                field: "authorization revision",
+            });
+        }
+        if self.snapshot_digest != request.snapshot.compute_digest()? {
+            return Err(RetrievalContractError::InvalidExactAdmissionBinding { field: "snapshot" });
+        }
+        Ok(())
+    }
+}
+
 /// The typed fields eligible for exact admission (Plan 15: exact IDs,
 /// diagnostic codes and text, symbols, CLI flags, quoted literals, paths,
 /// config keys, tool names, commit identifiers, task/session IDs, protocol
@@ -572,6 +670,16 @@ impl<E> RetrieverBatch<E> {
         for (expected_ordinal, candidate) in self.candidates.iter().enumerate() {
             if Some(candidate.retriever) != lane {
                 return Err(RetrievalContractError::MixedRetrieverBatch);
+            }
+            match (candidate.retriever, &candidate.exact_admission_proof) {
+                (RetrieverKind::ExactLiteral, Some(proof)) => proof.validate()?,
+                (RetrieverKind::ExactLiteral, None) => {
+                    return Err(RetrievalContractError::ExactClassWithoutProof);
+                }
+                (_, Some(_)) => {
+                    return Err(RetrievalContractError::ExactProofOutsideExactLane);
+                }
+                (_, None) => {}
             }
             if candidate.ordinal_rank != expected_ordinal as u32 {
                 return Err(RetrievalContractError::NonCanonicalOrder {
@@ -726,12 +834,33 @@ pub struct FusedCandidate {
 
 impl FusedCandidate {
     pub fn validate(&self) -> Result<(), RetrievalContractError> {
-        if self.exact_class != ExactClass::Approximate
-            && !self
-                .decisions
-                .iter()
-                .any(|decision| decision.kind == RankingDecisionKind::ExactTierAdmission)
-        {
+        let exact_decisions = self
+            .decisions
+            .iter()
+            .filter(|decision| decision.kind == RankingDecisionKind::ExactTierAdmission);
+        if self.exact_class == ExactClass::Approximate {
+            if exact_decisions.count() != 0 {
+                return Err(RetrievalContractError::UnexpectedExactTierAdmission);
+            }
+            return Ok(());
+        }
+
+        let mut found_admission = false;
+        for decision in exact_decisions {
+            found_admission = true;
+            let evidence_is_bound = decision.evidence_anchor.as_ref().is_some_and(|anchor| {
+                self.occurrences
+                    .iter()
+                    .any(|occurrence| occurrence.retriever_evidence_anchor == *anchor)
+            });
+            if decision.retriever != Some(RetrieverKind::ExactLiteral)
+                || decision.policy_anchor.is_none()
+                || !evidence_is_bound
+            {
+                return Err(RetrievalContractError::ExactClassWithoutProof);
+            }
+        }
+        if !found_admission {
             return Err(RetrievalContractError::ExactClassWithoutProof);
         }
         Ok(())
@@ -767,6 +896,7 @@ pub enum RankingDecisionKind {
     LogicalCopyRepresentativeSelection,
     ContradictionPreservation,
     DiversityCap,
+    ComparatorProvenance,
     RerankAdmission,
     Fallback,
 }
@@ -896,6 +1026,8 @@ pub struct RetrievalCursor {
     pub public_lane_statuses: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     pub lane_checkpoints: Vec<RetrieverContinuation>,
     pub ranking_revision: RankingRevision,
+    /// First final ordinal in the next page of the frozen candidate set.
+    pub next_ordinal: u32,
     pub expiry: Option<UtcMicros>,
     pub payload_digest: CursorPayloadDigest,
 }

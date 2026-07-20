@@ -417,7 +417,103 @@ pub(crate) fn parse_lcm_scope_arg(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandFamily {
+    Project,
+    Runtime,
+    Agent,
+    Hook,
+    Update,
+    Configuration,
+    Diagnostics,
+    Knowledge,
+}
+
+impl CommandFamily {
+    fn for_command(command: &Commands) -> Self {
+        match command {
+            Commands::Init { .. }
+            | Commands::Sync { .. }
+            | Commands::Status { .. }
+            | Commands::Projects { .. }
+            | Commands::Branch { .. }
+            | Commands::Memory { .. }
+            | Commands::Migrate { .. }
+            | Commands::Wipe { .. }
+            | Commands::List { .. } => Self::Project,
+            Commands::Tool { .. }
+            | Commands::Lsp { .. }
+            | Commands::ExtractWorker
+            | Commands::Dashboard { .. }
+            | Commands::Serve { .. }
+            | Commands::Daemon { .. } => Self::Runtime,
+            Commands::Install { .. }
+            | Commands::Reinstall
+            | Commands::UpdatePlugin
+            | Commands::Uninstall { .. } => Self::Agent,
+            Commands::HookPreToolUse
+            | Commands::HookPromptSubmit
+            | Commands::HookStop
+            | Commands::HookClaudeSessionStart
+            | Commands::HookClaudePostToolUse
+            | Commands::HookClaudeSubagentStart
+            | Commands::HookKiroPreToolUse
+            | Commands::HookKiroPromptSubmit
+            | Commands::HookKiroPostToolUse
+            | Commands::HookCursorSubagentStart
+            | Commands::HookCursorPostToolUse
+            | Commands::HookCursorBeforeSubmitPrompt
+            | Commands::HookCursorPreCompact
+            | Commands::HookCursorAfterFileEdit
+            | Commands::HookCursorSessionStart
+            | Commands::HookCursorSessionEnd
+            | Commands::HookCursorAfterShell
+            | Commands::HookCursorWorkspaceOpen
+            | Commands::HookCursorStop
+            | Commands::HookCodexSessionStart
+            | Commands::HookCodexUserPromptSubmit
+            | Commands::HookCodexSubagentStart
+            | Commands::HookCodexPostToolUse
+            | Commands::HookCodexPostCompact
+            | Commands::HookCodexStop
+            | Commands::HookHermesTerminalReceipt
+            | Commands::HookUserSessionReview => Self::Hook,
+            Commands::Upgrade { .. }
+            | Commands::Update { .. }
+            | Commands::Dogfood
+            | Commands::PostUpdate { .. }
+            | Commands::Channel { .. } => Self::Update,
+            Commands::CurrentCounter { .. }
+            | Commands::ResetCounter { .. }
+            | Commands::DisableUploadCounter
+            | Commands::EnableUploadCounter
+            | Commands::Gitignore { .. } => Self::Configuration,
+            Commands::Doctor { .. }
+            | Commands::Cost { .. }
+            | Commands::Bench { .. }
+            | Commands::Gain { .. }
+            | Commands::Monitor => Self::Diagnostics,
+            Commands::Sessions { .. }
+            | Commands::Analytics { .. }
+            | Commands::Automation { .. } => Self::Knowledge,
+        }
+    }
+}
+
 async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
+    match CommandFamily::for_command(&command) {
+        CommandFamily::Project => dispatch_project_command(command).await,
+        CommandFamily::Runtime => dispatch_runtime_command(command).await,
+        CommandFamily::Agent => dispatch_agent_command(command).await,
+        CommandFamily::Hook => dispatch_hook_command(command).await,
+        CommandFamily::Update => dispatch_update_command(command).await,
+        CommandFamily::Configuration => dispatch_configuration_command(command).await,
+        CommandFamily::Diagnostics => dispatch_diagnostics_command(command).await,
+        CommandFamily::Knowledge => dispatch_knowledge_command(command).await,
+    }
+}
+
+async fn dispatch_project_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
         Commands::Init {
             path,
@@ -457,6 +553,88 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             )
             .await?;
         }
+        Commands::Projects { action } => {
+            project_cmd::handle_projects_action(action).await?;
+        }
+        Commands::Branch { action } => {
+            commands::handle_branch_action(action).await?;
+        }
+        Commands::Memory { action } => {
+            dispatch_memory_command(action).await?;
+        }
+        Commands::Migrate { action } => {
+            commands::handle_migrate_action(action).await?;
+        }
+        Commands::Wipe { all } => {
+            commands::handle_wipe(all).await?;
+        }
+        Commands::List { all } => {
+            commands::handle_list(all).await?;
+        }
+        _ => unreachable!("non-project command passed to project dispatcher"),
+    }
+    Ok(())
+}
+
+async fn dispatch_memory_command(action: MemoryAction) -> tracedecay::errors::Result<()> {
+    match action {
+        MemoryAction::Status {
+            json,
+            path,
+            project_id,
+            project_path,
+        } => {
+            let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
+            let result = commands::daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_admin_project",
+                serde_json::json!({ "action": "memory_status" }),
+            )
+            .await?;
+            let status: tracedecay::memory::types::MemoryStatus =
+                serde_json::from_value(result.get("status").cloned().ok_or_else(|| {
+                    tracedecay::errors::TraceDecayError::Config {
+                        message: "daemon memory response omitted status".to_string(),
+                    }
+                })?)?;
+            let largest_bank_fact_count = result
+                .get("largest_bank_fact_count")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon memory response omitted largest bank count".to_string(),
+                })?;
+            let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
+                largest_bank_fact_count as f64 / status.estimated_capacity as f64 * 100.0
+            } else {
+                0.0
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "memory": status,
+                        "largest_bank_fact_count": largest_bank_fact_count,
+                        "largest_bank_utilization_pct": largest_bank_utilization_pct,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else {
+                print!(
+                    "{}",
+                    status_cmd::format_memory_status_report(&status, largest_bank_fact_count)
+                );
+            }
+        }
+        other => {
+            commands::handle_memory_action(other).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Result<()> {
+    match command {
         Commands::Tool {
             project,
             name,
@@ -467,63 +645,10 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         Commands::Lsp { action } => {
             lsp_cmd::handle_lsp_action(action)?;
         }
-        Commands::Install {
-            agent,
-            local,
-            no_dashboard,
-            automation,
-            auto_apply,
-        } => {
-            agent_cmd::handle_install_command(
-                agent,
-                local,
-                no_dashboard,
-                automation.then_some(agent_cmd::CodexAutomationInstall { auto_apply }),
-            )
-            .await?;
-        }
-        Commands::Reinstall => {
-            agent_cmd::handle_reinstall_command().await?;
-        }
-        Commands::UpdatePlugin => {
-            update_cmd::refresh_generated_plugins().await?;
-        }
-        Commands::Uninstall { agent } => {
-            agent_cmd::handle_uninstall_command(agent).await?;
-        }
         Commands::ExtractWorker => {
             // Handled by the early dispatch at the top of run(); this arm
             // exists only for clap match exhaustiveness.
             unreachable!("extract-worker handled by early dispatch")
-        }
-        hook_command @ (Commands::HookPreToolUse
-        | Commands::HookPromptSubmit
-        | Commands::HookStop
-        | Commands::HookClaudeSessionStart
-        | Commands::HookClaudePostToolUse
-        | Commands::HookClaudeSubagentStart
-        | Commands::HookKiroPreToolUse
-        | Commands::HookKiroPromptSubmit
-        | Commands::HookKiroPostToolUse
-        | Commands::HookCursorSubagentStart
-        | Commands::HookCursorPostToolUse
-        | Commands::HookCursorBeforeSubmitPrompt
-        | Commands::HookCursorPreCompact
-        | Commands::HookCursorAfterFileEdit
-        | Commands::HookCursorSessionStart
-        | Commands::HookCursorSessionEnd
-        | Commands::HookCursorAfterShell
-        | Commands::HookCursorWorkspaceOpen
-        | Commands::HookCursorStop
-        | Commands::HookCodexSessionStart
-        | Commands::HookCodexUserPromptSubmit
-        | Commands::HookCodexSubagentStart
-        | Commands::HookCodexPostToolUse
-        | Commands::HookCodexPostCompact
-        | Commands::HookCodexStop
-        | Commands::HookHermesTerminalReceipt
-        | Commands::HookUserSessionReview) => {
-            hook_cmd::handle_hook_command(hook_command).await?;
         }
         Commands::Dashboard {
             path,
@@ -573,42 +698,123 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             tracedecay::global_db::mark_process_long_lived_for_structured_backfill();
             serve::run_serve(path, timings).await?;
         }
-        Commands::Daemon { action } => match action {
-            DaemonAction::Run { socket } => {
-                // Long-lived host: allowed to run the structured-row sweep.
-                tracedecay::global_db::mark_process_long_lived_for_structured_backfill();
-                let socket_path = tracedecay::daemon::socket_path_or_default(socket)?;
-                tracedecay::daemon::run_foreground(socket_path).await?;
-            }
-            DaemonAction::InstallService { socket, no_start } => {
-                let tracedecay_bin = tracedecay::agents::which_tracedecay().ok_or_else(|| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: "tracedecay not found on PATH".to_string(),
-                    }
-                })?;
-                let spec = tracedecay::daemon::service_spec(tracedecay_bin, socket)?;
-                let service_path = tracedecay::daemon::install_service(&spec, !no_start)?;
-                eprintln!(
-                    "Installed TraceDecay daemon service at {}",
-                    service_path.display()
-                );
-                eprintln!("Daemon socket: {}", spec.socket_path.display());
-            }
-            DaemonAction::UninstallService { no_stop } => {
-                let service_path = tracedecay::daemon::uninstall_service(!no_stop)?;
-                eprintln!(
-                    "Removed TraceDecay daemon service at {}",
-                    service_path.display()
-                );
-            }
-            DaemonAction::Restart => {
-                update_cmd::restart_daemon_service()?;
-            }
-            DaemonAction::Status => {
-                let socket_path = tracedecay::daemon::socket_path_or_default(None)?;
-                print!("{}", tracedecay::daemon::service_status(&socket_path));
-            }
-        },
+        Commands::Daemon { action } => {
+            dispatch_daemon_command(action).await?;
+        }
+        _ => unreachable!("non-runtime command passed to runtime dispatcher"),
+    }
+    Ok(())
+}
+
+async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Result<()> {
+    match action {
+        DaemonAction::Run { socket } => {
+            // Long-lived host: allowed to run the structured-row sweep.
+            tracedecay::global_db::mark_process_long_lived_for_structured_backfill();
+            let socket_path = tracedecay::daemon::socket_path_or_default(socket)?;
+            tracedecay::daemon::run_foreground(socket_path).await?;
+        }
+        DaemonAction::InstallService { socket, no_start } => {
+            let tracedecay_bin = tracedecay::agents::which_tracedecay().ok_or_else(|| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message: "tracedecay not found on PATH".to_string(),
+                }
+            })?;
+            let spec = tracedecay::daemon::service_spec(tracedecay_bin, socket)?;
+            let service_path = tracedecay::daemon::install_service(&spec, !no_start)?;
+            eprintln!(
+                "Installed TraceDecay daemon service at {}",
+                service_path.display()
+            );
+            eprintln!("Daemon socket: {}", spec.socket_path.display());
+        }
+        DaemonAction::UninstallService { no_stop } => {
+            let service_path = tracedecay::daemon::uninstall_service(!no_stop)?;
+            eprintln!(
+                "Removed TraceDecay daemon service at {}",
+                service_path.display()
+            );
+        }
+        DaemonAction::Restart => {
+            update_cmd::restart_daemon_service()?;
+        }
+        DaemonAction::Status => {
+            let socket_path = tracedecay::daemon::socket_path_or_default(None)?;
+            print!("{}", tracedecay::daemon::service_status(&socket_path));
+        }
+    }
+    Ok(())
+}
+
+async fn dispatch_agent_command(command: Commands) -> tracedecay::errors::Result<()> {
+    match command {
+        Commands::Install {
+            agent,
+            local,
+            no_dashboard,
+            automation,
+            auto_apply,
+        } => {
+            agent_cmd::handle_install_command(
+                agent,
+                local,
+                no_dashboard,
+                automation.then_some(agent_cmd::CodexAutomationInstall { auto_apply }),
+            )
+            .await?;
+        }
+        Commands::Reinstall => {
+            agent_cmd::handle_reinstall_command().await?;
+        }
+        Commands::UpdatePlugin => {
+            update_cmd::refresh_generated_plugins().await?;
+        }
+        Commands::Uninstall { agent } => {
+            agent_cmd::handle_uninstall_command(agent).await?;
+        }
+        _ => unreachable!("non-agent command passed to agent dispatcher"),
+    }
+    Ok(())
+}
+
+async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<()> {
+    match command {
+        hook_command @ (Commands::HookPreToolUse
+        | Commands::HookPromptSubmit
+        | Commands::HookStop
+        | Commands::HookClaudeSessionStart
+        | Commands::HookClaudePostToolUse
+        | Commands::HookClaudeSubagentStart
+        | Commands::HookKiroPreToolUse
+        | Commands::HookKiroPromptSubmit
+        | Commands::HookKiroPostToolUse
+        | Commands::HookCursorSubagentStart
+        | Commands::HookCursorPostToolUse
+        | Commands::HookCursorBeforeSubmitPrompt
+        | Commands::HookCursorPreCompact
+        | Commands::HookCursorAfterFileEdit
+        | Commands::HookCursorSessionStart
+        | Commands::HookCursorSessionEnd
+        | Commands::HookCursorAfterShell
+        | Commands::HookCursorWorkspaceOpen
+        | Commands::HookCursorStop
+        | Commands::HookCodexSessionStart
+        | Commands::HookCodexUserPromptSubmit
+        | Commands::HookCodexSubagentStart
+        | Commands::HookCodexPostToolUse
+        | Commands::HookCodexPostCompact
+        | Commands::HookCodexStop
+        | Commands::HookHermesTerminalReceipt
+        | Commands::HookUserSessionReview) => {
+            hook_cmd::handle_hook_command(hook_command).await?;
+        }
+        _ => unreachable!("non-hook command passed to hook dispatcher"),
+    }
+    Ok(())
+}
+
+async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Result<()> {
+    match command {
         Commands::Upgrade {
             no_heal,
             no_reinstall,
@@ -646,6 +852,13 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             }
             None => tracedecay::upgrade::show_channel(),
         },
+        _ => unreachable!("non-update command passed to update dispatcher"),
+    }
+    Ok(())
+}
+
+async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors::Result<()> {
+    match command {
         Commands::CurrentCounter { path } => {
             let project_path = tracedecay::config::resolve_path(path);
             let result = commands::daemon_tool_json(
@@ -693,6 +906,13 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         Commands::Gitignore { path, action } => {
             commands::handle_gitignore(path, action).await?;
         }
+        _ => unreachable!("non-configuration command passed to configuration dispatcher"),
+    }
+    Ok(())
+}
+
+async fn dispatch_diagnostics_command(command: Commands) -> tracedecay::errors::Result<()> {
+    match command {
         Commands::Doctor { agent } => {
             tracedecay::doctor::run_doctor(agent.as_deref()).await?;
         }
@@ -726,6 +946,13 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 process::exit(1);
             }
         }
+        _ => unreachable!("non-diagnostics command passed to diagnostics dispatcher"),
+    }
+    Ok(())
+}
+
+async fn dispatch_knowledge_command(command: Commands) -> tracedecay::errors::Result<()> {
+    match command {
         Commands::Sessions { action } => {
             sessions_cmd::handle_sessions_action(action).await?;
         }
@@ -737,77 +964,10 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 tracedecay::analytics_bridge::run_analytics_sync().await?;
             }
         },
-        Commands::Projects { action } => {
-            project_cmd::handle_projects_action(action).await?;
-        }
-        Commands::Branch { action } => {
-            commands::handle_branch_action(action).await?;
-        }
-        Commands::Memory { action } => match action {
-            MemoryAction::Status {
-                json,
-                path,
-                project_id,
-                project_path,
-            } => {
-                let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
-                let result = commands::daemon_tool_json(
-                    Some(&project_path),
-                    "tracedecay_admin_project",
-                    serde_json::json!({ "action": "memory_status" }),
-                )
-                .await?;
-                let status: tracedecay::memory::types::MemoryStatus =
-                    serde_json::from_value(result.get("status").cloned().ok_or_else(|| {
-                        tracedecay::errors::TraceDecayError::Config {
-                            message: "daemon memory response omitted status".to_string(),
-                        }
-                    })?)?;
-                let largest_bank_fact_count = result
-                    .get("largest_bank_fact_count")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok())
-                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                        message: "daemon memory response omitted largest bank count".to_string(),
-                    })?;
-                let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
-                    largest_bank_fact_count as f64 / status.estimated_capacity as f64 * 100.0
-                } else {
-                    0.0
-                };
-                if json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "memory": status,
-                            "largest_bank_fact_count": largest_bank_fact_count,
-                            "largest_bank_utilization_pct": largest_bank_utilization_pct,
-                        }))
-                        .unwrap_or_default()
-                    );
-                } else {
-                    print!(
-                        "{}",
-                        status_cmd::format_memory_status_report(&status, largest_bank_fact_count)
-                    );
-                }
-            }
-            other => {
-                commands::handle_memory_action(other).await?;
-            }
-        },
         Commands::Automation { action } => {
             automation_cli::handle_automation_command(action).await?;
         }
-        Commands::Migrate { action } => {
-            commands::handle_migrate_action(action).await?;
-        }
-        Commands::Wipe { all } => {
-            commands::handle_wipe(all).await?;
-        }
-        Commands::List { all } => {
-            commands::handle_list(all).await?;
-        }
+        _ => unreachable!("non-knowledge command passed to knowledge dispatcher"),
     }
     Ok(())
 }

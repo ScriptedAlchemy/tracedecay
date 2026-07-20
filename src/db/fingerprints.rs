@@ -69,6 +69,44 @@ impl Database {
         }
     }
 
+    /// Fetch cached fingerprints for the requested node ids in one query.
+    ///
+    /// The JSON parameter keeps the query to one bound value regardless of
+    /// candidate count, while the `json_each` subquery bounds returned rows to
+    /// the requested ids instead of materializing the full fingerprint table.
+    /// Missing ids are omitted and row order is unspecified.
+    pub async fn get_fingerprints(&self, node_ids: &[String]) -> Result<Vec<StoredFingerprint>> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let node_ids_json =
+            serde_json::to_string(node_ids).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to encode fingerprint node ids: {e}"),
+                operation: "get_fingerprints".to_string(),
+            })?;
+        let mut rows = self
+            .conn()
+            .query(
+                "SELECT node_id, ast_hash, cfg_hash, call_seq_hash, shingles, body_tokens, source_hash
+                   FROM node_fingerprints
+                  WHERE node_id IN (SELECT value FROM json_each(?1))",
+                params![node_ids_json],
+            )
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to bulk query fingerprints: {e}"),
+                operation: "get_fingerprints".to_string(),
+            })?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read bulk fingerprint row: {e}"),
+            operation: "get_fingerprints".to_string(),
+        })? {
+            out.push(row_to_fingerprint(&row)?);
+        }
+        Ok(out)
+    }
+
     /// Fetch cached fingerprint rows whose `body_tokens` fall inside the
     /// inclusive `[lo, hi]` window, capped at `limit` rows.
     ///
@@ -173,4 +211,97 @@ fn row_to_fingerprint(row: &libsql::Row) -> Result<StoredFingerprint> {
             operation: "row_to_fingerprint".to_string(),
         })?,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::Database;
+    use crate::db::{DatabaseAuthority, StoredFingerprint};
+    use crate::redundancy::Fingerprint;
+    use crate::types::{Node, NodeKind, Visibility};
+
+    fn test_node(id: &str) -> Node {
+        Node {
+            id: id.to_string(),
+            kind: NodeKind::Function,
+            name: id.to_string(),
+            qualified_name: id.to_string(),
+            file_path: "src/lib.rs".to_string(),
+            start_line: 0,
+            attrs_start_line: 0,
+            end_line: 8,
+            start_column: 0,
+            end_column: 1,
+            signature: None,
+            docstring: None,
+            visibility: Visibility::default(),
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            updated_at: 0,
+            parent_id: None,
+        }
+    }
+
+    fn test_fingerprint(id: &str) -> Fingerprint {
+        Fingerprint {
+            ast_hash: format!("ast-{id}"),
+            cfg_hash: format!("cfg-{id}"),
+            call_seq_hash: format!("call-{id}"),
+            shingles: vec![1, 2, 3],
+            body_tokens: 42,
+            source_hash: format!("source-{id}"),
+        }
+    }
+
+    async fn seeded_database() -> (tempfile::TempDir, Database) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority =
+            DatabaseAuthority::acquire_test(&path, "fingerprint bulk read tests").unwrap();
+        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        for id in ["alpha", "beta", "gamma"] {
+            db.insert_node(&test_node(id)).await.unwrap();
+            db.upsert_fingerprint(id, &test_fingerprint(id))
+                .await
+                .unwrap();
+        }
+        (temp, db)
+    }
+
+    fn by_id(rows: Vec<StoredFingerprint>) -> std::collections::HashMap<String, StoredFingerprint> {
+        rows.into_iter()
+            .map(|fingerprint| (fingerprint.node_id.clone(), fingerprint))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn bulk_read_returns_only_requested_fingerprints() {
+        let (_temp, db) = seeded_database().await;
+        let requested = vec![
+            "beta".to_string(),
+            "missing".to_string(),
+            "alpha".to_string(),
+        ];
+
+        let rows = by_id(db.get_fingerprints(&requested).await.unwrap());
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows["alpha"].source_hash, "source-alpha");
+        assert_eq!(rows["beta"].source_hash, "source-beta");
+        assert!(!rows.contains_key("gamma"));
+    }
+
+    #[tokio::test]
+    async fn bulk_read_short_circuits_an_empty_request() {
+        let (_temp, db) = seeded_database().await;
+
+        assert!(db.get_fingerprints(&[]).await.unwrap().is_empty());
+    }
 }

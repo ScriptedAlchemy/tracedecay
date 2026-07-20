@@ -34,10 +34,12 @@ const PR8_WORKSPACE_MANIFESTS: &[&str] = &[
 ];
 const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-domain|tracedecay_domain|lib|crates/tracedecay-domain/src/lib.rs",
+    "tracedecay-domain|code_search_contract|test|crates/tracedecay-domain/tests/code_search_contract.rs",
     "tracedecay-domain|integration_catalog_contract|test|crates/tracedecay-domain/tests/integration_catalog_contract.rs",
     "tracedecay-domain|observation_contract|test|crates/tracedecay-domain/tests/observation_contract.rs",
     "tracedecay-domain|session_contract|test|crates/tracedecay-domain/tests/session_contract.rs",
     "tracedecay-store|tracedecay_store|lib|crates/tracedecay-store/src/lib.rs",
+    "tracedecay-store|diagnostics_contract|test|crates/tracedecay-store/tests/diagnostics_contract.rs",
     "tracedecay-store|session_contract|test|crates/tracedecay-store/tests/session_contract.rs",
     "tracedecay|tracedecay|lib|src/lib.rs",
     "tracedecay|tracedecay|bin|src/main.rs",
@@ -45,6 +47,8 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay|agent_suite|test|tests/agent_suite/main.rs",
     "tracedecay|architecture_boundaries|test|tests/architecture_boundaries/main.rs",
     "tracedecay|automation_runner_test|test|tests/automation_runner_test/main.rs",
+    "tracedecay|code_index_chunks|bench|benches/code_index_chunks.rs",
+    "tracedecay|code_index_suite|test|tests/code_index_suite/main.rs",
     "tracedecay|core_cli_suite|test|tests/core_cli_suite/main.rs",
     "tracedecay|cross_host_handoff_test|test|tests/cross_host_handoff_test.rs",
     "tracedecay|daemon_fault_harness_test|test|tests/daemon_fault_harness_test.rs",
@@ -58,6 +62,10 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay|lcm_gc_report_compat|test|tests/lcm_gc_report_compat.rs",
     "tracedecay|mcp_suite|test|tests/mcp_suite/main.rs",
     "tracedecay|memory_suite|test|tests/memory_suite/main.rs",
+    "tracedecay|pr10_artifact_runtime_prep_test|test|tests/pr10_artifact_runtime_prep_test.rs",
+    "tracedecay|pr10_vector_generation_prep_test|test|tests/pr10_vector_generation_prep_test.rs",
+    "tracedecay|search_quality_suite|test|tests/search_quality_suite/main.rs",
+    "tracedecay|semantic_search_suite|test|tests/semantic_search_suite/main.rs",
     "tracedecay|session_suite|test|tests/session_suite/main.rs",
     "tracedecay|storage_suite|test|tests/storage_suite/main.rs",
     "tracedecay|tool_client_transport|test|tests/tool_client_transport.rs",
@@ -95,6 +103,17 @@ const INTENTIONAL_STANDALONE_RUST_INPUTS: &[&str] = &[
     "tests/fixtures/context_eval_project/src/storage/cache.rs",
     "tests/fixtures/context_eval_project/src/storage/config_store.rs",
     "tests/fixtures/context_eval_project/src/storage/mod.rs",
+    // Search-quality evaluation corpus: sample project sources indexed by the
+    // PR9 search-eval harness. Deliberately source input, not crate modules.
+    "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/integration.rs",
+    "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/repository.rs",
+    "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/canonical.rs",
+    "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/coverage.rs",
+    "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/error.rs",
+    "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/id.rs",
+    "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/time.rs",
+    "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs",
+    "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs",
 ];
 
 #[derive(Debug, Deserialize)]

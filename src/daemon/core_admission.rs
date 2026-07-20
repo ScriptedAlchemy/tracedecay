@@ -1,7 +1,9 @@
 //! Daemon client admission: shared client deadlines, capacity admission, and
 //! typed saturation rejections.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, Weak};
 
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
@@ -15,6 +17,9 @@ use crate::mcp::ErrorCode;
 
 pub(crate) const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
 pub(crate) const RESERVED_DAEMON_CONTROL_CLIENTS: usize = 4;
+/// Allows one proxy meaningful parallelism while preventing it from occupying
+/// more than 8 of the 60 general slots.
+pub(crate) const MAX_CONCURRENT_REQUESTS_PER_DAEMON_CLIENT: usize = 8;
 pub(crate) const DAEMON_SATURATION_RESPONSE_DEADLINE: Duration = Duration::from_millis(250);
 
 /// One monotonic wall-clock budget shared across daemon client connect, write,
@@ -93,6 +98,26 @@ pub(crate) enum DaemonClientAdmissionOutcome {
     Saturated(DaemonClientSaturationResponse),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DaemonClientFairnessKey {
+    profile_root: PathBuf,
+    global_db_path: PathBuf,
+    client_instance_id: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct DaemonPerClientAdmission {
+    /// Weak entries retain no client state after the last in-flight lease.
+    /// Reconnects with the same validated process id reuse the live semaphore.
+    clients: Arc<Mutex<HashMap<DaemonClientFairnessKey, Weak<tokio::sync::Semaphore>>>>,
+    capacity: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct DaemonPerClientPermit {
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DaemonClientSaturationResponse {
     pub(crate) kind: DaemonClientSaturationKind,
@@ -104,7 +129,94 @@ pub(crate) struct DaemonClientSaturationResponse {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DaemonClientSaturationKind {
     ClientCapacityReached,
+    PerClientCapacityReached,
     BulkCapacityReached,
+}
+
+impl Default for DaemonPerClientAdmission {
+    fn default() -> Self {
+        Self::new(MAX_CONCURRENT_REQUESTS_PER_DAEMON_CLIENT)
+    }
+}
+
+impl DaemonPerClientAdmission {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            capacity,
+        }
+    }
+
+    pub(crate) fn try_admit(
+        &self,
+        handshake: &DaemonHandshake,
+    ) -> std::result::Result<DaemonPerClientPermit, DaemonClientSaturationResponse> {
+        if !valid_client_instance_id(&handshake.client_instance_id) {
+            return Ok(DaemonPerClientPermit { _permit: None });
+        }
+        let key = DaemonClientFairnessKey {
+            profile_root: handshake.client_identity.profile_root.clone(),
+            global_db_path: handshake.client_identity.global_db_path.clone(),
+            client_instance_id: handshake.client_instance_id.clone(),
+        };
+        let semaphore = {
+            let mut clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            clients.retain(|_, semaphore| semaphore.strong_count() > 0);
+            clients
+                .get(&key)
+                .and_then(Weak::upgrade)
+                .unwrap_or_else(|| {
+                    let semaphore = Arc::new(tokio::sync::Semaphore::new(self.capacity));
+                    clients.insert(key, Arc::downgrade(&semaphore));
+                    semaphore
+                })
+        };
+        Arc::clone(&semaphore)
+            .try_acquire_owned()
+            .map(|permit| DaemonPerClientPermit {
+                _permit: Some(permit),
+            })
+            .map_err(|_| DaemonClientSaturationResponse {
+                kind: DaemonClientSaturationKind::PerClientCapacityReached,
+                retryable: true,
+                capacity: self.capacity,
+            })
+    }
+
+    pub(crate) fn try_admit_request(
+        &self,
+        handshake: &DaemonHandshake,
+        request_line: &str,
+    ) -> std::result::Result<DaemonPerClientPermit, DaemonClientSaturationResponse> {
+        if is_reserved_control_request(request_line) {
+            return Ok(DaemonPerClientPermit { _permit: None });
+        }
+        self.try_admit(handshake)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_client_count(&self) -> usize {
+        let mut clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clients.retain(|_, semaphore| semaphore.strong_count() > 0);
+        clients.len()
+    }
+}
+
+pub(crate) fn valid_client_instance_id(client_instance_id: &str) -> bool {
+    let bytes = client_instance_id.as_bytes();
+    (bytes.len() == 32
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)))
+        || client_instance_id.strip_prefix("mcp-").is_some_and(|tail| {
+            !tail.is_empty() && tail.len() <= 20 && tail.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 impl DaemonClientAdmission {
@@ -151,6 +263,9 @@ impl DaemonClientSaturationResponse {
     pub(crate) fn into_json_rpc_with_id(self, id: serde_json::Value) -> JsonRpcResponse {
         let message = match self.kind {
             DaemonClientSaturationKind::ClientCapacityReached => "daemon client capacity reached",
+            DaemonClientSaturationKind::PerClientCapacityReached => {
+                "daemon per-client capacity reached; retry after this client's active requests finish"
+            }
             DaemonClientSaturationKind::BulkCapacityReached => {
                 "daemon bulk capacity reached; reserved capacity is limited to health and status"
             }
@@ -193,17 +308,36 @@ pub(crate) async fn reject_reserved_bulk_request(
     request_line: &str,
     capacity: usize,
 ) -> Result<()> {
+    reject_admitted_request(
+        transport,
+        request_line,
+        DaemonClientSaturationResponse {
+            kind: DaemonClientSaturationKind::BulkCapacityReached,
+            retryable: true,
+            capacity,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn reject_admitted_request(
+    transport: &mut impl crate::mcp::McpTransport,
+    request_line: &str,
+    saturation: DaemonClientSaturationResponse,
+) -> Result<()> {
+    let outcome = match saturation.kind {
+        DaemonClientSaturationKind::ClientCapacityReached => "client_capacity_reached",
+        DaemonClientSaturationKind::PerClientCapacityReached => "per_client_capacity_reached",
+        DaemonClientSaturationKind::BulkCapacityReached => "bulk_capacity_reached",
+    };
     let request_id = serde_json::from_str::<JsonRpcRequest>(request_line)
         .ok()
         .and_then(|request| request.id)
         .unwrap_or(serde_json::Value::Null);
-    let response = DaemonClientSaturationResponse {
-        kind: DaemonClientSaturationKind::BulkCapacityReached,
-        retryable: true,
-        capacity,
-    }
-    .into_json_rpc_with_id(request_id);
-    write_json_rpc_response(transport, &response).await
+    let response = saturation.into_json_rpc_with_id(request_id);
+    write_json_rpc_response(transport, &response).await?;
+    log_daemon_event("daemon_client", &[("outcome", outcome.to_string())]);
+    Ok(())
 }
 
 async fn saturated_request_id(

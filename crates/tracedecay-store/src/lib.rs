@@ -4,12 +4,17 @@
 //! Connection ownership, transaction boundaries, recovery policy, and storage
 //! resolution remain with the application crate's authoritative store adapter.
 
+pub mod diagnostics;
 pub mod memory;
 pub mod observation;
 pub mod projection;
 pub mod session;
 pub mod transcript;
 
+pub use diagnostics::{
+    DiagnosticPublicationDispositionV1, DiagnosticPublicationReceiptV1, DiagnosticStore,
+    DiagnosticStoreError, DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1,
+};
 pub use memory::{
     CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,
     CompatibilityDashboardFactDetailV1, CompatibilityDashboardFactEntityLinkV1,

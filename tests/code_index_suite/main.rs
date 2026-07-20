@@ -1,0 +1,16 @@
+mod architecture_boundaries;
+mod benchmark_contract;
+mod chunk_incremental;
+mod contract_spine;
+mod deterministic_extraction;
+mod diagnostic_generation;
+mod generations;
+mod git_joins;
+mod language_registry;
+mod lineage;
+mod projection_receipts;
+mod sanitized_intake;
+mod search_chunks;
+mod support;
+mod test_attribution;
+mod v1_migration;

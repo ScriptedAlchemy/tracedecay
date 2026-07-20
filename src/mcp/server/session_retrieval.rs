@@ -26,6 +26,11 @@ use crate::application::session::{
     SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
+use crate::daemon::session_temporal_refresh_scheduler::{
+    SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
+    SessionTemporalRefreshUnavailableReason, SessionTemporalRefreshWake,
+    SessionTemporalRefreshWorkerStatus,
+};
 use crate::global_db::{
     AuthorizedSessionDescribeRequest, AuthorizedSessionExpandCursorBinding,
     AuthorizedSessionExpandRequest, CompatibilityReadError, CompatibilityTemporalMetadata,
@@ -36,7 +41,9 @@ use crate::mcp::tools::{
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
     SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
     SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalStoreScope, SessionTemporalMetadataView, SessionTemporalWatermarksView,
+    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
+    SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
+    SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
 use crate::query::temporal::TemporalKernelResult;
 use crate::query::temporal::context::{TokenPolicy, VersionedTokenEstimator};
@@ -253,11 +260,44 @@ impl SessionScopeAuthorizer for DaemonSessionRetrievalAuthorizer {
     }
 }
 
+fn session_retrieval_worker_status(
+    status: SessionTemporalRefreshWorkerStatus,
+) -> SessionRetrievalWorkerStatusView {
+    SessionRetrievalWorkerStatusView {
+        last_progress_at_unix_micros: status.last_progress_at_unix_micros,
+        backlog: status.backlog,
+        blocker: status.blocker.map(|blocker| match blocker {
+            SessionTemporalRefreshBlocker::WorkerMissing => {
+                SessionRetrievalWorkerBlocker::WorkerMissing
+            }
+            SessionTemporalRefreshBlocker::WorkerPanicked => {
+                SessionRetrievalWorkerBlocker::WorkerPanicked
+            }
+            SessionTemporalRefreshBlocker::WorkerStopped => {
+                SessionRetrievalWorkerBlocker::WorkerStopped
+            }
+            SessionTemporalRefreshBlocker::Storage => SessionRetrievalWorkerBlocker::Storage,
+            SessionTemporalRefreshBlocker::Projector => SessionRetrievalWorkerBlocker::Projector,
+            SessionTemporalRefreshBlocker::Deadline => SessionRetrievalWorkerBlocker::Deadline,
+        }),
+        retry_class: status.retry_class.map(|retry_class| match retry_class {
+            SessionTemporalRefreshRetryClass::Storage => SessionRetrievalWorkerRetryClass::Storage,
+            SessionTemporalRefreshRetryClass::Projector => {
+                SessionRetrievalWorkerRetryClass::Projector
+            }
+            SessionTemporalRefreshRetryClass::Deadline => {
+                SessionRetrievalWorkerRetryClass::Deadline
+            }
+        }),
+    }
+}
+
 pub(crate) struct DaemonSessionRetrievalService {
     database: Arc<GlobalDb>,
     root: DaemonSessionRetrievalRoot,
     configuration: SessionRetrievalConfiguration,
     calls: Arc<AtomicU64>,
+    refresh_status: Option<SessionTemporalRefreshWake>,
 }
 
 impl DaemonSessionRetrievalService {
@@ -265,6 +305,7 @@ impl DaemonSessionRetrievalService {
         database: Arc<GlobalDb>,
         root: DaemonSessionRetrievalRoot,
         calls: Arc<AtomicU64>,
+        refresh_status: Option<SessionTemporalRefreshWake>,
     ) -> Option<Self> {
         Some(Self {
             database,
@@ -275,6 +316,26 @@ impl DaemonSessionRetrievalService {
             )
             .ok()?,
             calls,
+            refresh_status,
+        })
+    }
+
+    fn refresh_unavailable(&self) -> Option<SessionRetrievalUnavailable> {
+        let status = self.refresh_status.as_ref()?.status();
+        let unavailable = status.unavailable_reason?;
+        Some(SessionRetrievalUnavailable {
+            reason: match unavailable {
+                SessionTemporalRefreshUnavailableReason::Missing => {
+                    SessionRetrievalUnavailableReason::RefreshWorkerMissing
+                }
+                SessionTemporalRefreshUnavailableReason::Recovering => {
+                    SessionRetrievalUnavailableReason::RefreshWorkerRecovering
+                }
+                SessionTemporalRefreshUnavailableReason::Stopped => {
+                    SessionRetrievalUnavailableReason::RefreshWorkerStopped
+                }
+            },
+            worker: Some(session_retrieval_worker_status(status)),
         })
     }
 
@@ -313,6 +374,12 @@ impl DaemonSessionRetrievalService {
         &self,
         command: SessionRetrievalCommand,
     ) -> SessionRetrievalServiceOutcome {
+        if let Some(unavailable) = self.refresh_unavailable() {
+            return SessionRetrievalServiceOutcome::Unavailable(unavailable);
+        }
+        // Count commands the service answers past the fast-path gate,
+        // including wrong-scope rejections: the counter proves the transport
+        // selected this service for the answer.
         self.calls.fetch_add(1, Ordering::Relaxed);
         if !self.root.owns(&command) {
             return SessionRetrievalServiceOutcome::WrongScope;
@@ -321,10 +388,18 @@ impl DaemonSessionRetrievalService {
             || !command.filters().git_filter.is_empty()
             || command.filters().workflow_scope.is_some()
         {
-            return SessionRetrievalServiceOutcome::Unavailable;
+            return SessionRetrievalServiceOutcome::Unavailable(
+                SessionRetrievalUnavailable::without_worker(
+                    SessionRetrievalUnavailableReason::UnsupportedQuery,
+                ),
+            );
         }
         let Some(context) = self.request_context(&command) else {
-            return SessionRetrievalServiceOutcome::Unavailable;
+            return SessionRetrievalServiceOutcome::Unavailable(
+                SessionRetrievalUnavailable::without_worker(
+                    SessionRetrievalUnavailableReason::RequestContextInvalid,
+                ),
+            );
         };
         let grant_id = match self.root.store_scope {
             SessionRetrievalStoreScope::Project => "grant.mcp.message-search.project",
@@ -357,7 +432,11 @@ impl DaemonSessionRetrievalService {
             SessionRetrievalOutcome::Complete { items, freshness } => {
                 match self.page(items, command).await {
                     Some(page) => SessionRetrievalServiceOutcome::Complete { page, freshness },
-                    None => SessionRetrievalServiceOutcome::Unavailable,
+                    None => SessionRetrievalServiceOutcome::Unavailable(
+                        SessionRetrievalUnavailable::without_worker(
+                            SessionRetrievalUnavailableReason::HydrationUnavailable,
+                        ),
+                    ),
                 }
             }
             SessionRetrievalOutcome::CompleteZero { freshness } => {
@@ -380,14 +459,22 @@ impl DaemonSessionRetrievalService {
                     freshness,
                     omitted,
                 },
-                None => SessionRetrievalServiceOutcome::Unavailable,
+                None => SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(
+                        SessionRetrievalUnavailableReason::HydrationUnavailable,
+                    ),
+                ),
             },
             SessionRetrievalOutcome::WrongScope => SessionRetrievalServiceOutcome::WrongScope,
             SessionRetrievalOutcome::Locked => SessionRetrievalServiceOutcome::Locked,
             SessionRetrievalOutcome::Redacted => SessionRetrievalServiceOutcome::Redacted,
             SessionRetrievalOutcome::Deleted => SessionRetrievalServiceOutcome::Deleted,
             SessionRetrievalOutcome::Denied => SessionRetrievalServiceOutcome::Denied,
-            SessionRetrievalOutcome::Unavailable => SessionRetrievalServiceOutcome::Unavailable,
+            SessionRetrievalOutcome::Unavailable => SessionRetrievalServiceOutcome::Unavailable(
+                SessionRetrievalUnavailable::without_worker(
+                    SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+                ),
+            ),
             SessionRetrievalOutcome::BudgetExhausted => {
                 SessionRetrievalServiceOutcome::BudgetExhausted
             }
@@ -513,10 +600,13 @@ impl DaemonSessionRetrievalService {
         &self,
         command: LcmDescribeServiceCommand,
     ) -> LcmDescribeServiceOutcome {
-        self.calls.fetch_add(1, Ordering::Relaxed);
         if command.store_scope() != self.root.store_scope {
             return LcmDescribeServiceOutcome::WrongScope;
         }
+        if let Some(unavailable) = self.refresh_unavailable() {
+            return LcmDescribeServiceOutcome::Unavailable(unavailable);
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
         let request = match AuthorizedSessionDescribeRequest::new(
             command.provider(),
             command.session_id().as_str(),
@@ -594,10 +684,13 @@ impl DaemonSessionRetrievalService {
         &self,
         command: LcmExpandServiceCommand,
     ) -> LcmExpandServiceOutcome {
-        self.calls.fetch_add(1, Ordering::Relaxed);
         if command.store_scope() != self.root.store_scope {
             return LcmExpandServiceOutcome::WrongScope;
         }
+        if let Some(unavailable) = self.refresh_unavailable() {
+            return LcmExpandServiceOutcome::Unavailable(unavailable);
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
         let source_offset = if command.cursor().is_some() {
             let Some(offset) = self.decode_lcm_expand_cursor(&command).await else {
                 return LcmExpandServiceOutcome::Denied;
@@ -634,7 +727,11 @@ impl DaemonSessionRetrievalService {
             .and_then(|pagination| pagination.next_source_offset)
         {
             let Some(cursor) = self.encode_lcm_expand_cursor(&command, offset).await else {
-                return LcmExpandServiceOutcome::Unavailable;
+                return LcmExpandServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(
+                        SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+                    ),
+                );
             };
             temporal.cursor = Some(cursor);
         }
@@ -673,7 +770,11 @@ fn describe_compatibility_error(error: CompatibilityReadError) -> LcmDescribeSer
         CompatibilityReadError::Redacted => LcmDescribeServiceOutcome::Redacted,
         CompatibilityReadError::Deleted => LcmDescribeServiceOutcome::Deleted,
         CompatibilityReadError::Denied => LcmDescribeServiceOutcome::Denied,
-        CompatibilityReadError::Unavailable => LcmDescribeServiceOutcome::Unavailable,
+        CompatibilityReadError::Unavailable => {
+            LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+            ))
+        }
     }
 }
 
@@ -683,7 +784,11 @@ fn expand_compatibility_error(error: CompatibilityReadError) -> LcmExpandService
         CompatibilityReadError::Redacted => LcmExpandServiceOutcome::Redacted,
         CompatibilityReadError::Deleted => LcmExpandServiceOutcome::Deleted,
         CompatibilityReadError::Denied => LcmExpandServiceOutcome::Denied,
-        CompatibilityReadError::Unavailable => LcmExpandServiceOutcome::Unavailable,
+        CompatibilityReadError::Unavailable => {
+            LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+            ))
+        }
     }
 }
 

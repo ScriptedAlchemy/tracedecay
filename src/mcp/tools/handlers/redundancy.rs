@@ -20,8 +20,12 @@
 //!    the top N pairs plus their connected duplicate groups.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::future::Future;
+use std::path::Path;
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::errors::Result;
 use crate::redundancy::{
@@ -302,8 +306,36 @@ async fn ensure_fingerprints(
     cg: &TraceDecay,
     candidates: &[Node],
 ) -> Result<HashMap<String, Fingerprint>> {
-    let registry = crate::extraction::LanguageRegistry::new();
     let project_root = cg.project_root().to_path_buf();
+    let load = ensure_fingerprints_with_loader(&project_root, candidates, |node_ids| async move {
+        cg.db().get_fingerprints(&node_ids).await
+    })
+    .await?;
+    Ok(load.fingerprints)
+}
+
+struct FingerprintLoad {
+    fingerprints: HashMap<String, Fingerprint>,
+    parsed_files: usize,
+    computed_fingerprints: usize,
+}
+
+async fn ensure_fingerprints_with_loader<Load, LoadFuture>(
+    project_root: &Path,
+    candidates: &[Node],
+    load_cached: Load,
+) -> Result<FingerprintLoad>
+where
+    Load: FnOnce(Vec<String>) -> LoadFuture,
+    LoadFuture: Future<Output = Result<Vec<crate::db::StoredFingerprint>>>,
+{
+    let registry = crate::extraction::LanguageRegistry::new();
+    let node_ids = candidates.iter().map(|node| node.id.clone()).collect();
+    let mut cached_by_id: HashMap<String, Fingerprint> = load_cached(node_ids)
+        .await?
+        .into_iter()
+        .map(|stored| (stored.node_id.clone(), stored.into()))
+        .collect();
 
     // Group candidates by file so we parse each file at most once.
     let mut by_file: HashMap<String, Vec<&Node>> = HashMap::new();
@@ -312,6 +344,8 @@ async fn ensure_fingerprints(
     }
 
     let mut out: HashMap<String, Fingerprint> = HashMap::new();
+    let mut parsed_files = 0usize;
+    let mut computed_fingerprints = 0usize;
 
     for (file_path, file_nodes) in by_file {
         // Figure out which tree-sitter language this file maps to.
@@ -332,26 +366,19 @@ async fn ensure_fingerprints(
 
         // Cheap path: every cached fingerprint whose source_hash matches
         // the current body content is reusable without re-parsing.
-        let mut needs_parse = false;
-        let mut cached: HashMap<&str, Fingerprint> = HashMap::new();
+        let mut misses = Vec::new();
         for node in &file_nodes {
-            let body = body_slice(&source, node.start_line, node.end_line);
+            let body = node_body_slice(&source, node);
             let expected_hash = quick_body_hash(body);
-            match cg.db().get_fingerprint(&node.id).await? {
-                Some(stored) if stored.source_hash == expected_hash => {
-                    cached.insert(node.id.as_str(), stored.into());
+            match cached_by_id.remove(&node.id) {
+                Some(cached) if cached.source_hash == expected_hash => {
+                    out.insert(node.id.clone(), cached);
                 }
-                _ => {
-                    needs_parse = true;
-                }
+                _ => misses.push(*node),
             }
         }
 
-        // Insert cached hits.
-        for (id, fp) in cached {
-            out.insert(id.to_string(), fp);
-        }
-        if !needs_parse {
+        if misses.is_empty() {
             continue;
         }
 
@@ -363,21 +390,24 @@ async fn ensure_fingerprints(
         let Some(tree) = parse_file(&source, &language) else {
             continue;
         };
+        parsed_files += 1;
 
-        for node in &file_nodes {
-            if out.contains_key(&node.id) {
-                continue;
-            }
+        for node in misses {
             // Node.start_line / end_line are stored as raw tree-sitter
             // row indices (0-based) — see info::extract_lines docs.
             let Some(ts_node) = find_node_at_lines(&tree, node.start_line, node.end_line) else {
                 continue;
             };
             out.insert(node.id.clone(), compute_fingerprint(&source, ts_node));
+            computed_fingerprints += 1;
         }
     }
 
-    Ok(out)
+    Ok(FingerprintLoad {
+        fingerprints: out,
+        parsed_files,
+        computed_fingerprints,
+    })
 }
 
 /// Map `extractor.language_name()` (e.g. "Rust", "TypeScript") to the
@@ -426,6 +456,29 @@ fn body_slice(source: &str, start_line: u32, end_line: u32) -> &str {
     line_byte_range(source, start_line, end_line).map_or("", |range| &source[range])
 }
 
+/// Extract the exact tree-sitter node byte span, using its 0-indexed rows and
+/// byte columns. Unlike [`body_slice`], this excludes indentation before the
+/// node and the newline after it, matching the bytes hashed by
+/// [`compute_fingerprint`].
+fn node_body_slice<'a>(source: &'a str, node: &Node) -> &'a str {
+    let lines = body_slice(source, node.start_line, node.end_line);
+    if lines.is_empty() {
+        return "";
+    }
+    let start = node.start_column as usize;
+    let line_span = node.end_line.saturating_sub(node.start_line) as usize;
+    let end_line_start = if line_span == 0 {
+        0
+    } else {
+        let Some((offset, _)) = lines.match_indices('\n').nth(line_span - 1) else {
+            return "";
+        };
+        offset + 1
+    };
+    let end = end_line_start.saturating_add(node.end_column as usize);
+    lines.get(start..end).unwrap_or("")
+}
+
 fn line_byte_range(source: &str, start_line: u32, end_line: u32) -> Option<std::ops::Range<usize>> {
     let start = start_line as usize;
     let end = (end_line as usize).saturating_add(1);
@@ -452,8 +505,6 @@ fn line_byte_range(source: &str, start_line: u32, end_line: u32) -> Option<std::
 /// Cheap body hash used for cache invalidation. Matches the format used
 /// by `compute_fingerprint` (first 8 bytes of SHA-256, hex-encoded).
 fn quick_body_hash(body: &str) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
     let mut h = Sha256::new();
     h.update(body.as_bytes());
     let d = h.finalize();
@@ -568,10 +619,16 @@ fn duplicate_groups(groups: &[Vec<&Node>]) -> Vec<Value> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{RedundancyOptions, body_slice, is_generated_path, redundancy_md};
-    use crate::redundancy::{
-        Fingerprint, RedundancyMatchScore, RedundantPair, connected_node_groups,
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{
+        RedundancyOptions, body_slice, connected_node_groups, ensure_fingerprints_with_loader,
+        find_redundant_pairs, is_generated_path, node_body_slice, redundancy_md, redundancy_output,
+        scoped_fingerprints,
     };
+    use crate::db::StoredFingerprint;
+    use crate::redundancy::{Fingerprint, RedundancyMatchScore, RedundantPair};
     use crate::types::{Node, NodeKind, Visibility};
 
     #[test]
@@ -756,5 +813,175 @@ mod tests {
     fn body_slice_handles_out_of_bounds() {
         let src = "alpha\nbeta\n";
         assert_eq!(body_slice(src, 5, 9), "");
+    }
+
+    #[test]
+    fn node_body_slice_uses_tree_sitter_columns_and_excludes_trailing_newline() {
+        let src = "impl Demo {\n    fn value() {\n        work();\n    }\n}\n";
+        let node = candidate_node("value", "value", "src/lib.rs", 3);
+        let node = Node {
+            start_line: 1,
+            start_column: 4,
+            end_column: 5,
+            ..node
+        };
+
+        assert_eq!(
+            node_body_slice(src, &node),
+            "fn value() {\n        work();\n    }"
+        );
+    }
+
+    fn candidate_node(id: &str, name: &str, file_path: &str, end_line: u32) -> Node {
+        let mut node = test_node(id, name, 0);
+        node.file_path = file_path.to_string();
+        node.end_line = end_line;
+        node.end_column = 1;
+        node
+    }
+
+    fn stored_fingerprints(
+        nodes: &[Node],
+        fingerprints: &std::collections::HashMap<String, Fingerprint>,
+    ) -> Vec<StoredFingerprint> {
+        nodes
+            .iter()
+            .map(|node| {
+                let fingerprint = fingerprints.get(&node.id).unwrap();
+                StoredFingerprint {
+                    node_id: node.id.clone(),
+                    ast_hash: fingerprint.ast_hash.clone(),
+                    cfg_hash: fingerprint.cfg_hash.clone(),
+                    call_seq_hash: fingerprint.call_seq_hash.clone(),
+                    shingles: fingerprint.shingles.clone(),
+                    body_tokens: u32::try_from(fingerprint.body_tokens).unwrap(),
+                    source_hash: fingerprint.source_hash.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn result_bytes(
+        nodes: &[Node],
+        fingerprints: &std::collections::HashMap<String, Fingerprint>,
+    ) -> Vec<u8> {
+        let scoped = scoped_fingerprints(nodes, fingerprints);
+        let pairs = find_redundant_pairs(scoped, 0.6, false, 20);
+        let groups = connected_node_groups(&pairs);
+        let options = RedundancyOptions {
+            path_prefix: None,
+            min_lines: 8,
+            max_pairs: 20,
+            threshold: 0.6,
+            include_naming: false,
+            include_generated: false,
+        };
+        serde_json::to_vec(&redundancy_output(
+            &options,
+            nodes.len(),
+            fingerprints.len(),
+            &pairs,
+            &groups,
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cold_and_warm_cache_paths_each_issue_one_bulk_read_with_identical_results() {
+        if crate::extraction::ts_provider::language("rust").is_err() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let alpha = "fn alpha(input: i32) -> i32 {\n    let mut total = input;\n    for value in 0..4 {\n        if value % 2 == 0 {\n            total += value;\n        }\n    }\n    total\n}\n";
+        let beta = "fn beta(input: i32) -> i32 {\n    let mut total = input;\n    for value in 0..4 {\n        if value % 2 == 0 {\n            total += value;\n        }\n    }\n    total\n}\n";
+        std::fs::write(src_dir.join("alpha.rs"), alpha).unwrap();
+        std::fs::write(src_dir.join("beta.rs"), beta).unwrap();
+        let nodes = vec![
+            candidate_node("alpha-id", "alpha", "src/alpha.rs", 8),
+            candidate_node("beta-id", "beta", "src/beta.rs", 8),
+        ];
+
+        let cold_calls = Arc::new(AtomicUsize::new(0));
+        let cold_counter = Arc::clone(&cold_calls);
+        let cold = ensure_fingerprints_with_loader(temp.path(), &nodes, move |node_ids| {
+            cold_counter.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(node_ids, vec!["alpha-id", "beta-id"]);
+            std::future::ready(Ok(Vec::new()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(cold_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(cold.parsed_files, 2);
+        assert_eq!(cold.computed_fingerprints, 2);
+
+        let warm_rows = stored_fingerprints(&nodes, &cold.fingerprints);
+        let partial_calls = Arc::new(AtomicUsize::new(0));
+        let partial_counter = Arc::clone(&partial_calls);
+        let partial_rows = vec![warm_rows[0].clone()];
+        let partial = ensure_fingerprints_with_loader(temp.path(), &nodes, move |node_ids| {
+            partial_counter.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(node_ids, vec!["alpha-id", "beta-id"]);
+            std::future::ready(Ok(partial_rows))
+        })
+        .await
+        .unwrap();
+        assert_eq!(partial_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(partial.parsed_files, 1);
+        assert_eq!(partial.computed_fingerprints, 1);
+        assert_eq!(
+            result_bytes(&nodes, &cold.fingerprints),
+            result_bytes(&nodes, &partial.fingerprints)
+        );
+
+        let warm_calls = Arc::new(AtomicUsize::new(0));
+        let warm_counter = Arc::clone(&warm_calls);
+        let warm = ensure_fingerprints_with_loader(temp.path(), &nodes, move |node_ids| {
+            warm_counter.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(node_ids, vec!["alpha-id", "beta-id"]);
+            std::future::ready(Ok(warm_rows))
+        })
+        .await
+        .unwrap();
+        assert_eq!(warm_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(warm.parsed_files, 0);
+        assert_eq!(warm.computed_fingerprints, 0);
+        assert_eq!(
+            result_bytes(&nodes, &cold.fingerprints),
+            result_bytes(&nodes, &warm.fingerprints)
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_read_work_proxy_stays_one_call_for_1024_candidates() {
+        let nodes: Vec<Node> = (0..1024)
+            .map(|index| {
+                candidate_node(
+                    &format!("node-{index}"),
+                    "candidate",
+                    &format!("src/file-{index}.unsupported"),
+                    8,
+                )
+            })
+            .collect();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let load = ensure_fingerprints_with_loader(
+            std::path::Path::new("/unused"),
+            &nodes,
+            move |node_ids| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(node_ids.len(), 1024);
+                std::future::ready(Ok(Vec::new()))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(load.fingerprints.is_empty());
+        assert_eq!(load.parsed_files, 0);
+        assert_eq!(load.computed_fingerprints, 0);
     }
 }
