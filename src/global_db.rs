@@ -396,11 +396,60 @@ pub async fn repair_session_temporal_store(db_path: &Path) -> crate::errors::Res
     let conn = db.connect().map_err(|error| {
         global_db_operation_error("connect session temporal repair store", error)
     })?;
-    session_temporal::repair_session_temporal_state(&conn).await?;
-    session_temporal::ensure_session_temporal_schema(&conn).await?;
-    schema_contract::ensure_authority_invariant_schema(&conn)
+    repair_session_temporal_connection(&conn).await
+}
+
+async fn repair_session_temporal_connection(conn: &Connection) -> crate::errors::Result<()> {
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
-        .map(|_| ())
+        .map_err(|error| global_db_operation_error("begin session temporal repair", error))?;
+    let repair = async {
+        if !connection_table_exists(&transaction, "session_messages").await?
+            || !connection_table_exists(&transaction, "observations").await?
+        {
+            return crate::errors::Result::Ok(false);
+        }
+        session_temporal::repair_session_temporal_state(&transaction).await?;
+        session_temporal::ensure_session_temporal_schema(&transaction).await?;
+        schema_contract::ensure_authority_invariant_schema(&transaction).await?;
+        crate::errors::Result::Ok(true)
+    }
+    .await;
+    match repair {
+        Ok(true) => transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error("commit session temporal repair", error)),
+        Ok(false) => transaction
+            .rollback()
+            .await
+            .map_err(|error| global_db_operation_error("rollback skipped session repair", error)),
+        Err(error) => {
+            transaction.rollback().await.map_err(|rollback_error| {
+                global_db_operation_message(
+                    "rollback failed session temporal repair",
+                    format!("{rollback_error}; original repair failure: {error}"),
+                )
+            })?;
+            Err(error)
+        }
+    }
+}
+
+async fn connection_table_exists(conn: &Connection, table: &str) -> crate::errors::Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+        )
+        .await
+        .map_err(|error| global_db_operation_error("inspect global database schema", error))?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error("inspect global database schema", error))?
+        .is_some())
 }
 
 pub(crate) struct GlobalDbWriterConnection<'a> {

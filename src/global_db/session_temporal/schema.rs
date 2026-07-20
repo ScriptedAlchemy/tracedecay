@@ -990,6 +990,17 @@ pub(crate) async fn ensure_session_temporal_schema(conn: &Connection) -> crate::
 }
 
 pub(crate) async fn repair_session_temporal_state(conn: &Connection) -> crate::errors::Result<()> {
+    let Some(version) = schema_version(conn).await? else {
+        return Ok(());
+    };
+    if version > SESSION_TEMPORAL_SCHEMA_VERSION {
+        return Err(global_db_operation_message(
+            OPERATION,
+            format!(
+                "database session temporal schema version {version} is newer than supported version {SESSION_TEMPORAL_SCHEMA_VERSION}"
+            ),
+        ));
+    }
     repair_interrupted_refresh_state(conn).await?;
     repair_legacy_cursor_key_bindings(conn).await
 }
@@ -1693,4 +1704,39 @@ async fn schema_version(conn: &Connection) -> crate::errors::Result<Option<i64>>
                 .map_err(|error| global_db_operation_error(OPERATION, error))
         })
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use libsql::Builder;
+    use tempfile::TempDir;
+
+    use super::repair_session_temporal_state;
+
+    #[tokio::test]
+    async fn repair_uninitialized_store_is_non_mutating() {
+        let temp = TempDir::new().expect("temp dir");
+        let db = Builder::new_local(temp.path().join("sessions.db"))
+            .build()
+            .await
+            .expect("local database");
+        let conn = db.connect().expect("database connection");
+
+        repair_session_temporal_state(&conn)
+            .await
+            .expect("uninitialized store needs no state repair");
+
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'session_temporal_schema_migrations'",
+                (),
+            )
+            .await
+            .expect("inspect schema");
+        assert!(
+            rows.next().await.expect("read schema row").is_none(),
+            "repair must not initialize a normal unopened store"
+        );
+    }
 }

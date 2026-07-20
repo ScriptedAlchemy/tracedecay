@@ -14,6 +14,127 @@ use tracedecay_store::{
     ObservationStoreError, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
+#[tokio::test]
+async fn offline_session_repair_does_not_initialize_unopened_store() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let db = Builder::new_local(temp.path().join("sessions.db"))
+        .build()
+        .await
+        .expect("local database");
+    let conn = db.connect().expect("database connection");
+
+    repair_session_temporal_connection(&conn)
+        .await
+        .expect("initialize unopened temporal store");
+
+    assert!(
+        !connection_table_exists(&conn, "session_temporal_generations")
+            .await
+            .expect("inspect temporal schema")
+    );
+    assert!(
+        !connection_table_exists(&conn, "session_messages")
+            .await
+            .expect("inspect transcript schema")
+    );
+    assert!(
+        !connection_table_exists(&conn, "observations")
+            .await
+            .expect("inspect observation schema")
+    );
+}
+
+#[tokio::test]
+async fn offline_session_repair_does_not_initialize_transcript_only_store() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let db = Builder::new_local(temp.path().join("sessions.db"))
+        .build()
+        .await
+        .expect("local database");
+    let conn = db.connect().expect("database connection");
+    conn.execute(
+        "CREATE TABLE session_messages (message_id TEXT PRIMARY KEY)",
+        (),
+    )
+    .await
+    .expect("initialize transcript-only fixture");
+
+    repair_session_temporal_connection(&conn)
+        .await
+        .expect("transcript-only store needs no temporal repair");
+
+    assert!(
+        !connection_table_exists(&conn, "session_temporal_generations")
+            .await
+            .expect("inspect temporal schema")
+    );
+    assert!(
+        !connection_table_exists(&conn, "observations")
+            .await
+            .expect("inspect observation schema")
+    );
+}
+
+#[tokio::test]
+async fn offline_session_repair_rolls_back_trigger_suspension_on_failure() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let db = Builder::new_local(temp.path().join("sessions.db"))
+        .build()
+        .await
+        .expect("local database");
+    let conn = db.connect().expect("database connection");
+    session_temporal::ensure_session_temporal_schema(&conn)
+        .await
+        .expect("initialize temporal schema");
+    conn.execute_batch(
+        "CREATE TABLE session_messages (message_id TEXT PRIMARY KEY);
+         CREATE TABLE observations (sequence INTEGER PRIMARY KEY);
+         CREATE TRIGGER session_refresh_operations_delete_guard_v1
+         BEFORE DELETE ON session_refresh_operations BEGIN
+             SELECT RAISE(ABORT, 'session refresh operations are immutable');
+         END;
+         DROP TABLE session_refresh_progress;",
+    )
+    .await
+    .expect("corrupt repair fixture");
+    let mut before = conn
+        .query(
+            "SELECT 1 FROM sqlite_master
+             WHERE type = 'trigger'
+               AND name = 'session_refresh_operations_delete_guard_v1'",
+            (),
+        )
+        .await
+        .expect("inspect repair precondition");
+    assert!(
+        before
+            .next()
+            .await
+            .expect("read repair precondition")
+            .is_some(),
+        "repair fixture must begin with its immutability trigger"
+    );
+    drop(before);
+
+    repair_session_temporal_connection(&conn)
+        .await
+        .expect_err("missing temporal table must reject repair");
+
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master
+             WHERE type = 'trigger'
+               AND name = 'session_refresh_operations_delete_guard_v1'",
+            (),
+        )
+        .await
+        .expect("inspect temporal trigger");
+    assert!(
+        rows.next().await.expect("read temporal trigger").is_some(),
+        "failed maintenance must roll back suspended immutability triggers"
+    );
+}
+
 #[cfg(unix)]
 fn colliding_non_unicode_project_paths(root: &Path) -> (PathBuf, PathBuf) {
     use std::ffi::OsString;
