@@ -568,6 +568,9 @@ fn map_execution_error(
         SessionTemporalExecutionError::Deleted => SessionRetrievalOutcome::Deleted,
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
         SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
+        SessionTemporalExecutionError::Empty => SessionRetrievalOutcome::CompleteZero {
+            freshness: SessionDataFreshness::Fresh,
+        },
         SessionTemporalExecutionError::BudgetExhausted => SessionRetrievalOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
@@ -592,8 +595,12 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 SessionRetrievalOutcome::BudgetExhausted
             }
             TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
+            TemporalPortError::EmptyParticipantManifest => {
+                SessionRetrievalOutcome::CompleteZero {
+                    freshness: SessionDataFreshness::Fresh,
+                }
+            }
             TemporalPortError::InvalidBinding { .. }
-            | TemporalPortError::EmptyParticipantManifest
             | TemporalPortError::DuplicateParticipant
             | TemporalPortError::ZeroGeneration
             | TemporalPortError::ZeroVersion { .. }
