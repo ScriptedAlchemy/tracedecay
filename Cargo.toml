@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/tracedecay-domain", "crates/tracedecay-store"]
+members = [
+    "crates/tracedecay-domain",
+    "crates/tracedecay-store",
+    "crates/tracedecay-tool-catalog",
+]
 resolver = "3"
 
 # Declared once here; every member (including the root package) inherits via
@@ -131,6 +135,7 @@ tree-sitter-language = "0.1"
 ast-grep-core = "0.44"
 tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
 tracedecay-large-treesitters = { package = "tokensave-large-treesitters", version = "0.5.0", optional = true }
 clap = { version = "4.6", features = ["derive"] }

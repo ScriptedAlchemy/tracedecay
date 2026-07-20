@@ -25,12 +25,14 @@ const QUERY_ALLOWED_PACKAGES: &[&str] = &[
     "thiserror",
     "tracedecay-domain",
     "tracedecay-store",
+    "tracedecay-tool-catalog",
     "zeroize",
 ];
 const PR8_WORKSPACE_MANIFESTS: &[&str] = &[
     "Cargo.toml",
     "crates/tracedecay-domain/Cargo.toml",
     "crates/tracedecay-store/Cargo.toml",
+    "crates/tracedecay-tool-catalog/Cargo.toml",
 ];
 const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-domain|tracedecay_domain|lib|crates/tracedecay-domain/src/lib.rs",
@@ -42,6 +44,11 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-store|tracedecay_store|lib|crates/tracedecay-store/src/lib.rs",
     "tracedecay-store|diagnostics_contract|test|crates/tracedecay-store/tests/diagnostics_contract.rs",
     "tracedecay-store|session_contract|test|crates/tracedecay-store/tests/session_contract.rs",
+    "tracedecay-tool-catalog|tracedecay_tool_catalog|lib|crates/tracedecay-tool-catalog/src/lib.rs",
+    "tracedecay-tool-catalog|manifest_contract|test|crates/tracedecay-tool-catalog/tests/manifest_contract.rs",
+    "tracedecay-tool-catalog|profile_budget|test|crates/tracedecay-tool-catalog/tests/profile_budget.rs",
+    "tracedecay-tool-catalog|retrieval_contract|test|crates/tracedecay-tool-catalog/tests/retrieval_contract.rs",
+    "tracedecay-tool-catalog|snapshot_contract|test|crates/tracedecay-tool-catalog/tests/snapshot_contract.rs",
     "tracedecay|tracedecay|lib|src/lib.rs",
     "tracedecay|tracedecay|bin|src/main.rs",
     "tracedecay|tracedecay-search-eval|bin|src/bin/tracedecay-search-eval.rs",
@@ -322,6 +329,7 @@ fn expected_pr8_package_name(manifest_path: &Path) -> Option<&'static str> {
         Some("Cargo.toml") => Some("tracedecay"),
         Some("crates/tracedecay-domain/Cargo.toml") => Some("tracedecay-domain"),
         Some("crates/tracedecay-store/Cargo.toml") => Some("tracedecay-store"),
+        Some("crates/tracedecay-tool-catalog/Cargo.toml") => Some("tracedecay-tool-catalog"),
         _ => None,
     }
 }
@@ -899,6 +907,7 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
     let root_id = "path+file:///workspace#root@0.1.0";
     let domain_id = "path+file:///workspace/crates/domain#domain@0.1.0";
     let store_id = "path+file:///workspace/crates/store#store@0.1.0";
+    let catalog_id = "path+file:///workspace/crates/tool-catalog#tool-catalog@0.1.0";
     let metadata = serde_json::json!({
         "packages": [
             {
@@ -929,12 +938,20 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
                 ]
             },
             {
+                "id": catalog_id,
+                "name": "tracedecay-tool-catalog",
+                "manifest_path": repository.join("crates/tracedecay-tool-catalog/Cargo.toml"),
+                "targets": [
+                    { "src_path": repository.join("crates/tracedecay-tool-catalog/src/lib.rs") }
+                ]
+            },
+            {
                 "id": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0",
                 "manifest_path": "/outside/registry/serde/Cargo.toml",
                 "targets": [{ "src_path": "/outside/registry/serde/src/lib.rs" }]
             }
         ],
-        "workspace_members": [root_id, domain_id, store_id]
+        "workspace_members": [root_id, domain_id, store_id, catalog_id]
     });
 
     let layout = parse_cargo_source_layout(
@@ -950,6 +967,7 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
             PathBuf::from("crates/tracedecay-domain/src/lib.rs"),
             PathBuf::from("crates/tracedecay-domain/tests/boundary.rs"),
             PathBuf::from("crates/tracedecay-store/src/lib.rs"),
+            PathBuf::from("crates/tracedecay-tool-catalog/src/lib.rs"),
             PathBuf::from("src/lib.rs"),
             PathBuf::from("src/main.rs"),
         ]
@@ -963,6 +981,7 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
             PathBuf::from("build.rs"),
             PathBuf::from("crates/tracedecay-domain"),
             PathBuf::from("crates/tracedecay-store"),
+            PathBuf::from("crates/tracedecay-tool-catalog"),
             PathBuf::from("examples"),
             PathBuf::from("src"),
             PathBuf::from("tests"),

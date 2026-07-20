@@ -185,6 +185,44 @@ fn domain_session_contracts_are_runtime_and_store_free() {
 }
 
 #[test]
+fn tool_catalog_is_application_transport_runtime_and_store_free() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("crates/tracedecay-tool-catalog/src")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve tool catalog sources");
+    assert!(!sources.is_empty(), "tool catalog sources must exist");
+
+    let forbidden: &[&[&str]] = &[
+        &["tracedecay"],
+        &["tracedecay_domain"],
+        &["tracedecay_store"],
+        &["libsql"],
+        &["rusqlite"],
+        &["sqlx"],
+        &["tokio"],
+        &["async_std"],
+        &["axum"],
+        &["tower"],
+        &["ureq"],
+        &["std", "fs"],
+        &["std", "net"],
+        &["std", "process"],
+        &["std", "thread"],
+        &["std", "time", "Instant"],
+        &["std", "time", "SystemTime"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect tool catalog sources");
+    assert!(
+        violations.is_empty(),
+        "tool catalog must remain application/transport/runtime/store free:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
 fn store_session_contracts_are_adapter_free() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let roots = [PathBuf::from("crates/tracedecay-store/src/session")]

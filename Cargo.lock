@@ -4386,6 +4386,7 @@ dependencies = [
  "tower",
  "tracedecay-domain",
  "tracedecay-store",
+ "tracedecay-tool-catalog",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
@@ -4417,6 +4418,16 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracedecay-domain",
+]
+
+[[package]]
+name = "tracedecay-tool-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
