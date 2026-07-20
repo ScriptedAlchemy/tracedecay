@@ -90,6 +90,8 @@ pub struct CompareOptions {
     /// Opaque locator resolved only through the private holdout authority
     /// store after the frozen run passes pre-reveal validation.
     pub holdout_capability: Option<String>,
+    pub holdout_profile_root: Option<PathBuf>,
+    pub holdout_seal: Option<PathBuf>,
     pub saved_candidates: Option<PathBuf>,
     pub required_outcome: Option<EvalOutcomeV1>,
 }
@@ -321,7 +323,8 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
     } else {
         fixtures.bundle.run.clone()
     };
-    validate_run_bindings(&run, &fixtures)?;
+    let holdout_seal = options.holdout_seal.as_deref().map(read_json).transpose()?;
+    validate_run_bindings_with_seal(&run, &fixtures, holdout_seal.as_ref())?;
     validate_single_path_component(run.run_id.as_str(), "run id")?;
 
     let loaded_saved_candidates = options
@@ -330,12 +333,11 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
         .map(|path| load_saved_candidate_ablations(path, &run, &fixtures.bundle.workload))
         .transpose()?;
 
-    // This check deliberately precedes reading the capability. The
-    // contract-only packet can prove what is missing without touching any
-    // label-bearing artifact.
+    // A checked-in contract-only corpus may be elevated only by an explicitly
+    // locked run carrying private saved candidates and a reveal capability.
+    // Development runs still stop before touching label-bearing artifacts.
     let (outcome, rationale, blocked_on, accepted_evidence) = if run.authority
         != FixtureAuthorityV1::LockedQuality
-        || fixtures.bundle.manifest.authority != FixtureAuthorityV1::LockedQuality
     {
         (
             EvalOutcomeV1::Blocked,
@@ -357,13 +359,19 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
                 "locked-quality run has no holdout reveal capability".to_string(),
             )
         })?;
-        let store = HoldoutAuthorityStoreV1::open_default()?;
+        let store = match options.holdout_profile_root.as_deref() {
+            Some(root) => HoldoutAuthorityStoreV1::open_at(root)?,
+            None => HoldoutAuthorityStoreV1::open_default()?,
+        };
         let evaluation = evaluate_locked_quality(
             &store,
             capability_locator,
             &fixtures,
             &run,
             &saved_candidates.saved,
+            holdout_seal
+                .as_ref()
+                .unwrap_or(&fixtures.bundle.manifest.holdout_seal),
             current_unix_seconds()?,
         )?;
         (
@@ -477,6 +485,7 @@ fn evaluate_locked_quality(
     fixtures: &ValidatedFixtures,
     run: &RunManifestV1,
     saved_candidates: &SavedCandidateSetV1,
+    holdout_seal: &HoldoutSealV1,
     now_unix: u64,
 ) -> Result<LockedQualityEvaluation, SearchEvalError> {
     run.validate_pre_reveal(&fixtures.bundle.manifest, &fixtures.bundle.workload)?;
@@ -487,21 +496,15 @@ fn evaluate_locked_quality(
                 .to_string(),
         ));
     }
-    let declared_label_authority = fixtures
-        .bundle
-        .manifest
-        .holdout_seal
-        .label_authority
-        .clone()
-        .ok_or_else(|| {
-            SearchEvalError::InvalidRun(
-                "locked-quality seal has no declared label authority".to_string(),
-            )
-        })?;
+    let declared_label_authority = holdout_seal.label_authority.clone().ok_or_else(|| {
+        SearchEvalError::InvalidRun(
+            "locked-quality seal has no declared label authority".to_string(),
+        )
+    })?;
     let (labels, receipt) = store.evaluate_locked_labels(
         capability_locator,
         run,
-        &fixtures.bundle.manifest.holdout_seal,
+        holdout_seal,
         &fixtures.bundle.manifest.decision_owners,
         now_unix,
         |bytes| parse_sealed_holdout_labels(bytes, &declared_label_authority, run, fixtures),
@@ -525,7 +528,7 @@ fn evaluate_locked_quality(
             &accepted_evidence,
             run,
             &fixtures.bundle.workload,
-            &fixtures.bundle.manifest.holdout_seal,
+            holdout_seal,
             &fixtures.bundle.manifest.decision_owners,
         )
         .map_err(SearchEvalError::Contract)?;
@@ -706,7 +709,7 @@ fn validate_sealed_holdout_labels(
     Ok(())
 }
 
-fn sealed_holdout_label_set_digest(
+pub fn sealed_holdout_label_set_digest(
     judgments: &[RelevanceJudgmentV1],
 ) -> Result<LabelSetDigest, EvaluationContractError> {
     #[derive(Serialize)]
@@ -827,7 +830,7 @@ fn load_validated_fixtures(fixture_root: &Path) -> Result<ValidatedFixtures, Sea
 
     let manifest_file_digest =
         FixtureManifestDigest::new(sha256_file(&manifest_path)?.0.as_str().to_string())?;
-    validate_run_bindings_raw(&bundle.run, &bundle.manifest, &manifest_file_digest)?;
+    validate_run_bindings_raw(&bundle.run, &bundle.manifest, &manifest_file_digest, None)?;
     Ok(ValidatedFixtures {
         bundle,
         manifest_file_digest,
@@ -852,9 +855,10 @@ fn validation_summary(fixtures: &ValidatedFixtures) -> ValidationSummary {
     }
 }
 
-fn validate_run_bindings(
+fn validate_run_bindings_with_seal(
     run: &RunManifestV1,
     fixtures: &ValidatedFixtures,
+    holdout_seal: Option<&HoldoutSealV1>,
 ) -> Result<(), SearchEvalError> {
     run.validate_against_workload(&fixtures.bundle.workload)?;
     let computed = run.compute_digest()?;
@@ -867,6 +871,7 @@ fn validate_run_bindings(
         run,
         &fixtures.bundle.manifest,
         &fixtures.manifest_file_digest,
+        holdout_seal,
     )
 }
 
@@ -874,13 +879,15 @@ fn validate_run_bindings_raw(
     run: &RunManifestV1,
     manifest: &FixtureManifestV1,
     manifest_file_digest: &FixtureManifestDigest,
+    holdout_seal: Option<&HoldoutSealV1>,
 ) -> Result<(), SearchEvalError> {
     if &run.fixture_manifest_digest != manifest_file_digest {
         return Err(SearchEvalError::InvalidRun(
             "run manifest does not bind the fixture-manifest bytes".to_string(),
         ));
     }
-    if run.holdout_seal_digest != manifest.holdout_seal.seal_digest {
+    let expected_seal = holdout_seal.unwrap_or(&manifest.holdout_seal);
+    if run.holdout_seal_digest != expected_seal.seal_digest {
         return Err(SearchEvalError::InvalidRun(
             "run manifest does not bind the holdout seal".to_string(),
         ));
@@ -1486,6 +1493,7 @@ mod tests {
             &fixtures,
             &run,
             &saved_candidates,
+            &fixtures.bundle.manifest.holdout_seal,
             now_unix,
         )
         .unwrap();

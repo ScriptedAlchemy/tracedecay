@@ -9,11 +9,13 @@ use tracedecay::search_eval::holdout::{
     AgentDelegationPayloadV1, AgentJudgmentArtifactV1, HoldoutAuthorityStoreV1,
 };
 use tracedecay::search_eval::{
-    CompareOptions, SealHoldoutOptions, compare, seal_holdout_labels, validate_fixture_root,
+    CompareOptions, SealHoldoutOptions, compare, seal_holdout_labels,
+    sealed_holdout_label_set_digest, validate_fixture_root,
 };
 use tracedecay_domain::{
     DecisionOwnerId, EvalOutcomeV1, EvidenceIndexV1, FixtureContentDigest, HoldoutLabelAuthorityV1,
-    HoldoutRevealCapabilityV1, HoldoutSealV1, RunManifestV1,
+    HoldoutRevealCapabilityV1, HoldoutSealV1, RelevanceJudgmentV1, RunManifestV1,
+    SavedCandidateSetV1,
 };
 
 #[derive(Debug, Parser)]
@@ -43,6 +45,16 @@ enum Command {
         #[arg(long)]
         input: PathBuf,
     },
+    /// Compute the canonical digest for one judgment array.
+    RehashLabels {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Compute the canonical digest for a saved-candidate draft.
+    RehashCandidates {
+        #[arg(long)]
+        input: PathBuf,
+    },
     /// Compare one frozen run and emit one immutable terminal outcome.
     Compare {
         #[arg(long, default_value = "tests/fixtures/search_quality")]
@@ -53,6 +65,10 @@ enum Command {
         output_root: PathBuf,
         #[arg(long, value_name = "AUTHORIZED_STORE_LOCATOR")]
         holdout_capability: Option<String>,
+        #[arg(long)]
+        holdout_profile_root: Option<PathBuf>,
+        #[arg(long)]
+        holdout_seal: Option<PathBuf>,
         #[arg(long)]
         saved_candidates: Option<PathBuf>,
         #[arg(long)]
@@ -194,11 +210,32 @@ fn main() -> ExitCode {
                 serde_json::to_value(digest).map_err(|error| error.to_string())
             })(),
         ),
+        Command::RehashLabels { input } => emit_operation(
+            "rehash_labels",
+            (|| {
+                let judgments: Vec<RelevanceJudgmentV1> = read_json_file(&input)?;
+                let digest = sealed_holdout_label_set_digest(&judgments)
+                    .map_err(|error| error.to_string())?;
+                serde_json::to_value(digest).map_err(|error| error.to_string())
+            })(),
+        ),
+        Command::RehashCandidates { input } => emit_operation(
+            "rehash_candidates",
+            (|| {
+                let candidates: SavedCandidateSetV1 = read_json_file(&input)?;
+                let digest = candidates
+                    .compute_digest()
+                    .map_err(|error| error.to_string())?;
+                serde_json::to_value(digest).map_err(|error| error.to_string())
+            })(),
+        ),
         Command::Compare {
             fixtures,
             run_manifest,
             output_root,
             holdout_capability,
+            holdout_profile_root,
+            holdout_seal,
             saved_candidates,
             require_outcome,
         } => {
@@ -208,6 +245,8 @@ fn main() -> ExitCode {
                 run_manifest,
                 output_root,
                 holdout_capability,
+                holdout_profile_root,
+                holdout_seal,
                 saved_candidates,
                 required_outcome,
             };

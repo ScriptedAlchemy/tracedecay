@@ -33,6 +33,8 @@ fn contract_only_compare_blocks_without_reading_capability_or_creating_promotion
         holdout_capability: Some(
             "authorized-store://search-quality/holdout/v1/reveal-capability/unopened".to_string(),
         ),
+        holdout_profile_root: None,
+        holdout_seal: None,
         saved_candidates: None,
         required_outcome: Some(EvalOutcomeV1::Accepted),
     })
@@ -72,6 +74,8 @@ fn evaluator_rejects_run_ids_that_are_not_single_path_components() {
         run_manifest: Some(run_path),
         output_root: temp.path().join("runs"),
         holdout_capability: None,
+        holdout_profile_root: None,
+        holdout_seal: None,
         saved_candidates: None,
         required_outcome: Some(EvalOutcomeV1::Accepted),
     })
@@ -119,6 +123,8 @@ fn compare_reports_each_lane_ablation_from_saved_candidate_bytes() {
         run_manifest: None,
         output_root: temp.path().join("runs"),
         holdout_capability: None,
+        holdout_profile_root: None,
+        holdout_seal: None,
         saved_candidates: Some(saved_path),
         required_outcome: Some(EvalOutcomeV1::Accepted),
     })

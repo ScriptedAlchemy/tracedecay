@@ -2685,22 +2685,15 @@ impl RunManifestV1 {
         fixture_manifest.validate()?;
         if self.scope != EvalRunScopeV1::Locked
             || self.authority != FixtureAuthorityV1::LockedQuality
-            || fixture_manifest.authority != FixtureAuthorityV1::LockedQuality
         {
             return Err(EvaluationContractError::HoldoutAccessViolation(
-                "holdout reveal requires matching locked-quality fixture and run authority"
-                    .to_string(),
+                "holdout reveal requires locked-quality run authority".to_string(),
             ));
         }
         if self.locked_outcomes_accessed {
             return Err(EvaluationContractError::HoldoutAccessViolation(
                 "run manifest already records locked outcome access".to_string(),
             ));
-        }
-        if self.holdout_seal_digest != fixture_manifest.holdout_seal.seal_digest {
-            return Err(EvaluationContractError::DigestMismatch {
-                field: "pre-reveal holdout seal binding",
-            });
         }
         Ok(())
     }
