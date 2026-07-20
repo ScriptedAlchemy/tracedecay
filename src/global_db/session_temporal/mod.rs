@@ -51,7 +51,7 @@ pub(crate) use doctor_health::{
 };
 pub(in crate::global_db) use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
-pub(super) use schema::ensure_session_temporal_schema;
+pub(crate) use schema::ensure_session_temporal_schema;
 
 /// Production temporal executor over one already-open authoritative global DB.
 pub struct GlobalDbSessionTemporalExecution<'db> {

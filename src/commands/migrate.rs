@@ -508,6 +508,7 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
         }
         MigrateAction::RepairSessions {
             profile_root,
+            project_id,
             apply,
             json,
         } => {
@@ -522,6 +523,9 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 .filter(|plan| {
                     plan.status
                         == tracedecay::migrate::registry::RegistryReconstructionStatus::Eligible
+                        && project_id
+                            .as_ref()
+                            .is_none_or(|expected| &plan.project.project_id == expected)
                 })
                 .filter_map(|plan| {
                     plan.artifacts
@@ -564,9 +568,15 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 "session temporal repair",
             )?;
             let mut repaired = Vec::new();
+            let mut failed = Vec::new();
             for (project_id, path) in stores {
-                tracedecay::global_db::repair_session_temporal_store(&path).await?;
-                repaired.push(project_id);
+                match tracedecay::global_db::repair_session_temporal_store(&path).await {
+                    Ok(()) => repaired.push(project_id),
+                    Err(error) => failed.push(serde_json::json!({
+                        "project_id": project_id,
+                        "error": error.to_string(),
+                    })),
+                }
             }
             if json {
                 println!(
@@ -575,12 +585,14 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                         "apply": true,
                         "repaired_count": repaired.len(),
                         "project_ids": repaired,
+                        "failed": failed,
                     }))?
                 );
             } else {
                 println!(
-                    "session repair applied to {} profile store(s)",
-                    repaired.len()
+                    "session repair applied to {} profile store(s); {} failed",
+                    repaired.len(),
+                    failed.len(),
                 );
             }
         }

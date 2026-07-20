@@ -953,6 +953,9 @@ pub enum MigrateAction {
         /// Profile root containing projects/<project_id>/store_manifest.json files.
         #[arg(long = "profile-root")]
         profile_root: String,
+        /// Limit repair to one registered project id.
+        #[arg(long = "project-id")]
+        project_id: Option<String>,
         /// Apply repairs. Omit for a read-only inventory.
         #[arg(long)]
         apply: bool,

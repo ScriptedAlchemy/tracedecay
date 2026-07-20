@@ -951,9 +951,7 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     ("session_summary_nodes_fts", &["summary_text", "index_text"]),
 ];
 
-pub(in crate::global_db) async fn ensure_session_temporal_schema(
-    conn: &Connection,
-) -> crate::errors::Result<()> {
+pub(crate) async fn ensure_session_temporal_schema(conn: &Connection) -> crate::errors::Result<()> {
     let version = schema_version(conn).await?;
     if let Some(version) = version
         && version > SESSION_TEMPORAL_SCHEMA_VERSION
@@ -1002,6 +1000,9 @@ async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::R
          DROP TRIGGER IF EXISTS session_refresh_receipts_insert_guard_v1;
          DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1;
          DROP TRIGGER IF EXISTS session_temporal_generations_delete_guard_v1;
+         DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
+         DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
+         DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
          DELETE FROM session_temporal_generations
          WHERE EXISTS (
              SELECT 1
@@ -1191,65 +1192,63 @@ async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::
         .map_err(|error| global_db_operation_error(OPERATION, error))?
         .map(|row| row.get::<i64>(0))
         .transpose()
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(|error| {
+            global_db_operation_message(
+                OPERATION,
+                format!("read missing legacy cursor key count: {error}"),
+            )
+        })?
         .unwrap_or(0);
     drop(missing);
     if count == 0 {
         return Ok(());
     }
 
-    let mut active = conn
+    conn.execute(
+        "UPDATE session_query_cursor_keys
+         SET retired_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000000
+         WHERE retired_at IS NULL",
+        (),
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut history = conn
         .query(
-            "SELECT key_id, key_version FROM session_query_cursor_keys
-             WHERE retired_at IS NULL ORDER BY key_version DESC LIMIT 2",
+            "SELECT COALESCE(MAX(key_version), 0)
+             FROM session_query_cursor_keys",
             (),
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let first = active
+    let highest_version = history
         .next()
         .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .ok_or_else(|| global_db_operation_message(OPERATION, "missing cursor key history row"))?
+        .get::<i64>(0)
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let second = active
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    drop(active);
-    let (key_id, key_version) = match (first, second) {
-        (Some(row), None) => (
-            row.get::<String>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            row.get::<i64>(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        ),
-        (None, None) => {
-            let mut key_id_random = [0_u8; 16];
-            let mut key_material = [0_u8; 32];
-            getrandom::getrandom(&mut key_id_random).map_err(|error| {
-                global_db_operation_message(
-                    OPERATION,
-                    format!("generate legacy cursor key id: {error}"),
-                )
-            })?;
-            getrandom::getrandom(&mut key_material).map_err(|error| {
-                global_db_operation_message(
-                    OPERATION,
-                    format!("generate legacy cursor key material: {error}"),
-                )
-            })?;
-            let key_id = format!("cursor-key-1-{}", hex::encode(key_id_random));
-            conn.execute(
-                "INSERT INTO session_query_cursor_keys (
-                    key_id, key_version, key_material, created_at, retired_at
-                 ) VALUES (?1, 1, ?2, CAST(strftime('%s', 'now') AS INTEGER) * 1000000, NULL)",
-                params![key_id.clone(), key_material.to_vec()],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            (key_id, 1)
-        }
-        _ => return Ok(()),
-    };
+    drop(history);
+    let key_version = highest_version.saturating_add(1).max(1);
+    let mut key_id_random = [0_u8; 16];
+    let mut key_material = [0_u8; 32];
+    getrandom::getrandom(&mut key_id_random).map_err(|error| {
+        global_db_operation_message(OPERATION, format!("generate legacy cursor key id: {error}"))
+    })?;
+    getrandom::getrandom(&mut key_material).map_err(|error| {
+        global_db_operation_message(
+            OPERATION,
+            format!("generate legacy cursor key material: {error}"),
+        )
+    })?;
+    let key_id = format!("cursor-key-{key_version}-{}", hex::encode(key_id_random));
+    conn.execute(
+        "INSERT INTO session_query_cursor_keys (
+            key_id, key_version, key_material, created_at, retired_at
+         ) VALUES (?1, ?2, ?3, CAST(strftime('%s', 'now') AS INTEGER) * 1000000, NULL)",
+        params![key_id.clone(), key_version, key_material.to_vec()],
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
     conn.execute(
         "UPDATE session_temporal_generations
          SET frozen_watermarks_json = json_set(

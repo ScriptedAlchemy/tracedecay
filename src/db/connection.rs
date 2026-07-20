@@ -409,6 +409,13 @@ impl Database {
         })
     }
 
+    pub(crate) async fn repair_session_temporal_schema(&self) -> Result<()> {
+        let writer = self
+            .writer_connection("repair session temporal schema")
+            .await?;
+        crate::global_db::session_temporal::ensure_session_temporal_schema(&writer.conn).await
+    }
+
     /// Acquires opaque, serialized access to memory mutations.
     #[doc(hidden)]
     pub async fn memory_writer(&self) -> Result<DatabaseMemoryWriter<'_>> {

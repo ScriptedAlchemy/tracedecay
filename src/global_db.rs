@@ -8,6 +8,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::ops::Deref;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Weak};
 
@@ -364,9 +366,30 @@ pub struct GlobalDbInner {
 /// before a full [`GlobalDb`] invariant open. Callers must hold the profile's
 /// exclusive maintenance lease and database scope.
 pub async fn repair_session_temporal_store(db_path: &Path) -> crate::errors::Result<()> {
+    #[cfg(unix)]
+    {
+        if let Some(parent) = db_path.parent() {
+            let mut parent_permissions = std::fs::metadata(parent)
+                .map_err(|error| {
+                    global_db_operation_error("inspect session store directory permissions", error)
+                })?
+                .permissions();
+            parent_permissions.set_mode(0o700);
+            std::fs::set_permissions(parent, parent_permissions).map_err(|error| {
+                global_db_operation_error("restore session store directory permissions", error)
+            })?;
+        }
+        let mut permissions = std::fs::metadata(db_path)
+            .map_err(|error| global_db_operation_error("inspect session store permissions", error))?
+            .permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(db_path, permissions).map_err(|error| {
+            global_db_operation_error("restore session store owner permissions", error)
+        })?;
+    }
     let authority = DatabaseAuthority::for_runtime(db_path, "repair session temporal store")?;
     let (db, _) = Database::open(db_path, &authority).await?;
-    session_temporal::ensure_session_temporal_schema(db.conn()).await
+    db.repair_session_temporal_schema().await
 }
 
 pub(crate) struct GlobalDbWriterConnection<'a> {
