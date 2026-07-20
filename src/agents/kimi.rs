@@ -1,18 +1,19 @@
 // Rust guideline compliant 2025-10-17
-//! Moonshot Kimi CLI agent integration.
+//! Kimi Code CLI agent integration.
 //!
-//! Two install surfaces are maintained side by side:
-//! - Legacy Kimi CLI: registers the tracedecay MCP server in `~/.kimi/mcp.json`
-//!   (standard `mcpServers` JSON schema, same shape as Claude/Cursor) and
-//!   appends prompt rules to `~/.kimi/AGENTS.md`. Kimi has no hook system and
-//!   no per-tool auto-approval — approval is handled globally via Kimi's
-//!   YOLO / AFK modes.
-//! - Kimi Code CLI native plugin: deploys the tracedecay plugin bundle to
-//!   `<kimi-code-home>/plugins/managed/tracedecay/` and registers it in
-//!   `<kimi-code-home>/plugins/installed.json`, where `<kimi-code-home>` is
-//!   `$KIMI_CODE_HOME` when set, else `~/.kimi-code`. The plugin manifest owns
-//!   the MCP server, skills, and commands for the new CLI, so a stale direct
-//!   registration in `<kimi-code-home>/mcp.json` is migrated away on install.
+//! The global install is the Kimi Code CLI native plugin: the tracedecay
+//! plugin bundle deploys to `<kimi-code-home>/plugins/managed/tracedecay/`
+//! and registers in `<kimi-code-home>/plugins/installed.json`, where
+//! `<kimi-code-home>` is `$KIMI_CODE_HOME` when set, else `~/.kimi-code`. The
+//! plugin manifest owns the MCP server, skills, and commands, so a stale
+//! direct registration in `<kimi-code-home>/mcp.json` is migrated away on
+//! install. Project-local `--local` installs write
+//! `<project>/.kimi-code/mcp.json` plus prompt rules in `<project>/AGENTS.md`.
+//!
+//! The pre-plugin Kimi CLI surface (`~/.kimi/mcp.json` + `~/.kimi/AGENTS.md`)
+//! is no longer written; `uninstall` and `has_tracedecay` keep reading it as
+//! a migration shim so installs written by older tracedecay versions are
+//! still cleaned up and noticed by upgrade tracking.
 
 use std::path::{Path, PathBuf};
 
@@ -40,7 +41,7 @@ const KIMI_PLUGIN_ID: &str = "tracedecay";
 /// managed plugin dir (the only bundle entry rendered at install time).
 const KIMI_PLUGIN_MANIFEST_RELATIVE: &str = ".kimi-plugin/plugin.json";
 
-/// Moonshot Kimi CLI agent.
+/// Kimi Code CLI agent (`tracedecay install --agent kimi`).
 pub struct KimiIntegration;
 
 impl AgentIntegration for KimiIntegration {
@@ -53,20 +54,6 @@ impl AgentIntegration for KimiIntegration {
     }
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let kimi_dir = ctx.home.join(".kimi");
-        std::fs::create_dir_all(&kimi_dir).ok();
-
-        let mcp_path = kimi_dir.join("mcp.json");
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
-
-        let agents_md = kimi_dir.join("AGENTS.md");
-        install_prompt_rules(&agents_md)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &agents_md,
-            crate::automation::skill_targets::SkillInstallTarget::Kimi,
-        )?;
-
         let code_home = kimi_code_home(&ctx.home);
         let managed_dir = deploy_kimi_plugin(&code_home, &ctx.tracedecay_bin)?;
         upsert_kimi_installed_entry(&code_home)?;
@@ -75,9 +62,8 @@ impl AgentIntegration for KimiIntegration {
         eprintln!();
         eprintln!("Setup complete. Next steps:");
         eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Start a new Kimi session — tracedecay tools are now available");
         eprintln!(
-            "  3. Kimi Code CLI loads the tracedecay plugin from {}",
+            "  2. Start a new Kimi Code session — the tracedecay plugin loads from {}",
             managed_dir.display()
         );
         Ok(())
@@ -120,6 +106,11 @@ impl AgentIntegration for KimiIntegration {
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
+        // Migration shim: pre-plugin tracedecay versions wrote a legacy global
+        // install under `~/.kimi` (mcp.json registration, AGENTS.md prompt
+        // rules, and the managed skill prompt index). Current installs never
+        // write those files; keep removing them here so an uninstall after an
+        // upgrade still cleans up the old surface.
         let kimi_dir = ctx.home.join(".kimi");
         let mcp_path = kimi_dir.join("mcp.json");
         uninstall_mcp_server(&mcp_path);
@@ -137,28 +128,28 @@ impl AgentIntegration for KimiIntegration {
         remove_kimi_plugin_dir(&code_home)?;
 
         eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from Kimi CLI.");
-        eprintln!("Start a new Kimi session for changes to take effect.");
+        eprintln!("Uninstall complete. Tracedecay has been removed from Kimi Code CLI.");
+        eprintln!("Start a new Kimi Code session for changes to take effect.");
         Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKimi CLI integration\x1b[0m");
-        let kimi_dir = ctx.home.join(".kimi");
-        doctor_check_mcp(dc, &kimi_dir.join("mcp.json"));
-        doctor_check_prompt(dc, &kimi_dir);
         doctor_check_plugin(dc, &kimi_code_home(&ctx.home));
     }
 
     fn is_detected(&self, home: &Path) -> bool {
-        home.join(".kimi").is_dir()
+        kimi_code_home(home).is_dir()
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
-        Some(home.join(".kimi/mcp.json"))
+        Some(kimi_installed_json_path(&kimi_code_home(home)))
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
+        // Migration shim: the legacy `~/.kimi/mcp.json` branch exists only so
+        // upgrade tracking still notices installs written before the plugin
+        // became the global surface.
         let mcp_path = home.join(".kimi/mcp.json");
         if mcp_path.exists() {
             let json = load_json_file(&mcp_path);
@@ -168,24 +159,6 @@ impl AgentIntegration for KimiIntegration {
             }
         }
         installed_json_has_tracedecay(&kimi_code_home(home))
-    }
-
-    fn export_managed_skills(
-        &self,
-        home: &Path,
-        profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
-        let agents_md = home.join(".kimi").join("AGENTS.md");
-        if !self.has_tracedecay(home) || !agents_md.exists() {
-            return Ok(Vec::new());
-        }
-        Ok(vec![
-            crate::automation::skill_targets::install_managed_skills(
-                profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::Kimi,
-                &agents_md,
-            )?,
-        ])
     }
 
     fn export_managed_skills_local(
@@ -325,9 +298,9 @@ fn upsert_kimi_installed_entry(kimi_code_home: &Path) -> Result<()> {
     let root = managed_dir
         .canonicalize()
         .unwrap_or_else(|_| managed_dir.clone());
-    let existing = plugins.iter().position(|entry| {
-        entry.get("id").and_then(|value| value.as_str()) == Some(KIMI_PLUGIN_ID)
-    });
+    let existing = plugins
+        .iter()
+        .position(|entry| entry.get("id").and_then(|value| value.as_str()) == Some(KIMI_PLUGIN_ID));
     let (enabled, installed_at) = existing
         .map(|index| &plugins[index])
         .map(|entry| {
@@ -388,9 +361,8 @@ fn remove_kimi_installed_entry(kimi_code_home: &Path) {
         return;
     };
     let before = plugins.len();
-    plugins.retain(|entry| {
-        entry.get("id").and_then(|value| value.as_str()) != Some(KIMI_PLUGIN_ID)
-    });
+    plugins
+        .retain(|entry| entry.get("id").and_then(|value| value.as_str()) != Some(KIMI_PLUGIN_ID));
     if plugins.len() == before {
         eprintln!(
             "  No tracedecay plugin entry in {}, skipping",
@@ -449,7 +421,8 @@ fn migrate_kimi_code_mcp_json(kimi_code_home: &Path) {
 // Install helpers
 // ---------------------------------------------------------------------------
 
-/// Register tracedecay under `mcpServers` in `~/.kimi/mcp.json`.
+/// Register tracedecay under `mcpServers` in a Kimi Code MCP config. Used by
+/// the project-local install surface (`<project>/.kimi-code/mcp.json`).
 fn install_mcp_server(mcp_path: &Path, tracedecay_bin: &str) -> Result<()> {
     let backup = backup_config_file(mcp_path)?;
     let mut settings = match load_json_file_strict(mcp_path) {
@@ -490,7 +463,10 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
-/// Remove tracedecay from `~/.kimi/mcp.json`.
+/// Remove tracedecay from a Kimi MCP config, backing up before rewriting and
+/// deleting the file when nothing else remains. Used for the legacy
+/// `~/.kimi/mcp.json` uninstall shim and the `<kimi-code-home>/mcp.json`
+/// install-time migration.
 fn uninstall_mcp_server(mcp_path: &Path) {
     if !mcp_path.exists() {
         eprintln!("  {} not found, skipping", mcp_path.display());
@@ -551,44 +527,6 @@ fn uninstall_prompt_rules(agents_md: &Path) {
 // ---------------------------------------------------------------------------
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
-
-/// Check `~/.kimi/mcp.json` has tracedecay registered.
-fn doctor_check_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
-    if !mcp_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent kimi` if you use Kimi CLI",
-            mcp_path.display()
-        ));
-        return;
-    }
-    let settings = load_json_file(mcp_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
-    if server.and_then(|v| v.as_object()).is_some() {
-        dc.pass(&format!("MCP server registered in {}", mcp_path.display()));
-    } else {
-        dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent kimi`",
-            mcp_path.display()
-        ));
-    }
-}
-
-/// Check AGENTS.md contains tracedecay rules.
-fn doctor_check_prompt(dc: &mut DoctorCounters, kimi_dir: &Path) {
-    let agents_md = kimi_dir.join("AGENTS.md");
-    if agents_md.exists() {
-        let has_rules = std::fs::read_to_string(&agents_md)
-            .unwrap_or_default()
-            .contains("tracedecay");
-        if has_rules {
-            dc.pass("AGENTS.md contains tracedecay rules");
-        } else {
-            dc.fail("AGENTS.md missing tracedecay rules — run `tracedecay install --agent kimi`");
-        }
-    } else {
-        dc.warn("~/.kimi/AGENTS.md does not exist");
-    }
-}
 
 /// Check the Kimi Code CLI native plugin: registered in `installed.json` and
 /// its deployed manifest parses. Like the other plugin-based hosts, an absent

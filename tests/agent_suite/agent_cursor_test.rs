@@ -517,21 +517,28 @@ async fn test_prompt_integrations_export_active_managed_skill_indexes() {
         .unwrap();
 
     let ctx = make_install_ctx(home);
-    // Pin the Kimi Code CLI home so a developer-set KIMI_CODE_HOME cannot leak
-    // this test's plugin deploy into the real home.
+    // Pin the Kimi Code CLI home so a developer-set KIMI_CODE_HOME can never
+    // redirect any kimi path resolution in this test into the real home.
     let _kimi_code_home = EnvVarGuard::set(
         tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
         home.join(".kimi-code"),
     );
     ClaudeIntegration.install(&ctx).unwrap();
-    KimiIntegration.install(&ctx).unwrap();
     OpenCodeIntegration.install(&ctx).unwrap();
     CopilotIntegration.install(&ctx).unwrap();
     VibeIntegration.install(&ctx).unwrap();
 
+    // Kimi's prompt-index surface is project-local (its global install is the
+    // Kimi Code CLI plugin, which owns skills natively): exercise the same
+    // managed-skill index export through install_local.
+    let kimi_project = TempDir::new().unwrap();
+    KimiIntegration
+        .install_local(&ctx, kimi_project.path())
+        .unwrap();
+
     for prompt_path in [
         home.join(".claude/CLAUDE.md"),
-        home.join(".kimi/AGENTS.md"),
+        kimi_project.path().join("AGENTS.md"),
         home.join(".config/opencode/AGENTS.md"),
         vscode_data_dir(home).join("User/prompts/copilot-instructions.md"),
         copilot_cli_dir(home).join("copilot-instructions.md"),
@@ -548,14 +555,16 @@ async fn test_prompt_integrations_export_active_managed_skill_indexes() {
     }
 
     ClaudeIntegration.uninstall(&ctx).unwrap();
-    KimiIntegration.uninstall(&ctx).unwrap();
     OpenCodeIntegration.uninstall(&ctx).unwrap();
     CopilotIntegration.uninstall(&ctx).unwrap();
     VibeIntegration.uninstall(&ctx).unwrap();
 
+    // Kimi's project AGENTS.md is intentionally absent here: the project-local
+    // index has no global uninstall surface. Removal of pre-plugin `~/.kimi`
+    // prompt indexes is covered by the migration-shim uninstall test in
+    // agent_install_test.rs.
     for prompt_path in [
         home.join(".claude/CLAUDE.md"),
-        home.join(".kimi/AGENTS.md"),
         home.join(".config/opencode/AGENTS.md"),
         vscode_data_dir(home).join("User/prompts/copilot-instructions.md"),
         copilot_cli_dir(home).join("copilot-instructions.md"),

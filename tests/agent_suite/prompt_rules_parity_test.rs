@@ -47,12 +47,9 @@ fn hosts() -> Vec<HostCase> {
             marker: STANDARD_MARKER,
             stale_block_tail: "",
         },
-        HostCase {
-            id: "kimi",
-            rules_path: |home| home.join(".kimi/AGENTS.md"),
-            marker: STANDARD_MARKER,
-            stale_block_tail: "",
-        },
+        // Kimi is absent: its global install is the Kimi Code CLI plugin (no
+        // prompt rules); its project-local AGENTS.md rules use the same shared
+        // renderer and are covered by the local-install tests.
         HostCase {
             id: "vibe",
             rules_path: |home| home.join(".vibe/prompts/cli.md"),

@@ -1086,13 +1086,22 @@ fn kimi_update_plugin_refreshes_bundle_and_preserves_user_config() {
         &kimi_code_home,
     );
     let kimi = get_integration("kimi").unwrap();
+
+    // User-owned MCP config in the Kimi Code home that install/update-plugin
+    // must never write (no tracedecay key, so the install migration skips it).
+    std::fs::create_dir_all(&kimi_code_home).unwrap();
+    let user_mcp = kimi_code_home.join("mcp.json");
+    std::fs::write(
+        &user_mcp,
+        "{\n  \"mcpServers\": {\n    \"other\": { \"command\": \"other-bin\" }\n  }\n}\n",
+    )
+    .unwrap();
+    let user_mcp_before = bytes(&user_mcp);
+
     kimi.install(&ctx(home.path(), OLD_BIN)).unwrap();
 
     let managed_dir = kimi_code_home.join("plugins/managed/tracedecay");
     let installed_path = kimi_code_home.join("plugins/installed.json");
-    // Legacy user config that update-plugin must never write.
-    let legacy_mcp = home.path().join(".kimi/mcp.json");
-    let legacy_mcp_before = bytes(&legacy_mcp);
 
     // A user-disabled registry entry keeps its flag through the refresh.
     let mut installed = read_json(&installed_path);
@@ -1110,8 +1119,8 @@ fn kimi_update_plugin_refreshes_bundle_and_preserves_user_config() {
     };
     assert_eq!(paths, vec![managed_dir.clone()]);
 
-    // Legacy config byte-identical; bundle re-baked with the new bin + version.
-    assert_eq!(bytes(&legacy_mcp), legacy_mcp_before);
+    // User config byte-identical; bundle re-baked with the new bin + version.
+    assert_eq!(bytes(&user_mcp), user_mcp_before);
     let manifest = text(&managed_dir.join(".kimi-plugin/plugin.json"));
     assert!(manifest.contains(NEW_BIN));
     assert!(manifest.contains(env!("CARGO_PKG_VERSION")));

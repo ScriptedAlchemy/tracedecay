@@ -212,7 +212,7 @@ tracedecay install --agent roo-code    # Roo Code
 tracedecay install --agent antigravity # Antigravity (Windsurf)
 tracedecay install --agent kilo        # Kilo CLI
 tracedecay install --agent kiro        # AWS Kiro
-tracedecay install --agent kimi        # Moonshot Kimi CLI
+tracedecay install --agent kimi        # Kimi Code CLI
 tracedecay install --agent vibe        # Mistral Vibe
 ```
 
@@ -221,7 +221,7 @@ Each agent gets the configuration its host supports: MCP registration or native 
 - Hermes installs one native user plugin through Hermes' plugin API.
 - Cursor installs a local plugin in `~/.cursor/plugins/local/tracedecay` that bundles MCP, hooks, and the tracedecay rule.
 - Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay writes the source bundle and marketplace entry, then `codex plugin add tracedecay@personal` installs Codex's cache from that source. The plugin owns MCP, hooks, and skills. Codex global install does not write `~/.codex/AGENTS.md` or `~/.codex/hooks.json`.
-- Kimi Code CLI gets a native plugin under `~/.kimi-code/plugins/managed/tracedecay` (registered in `~/.kimi-code/plugins/installed.json`; `$KIMI_CODE_HOME` overrides the home); the legacy `~/.kimi` MCP registration and `AGENTS.md` rules are still written for the older Kimi CLI.
+- Kimi Code CLI installs a native plugin in `~/.kimi-code/plugins/managed/tracedecay` (registered in `~/.kimi-code/plugins/installed.json`; `$KIMI_CODE_HOME` overrides the home) that bundles MCP, skills, and commands; `--local` writes `<project>/.kimi-code/mcp.json` and project `AGENTS.md` rules. Older `~/.kimi` installs are no longer written — uninstall removes them as a one-time cleanup.
 
 Hermes setup writes the single user integration to
 `~/.hermes/plugins/tracedecay/` and enables it in `~/.hermes/config.yaml` under
