@@ -412,7 +412,8 @@ async fn repair_session_temporal_connection(conn: &Connection) -> crate::errors:
         }
         session_temporal::repair_session_temporal_state(&transaction).await?;
         session_temporal::ensure_session_temporal_schema(&transaction).await?;
-        schema_contract::ensure_authority_invariants(&transaction, true).await?;
+        schema_contract::ensure_authority_invariant_schema(&transaction).await?;
+        schema_contract::validate_session_temporal_repair_authority(&transaction).await?;
         crate::errors::Result::Ok(true)
     }
     .await;

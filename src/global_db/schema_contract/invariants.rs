@@ -30,6 +30,13 @@ pub(in crate::global_db) use triggers::{
 };
 
 const OPERATION: &str = "ensure global database authority invariants";
+const SESSION_TEMPORAL_REPAIR_AUDITS: &[&str] = &[
+    "session temporal receipts or cursor keys are mutable",
+    "session cursor key rotation state is invalid",
+    "session refresh operation state is invalid",
+    "session temporal generation state is invalid",
+    "session temporal authority ownership is invalid",
+];
 
 pub(in crate::global_db) async fn authority_invariant_triggers_intact(
     conn: &Connection,
@@ -149,4 +156,20 @@ pub(in crate::global_db) async fn validate_authority_rows_exhaustive(
     validate_observation_cursor_coverage(conn, 0).await?;
     validate_projection_authority_suffix(conn, AuditCheckpoint::default()).await?;
     validate_invariant_rows(conn).await
+}
+
+pub(in crate::global_db) async fn validate_session_temporal_repair_authority(
+    conn: &Connection,
+) -> crate::errors::Result<()> {
+    for invariant in INVARIANTS
+        .iter()
+        .filter(|invariant| SESSION_TEMPORAL_REPAIR_AUDITS.contains(&invariant.violation))
+    {
+        if let Some(query) = invariant.audit_query
+            && query_has_rows(conn, query).await?
+        {
+            return Err(global_db_operation_message(OPERATION, invariant.violation));
+        }
+    }
+    Ok(())
 }

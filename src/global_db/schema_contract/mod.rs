@@ -14,7 +14,7 @@ fn normalize_trigger_sql(sql: &str) -> String {
 pub(super) use invariants::{
     authority_invariant_triggers_intact, restore_immutability_after_canonical_repair,
     suspend_immutability_for_canonical_repair, suspend_session_invariants_for_schema_upgrade,
-    validate_authority_rows_exhaustive,
+    validate_authority_rows_exhaustive, validate_session_temporal_repair_authority,
 };
 pub(crate) use invariants::{ensure_authority_invariant_schema, ensure_authority_invariants};
 pub(super) use validation::{
