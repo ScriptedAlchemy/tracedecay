@@ -1003,6 +1003,95 @@ async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::R
          DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
          DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
          DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
+         DROP TRIGGER IF EXISTS session_refresh_bindings_immutable_update_v1;
+         DROP TRIGGER IF EXISTS session_refresh_bindings_immutable_delete_v1;
+         DROP TRIGGER IF EXISTS session_refresh_progress_immutable_update_v1;
+         DROP TRIGGER IF EXISTS session_refresh_progress_immutable_delete_v1;
+         DROP TRIGGER IF EXISTS session_refresh_batch_bindings_immutable_update_v1;
+         DROP TRIGGER IF EXISTS session_refresh_batch_bindings_immutable_delete_v1;
+         DROP TRIGGER IF EXISTS session_refresh_bindings_insert_guard_v1;
+         DROP TRIGGER IF EXISTS session_refresh_progress_insert_guard_v1;
+         DROP TRIGGER IF EXISTS session_refresh_batch_bindings_insert_guard_v1;
+         INSERT OR IGNORE INTO session_temporal_generations (
+             session_id, generation, state, frozen_watermarks_json, created_at
+         )
+         SELECT binding.session_id, binding.generation, 'building',
+                binding.frozen_watermarks_json, binding.created_at
+         FROM session_refresh_bindings AS binding
+         LEFT JOIN session_temporal_generations AS generation
+           ON generation.session_id = binding.session_id
+          AND generation.generation = binding.generation
+         WHERE generation.generation IS NULL;
+         UPDATE session_refresh_bindings
+         SET binding_digest = (
+                 SELECT operation.request_digest
+                 FROM session_refresh_operations AS operation
+                 WHERE operation.session_id = session_refresh_bindings.session_id
+                   AND operation.operation_id = session_refresh_bindings.operation_id
+             ),
+             created_at = (
+                 SELECT operation.created_at
+                 FROM session_refresh_operations AS operation
+                 WHERE operation.session_id = session_refresh_bindings.session_id
+                   AND operation.operation_id = session_refresh_bindings.operation_id
+             ),
+             source_frontier = (
+                 SELECT json_extract(operation.target_frontier_json, '$.committed_through')
+                 FROM session_refresh_operations AS operation
+                 WHERE operation.session_id = session_refresh_bindings.session_id
+                   AND operation.operation_id = session_refresh_bindings.operation_id
+             ),
+             target_frontier = (
+                 SELECT json_extract(operation.target_frontier_json, '$.observed_through')
+                 FROM session_refresh_operations AS operation
+                 WHERE operation.session_id = session_refresh_bindings.session_id
+                   AND operation.operation_id = session_refresh_bindings.operation_id
+             ),
+             frozen_watermarks_json = (
+                 SELECT generation.frozen_watermarks_json
+                 FROM session_temporal_generations AS generation
+                 WHERE generation.session_id = session_refresh_bindings.session_id
+                   AND generation.generation = session_refresh_bindings.generation
+             )
+         WHERE EXISTS (
+             SELECT 1 FROM session_refresh_operations AS operation
+             WHERE operation.session_id = session_refresh_bindings.session_id
+               AND operation.operation_id = session_refresh_bindings.operation_id
+         );
+         UPDATE session_refresh_progress
+         SET recorded_at = (
+             SELECT MAX(session_refresh_progress.recorded_at, operation.created_at)
+             FROM session_refresh_operations AS operation
+             WHERE operation.session_id = session_refresh_progress.session_id
+               AND operation.operation_id = session_refresh_progress.operation_id
+         )
+         WHERE EXISTS (
+             SELECT 1 FROM session_refresh_operations AS operation
+             WHERE operation.session_id = session_refresh_progress.session_id
+               AND operation.operation_id = session_refresh_progress.operation_id
+               AND session_refresh_progress.recorded_at < operation.created_at
+         );
+         DELETE FROM session_refresh_batch_bindings
+         WHERE progress_ordinal <> batch_ordinal
+            OR NOT EXISTS (
+                SELECT 1 FROM session_refresh_bindings AS binding
+                WHERE binding.session_id = session_refresh_batch_bindings.session_id
+                  AND binding.operation_id = session_refresh_batch_bindings.operation_id
+                  AND binding.generation = session_refresh_batch_bindings.generation
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM session_refresh_progress AS progress
+                WHERE progress.session_id = session_refresh_batch_bindings.session_id
+                  AND progress.operation_id = session_refresh_batch_bindings.operation_id
+                  AND progress.progress_ordinal =
+                      session_refresh_batch_bindings.progress_ordinal
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM session_temporal_projection_receipts AS receipt
+                WHERE receipt.session_id = session_refresh_batch_bindings.session_id
+                  AND receipt.generation = session_refresh_batch_bindings.generation
+                  AND receipt.batch_ordinal = session_refresh_batch_bindings.batch_ordinal
+            );
          DELETE FROM session_temporal_generations
          WHERE EXISTS (
              SELECT 1
@@ -1115,6 +1204,33 @@ async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::R
                WHERE receipt.session_id = session_refresh_operations.session_id
                  AND receipt.operation_id = session_refresh_operations.operation_id
                  AND receipt.terminal_state IN ('complete', 'failed', 'cancelled')
+           );
+         INSERT INTO session_refresh_receipts (
+             session_id, operation_id, terminal_state, frontier_json,
+             coverage_json, failure_code, terminal_at
+         )
+         SELECT operation.session_id, operation.operation_id, operation.state,
+                CASE
+                    WHEN operation.state = 'complete' THEN operation.target_frontier_json
+                    ELSE progress.frontier_json
+                END,
+                progress.coverage_json, operation.failure_code, operation.terminal_at
+         FROM session_refresh_operations AS operation
+         JOIN session_refresh_progress AS progress
+           ON progress.session_id = operation.session_id
+          AND progress.operation_id = operation.operation_id
+          AND progress.progress_ordinal = (
+              SELECT MAX(latest.progress_ordinal)
+              FROM session_refresh_progress AS latest
+              WHERE latest.session_id = operation.session_id
+                AND latest.operation_id = operation.operation_id
+          )
+         WHERE operation.state <> 'running'
+           AND operation.terminal_at IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM session_refresh_receipts AS receipt
+               WHERE receipt.session_id = operation.session_id
+                 AND receipt.operation_id = operation.operation_id
            );
          INSERT INTO session_refresh_receipts (
              session_id, operation_id, terminal_state, frontier_json,

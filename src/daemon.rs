@@ -1010,10 +1010,23 @@ impl DaemonEngine {
         initialize_request: JsonRpcRequest,
     ) {
         let engine = self.clone();
+        let project = handshake.project_path.clone();
         spawn_lifecycle_project_server_warmup(
             self.lifecycle.clone(),
             initialize_request,
-            async move { Box::pin(engine.project_server(&handshake)).await },
+            async move {
+                Box::pin(engine.project_server(&handshake))
+                    .await
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!(
+                            "project server warm-up for '{}': {error}",
+                            project.as_deref().map_or_else(
+                                || "<projectless>".into(),
+                                |path| path.display().to_string()
+                            )
+                        ),
+                    })
+            },
         );
     }
 
@@ -1022,6 +1035,7 @@ impl DaemonEngine {
         handshake: DaemonHandshake,
     ) -> JoinHandle<Result<Arc<crate::mcp::McpServer>>> {
         let engine = self.clone();
+        let project = handshake.project_path.clone();
         tokio::spawn(async move {
             let Some(activity) = engine.lifecycle.try_enter() else {
                 return Err(TraceDecayError::Config {
@@ -1041,6 +1055,13 @@ impl DaemonEngine {
                     "project_server_warmup",
                     &[
                         ("outcome", "error".to_string()),
+                        (
+                            "project",
+                            project.as_deref().map_or_else(
+                                || "<projectless>".into(),
+                                |path| path.display().to_string(),
+                            ),
+                        ),
                         ("error", error.to_string()),
                     ],
                 );
@@ -1760,6 +1781,12 @@ fn spawn_portable_project_server_warmup(
                 )
             })
             .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "project server warm-up for '{}': {error}",
+                    canonical_project_path.display()
+                ),
+            })
     });
 }
 

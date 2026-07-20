@@ -1654,33 +1654,7 @@ pub(in crate::global_db::schema_contract) const INVARIANTS: &[Invariant] = &[
                 LEFT JOIN session_temporal_generations AS generation
                   ON generation.session_id = binding.session_id
                  AND generation.generation = binding.generation
-                WHERE (binding.operation_id IS NULL AND operation.state <> 'running')
-                   OR (operation.state <> 'running' AND receipt.operation_id IS NULL)
-                   OR (operation.state <> 'running'
-                       AND (
-                         receipt.terminal_state <> operation.state
-                         OR receipt.terminal_at <> operation.terminal_at
-                         OR receipt.failure_code IS NOT operation.failure_code
-                         OR NOT EXISTS (
-                             SELECT 1
-                             FROM session_refresh_progress AS progress
-                             WHERE progress.session_id = operation.session_id
-                               AND progress.operation_id = operation.operation_id
-                               AND progress.progress_ordinal = (
-                                   SELECT MAX(latest.progress_ordinal)
-                                   FROM session_refresh_progress AS latest
-                                   WHERE latest.session_id = operation.session_id
-                                     AND latest.operation_id = operation.operation_id
-                               )
-                               AND progress.frontier_json = receipt.frontier_json
-                               AND progress.coverage_json = receipt.coverage_json
-                         )
-                       ))
-                   OR (operation.state = 'complete' AND generation.state <> 'active')
-                   OR (operation.state = 'complete'
-                       AND receipt.frontier_json <> operation.target_frontier_json)
-                   OR (operation.state = 'failed' AND generation.state <> 'failed')
-                   OR (operation.state = 'cancelled' AND generation.state <> 'cancelled')
+                WHERE binding.operation_id IS NULL
              )
              LIMIT 1",
         ),

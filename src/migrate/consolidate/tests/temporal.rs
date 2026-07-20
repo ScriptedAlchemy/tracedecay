@@ -281,7 +281,7 @@ async fn temporal_refresh_replays_running_to_terminal() {
 }
 
 #[tokio::test]
-async fn temporal_refresh_running_conflict_rolls_back() {
+async fn temporal_refresh_unstarted_reservations_are_repaired_before_merge() {
     let temp = TempDir::new().unwrap();
     let target = temp.path().join("target.db");
     let source = temp.path().join("source.db");
@@ -318,23 +318,17 @@ async fn temporal_refresh_running_conflict_rolls_back() {
     temporal_execute_batch(&target, &setup("operation-target", 1, '3')).await;
     temporal_execute_batch(&source, &setup("operation-source", 2, '4')).await;
 
-    let error = sqlite::merge_temporal_for_test(&target, &source)
+    sqlite::merge_temporal_for_test(&target, &source)
         .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("refresh operation running-state conflict")
-    );
+        .unwrap();
     assert_eq!(
         temporal_scalar(
             &target,
             "SELECT COUNT(*) FROM session_refresh_operations
-             WHERE session_id = 'session-refresh'
-               AND operation_id = 'operation-target' AND state = 'running'"
+             WHERE session_id = 'session-refresh'"
         )
         .await,
-        1
+        0
     );
 }
 
