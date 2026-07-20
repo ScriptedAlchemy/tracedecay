@@ -961,6 +961,826 @@ impl HunkRefV1 {
     }
 }
 
+/// Domain separator for the immutable repository-state digest retained by a
+/// PR11 index preview. This digest is distinct from the content-addressed
+/// [`RepositoryStateSnapshotId`] so it can bind the full typed snapshot into
+/// every `HunkRefV1` compare-and-swap precondition.
+pub const GIT_INDEX_SNAPSHOT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.snapshot.v1";
+
+/// Domain separator for immutable PR11 index previews.
+pub const GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.preview.v1";
+
+/// Domain separator for terminal PR11 index transaction receipts.
+pub const GIT_INDEX_RECEIPT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.receipt.v1";
+
+macro_rules! git_index_identifier {
+    ($($name:ident => $field:literal),+ $(,)?) => {$(
+        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
+                let value = value.into();
+                validate_path_label(&value, $field)?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn validate(&self) -> Result<(), DomainError> {
+                validate_path_label(&self.0, $field)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = DomainError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    )+};
+}
+
+git_index_identifier!(
+    GitIndexPreviewId => "git index preview id",
+    GitIndexTransactionId => "git index transaction id",
+    GitIndexReceiptId => "git index receipt id",
+    GitIndexIdempotencyKey => "git index idempotency key",
+);
+
+/// The only native Git mutations represented by PR11. Generic Git execution,
+/// ref rewrites, merge/rebase/cherry-pick, push, and worktree writes are
+/// deliberately absent.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum GitIndexTransactionOperationV1 {
+    StageHunks,
+    UnstageHunks,
+    CommitIndex,
+}
+
+impl GitIndexTransactionOperationV1 {
+    pub const fn hunk_direction(self) -> Option<HunkDirectionV1> {
+        match self {
+            Self::StageHunks => Some(HunkDirectionV1::WorkingTreeToIndex),
+            Self::UnstageHunks => Some(HunkDirectionV1::IndexToHead),
+            Self::CommitIndex => None,
+        }
+    }
+}
+
+/// Why a preview is intentionally read-only. A caller must re-preview after
+/// resolving the condition; no variant grants a relaxed or partial apply.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum GitIndexUnsupportedStateV1 {
+    BareRepository,
+    DetachedHead,
+    UnbornBranch,
+    IndexLockPresent,
+    UnmergedIndex,
+    IntentToAdd,
+    SplitIndex,
+    SparseIndex,
+    UnreadableIndex,
+    ConflictedWorkingTree,
+    UnreadableWorkingTree,
+    InProgressOperation,
+    UnsupportedObjectFormat,
+    BinaryHunk,
+    Submodule,
+    Symlink,
+    FileModeOnly,
+    RenameOrCopy,
+    FiltersOrEndOfLine,
+    PartialHunkSelection,
+}
+
+/// Whether a captured preview may reach the daemon's native apply path.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state", content = "reason")]
+pub enum GitIndexPreviewDispositionV1 {
+    Applicable,
+    Unsupported(GitIndexUnsupportedStateV1),
+}
+
+impl GitIndexPreviewDispositionV1 {
+    pub const fn is_applicable(&self) -> bool {
+        matches!(self, Self::Applicable)
+    }
+}
+
+/// The fixed commit-signing policy understood by `commit_index`. It is not a
+/// generic collection of Git flags and does not authorize hook bypasses.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "policy")]
+pub enum GitIndexSigningPolicyV1 {
+    UnsignedPermitted,
+    SignatureRequired { key_reference: String },
+}
+
+/// Structured, bounded commit input for the `commit_index` operation.
+///
+/// The message is retained only while the native transaction is in flight;
+/// previews and durable receipts retain its digest rather than the text.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitIndexCommitIntentV1 {
+    pub message: String,
+    pub message_digest: ManifestDigest,
+    pub author: GitCommitIdentityV1,
+    pub committer: GitCommitIdentityV1,
+    pub signing_policy: GitIndexSigningPolicyV1,
+}
+
+impl GitIndexCommitIntentV1 {
+    pub fn new(
+        message: String,
+        author: GitCommitIdentityV1,
+        committer: GitCommitIdentityV1,
+        signing_policy: GitIndexSigningPolicyV1,
+    ) -> Result<Self, DomainError> {
+        let mut intent = Self {
+            message,
+            message_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))?,
+            author,
+            committer,
+            signing_policy,
+        };
+        intent.message_digest = intent.compute_message_digest()?;
+        intent.validate()?;
+        Ok(intent)
+    }
+
+    pub fn compute_message_digest(&self) -> Result<ManifestDigest, DomainError> {
+        validate_git_commit_message(&self.message)?;
+        canonical_sha256(&("tracedecay.git-index.commit-message.v1", &self.message))
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        validate_git_commit_message(&self.message)?;
+        if self.message_digest != self.compute_message_digest()? {
+            return Err(DomainError::DigestMismatch);
+        }
+        validate_git_commit_identity(&self.author)?;
+        validate_git_commit_identity(&self.committer)?;
+        if let GitIndexSigningPolicyV1::SignatureRequired { key_reference } = &self.signing_policy {
+            validate_path_label(key_reference, "git index signing key reference")?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_git_commit_message(message: &str) -> Result<(), DomainError> {
+    if message.is_empty() {
+        return Err(DomainError::Empty {
+            field: "git index commit message",
+        });
+    }
+    if message.len() > 65_536 || message.contains('\0') {
+        return Err(DomainError::NonCanonical {
+            field: "git index commit message",
+        });
+    }
+    Ok(())
+}
+
+fn validate_git_commit_identity(identity: &GitCommitIdentityV1) -> Result<(), DomainError> {
+    validate_path_label(&identity.name, "git index commit identity name")?;
+    validate_path_label(&identity.email, "git index commit identity email")
+}
+
+/// Immutable, content-bound preview for one daemon-serialized index
+/// transaction. Applicability is only a precondition: the daemon must capture
+/// and compare the entire snapshot and every contained `HunkRefV1` again
+/// immediately before a native mutation.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitIndexPreviewV1 {
+    pub preview_id: GitIndexPreviewId,
+    pub operation: GitIndexTransactionOperationV1,
+    pub repository_snapshot: RepositoryStateSnapshotV1,
+    pub repository_snapshot_digest: ManifestDigest,
+    pub selected_hunks: Vec<HunkRefV1>,
+    pub candidate_index_tree: Option<GitOidV1>,
+    pub disposition: GitIndexPreviewDispositionV1,
+    pub created_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub preview_digest: ManifestDigest,
+}
+
+#[derive(Serialize)]
+struct GitIndexPreviewDigestMaterial<'a> {
+    domain: &'static str,
+    preview_id: &'a GitIndexPreviewId,
+    operation: GitIndexTransactionOperationV1,
+    repository_snapshot_id: &'a RepositoryStateSnapshotId,
+    repository_snapshot_digest: &'a ManifestDigest,
+    selected_hunk_digests: &'a [ManifestDigest],
+    candidate_index_tree: Option<&'a GitOidV1>,
+    disposition: &'a GitIndexPreviewDispositionV1,
+    created_at: UtcMicros,
+    expires_at: UtcMicros,
+}
+
+impl GitIndexPreviewV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        preview_id: GitIndexPreviewId,
+        operation: GitIndexTransactionOperationV1,
+        repository_snapshot: RepositoryStateSnapshotV1,
+        repository_snapshot_digest: ManifestDigest,
+        selected_hunks: Vec<HunkRefV1>,
+        candidate_index_tree: Option<GitOidV1>,
+        disposition: GitIndexPreviewDispositionV1,
+        created_at: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
+        let mut preview = Self {
+            preview_id,
+            operation,
+            repository_snapshot,
+            repository_snapshot_digest,
+            selected_hunks,
+            candidate_index_tree,
+            disposition,
+            created_at,
+            expires_at,
+            preview_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))?,
+        };
+        preview.preview_digest = preview.compute_preview_digest()?;
+        preview.validate()?;
+        Ok(preview)
+    }
+
+    pub fn repository_snapshot_digest(
+        snapshot: &RepositoryStateSnapshotV1,
+    ) -> Result<ManifestDigest, DomainError> {
+        snapshot.validate()?;
+        canonical_sha256(&(GIT_INDEX_SNAPSHOT_DIGEST_DOMAIN_V1, snapshot))
+    }
+
+    pub fn selected_hunk_digests(&self) -> Result<Vec<ManifestDigest>, DomainError> {
+        self.selected_hunks
+            .iter()
+            .map(HunkRefV1::compute_digest)
+            .collect()
+    }
+
+    pub fn is_expired_at(&self, observed_at: UtcMicros) -> bool {
+        observed_at >= self.expires_at
+    }
+
+    pub fn compute_preview_digest(&self) -> Result<ManifestDigest, DomainError> {
+        self.validate_fields()?;
+        let hunk_digests = self.selected_hunk_digests()?;
+        canonical_sha256(&GitIndexPreviewDigestMaterial {
+            domain: GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1,
+            preview_id: &self.preview_id,
+            operation: self.operation,
+            repository_snapshot_id: self.repository_snapshot.snapshot_id(),
+            repository_snapshot_digest: &self.repository_snapshot_digest,
+            selected_hunk_digests: &hunk_digests,
+            candidate_index_tree: self.candidate_index_tree.as_ref(),
+            disposition: &self.disposition,
+            created_at: self.created_at,
+            expires_at: self.expires_at,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.preview_digest.validate()?;
+        self.validate_fields()?;
+        if self.preview_digest != self.compute_preview_digest()? {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    fn validate_fields(&self) -> Result<(), DomainError> {
+        self.preview_id.validate()?;
+        self.repository_snapshot.validate()?;
+        self.repository_snapshot_digest.validate()?;
+        if self.repository_snapshot_digest
+            != Self::repository_snapshot_digest(&self.repository_snapshot)?
+        {
+            return Err(DomainError::SnapshotMismatch {
+                field: "git index preview repository snapshot digest",
+            });
+        }
+        if self.expires_at <= self.created_at {
+            return Err(DomainError::InvalidTimeInterval);
+        }
+
+        let mut hunk_digests = Vec::with_capacity(self.selected_hunks.len());
+        for hunk in &self.selected_hunks {
+            hunk.validate()?;
+            if hunk.repository != self.repository_snapshot.repository_id
+                || self.repository_snapshot.worktree_id.as_ref() != Some(&hunk.worktree)
+                || hunk.preview_id != self.preview_id.as_str()
+                || hunk.snapshot_digest != self.repository_snapshot_digest
+            {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "git index preview hunk compare-and-swap binding",
+                });
+            }
+            if self.operation.hunk_direction() != Some(hunk.direction) {
+                return Err(DomainError::NonCanonical {
+                    field: "git index preview hunk direction",
+                });
+            }
+            hunk_digests.push(hunk.compute_digest()?);
+        }
+        if hunk_digests.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(DomainError::DuplicateId {
+                field: "git index preview hunk digest order",
+            });
+        }
+
+        if let Some(tree) = &self.candidate_index_tree {
+            tree.validate()?;
+            if tree.format() != self.repository_snapshot.object_format {
+                return Err(DomainError::NonCanonical {
+                    field: "git index preview candidate tree format",
+                });
+            }
+        }
+
+        match (&self.disposition, self.operation) {
+            (
+                GitIndexPreviewDispositionV1::Applicable,
+                GitIndexTransactionOperationV1::CommitIndex,
+            ) => {
+                if !self.repository_snapshot.is_mutation_eligible()
+                    || !matches!(
+                        self.repository_snapshot.head,
+                        GitHeadStateV1::Attached { .. }
+                    )
+                    || !self.selected_hunks.is_empty()
+                    || self.candidate_index_tree.as_ref()
+                        != self.repository_snapshot.index.tree_id.as_ref()
+                {
+                    return Err(DomainError::NonCanonical {
+                        field: "applicable git index commit preview",
+                    });
+                }
+            }
+            (GitIndexPreviewDispositionV1::Applicable, _) => {
+                if !self.repository_snapshot.is_mutation_eligible()
+                    || self.selected_hunks.is_empty()
+                    || self.candidate_index_tree.is_none()
+                {
+                    return Err(DomainError::NonCanonical {
+                        field: "applicable git index hunk preview",
+                    });
+                }
+            }
+            (GitIndexPreviewDispositionV1::Unsupported(_), _) => {
+                if !self.selected_hunks.is_empty() || self.candidate_index_tree.is_some() {
+                    return Err(DomainError::NonCanonical {
+                        field: "unsupported git index preview mutation payload",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for GitIndexPreviewV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            preview_id: GitIndexPreviewId,
+            operation: GitIndexTransactionOperationV1,
+            repository_snapshot: RepositoryStateSnapshotV1,
+            repository_snapshot_digest: ManifestDigest,
+            selected_hunks: Vec<HunkRefV1>,
+            candidate_index_tree: Option<GitOidV1>,
+            disposition: GitIndexPreviewDispositionV1,
+            created_at: UtcMicros,
+            expires_at: UtcMicros,
+            preview_digest: ManifestDigest,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let preview = Self::new(
+            wire.preview_id,
+            wire.operation,
+            wire.repository_snapshot,
+            wire.repository_snapshot_digest,
+            wire.selected_hunks,
+            wire.candidate_index_tree,
+            wire.disposition,
+            wire.created_at,
+            wire.expires_at,
+        )
+        .map_err(serde::de::Error::custom)?;
+        if preview.preview_digest != wire.preview_digest {
+            return Err(serde::de::Error::custom(
+                "git index preview digest does not match its immutable payload",
+            ));
+        }
+        Ok(preview)
+    }
+}
+
+/// Durable transaction phases. Recovery may reconcile a transaction only to
+/// one of the terminal truth states; it never re-enters `NativeApplyStarted`
+/// after a crash.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum GitIndexJournalPhaseV1 {
+    Prepared,
+    NativeApplyStarted,
+    IndexCommitted,
+    RefCommitted,
+    Verifying,
+    Committed,
+    AbortedNoChange,
+    NeedsInspection,
+}
+
+impl GitIndexJournalPhaseV1 {
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Committed | Self::AbortedNoChange | Self::NeedsInspection
+        )
+    }
+
+    pub const fn permits_successor(self, successor: Self) -> bool {
+        matches!(
+            (self, successor),
+            (Self::Prepared, Self::NativeApplyStarted)
+                | (Self::Prepared, Self::AbortedNoChange)
+                | (Self::Prepared, Self::NeedsInspection)
+                | (Self::NativeApplyStarted, Self::IndexCommitted)
+                | (Self::NativeApplyStarted, Self::AbortedNoChange)
+                | (Self::NativeApplyStarted, Self::NeedsInspection)
+                | (Self::IndexCommitted, Self::RefCommitted)
+                | (Self::IndexCommitted, Self::Verifying)
+                | (Self::IndexCommitted, Self::NeedsInspection)
+                | (Self::RefCommitted, Self::Verifying)
+                | (Self::RefCommitted, Self::NeedsInspection)
+                | (Self::Verifying, Self::Committed)
+                | (Self::Verifying, Self::NeedsInspection)
+        )
+    }
+}
+
+/// Durable recovery record. The daemon fsyncs this record before the first
+/// native mutation and after every legal phase transition.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitIndexTransactionJournalV1 {
+    pub transaction_id: GitIndexTransactionId,
+    pub preview_id: GitIndexPreviewId,
+    pub preview_digest: ManifestDigest,
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub operation: GitIndexTransactionOperationV1,
+    pub expected_snapshot_digest: ManifestDigest,
+    pub phase: GitIndexJournalPhaseV1,
+    pub phase_epoch: u64,
+    pub started_at: UtcMicros,
+    pub updated_at: UtcMicros,
+}
+
+impl GitIndexTransactionJournalV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepared(
+        transaction_id: GitIndexTransactionId,
+        preview: &GitIndexPreviewV1,
+        started_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
+        preview.validate()?;
+        let worktree_id =
+            preview
+                .repository_snapshot
+                .worktree_id
+                .clone()
+                .ok_or(DomainError::NonCanonical {
+                    field: "git index transaction worktree",
+                })?;
+        let journal = Self {
+            transaction_id,
+            preview_id: preview.preview_id.clone(),
+            preview_digest: preview.preview_digest.clone(),
+            repository_id: preview.repository_snapshot.repository_id.clone(),
+            worktree_id,
+            operation: preview.operation,
+            expected_snapshot_digest: preview.repository_snapshot_digest.clone(),
+            phase: GitIndexJournalPhaseV1::Prepared,
+            phase_epoch: 1,
+            started_at,
+            updated_at: started_at,
+        };
+        journal.validate()?;
+        Ok(journal)
+    }
+
+    pub fn advance(
+        &mut self,
+        successor: GitIndexJournalPhaseV1,
+        updated_at: UtcMicros,
+    ) -> Result<(), DomainError> {
+        if !self.phase.permits_successor(successor)
+            || (successor == GitIndexJournalPhaseV1::RefCommitted
+                && self.operation != GitIndexTransactionOperationV1::CommitIndex)
+            || updated_at < self.updated_at
+        {
+            return Err(DomainError::NonCanonical {
+                field: "git index transaction journal transition",
+            });
+        }
+        self.phase = successor;
+        self.phase_epoch = self
+            .phase_epoch
+            .checked_add(1)
+            .ok_or(DomainError::NonCanonical {
+                field: "git index transaction phase epoch",
+            })?;
+        self.updated_at = updated_at;
+        self.validate()
+    }
+
+    pub fn requires_recovery(&self) -> bool {
+        !self.phase.is_terminal()
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.transaction_id.validate()?;
+        self.preview_id.validate()?;
+        self.preview_digest.validate()?;
+        self.repository_id.validate()?;
+        self.worktree_id.validate()?;
+        self.expected_snapshot_digest.validate()?;
+        if self.phase_epoch == 0 || self.updated_at < self.started_at {
+            return Err(DomainError::NonCanonical {
+                field: "git index transaction journal timing",
+            });
+        }
+        if self.operation != GitIndexTransactionOperationV1::CommitIndex
+            && self.phase == GitIndexJournalPhaseV1::RefCommitted
+        {
+            return Err(DomainError::NonCanonical {
+                field: "git index transaction ref commit phase",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Terminal outcome a recovery record can prove without re-running a native
+/// mutation.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum GitIndexReceiptOutcomeV1 {
+    Committed,
+    AbortedNoChange,
+    NeedsInspection,
+}
+
+/// Durable, integrity-protected receipt for one PR11 index transaction.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitIndexTransactionReceiptV1 {
+    pub receipt_id: GitIndexReceiptId,
+    pub transaction_id: GitIndexTransactionId,
+    pub preview_id: GitIndexPreviewId,
+    pub operation: GitIndexTransactionOperationV1,
+    pub old_snapshot_digest: ManifestDigest,
+    pub final_snapshot_digest: ManifestDigest,
+    pub old_index_tree: Option<GitOidV1>,
+    pub new_index_tree: Option<GitOidV1>,
+    pub old_head: Option<GitOidV1>,
+    pub new_head: Option<GitOidV1>,
+    pub selected_hunk_digests: Vec<ManifestDigest>,
+    pub created_commit: Option<GitOidV1>,
+    pub outcome: GitIndexReceiptOutcomeV1,
+    pub committed_at: UtcMicros,
+    pub receipt_digest: ManifestDigest,
+}
+
+#[derive(Serialize)]
+struct GitIndexReceiptDigestMaterial<'a> {
+    domain: &'static str,
+    receipt_id: &'a GitIndexReceiptId,
+    transaction_id: &'a GitIndexTransactionId,
+    preview_id: &'a GitIndexPreviewId,
+    operation: GitIndexTransactionOperationV1,
+    old_snapshot_digest: &'a ManifestDigest,
+    final_snapshot_digest: &'a ManifestDigest,
+    old_index_tree: Option<&'a GitOidV1>,
+    new_index_tree: Option<&'a GitOidV1>,
+    old_head: Option<&'a GitOidV1>,
+    new_head: Option<&'a GitOidV1>,
+    selected_hunk_digests: &'a [ManifestDigest],
+    created_commit: Option<&'a GitOidV1>,
+    outcome: GitIndexReceiptOutcomeV1,
+    committed_at: UtcMicros,
+}
+
+impl GitIndexTransactionReceiptV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        receipt_id: GitIndexReceiptId,
+        transaction_id: GitIndexTransactionId,
+        preview: &GitIndexPreviewV1,
+        final_snapshot_digest: ManifestDigest,
+        new_index_tree: Option<GitOidV1>,
+        new_head: Option<GitOidV1>,
+        created_commit: Option<GitOidV1>,
+        outcome: GitIndexReceiptOutcomeV1,
+        committed_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
+        preview.validate()?;
+        let old_index_tree = preview.repository_snapshot.index.tree_id.clone();
+        let old_head = preview.repository_snapshot.head.commit().cloned();
+        let mut receipt = Self {
+            receipt_id,
+            transaction_id,
+            preview_id: preview.preview_id.clone(),
+            operation: preview.operation,
+            old_snapshot_digest: preview.repository_snapshot_digest.clone(),
+            final_snapshot_digest,
+            old_index_tree,
+            new_index_tree,
+            old_head,
+            new_head,
+            selected_hunk_digests: preview.selected_hunk_digests()?,
+            created_commit,
+            outcome,
+            committed_at,
+            receipt_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))?,
+        };
+        receipt.receipt_digest = receipt.compute_receipt_digest()?;
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    pub fn compute_receipt_digest(&self) -> Result<ManifestDigest, DomainError> {
+        self.validate_fields()?;
+        canonical_sha256(&GitIndexReceiptDigestMaterial {
+            domain: GIT_INDEX_RECEIPT_DIGEST_DOMAIN_V1,
+            receipt_id: &self.receipt_id,
+            transaction_id: &self.transaction_id,
+            preview_id: &self.preview_id,
+            operation: self.operation,
+            old_snapshot_digest: &self.old_snapshot_digest,
+            final_snapshot_digest: &self.final_snapshot_digest,
+            old_index_tree: self.old_index_tree.as_ref(),
+            new_index_tree: self.new_index_tree.as_ref(),
+            old_head: self.old_head.as_ref(),
+            new_head: self.new_head.as_ref(),
+            selected_hunk_digests: &self.selected_hunk_digests,
+            created_commit: self.created_commit.as_ref(),
+            outcome: self.outcome,
+            committed_at: self.committed_at,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.receipt_digest.validate()?;
+        self.validate_fields()?;
+        if self.receipt_digest != self.compute_receipt_digest()? {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    fn validate_fields(&self) -> Result<(), DomainError> {
+        self.receipt_id.validate()?;
+        self.transaction_id.validate()?;
+        self.preview_id.validate()?;
+        self.old_snapshot_digest.validate()?;
+        self.final_snapshot_digest.validate()?;
+        for digest in &self.selected_hunk_digests {
+            digest.validate()?;
+        }
+        if self
+            .selected_hunk_digests
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(DomainError::DuplicateId {
+                field: "git index receipt hunk digest order",
+            });
+        }
+        if self.operation.hunk_direction().is_some() && self.selected_hunk_digests.is_empty() {
+            return Err(DomainError::Empty {
+                field: "git index receipt hunk digests",
+            });
+        }
+        if self.operation == GitIndexTransactionOperationV1::CommitIndex
+            && !self.selected_hunk_digests.is_empty()
+        {
+            return Err(DomainError::NonCanonical {
+                field: "git index commit receipt hunk digests",
+            });
+        }
+        if self.operation != GitIndexTransactionOperationV1::CommitIndex
+            && self.created_commit.is_some()
+        {
+            return Err(DomainError::NonCanonical {
+                field: "git index hunk receipt created commit",
+            });
+        }
+        if self.outcome == GitIndexReceiptOutcomeV1::Committed
+            && (self.new_index_tree.is_none()
+                || (self.operation == GitIndexTransactionOperationV1::CommitIndex
+                    && self.created_commit.is_none()))
+        {
+            return Err(DomainError::NonCanonical {
+                field: "committed git index receipt outcome",
+            });
+        }
+        if self.outcome == GitIndexReceiptOutcomeV1::AbortedNoChange
+            && (self.old_snapshot_digest != self.final_snapshot_digest
+                || self.old_index_tree != self.new_index_tree
+                || self.old_head != self.new_head
+                || self.created_commit.is_some())
+        {
+            return Err(DomainError::SnapshotMismatch {
+                field: "aborted git index receipt state",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for GitIndexTransactionReceiptV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            receipt_id: GitIndexReceiptId,
+            transaction_id: GitIndexTransactionId,
+            preview_id: GitIndexPreviewId,
+            operation: GitIndexTransactionOperationV1,
+            old_snapshot_digest: ManifestDigest,
+            final_snapshot_digest: ManifestDigest,
+            old_index_tree: Option<GitOidV1>,
+            new_index_tree: Option<GitOidV1>,
+            old_head: Option<GitOidV1>,
+            new_head: Option<GitOidV1>,
+            selected_hunk_digests: Vec<ManifestDigest>,
+            created_commit: Option<GitOidV1>,
+            outcome: GitIndexReceiptOutcomeV1,
+            committed_at: UtcMicros,
+            receipt_digest: ManifestDigest,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let receipt = Self {
+            receipt_id: wire.receipt_id,
+            transaction_id: wire.transaction_id,
+            preview_id: wire.preview_id,
+            operation: wire.operation,
+            old_snapshot_digest: wire.old_snapshot_digest,
+            final_snapshot_digest: wire.final_snapshot_digest,
+            old_index_tree: wire.old_index_tree,
+            new_index_tree: wire.new_index_tree,
+            old_head: wire.old_head,
+            new_head: wire.new_head,
+            selected_hunk_digests: wire.selected_hunk_digests,
+            created_commit: wire.created_commit,
+            outcome: wire.outcome,
+            committed_at: wire.committed_at,
+            receipt_digest: wire.receipt_digest,
+        };
+        receipt.validate().map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
