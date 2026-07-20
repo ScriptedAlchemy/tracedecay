@@ -3776,6 +3776,7 @@ async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
         .execute_batch(
             "DROP TRIGGER IF EXISTS session_temporal_generations_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1;
+             DROP TRIGGER IF EXISTS session_temporal_projection_receipts_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_refresh_operations_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_refresh_bindings_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_refresh_progress_insert_guard_v1;
@@ -3786,6 +3787,29 @@ async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
                  'session.active', 1, 'active',
                  '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
                  50, 51, 52, NULL
+             );
+             INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json,
+                 created_at, ready_at, activated_at, completed_at
+             ) VALUES (
+                 'session.receipted', 1, 'active',
+                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
+                 60, 61, 62, NULL
+             );
+             INSERT INTO session_temporal_projection_receipts (
+                 session_id, generation, batch_ordinal, batch_digest,
+                 frozen_watermarks_json, source_through, projection_through,
+                 occurrence_count, occurrence_digest, dimension_count, dimension_digest,
+                 copy_count, copy_digest, assertion_count, assertion_digest,
+                 supersession_count, supersession_digest, current_count, current_digest,
+                 fts_count, fts_digest, committed_at
+             ) VALUES (
+                 'session.receipted', 1, 0, 'batch.receipted',
+                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
+                 0, 0, 0, 'occurrences.empty', 0, 'dimensions.empty',
+                 0, 'copies.empty', 0, 'assertions.empty',
+                 0, 'supersession.empty', 0, 'current.empty',
+                 0, 'fts.empty', 63
              );
              INSERT INTO session_temporal_generations (
                  session_id, generation, state, frozen_watermarks_json, created_at
@@ -3828,14 +3852,9 @@ async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
         )
         .await
         .unwrap();
-    let writer = db.writer_connection().await.unwrap();
-    super::session_temporal::repair_session_temporal_state(&writer.conn)
+    repair_session_temporal_connection(&db.conn)
         .await
-        .unwrap();
-    super::schema_contract::ensure_authority_invariant_schema(&writer.conn)
-        .await
-        .unwrap();
-    drop(writer);
+        .expect("maintenance repair must restore exhaustive authority");
     drop(db);
 
     let reopened = GlobalDb::open_at(&db_path).await.unwrap();
@@ -3897,4 +3916,23 @@ async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
             .unwrap(),
         "object"
     );
+    drop(cursor);
+    let mut receipted = reopened
+        .conn
+        .query(
+            "SELECT json_type(generation.frozen_watermarks_json, '$.cursor_key'),
+                    generation.frozen_watermarks_json = receipt.frozen_watermarks_json
+             FROM session_temporal_generations AS generation
+             JOIN session_temporal_projection_receipts AS receipt
+               ON receipt.session_id = generation.session_id
+              AND receipt.generation = generation.generation
+             WHERE generation.session_id = 'session.receipted'
+               AND generation.state = 'active'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = receipted.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "null");
+    assert_eq!(row.get::<i64>(1).unwrap(), 1);
 }
