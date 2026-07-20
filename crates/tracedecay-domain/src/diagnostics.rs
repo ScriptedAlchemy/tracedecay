@@ -415,7 +415,7 @@ mod tests {
         assert!(matches!(record.validate(), Err(DomainError::Empty { .. })));
 
         let mut record = fixture_record();
-        record.code = format!(" E0308");
+        record.code = " E0308".to_owned();
         assert!(matches!(
             record.validate(),
             Err(DomainError::NonCanonical { .. })

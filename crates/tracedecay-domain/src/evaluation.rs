@@ -1822,6 +1822,7 @@ impl HoldoutRevealCapabilityV1 {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn issue_receipt(
         &self,
         run: &RunManifestV1,

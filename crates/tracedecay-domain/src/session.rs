@@ -1167,10 +1167,10 @@ impl CompactContextBundleV1 {
         }
         for omission in &self.omissions {
             omission.validate()?;
-            if let Some(anchor_id) = &omission.anchor_id {
-                if !anchors.insert(anchor_id.clone()) {
-                    return Err(SessionContractError::DuplicateContextAnchor);
-                }
+            if let Some(anchor_id) = &omission.anchor_id
+                && !anchors.insert(anchor_id.clone())
+            {
+                return Err(SessionContractError::DuplicateContextAnchor);
             }
         }
         for conflict in &self.conflicts {
