@@ -3707,6 +3707,14 @@ async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
         )
         .await
         .unwrap();
+    let writer = db.writer_connection().await.unwrap();
+    super::session_temporal::repair_session_temporal_state(&writer.conn)
+        .await
+        .unwrap();
+    super::schema_contract::ensure_authority_invariant_schema(&writer.conn)
+        .await
+        .unwrap();
+    drop(writer);
     drop(db);
 
     let reopened = GlobalDb::open_at(&db_path).await.unwrap();

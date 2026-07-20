@@ -176,7 +176,7 @@
       "scope_ids": [
         "scope-cargo-slot"
       ],
-      "snapshot_path": "corpus/cargo-slot/src/main.rs",
+      "snapshot_path": "corpus/cargo-slot/src/main.rust.fixture",
       "source_repository_path": "src/main.rs"
     }
   ],

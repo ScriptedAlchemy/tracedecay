@@ -965,10 +965,6 @@ pub(crate) async fn ensure_session_temporal_schema(conn: &Connection) -> crate::
     }
 
     let rebuild_fts = version.is_none() || temporal_fts_is_missing(conn).await?;
-    if version.is_some() {
-        repair_interrupted_refresh_state(conn).await?;
-        repair_legacy_cursor_key_bindings(conn).await?;
-    }
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -993,6 +989,11 @@ pub(crate) async fn ensure_session_temporal_schema(conn: &Connection) -> crate::
     Ok(())
 }
 
+pub(crate) async fn repair_session_temporal_state(conn: &Connection) -> crate::errors::Result<()> {
+    repair_interrupted_refresh_state(conn).await?;
+    repair_legacy_cursor_key_bindings(conn).await
+}
+
 async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::Result<()> {
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS session_refresh_operations_delete_guard_v1;
@@ -1003,6 +1004,7 @@ async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::R
          DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
          DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
          DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
+         DROP TRIGGER IF EXISTS session_query_cursor_keys_immutable_delete_v1;
          DROP TRIGGER IF EXISTS session_refresh_bindings_immutable_update_v1;
          DROP TRIGGER IF EXISTS session_refresh_bindings_immutable_delete_v1;
          DROP TRIGGER IF EXISTS session_refresh_progress_immutable_update_v1;
@@ -1334,30 +1336,50 @@ async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::
     }
 
     conn.execute(
-        "UPDATE session_query_cursor_keys
-         SET retired_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000000
-         WHERE retired_at IS NULL",
+        "DELETE FROM session_query_cursor_keys
+         WHERE key_id IS NULL OR key_version IS NULL OR key_material IS NULL",
         (),
     )
     .await
     .map_err(|error| global_db_operation_error(OPERATION, error))?;
     let mut history = conn
         .query(
-            "SELECT COALESCE(MAX(key_version), 0)
+            "SELECT COALESCE(MAX(key_version), 0), COALESCE(MAX(created_at), 0)
              FROM session_query_cursor_keys",
             (),
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let highest_version = history
+    let row = history
         .next()
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .ok_or_else(|| global_db_operation_message(OPERATION, "missing cursor key history row"))?
+        .ok_or_else(|| global_db_operation_message(OPERATION, "missing cursor key history row"))?;
+    let highest_version = row
         .get::<i64>(0)
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let highest_created_at = row
+        .get::<i64>(1)
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     drop(history);
     let key_version = highest_version.saturating_add(1).max(1);
+    let now_micros: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            global_db_operation_message(OPERATION, format!("read cursor key time: {error}"))
+        })?
+        .as_micros()
+        .try_into()
+        .map_err(|_| global_db_operation_message(OPERATION, "cursor key time overflow"))?;
+    let created_at = now_micros.max(highest_created_at.saturating_add(1));
+    conn.execute(
+        "UPDATE session_query_cursor_keys
+         SET retired_at = ?1
+         WHERE retired_at IS NULL",
+        params![created_at],
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
     let mut key_id_random = [0_u8; 16];
     let mut key_material = [0_u8; 32];
     getrandom::getrandom(&mut key_id_random).map_err(|error| {
@@ -1373,8 +1395,13 @@ async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::
     conn.execute(
         "INSERT INTO session_query_cursor_keys (
             key_id, key_version, key_material, created_at, retired_at
-         ) VALUES (?1, ?2, ?3, CAST(strftime('%s', 'now') AS INTEGER) * 1000000, NULL)",
-        params![key_id.clone(), key_version, key_material.to_vec()],
+         ) VALUES (?1, ?2, ?3, ?4, NULL)",
+        params![
+            key_id.clone(),
+            key_version,
+            key_material.to_vec(),
+            created_at
+        ],
     )
     .await
     .map_err(|error| global_db_operation_error(OPERATION, error))?;

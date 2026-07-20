@@ -46,11 +46,11 @@ fn validate_reports_frozen_fixture_and_run_digests_without_outputs() {
     assert_eq!(payload["authority"], "contract_only");
     assert_eq!(
         payload["fixture_manifest_digest"],
-        "sha256:3ed1e38d41625e0bbe113ff894756b119044c0dc15a11e1706a76b22219fcbc1"
+        "sha256:46d0b4fc29125d45a0adf7d408dc9791f1c2a2a6f25ea767c99179d82f6eae23"
     );
     assert_eq!(
         payload["run_manifest_digest"],
-        "sha256:bb0c5281ead36f99e0bf97b8ace70ae1743939639e883c814d57f2963175c749"
+        "sha256:b3108f62e645ce745a5f18dd4180277c309aa20346a2531a7f307793c7e0b36c"
     );
     assert_eq!(
         payload["holdout_seal_digest"],

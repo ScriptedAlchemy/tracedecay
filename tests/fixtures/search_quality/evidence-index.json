@@ -1,6 +1,6 @@
 {
   "authority": "contract_only",
-  "digest": "sha256:3c53af8b754b4deebf61691229dccfc9a45ad7db7971f860003fed4874d70b59",
+  "digest": "sha256:8663decc7f33d48fe0f4ffeba1bbd9e9c9cc57a990c7815d79c9f0ce2050840c",
   "entries": [
     {
       "acceptance_authority": false,
@@ -23,7 +23,7 @@
         "git:eda50f53000ab4f96ef30e1f3a46b748b3fea6e0",
         "git-tree:a29158914bc8b87b7f06fe5cf922d8186514c727"
       ],
-      "run_manifest_digest": "sha256:96defd526a42c7858ba690f4fdbf6d6508305a961788f396393cb49c3f4d84b4"
+      "run_manifest_digest": "sha256:b3108f62e645ce745a5f18dd4180277c309aa20346a2531a7f307793c7e0b36c"
     },
     {
       "acceptance_authority": false,
@@ -39,7 +39,7 @@
         "authorized-store://search-quality/holdout/judgments-v1",
         "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de"
       ],
-      "run_manifest_digest": "sha256:96defd526a42c7858ba690f4fdbf6d6508305a961788f396393cb49c3f4d84b4"
+      "run_manifest_digest": "sha256:b3108f62e645ce745a5f18dd4180277c309aa20346a2531a7f307793c7e0b36c"
     }
   ],
   "index_id": "evidence-index-search-quality-contract-v1",

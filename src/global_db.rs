@@ -396,6 +396,7 @@ pub async fn repair_session_temporal_store(db_path: &Path) -> crate::errors::Res
     let conn = db.connect().map_err(|error| {
         global_db_operation_error("connect session temporal repair store", error)
     })?;
+    session_temporal::repair_session_temporal_state(&conn).await?;
     session_temporal::ensure_session_temporal_schema(&conn).await?;
     schema_contract::ensure_authority_invariant_schema(&conn)
         .await

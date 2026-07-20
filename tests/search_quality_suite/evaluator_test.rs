@@ -14,11 +14,11 @@ fn canonical_validator_accepts_only_the_frozen_real_fixture_packet() {
     assert_eq!(validation.authority, FixtureAuthorityV1::ContractOnly);
     assert_eq!(
         validation.fixture_manifest_digest.as_str(),
-        "sha256:98b21aad688421f4a261aa46034e251e09ec52f45ac81605f7bf1382c4628677"
+        "sha256:46d0b4fc29125d45a0adf7d408dc9791f1c2a2a6f25ea767c99179d82f6eae23"
     );
     assert_eq!(
         validation.run_manifest_digest.as_str(),
-        "sha256:96defd526a42c7858ba690f4fdbf6d6508305a961788f396393cb49c3f4d84b4"
+        "sha256:b3108f62e645ce745a5f18dd4180277c309aa20346a2531a7f307793c7e0b36c"
     );
 }
 
