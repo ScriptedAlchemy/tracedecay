@@ -89,6 +89,12 @@ fn embedding_key() -> EmbeddingProjectionKeyV1 {
     }
 }
 
+fn admitted_key(
+    key: &EmbeddingProjectionKeyV1,
+) -> tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
+    key.admit().expect("valid embedding projection admission")
+}
+
 fn chunk(generation: &str, name: &str, text: &str, ordinal: u32) -> CodeSearchChunkV1 {
     CodeSearchChunkV1 {
         id: id::<CodeSearchChunkId>(&format!("chunk.v1.{name}")),
@@ -226,7 +232,7 @@ fn publish_initial_generation() -> (
     );
     let mut encoder = FakeEncoder::default();
     let prepared = prepare_vector_generation(
-        &key,
+        &admitted_key(&key),
         initial_request,
         &[alpha.clone(), gone.clone(), stable.clone()],
         &mut encoder,
@@ -308,6 +314,24 @@ fn semantic_projection_key_is_complete_deterministic_and_maps_to_plan25() {
 }
 
 #[test]
+fn admitted_projection_key_is_the_projection_and_privacy_authority() {
+    let key = embedding_key();
+    let admitted = key.admit().expect("valid projection admission");
+
+    assert_eq!(admitted.embedding_key(), &key);
+    assert_eq!(
+        admitted.projection_key(),
+        &key.projection_key().expect("generic projection key")
+    );
+    assert_eq!(admitted.privacy_domain(), &key.privacy_domain);
+    assert_eq!(admitted.privacy_key_epoch(), key.privacy_key_epoch);
+
+    let mut invalid = key;
+    invalid.dimensions = 0;
+    assert!(invalid.admit().is_err(), "invalid keys cannot be admitted");
+}
+
+#[test]
 fn fake_projection_uses_canonical_chunks_and_plan25_receipts() {
     let (mut store, key, base_generation) = publish_initial_generation();
     let projection_key = key.projection_key().unwrap();
@@ -348,7 +372,7 @@ fn fake_projection_uses_canonical_chunks_and_plan25_receipts() {
     );
     let mut encoder = FakeEncoder::default();
     let prepared = prepare_vector_generation(
-        &key,
+        &admitted_key(&key),
         projection_request,
         &[alpha.clone(), added.clone()],
         &mut encoder,
@@ -396,7 +420,7 @@ fn checkpoint_and_active_pointer_publish_atomically() {
     let projection_key = key.projection_key().unwrap();
     let alpha = chunk("code-generation.2", "alpha", "fn alpha() -> u8 { 2 }", 0);
     let prepared = prepare_vector_generation(
-        &key,
+        &admitted_key(&key),
         request(
             changes(
                 Some("code-generation.1"),
@@ -479,7 +503,7 @@ fn unchanged_generation_reuses_vectors_without_fake_inference() {
     );
     let mut encoder = FakeEncoder::default();
     let prepared = prepare_vector_generation(
-        &key,
+        &admitted_key(&key),
         request(
             no_op,
             Some(projection_key.clone()),
@@ -541,7 +565,7 @@ fn invalid_fake_vectors_and_key_only_reuse_fail_closed() {
     };
     assert!(matches!(
         prepare_vector_generation(
-            &key,
+            &admitted_key(&key),
             initial.clone(),
             std::slice::from_ref(&alpha),
             &mut wrong_dimensions
@@ -553,7 +577,12 @@ fn invalid_fake_vectors_and_key_only_reuse_fail_closed() {
         ..FakeEncoder::default()
     };
     assert!(matches!(
-        prepare_vector_generation(&key, initial, std::slice::from_ref(&alpha), &mut non_finite),
+        prepare_vector_generation(
+            &admitted_key(&key),
+            initial,
+            std::slice::from_ref(&alpha),
+            &mut non_finite
+        ),
         Err(SemanticProjectionErrorV1::NonFiniteVector { .. })
     ));
 
@@ -578,7 +607,12 @@ fn invalid_fake_vectors_and_key_only_reuse_fail_closed() {
     );
     let mut encoder = FakeEncoder::default();
     assert_eq!(
-        prepare_vector_generation(&replacement_key, key_only_replay, &[], &mut encoder),
+        prepare_vector_generation(
+            &admitted_key(&replacement_key),
+            key_only_replay,
+            &[],
+            &mut encoder
+        ),
         Err(SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds)
     );
     assert!(encoder.seen.is_empty());
@@ -590,7 +624,7 @@ fn duplicate_vector_rows_fail_without_advancing_the_checkpoint() {
     let projection_key = key.projection_key().unwrap();
     let alpha = chunk("code-generation.1", "alpha", "fn alpha() {}", 0);
     let prepared = prepare_vector_generation(
-        &key,
+        &admitted_key(&key),
         request(
             changes(
                 None,
@@ -628,4 +662,121 @@ fn duplicate_vector_rows_fail_without_advancing_the_checkpoint() {
         .commit_batch(&build_id, None, prepared)
         .expect("failed handoff left the prior checkpoint intact");
     assert_eq!(checkpoint.completed_batches, 1);
+}
+
+#[test]
+fn one_batch_and_multi_batch_publications_have_equal_generation_identity() {
+    let key = embedding_key();
+    let admitted = admitted_key(&key);
+    let projection_key = key.projection_key().expect("projection key");
+    let alpha = chunk("code-generation.1", "alpha", "fn alpha() {}", 0);
+    let beta = chunk("code-generation.1", "beta", "fn beta() {}", 1);
+    let source_manifest_digest = digest(42);
+    let plan = VectorGenerationPlanV1 {
+        target_projection_key: projection_key.clone(),
+        source_generation: id("code-generation.1"),
+        source_manifest_digest,
+        expected_chunk_ids: vec![alpha.id.clone(), beta.id.clone()],
+        base_generation: None,
+    };
+
+    let single_prepared = prepare_vector_generation(
+        &admitted,
+        request(
+            changes(
+                None,
+                "code-generation.1",
+                vec![
+                    change(&alpha, None, Some(alpha.content_digest.clone())),
+                    change(&beta, None, Some(beta.content_digest.clone())),
+                ],
+                vec![],
+                vec![],
+            ),
+            None,
+            projection_key.clone(),
+            ProjectionReplayReasonV1::InitialProjection,
+        ),
+        &[alpha.clone(), beta.clone()],
+        &mut FakeEncoder::default(),
+    )
+    .expect("single projection batch");
+    let mut single_store = FakeVectorGenerationStoreV1::new();
+    let single_build = single_store
+        .begin_generation(plan.clone())
+        .expect("single build");
+    single_store
+        .commit_batch(&single_build, None, single_prepared)
+        .expect("single batch commit");
+    let single = single_store
+        .publish_generation(&single_build, None)
+        .expect("single batch publication");
+
+    let alpha_prepared = prepare_vector_generation(
+        &admitted,
+        request(
+            changes(
+                None,
+                "code-generation.1",
+                vec![change(&alpha, None, Some(alpha.content_digest.clone()))],
+                vec![],
+                vec![],
+            ),
+            None,
+            projection_key.clone(),
+            ProjectionReplayReasonV1::InitialProjection,
+        ),
+        std::slice::from_ref(&alpha),
+        &mut FakeEncoder::default(),
+    )
+    .expect("first projection batch");
+    let beta_prepared = prepare_vector_generation(
+        &admitted,
+        request(
+            changes(
+                None,
+                "code-generation.1",
+                vec![change(&beta, None, Some(beta.content_digest.clone()))],
+                vec![],
+                vec![],
+            ),
+            None,
+            projection_key,
+            ProjectionReplayReasonV1::InitialProjection,
+        ),
+        std::slice::from_ref(&beta),
+        &mut FakeEncoder::default(),
+    )
+    .expect("second projection batch");
+    let mut multi_store = FakeVectorGenerationStoreV1::new();
+    let multi_build = multi_store.begin_generation(plan).expect("multi build");
+    let checkpoint = multi_store
+        .commit_batch(&multi_build, None, alpha_prepared)
+        .expect("first batch commit");
+    multi_store
+        .commit_batch(&multi_build, Some(&checkpoint), beta_prepared)
+        .expect("second batch commit");
+    let multi = multi_store
+        .publish_generation(&multi_build, None)
+        .expect("multi batch publication");
+
+    assert_eq!(single.generation_id, multi.generation_id);
+    assert_eq!(single.manifest_digest, multi.manifest_digest);
+    assert_ne!(single.checkpoint, multi.checkpoint);
+    assert_eq!(
+        single_store
+            .generation(&single.generation_id)
+            .expect("single generation")
+            .receipts()
+            .len(),
+        1
+    );
+    assert_eq!(
+        multi_store
+            .generation(&multi.generation_id)
+            .expect("multi generation")
+            .receipts()
+            .len(),
+        2
+    );
 }

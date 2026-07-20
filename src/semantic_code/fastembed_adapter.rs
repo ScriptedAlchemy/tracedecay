@@ -10,8 +10,9 @@
 //!
 //! QUARANTINE STATUS: temporarily unlinked. Registration happens at
 //! integration by the Sol coordinator; this file must not be referenced from
-//! `src/lib.rs` or `src/semantic_code/mod.rs` in this packet. It is std-only
-//! on purpose so it compiles standalone via `#[path]` inclusion.
+//! `src/lib.rs` or `src/semantic_code/mod.rs` in this packet. It depends only
+//! on the quarantined artifact/manifest packet and domain projection types,
+//! and compiles standalone through the PR10 `#[path]` integration test.
 //!
 //! The real FastEmbed-backed implementation is NOT part of this packet. The
 //! port is shaped so that implementation drops in later as another
@@ -27,14 +28,13 @@
 //!   `src/query/retrieval/ports.rs` sets the precedent that ports are
 //!   synchronous contracts with scheduling/cancellation above them. This port
 //!   is therefore synchronous; async wrapping is an integration concern.
-//! - ESCALATION-2 (metric enumeration): Plan 31 pins "metric" in the manifest
-//!   but never enumerates values. [`EmbeddingMetricV1`] is a closed enum of
-//!   cosine/dot/L2; adding a variant later is additive.
-//! - ESCALATION-3 (projection identity): Plan 31's `EmbeddingProjectionKeyV1`
-//!   lives in the domain packet (crates/tracedecay-domain), not here. The
-//!   pool key in `session_pool.rs` therefore carries the projection profile
-//!   digest as an opaque string plus privacy domain/key epoch; the integrator
-//!   maps `EmbeddingProjectionKeyV1.profile_digest` into it.
+//! - ESCALATION-2 (manifest/domain vocabulary): the signed artifact manifest
+//!   and domain projection key remain separate authorities. Exhaustive bridge
+//!   matches below admit them into one private projection-artifact authority;
+//!   the runtime defines no duplicate metric/normalization/precision enums.
+//! - ESCALATION-3 (projection identity): sessions and runtime descriptors are
+//!   created only from the admitted projection-artifact authority. Callers
+//!   cannot pair an independent projection identity with an artifact.
 //! - ESCALATION-4 (budget type): Plan 31 says deadline/cancellation limits are
 //!   fields of the shared PR9 `RetrievalBudget` and PR10 introduces no
 //!   semantic-only budget type. That domain type is outside this quarantined
@@ -44,71 +44,22 @@
 
 use std::error::Error;
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-/// Upper bound on a declared embedding dimension (manifest sanity limit; the
-/// largest maintained FastEmbed text models are far below this).
-pub const MAX_EMBEDDING_DIMENSIONS: u32 = 8192;
+use tracedecay_domain::{
+    AdmittedEmbeddingProjectionKeyV1, EmbeddingDeviceClassV1, EmbeddingMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingTruncationSideV1,
+    ManifestDigest,
+};
 
-/// Distance metric pinned by the verified manifest (Plan 31: the manifest
-/// pins dimension, metric, and normalization; vectors are only comparable
-/// under the same pinned triple).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum EmbeddingMetricV1 {
-    Cosine,
-    DotProduct,
-    EuclideanL2,
-}
-
-impl fmt::Display for EmbeddingMetricV1 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::Cosine => "cosine",
-            Self::DotProduct => "dot_product",
-            Self::EuclideanL2 => "euclidean_l2",
-        };
-        f.write_str(s)
-    }
-}
-
-/// Output-vector normalization pinned by the verified manifest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum EmbeddingNormalizationV1 {
-    None,
-    L2,
-}
-
-impl fmt::Display for EmbeddingNormalizationV1 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::None => "none",
-            Self::L2 => "l2",
-        };
-        f.write_str(s)
-    }
-}
-
-/// Precision/quantization pinned by the verified manifest (Plan 31:
-/// precision/quantization is a vector-affecting input and must be echoed).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum EmbeddingPrecisionV1 {
-    F32,
-    F16,
-    QuantizedI8,
-}
-
-impl fmt::Display for EmbeddingPrecisionV1 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::F32 => "f32",
-            Self::F16 => "f16",
-            Self::QuantizedI8 => "quantized_i8",
-        };
-        f.write_str(s)
-    }
-}
+use super::artifact_store::AdmittedArtifactV1;
+use super::manifest::{
+    ArtifactMemberRoleV1, ArtifactProfileKindV1, DeviceClassV1,
+    EmbeddingNormalizationV1 as ManifestNormalizationV1, EmbeddingPoolingV1 as ManifestPoolingV1,
+    EmbeddingPrecisionV1 as ManifestPrecisionV1, SemanticMetricV1, Sha256DigestHex,
+    TruncationSideV1,
+};
 
 /// Typed failure of one embedding operation or runtime admission (Plan 31:
 /// load failure, OOM, corruption, revocation, or incompatible pins disables
@@ -127,8 +78,6 @@ pub enum EmbedError {
     DimensionMismatch { expected: u32, actual: usize },
     /// A produced vector contains NaN or infinite values.
     NonFiniteVectorValue,
-    /// The verified-artifact descriptor failed validation.
-    InvalidArtifactDescriptor(String),
     /// Runtime-level failure (load, OOM, corruption, revocation,
     /// incompatibility, inference failure).
     Runtime(RuntimeFailureV1),
@@ -153,9 +102,6 @@ impl fmt::Display for EmbedError {
             ),
             Self::NonFiniteVectorValue => {
                 write!(f, "vector contains NaN or infinite values")
-            }
-            Self::InvalidArtifactDescriptor(detail) => {
-                write!(f, "invalid verified-artifact descriptor: {detail}")
             }
             Self::Runtime(failure) => write!(f, "{failure}"),
         }
@@ -204,99 +150,288 @@ impl fmt::Display for RuntimeFailureV1 {
     }
 }
 
-/// The manifest echo the runtime is allowed to see (Plan 31: the canonical
-/// manifest lists model/tokenizer/config digests, runtime compatibility,
-/// projection inputs, and the complete resource ceiling; the runtime path
-/// performs no download, import, extraction, or trust decision).
-///
-/// The integrator builds this value from the verified manifest produced by
-/// the artifact packet (`artifacts.rs`/`manifest.rs`); this quarantined
-/// packet does not own the manifest schema and performs no verification
-/// itself — verification is the artifact verifier's job upstream.
+/// Exact signed-manifest pin that failed projection/artifact admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProjectionArtifactPinV1 {
+    ArtifactIdentity,
+    ManifestIdentity,
+    ProfileKind,
+    ArtifactDigest,
+    TokenizerDigest,
+    ConfigDigest,
+    QueryInstructionDigest,
+    DocumentInstructionDigest,
+    Pooling,
+    TruncationSide,
+    TruncationLength,
+    RuntimeBackend,
+    RuntimeBuildRevision,
+    DeviceClass,
+    Dimensions,
+    Metric,
+    Normalization,
+    Precision,
+}
+
+/// Private runtime descriptor created only by successful projection/artifact
+/// admission. It carries the admitted domain projection directly rather than
+/// re-declaring vector-affecting pins in adapter-local types.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VerifiedEmbeddingArtifactV1 {
-    /// Signed artifact digest (opaque hex); keys the installed artifact in
-    /// the Plan-02 user store. Also seeds deterministic fake vectors so the
-    /// same model identity always produces the same pseudo-embeddings.
-    pub artifact_digest: String,
-    /// Installed location inside the Plan-02-owned user store. Never an
-    /// ambient Hugging Face/ORT/FastEmbed cache directory.
-    pub model_root: PathBuf,
-    /// Manifest-declared member paths, relative to `model_root`.
-    pub model_file: String,
-    pub tokenizer_file: String,
-    pub config_file: String,
-    /// Declared embedding dimension.
-    pub dimensions: u32,
-    pub metric: EmbeddingMetricV1,
-    pub normalization: EmbeddingNormalizationV1,
-    pub precision: EmbeddingPrecisionV1,
-    /// Manifest-pinned query/document instructions (Plan 31: the manifest
-    /// pins query and document instructions/prefixes). The real adapter
-    /// applies them as prefixes; the fake ignores them but echoes them so
-    /// descriptor identity stays complete.
-    pub query_instruction: Option<String>,
-    pub document_instruction: Option<String>,
-    /// Resource ceiling: maximum texts per batch.
-    pub max_batch_texts: u32,
-    /// Resource ceiling: maximum total sanitized bytes per batch.
-    pub max_batch_bytes: u32,
-    /// Resource ceiling: declared resident bytes per warmed session, used by
-    /// the session pool's memory-ceiling enforcement.
-    pub resident_byte_ceiling: u64,
-    /// Runtime/backend/build revision echo (Plan 31: manifests pin
-    /// runtime/build identity).
-    pub runtime_build_revision: String,
+struct VerifiedEmbeddingArtifactV1 {
+    projection: AdmittedEmbeddingProjectionKeyV1,
+    model_file: String,
+    tokenizer_file: String,
+    config_file: String,
+    max_batch_texts: u32,
+    max_batch_bytes: u32,
+    resident_byte_ceiling: u64,
 }
 
 impl VerifiedEmbeddingArtifactV1 {
-    /// Structural validation of the descriptor itself. This is not artifact
-    /// verification; the descriptor is already trusted input from the
-    /// artifact verifier.
-    pub fn validate(&self) -> Result<(), EmbedError> {
-        if self.artifact_digest.is_empty() {
-            return Err(EmbedError::InvalidArtifactDescriptor(
-                "artifact_digest is empty".to_string(),
-            ));
-        }
-        if self.dimensions == 0 || self.dimensions > MAX_EMBEDDING_DIMENSIONS {
-            return Err(EmbedError::InvalidArtifactDescriptor(format!(
-                "dimensions {} outside 1..={MAX_EMBEDDING_DIMENSIONS}",
-                self.dimensions
-            )));
-        }
-        for (field, value) in [
-            ("model_file", &self.model_file),
-            ("tokenizer_file", &self.tokenizer_file),
-            ("config_file", &self.config_file),
-        ] {
-            if value.is_empty() {
-                return Err(EmbedError::InvalidArtifactDescriptor(format!(
-                    "{field} is empty"
-                )));
-            }
-        }
-        if self.max_batch_texts == 0 {
-            return Err(EmbedError::InvalidArtifactDescriptor(
-                "max_batch_texts is zero".to_string(),
-            ));
-        }
-        if self.max_batch_bytes == 0 {
-            return Err(EmbedError::InvalidArtifactDescriptor(
-                "max_batch_bytes is zero".to_string(),
-            ));
-        }
-        if self.resident_byte_ceiling == 0 {
-            return Err(EmbedError::InvalidArtifactDescriptor(
-                "resident_byte_ceiling is zero".to_string(),
-            ));
-        }
-        if self.runtime_build_revision.is_empty() {
-            return Err(EmbedError::InvalidArtifactDescriptor(
-                "runtime_build_revision is empty".to_string(),
-            ));
-        }
-        Ok(())
+    fn embedding_key(&self) -> &tracedecay_domain::EmbeddingProjectionKeyV1 {
+        self.projection.embedding_key()
+    }
+
+    fn artifact_digest(&self) -> &ManifestDigest {
+        &self.embedding_key().model_artifact_digest
+    }
+
+    fn dimensions(&self) -> u32 {
+        self.embedding_key().dimensions
+    }
+
+    fn metric(&self) -> EmbeddingMetricV1 {
+        self.embedding_key().metric
+    }
+
+    fn normalization(&self) -> EmbeddingNormalizationV1 {
+        self.embedding_key().normalization
+    }
+
+    fn max_batch_texts(&self) -> u32 {
+        self.max_batch_texts
+    }
+
+    fn max_batch_bytes(&self) -> u32 {
+        self.max_batch_bytes
+    }
+
+    pub(super) fn resident_byte_ceiling(&self) -> u64 {
+        self.resident_byte_ceiling
+    }
+}
+
+/// Single root-private authority pairing a store-admitted artifact with an
+/// admitted domain projection. Construction exhaustively checks every pin the
+/// signed manifest and projection share before compatibility or session open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct AdmittedProjectionArtifactV1 {
+    runtime_artifact: VerifiedEmbeddingArtifactV1,
+}
+
+impl AdmittedProjectionArtifactV1 {
+    pub(super) fn admit(
+        artifact: &AdmittedArtifactV1,
+        projection: &AdmittedEmbeddingProjectionKeyV1,
+    ) -> Result<Self, ProjectionArtifactPinV1> {
+        let manifest = artifact.manifest();
+        let payload = &manifest.payload;
+        let key = projection.embedding_key();
+
+        require_pin(
+            artifact.artifact_digest() == &manifest.signed_identity_digest(),
+            ProjectionArtifactPinV1::ArtifactIdentity,
+        )?;
+        require_pin(
+            artifact.manifest_digest() == &manifest.canonical_digest(),
+            ProjectionArtifactPinV1::ManifestIdentity,
+        )?;
+        require_pin(
+            payload.profile_kind == ArtifactProfileKindV1::Embedding,
+            ProjectionArtifactPinV1::ProfileKind,
+        )?;
+        require_pin(
+            key.model_artifact_digest
+                == domain_digest(
+                    artifact.artifact_digest(),
+                    ProjectionArtifactPinV1::ArtifactDigest,
+                )?,
+            ProjectionArtifactPinV1::ArtifactDigest,
+        )?;
+        require_pin(
+            key.tokenizer_digest
+                == domain_digest(
+                    &payload.tokenizer_digest,
+                    ProjectionArtifactPinV1::TokenizerDigest,
+                )?,
+            ProjectionArtifactPinV1::TokenizerDigest,
+        )?;
+        require_pin(
+            key.config_digest
+                == domain_digest(
+                    &payload.config_digest,
+                    ProjectionArtifactPinV1::ConfigDigest,
+                )?,
+            ProjectionArtifactPinV1::ConfigDigest,
+        )?;
+        let query_instruction_digest = payload
+            .query_instruction_digest
+            .as_ref()
+            .map(|digest| domain_digest(digest, ProjectionArtifactPinV1::QueryInstructionDigest))
+            .transpose()?;
+        require_pin(
+            key.query_instruction_digest == query_instruction_digest,
+            ProjectionArtifactPinV1::QueryInstructionDigest,
+        )?;
+        let document_instruction_digest = payload
+            .document_instruction_digest
+            .as_ref()
+            .map(|digest| domain_digest(digest, ProjectionArtifactPinV1::DocumentInstructionDigest))
+            .transpose()?;
+        require_pin(
+            key.document_instruction_digest == document_instruction_digest,
+            ProjectionArtifactPinV1::DocumentInstructionDigest,
+        )?;
+        require_pin(
+            key.pooling == bridge_pooling(payload.pooling),
+            ProjectionArtifactPinV1::Pooling,
+        )?;
+        require_pin(
+            key.truncation_side == bridge_truncation_side(payload.truncation.side),
+            ProjectionArtifactPinV1::TruncationSide,
+        )?;
+        require_pin(
+            key.truncation_length == payload.truncation.max_length
+                && key.truncation_length == payload.resource_ceiling.max_sequence_length,
+            ProjectionArtifactPinV1::TruncationLength,
+        )?;
+        require_pin(
+            key.runtime_backend == payload.runtime.runtime,
+            ProjectionArtifactPinV1::RuntimeBackend,
+        )?;
+        require_pin(
+            key.runtime_build_revision == payload.runtime.build_revision,
+            ProjectionArtifactPinV1::RuntimeBuildRevision,
+        )?;
+        require_pin(
+            key.device_class == bridge_device(payload.device),
+            ProjectionArtifactPinV1::DeviceClass,
+        )?;
+        require_pin(
+            key.dimensions == payload.dimensions,
+            ProjectionArtifactPinV1::Dimensions,
+        )?;
+        require_pin(
+            key.metric == bridge_metric(payload.metric),
+            ProjectionArtifactPinV1::Metric,
+        )?;
+        require_pin(
+            key.normalization == bridge_normalization(payload.normalization),
+            ProjectionArtifactPinV1::Normalization,
+        )?;
+        require_pin(
+            key.precision == bridge_precision(payload.precision),
+            ProjectionArtifactPinV1::Precision,
+        )?;
+
+        let model_file = member_path(artifact, ArtifactMemberRoleV1::Model)?;
+        let tokenizer_file = member_path(artifact, ArtifactMemberRoleV1::Tokenizer)?;
+        let config_file = member_path(artifact, ArtifactMemberRoleV1::Config)?;
+        Ok(Self {
+            runtime_artifact: VerifiedEmbeddingArtifactV1 {
+                projection: projection.clone(),
+                model_file,
+                tokenizer_file,
+                config_file,
+                max_batch_texts: payload.resource_ceiling.max_batch_size,
+                max_batch_bytes: payload
+                    .resource_ceiling
+                    .max_batch_size
+                    .saturating_mul(payload.resource_ceiling.max_sequence_length)
+                    .saturating_mul(4),
+                resident_byte_ceiling: payload.resource_ceiling.max_resident_bytes,
+            },
+        })
+    }
+
+    pub(super) fn projection(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
+        &self.runtime_artifact.projection
+    }
+
+    fn runtime_artifact(&self) -> &VerifiedEmbeddingArtifactV1 {
+        &self.runtime_artifact
+    }
+
+    pub(super) fn resident_byte_ceiling(&self) -> u64 {
+        self.runtime_artifact.resident_byte_ceiling()
+    }
+}
+
+fn require_pin(matches: bool, pin: ProjectionArtifactPinV1) -> Result<(), ProjectionArtifactPinV1> {
+    matches.then_some(()).ok_or(pin)
+}
+
+fn domain_digest(
+    digest: &Sha256DigestHex,
+    pin: ProjectionArtifactPinV1,
+) -> Result<ManifestDigest, ProjectionArtifactPinV1> {
+    ManifestDigest::new(format!("sha256:{}", digest.as_str())).map_err(|_| pin)
+}
+
+fn member_path(
+    artifact: &AdmittedArtifactV1,
+    role: ArtifactMemberRoleV1,
+) -> Result<String, ProjectionArtifactPinV1> {
+    artifact
+        .manifest()
+        .package_member(role)
+        .map(|member| member.path.clone())
+        .ok_or(ProjectionArtifactPinV1::ManifestIdentity)
+}
+
+fn bridge_metric(metric: SemanticMetricV1) -> EmbeddingMetricV1 {
+    match metric {
+        SemanticMetricV1::Cosine => EmbeddingMetricV1::Cosine,
+        SemanticMetricV1::DotProduct => EmbeddingMetricV1::DotProduct,
+        SemanticMetricV1::EuclideanL2 => EmbeddingMetricV1::EuclideanL2,
+    }
+}
+
+fn bridge_normalization(normalization: ManifestNormalizationV1) -> EmbeddingNormalizationV1 {
+    match normalization {
+        ManifestNormalizationV1::L2 => EmbeddingNormalizationV1::L2,
+        ManifestNormalizationV1::None => EmbeddingNormalizationV1::None,
+    }
+}
+
+fn bridge_pooling(pooling: ManifestPoolingV1) -> EmbeddingPoolingV1 {
+    match pooling {
+        ManifestPoolingV1::Mean => EmbeddingPoolingV1::Mean,
+        ManifestPoolingV1::Cls => EmbeddingPoolingV1::Cls,
+        ManifestPoolingV1::LastToken => EmbeddingPoolingV1::LastToken,
+        ManifestPoolingV1::MeanSqrtLength => EmbeddingPoolingV1::MeanSqrtLength,
+    }
+}
+
+fn bridge_precision(precision: ManifestPrecisionV1) -> EmbeddingPrecisionV1 {
+    match precision {
+        ManifestPrecisionV1::Fp32 => EmbeddingPrecisionV1::Fp32,
+        ManifestPrecisionV1::Fp16 => EmbeddingPrecisionV1::Fp16,
+        ManifestPrecisionV1::Bf16 => EmbeddingPrecisionV1::Bf16,
+        ManifestPrecisionV1::Int8 => EmbeddingPrecisionV1::Int8,
+    }
+}
+
+fn bridge_device(device: DeviceClassV1) -> EmbeddingDeviceClassV1 {
+    match device {
+        DeviceClassV1::Cpu => EmbeddingDeviceClassV1::Cpu,
+    }
+}
+
+fn bridge_truncation_side(side: TruncationSideV1) -> EmbeddingTruncationSideV1 {
+    match side {
+        TruncationSideV1::Left => EmbeddingTruncationSideV1::Left,
+        TruncationSideV1::Right => EmbeddingTruncationSideV1::Right,
     }
 }
 
@@ -446,9 +581,9 @@ impl CancellationSignal for ScriptedCancellation {
 /// One warmed embedding session bound to one verified artifact descriptor
 /// (Plan 31: compatible warmed sessions are pooled under bounded memory,
 /// concurrency, idle, and cancellation policy).
-pub trait EmbeddingSession: Send {
-    /// The descriptor this session was opened from (echo surface).
-    fn descriptor(&self) -> &VerifiedEmbeddingArtifactV1;
+pub(super) trait EmbeddingSession: Send {
+    /// The authority this session was opened from (echo surface).
+    fn authority(&self) -> &AdmittedProjectionArtifactV1;
     /// Estimated resident bytes, used by the pool's memory-ceiling
     /// enforcement. Must be <= the descriptor's `resident_byte_ceiling`.
     fn resident_bytes_estimate(&self) -> u64;
@@ -467,7 +602,7 @@ pub trait EmbeddingSession: Send {
 /// → create session → embed bounded sanitized batches). The only production
 /// implementation will be the FastEmbed adapter in this module; every other
 /// crate depends on this trait surface, never on FastEmbed runtime types.
-pub trait EmbeddingRuntime {
+pub(super) trait EmbeddingRuntime {
     type Session: EmbeddingSession;
 
     /// Cheap admission-time compatibility check (Plan 31: activation verifies
@@ -475,7 +610,7 @@ pub trait EmbeddingRuntime {
     /// load and no I/O beyond descriptor/platform inspection.
     fn verify_artifact_compatibility(
         &self,
-        artifact: &VerifiedEmbeddingArtifactV1,
+        authority: &AdmittedProjectionArtifactV1,
     ) -> Result<(), EmbedError>;
 
     /// Load the verified artifact and create one warmed session. The
@@ -484,7 +619,7 @@ pub trait EmbeddingRuntime {
     /// discovery, or trust decision.
     fn open_session(
         &self,
-        artifact: &VerifiedEmbeddingArtifactV1,
+        authority: &AdmittedProjectionArtifactV1,
     ) -> Result<Self::Session, EmbedError>;
 }
 
@@ -505,7 +640,7 @@ pub struct FakeRuntimeCounters {
 /// normalization. Same descriptor digest + same text always yields the same
 /// vector, so all pool/session behavior is testable offline.
 #[derive(Debug)]
-pub struct FakeEmbeddingRuntime {
+pub(super) struct FakeEmbeddingRuntime {
     resident_bytes_per_session: u64,
     open_failure: Option<RuntimeFailureKindV1>,
     compatibility_failure: Option<RuntimeFailureKindV1>,
@@ -519,7 +654,7 @@ impl Default for FakeEmbeddingRuntime {
 }
 
 impl FakeEmbeddingRuntime {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             resident_bytes_per_session: 1024 * 1024,
             open_failure: None,
@@ -528,22 +663,22 @@ impl FakeEmbeddingRuntime {
         }
     }
 
-    pub fn with_resident_bytes_per_session(mut self, bytes: u64) -> Self {
+    pub(super) fn with_resident_bytes_per_session(mut self, bytes: u64) -> Self {
         self.resident_bytes_per_session = bytes;
         self
     }
 
-    pub fn with_open_failure(mut self, kind: RuntimeFailureKindV1) -> Self {
+    pub(super) fn with_open_failure(mut self, kind: RuntimeFailureKindV1) -> Self {
         self.open_failure = Some(kind);
         self
     }
 
-    pub fn with_compatibility_failure(mut self, kind: RuntimeFailureKindV1) -> Self {
+    pub(super) fn with_compatibility_failure(mut self, kind: RuntimeFailureKindV1) -> Self {
         self.compatibility_failure = Some(kind);
         self
     }
 
-    pub fn counters(&self) -> Arc<FakeRuntimeCounters> {
+    pub(super) fn counters(&self) -> Arc<FakeRuntimeCounters> {
         Arc::clone(&self.counters)
     }
 }
@@ -553,12 +688,11 @@ impl EmbeddingRuntime for FakeEmbeddingRuntime {
 
     fn verify_artifact_compatibility(
         &self,
-        artifact: &VerifiedEmbeddingArtifactV1,
+        _authority: &AdmittedProjectionArtifactV1,
     ) -> Result<(), EmbedError> {
         self.counters
             .compatibility_checks
             .fetch_add(1, Ordering::SeqCst);
-        artifact.validate()?;
         if let Some(kind) = self.compatibility_failure {
             return Err(EmbedError::Runtime(RuntimeFailureV1 {
                 kind,
@@ -570,9 +704,8 @@ impl EmbeddingRuntime for FakeEmbeddingRuntime {
 
     fn open_session(
         &self,
-        artifact: &VerifiedEmbeddingArtifactV1,
+        authority: &AdmittedProjectionArtifactV1,
     ) -> Result<Self::Session, EmbedError> {
-        artifact.validate()?;
         if let Some(kind) = self.open_failure {
             return Err(EmbedError::Runtime(RuntimeFailureV1 {
                 kind,
@@ -581,8 +714,15 @@ impl EmbeddingRuntime for FakeEmbeddingRuntime {
         }
         self.counters.sessions_opened.fetch_add(1, Ordering::SeqCst);
         Ok(FakeEmbeddingSession {
-            descriptor: artifact.clone(),
-            vector_seed: fnv1a64(artifact.artifact_digest.as_bytes(), FNV_OFFSET_BASIS),
+            authority: authority.clone(),
+            vector_seed: fnv1a64(
+                authority
+                    .runtime_artifact()
+                    .artifact_digest()
+                    .as_str()
+                    .as_bytes(),
+                FNV_OFFSET_BASIS,
+            ),
             resident_bytes: self.resident_bytes_per_session,
             counters: Arc::clone(&self.counters),
         })
@@ -592,15 +732,15 @@ impl EmbeddingRuntime for FakeEmbeddingRuntime {
 /// One deterministic fake warmed session.
 #[derive(Debug)]
 pub struct FakeEmbeddingSession {
-    descriptor: VerifiedEmbeddingArtifactV1,
+    authority: AdmittedProjectionArtifactV1,
     vector_seed: u64,
     resident_bytes: u64,
     counters: Arc<FakeRuntimeCounters>,
 }
 
 impl EmbeddingSession for FakeEmbeddingSession {
-    fn descriptor(&self) -> &VerifiedEmbeddingArtifactV1 {
-        &self.descriptor
+    fn authority(&self) -> &AdmittedProjectionArtifactV1 {
+        &self.authority
     }
 
     fn resident_bytes_estimate(&self) -> u64 {
@@ -615,16 +755,17 @@ impl EmbeddingSession for FakeEmbeddingSession {
         if batch.is_empty() {
             return Err(EmbedError::EmptyBatch);
         }
-        if batch.len() > self.descriptor.max_batch_texts as usize {
+        let artifact = self.authority.runtime_artifact();
+        if batch.len() > artifact.max_batch_texts() as usize {
             return Err(EmbedError::TooManyTexts {
                 presented: batch.len(),
-                max: self.descriptor.max_batch_texts as usize,
+                max: artifact.max_batch_texts() as usize,
             });
         }
-        if batch.total_bytes() > self.descriptor.max_batch_bytes as usize {
+        if batch.total_bytes() > artifact.max_batch_bytes() as usize {
             return Err(EmbedError::BatchBytesExceeded {
                 presented: batch.total_bytes(),
-                max: self.descriptor.max_batch_bytes as usize,
+                max: artifact.max_batch_bytes() as usize,
             });
         }
         let mut out = Vec::with_capacity(batch.len());
@@ -638,12 +779,12 @@ impl EmbeddingSession for FakeEmbeddingSession {
                 values: pseudo_embedding(
                     self.vector_seed,
                     text,
-                    self.descriptor.dimensions,
-                    self.descriptor.normalization,
+                    artifact.dimensions(),
+                    artifact.normalization(),
                 ),
-                dimensions: self.descriptor.dimensions,
-                metric: self.descriptor.metric,
-                normalization: self.descriptor.normalization,
+                dimensions: artifact.dimensions(),
+                metric: artifact.metric(),
+                normalization: artifact.normalization(),
             };
             vector.validate()?;
             self.counters.texts_embedded.fetch_add(1, Ordering::SeqCst);
@@ -714,25 +855,82 @@ fn pseudo_embedding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_domain::{ChunkerRevision, EmbeddingProjectionKeyV1, PrivacyDomainId};
 
-    fn descriptor(dimensions: u32) -> VerifiedEmbeddingArtifactV1 {
-        VerifiedEmbeddingArtifactV1 {
-            artifact_digest: "aa55aa55aa55aa55".to_string(),
-            model_root: PathBuf::from("/plan02-store/artifacts/aa55"),
-            model_file: "model.onnx".to_string(),
-            tokenizer_file: "tokenizer.json".to_string(),
-            config_file: "config.json".to_string(),
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("canonical test identity")
+    }
+
+    fn digest(byte: char) -> ManifestDigest {
+        id(&format!("sha256:{}", byte.to_string().repeat(64)))
+    }
+
+    fn authority(dimensions: u32) -> AdmittedProjectionArtifactV1 {
+        authority_with(
             dimensions,
-            metric: EmbeddingMetricV1::Cosine,
-            normalization: EmbeddingNormalizationV1::L2,
-            precision: EmbeddingPrecisionV1::F32,
-            query_instruction: Some("query:".to_string()),
-            document_instruction: Some("passage:".to_string()),
-            max_batch_texts: 8,
-            max_batch_bytes: 16 * 1024,
-            resident_byte_ceiling: 64 * 1024 * 1024,
-            runtime_build_revision: "fastembed-test-rev-1".to_string(),
+            'a',
+            EmbeddingMetricV1::Cosine,
+            EmbeddingNormalizationV1::L2,
+        )
+    }
+
+    fn authority_with(
+        dimensions: u32,
+        artifact_digest: char,
+        metric: EmbeddingMetricV1,
+        normalization: EmbeddingNormalizationV1,
+    ) -> AdmittedProjectionArtifactV1 {
+        let projection = EmbeddingProjectionKeyV1 {
+            model_artifact_digest: digest(artifact_digest),
+            tokenizer_digest: digest('b'),
+            config_digest: digest('c'),
+            query_instruction_digest: Some(digest('d')),
+            document_instruction_digest: Some(digest('e')),
+            pooling: EmbeddingPoolingV1::Mean,
+            truncation_side: EmbeddingTruncationSideV1::Right,
+            truncation_length: 512,
+            runtime_backend: "fastembed-ort".to_owned(),
+            runtime_build_revision: "ort-test-rev-1".to_owned(),
+            device_class: EmbeddingDeviceClassV1::Cpu,
+            dimensions,
+            metric,
+            normalization,
+            precision: EmbeddingPrecisionV1::Fp32,
+            chunk_schema_revision: "code-search-chunk.v1".to_owned(),
+            chunker_revision: id::<ChunkerRevision>("chunker.v1"),
+            privacy_domain: id::<PrivacyDomainId>("privacy.test"),
+            privacy_key_epoch: 7,
         }
+        .admit()
+        .expect("valid test projection");
+        AdmittedProjectionArtifactV1 {
+            runtime_artifact: VerifiedEmbeddingArtifactV1 {
+                projection,
+                model_file: "model.onnx".to_string(),
+                tokenizer_file: "tokenizer.json".to_string(),
+                config_file: "config.json".to_string(),
+                max_batch_texts: 8,
+                max_batch_bytes: 16 * 1024,
+                resident_byte_ceiling: 64 * 1024 * 1024,
+            },
+        }
+    }
+
+    fn descriptor(authority: &AdmittedProjectionArtifactV1) -> &VerifiedEmbeddingArtifactV1 {
+        authority.runtime_artifact()
+    }
+
+    fn descriptor_paths(authority: &AdmittedProjectionArtifactV1) -> (&str, &str, &str) {
+        let descriptor = descriptor(authority);
+        (
+            descriptor.model_file.as_str(),
+            descriptor.tokenizer_file.as_str(),
+            descriptor.config_file.as_str(),
+        )
     }
 
     fn batch(texts: &[&str]) -> BoundedSanitizedTextBatchV1 {
@@ -749,44 +947,16 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_validation_accepts_valid_descriptor() {
-        descriptor(384).validate().expect("valid descriptor");
-    }
-
-    #[test]
-    fn descriptor_validation_rejects_zero_and_oversized_dimensions() {
-        let mut d = descriptor(0);
-        assert!(matches!(
-            d.validate(),
-            Err(EmbedError::InvalidArtifactDescriptor(_))
-        ));
-        d = descriptor(MAX_EMBEDDING_DIMENSIONS + 1);
-        assert!(matches!(
-            d.validate(),
-            Err(EmbedError::InvalidArtifactDescriptor(_))
-        ));
-    }
-
-    #[test]
-    fn descriptor_validation_rejects_empty_identity_and_zero_ceilings() {
-        for mutate in [
-            (|d: &mut VerifiedEmbeddingArtifactV1| d.artifact_digest.clear())
-                as fn(&mut VerifiedEmbeddingArtifactV1),
-            |d| d.model_file.clear(),
-            |d| d.tokenizer_file.clear(),
-            |d| d.config_file.clear(),
-            |d| d.max_batch_texts = 0,
-            |d| d.max_batch_bytes = 0,
-            |d| d.resident_byte_ceiling = 0,
-            |d| d.runtime_build_revision.clear(),
-        ] {
-            let mut d = descriptor(384);
-            mutate(&mut d);
-            assert!(
-                matches!(d.validate(), Err(EmbedError::InvalidArtifactDescriptor(_))),
-                "mutation must be rejected"
-            );
-        }
+    fn private_runtime_descriptor_uses_domain_projection_types() {
+        let authority = authority(384);
+        let descriptor = descriptor(&authority);
+        assert_eq!(descriptor.dimensions(), 384);
+        assert_eq!(descriptor.metric(), EmbeddingMetricV1::Cosine);
+        assert_eq!(descriptor.normalization(), EmbeddingNormalizationV1::L2);
+        assert_eq!(
+            descriptor_paths(&authority),
+            ("model.onnx", "tokenizer.json", "config.json")
+        );
     }
 
     #[test]
@@ -814,9 +984,9 @@ mod tests {
     #[test]
     fn fake_embed_is_deterministic_across_sessions() {
         let runtime = FakeEmbeddingRuntime::new();
-        let d = descriptor(16);
-        let mut s1 = runtime.open_session(&d).expect("session 1");
-        let mut s2 = runtime.open_session(&d).expect("session 2");
+        let authority = authority(16);
+        let mut s1 = runtime.open_session(&authority).expect("session 1");
+        let mut s2 = runtime.open_session(&authority).expect("session 2");
         let texts = batch(&["fn reserve_stock()", "impl Display for Error"]);
         let cancel = never_cancelled();
         let v1 = s1.embed_batch(&texts, &cancel).expect("embed 1");
@@ -827,16 +997,20 @@ mod tests {
     #[test]
     fn fake_embed_distinguishes_inputs_and_model_identities() {
         let runtime = FakeEmbeddingRuntime::new();
-        let d = descriptor(16);
-        let mut session = runtime.open_session(&d).expect("session");
+        let authority = authority(16);
+        let mut session = runtime.open_session(&authority).expect("session");
         let cancel = never_cancelled();
         let pair = session
             .embed_batch(&batch(&["alpha", "beta"]), &cancel)
             .expect("embed");
         assert_ne!(pair[0].values, pair[1].values, "distinct texts differ");
 
-        let mut other = d.clone();
-        other.artifact_digest = "bb66bb66bb66bb66".to_string();
+        let other = authority_with(
+            16,
+            'f',
+            EmbeddingMetricV1::Cosine,
+            EmbeddingNormalizationV1::L2,
+        );
         let mut other_session = runtime.open_session(&other).expect("other session");
         let other_vec = other_session
             .embed_batch(&batch(&["alpha"]), &cancel)
@@ -850,10 +1024,13 @@ mod tests {
     #[test]
     fn echo_dimensions_metric_and_normalization_are_exact() {
         let runtime = FakeEmbeddingRuntime::new();
-        let mut d = descriptor(24);
-        d.metric = EmbeddingMetricV1::DotProduct;
-        d.normalization = EmbeddingNormalizationV1::L2;
-        let mut session = runtime.open_session(&d).expect("session");
+        let authority = authority_with(
+            24,
+            'a',
+            EmbeddingMetricV1::DotProduct,
+            EmbeddingNormalizationV1::L2,
+        );
+        let mut session = runtime.open_session(&authority).expect("session");
         let vectors = session
             .embed_batch(&batch(&["echo me"]), &never_cancelled())
             .expect("embed");
@@ -873,9 +1050,13 @@ mod tests {
     #[test]
     fn unnormalized_echo_stays_raw() {
         let runtime = FakeEmbeddingRuntime::new();
-        let mut d = descriptor(24);
-        d.normalization = EmbeddingNormalizationV1::None;
-        let mut session = runtime.open_session(&d).expect("session");
+        let authority = authority_with(
+            24,
+            'a',
+            EmbeddingMetricV1::Cosine,
+            EmbeddingNormalizationV1::None,
+        );
+        let mut session = runtime.open_session(&authority).expect("session");
         let vectors = session
             .embed_batch(&batch(&["raw values"]), &never_cancelled())
             .expect("embed");
@@ -889,7 +1070,7 @@ mod tests {
     #[test]
     fn cancellation_before_embed_aborts() {
         let runtime = FakeEmbeddingRuntime::new();
-        let mut session = runtime.open_session(&descriptor(8)).expect("session");
+        let mut session = runtime.open_session(&authority(8)).expect("session");
         let cancel = ManualCancellation::new();
         cancel.cancel();
         let result = session.embed_batch(&batch(&["a", "b"]), &cancel);
@@ -904,7 +1085,7 @@ mod tests {
     #[test]
     fn cancellation_mid_embed_discards_partial_batch() {
         let runtime = FakeEmbeddingRuntime::new();
-        let mut session = runtime.open_session(&descriptor(8)).expect("session");
+        let mut session = runtime.open_session(&authority(8)).expect("session");
         // First poll (before text 1) passes, second poll cancels.
         let cancel = ScriptedCancellation::new(1);
         let result = session.embed_batch(&batch(&["a", "b", "c", "d"]), &cancel);
@@ -919,9 +1100,9 @@ mod tests {
     #[test]
     fn session_enforces_its_own_manifest_batch_ceiling() {
         let runtime = FakeEmbeddingRuntime::new();
-        let mut d = descriptor(8);
-        d.max_batch_texts = 1;
-        let mut session = runtime.open_session(&d).expect("session");
+        let mut authority = authority(8);
+        authority.runtime_artifact.max_batch_texts = 1;
+        let mut session = runtime.open_session(&authority).expect("session");
         let result = session.embed_batch(&batch(&["a", "b"]), &never_cancelled());
         assert!(matches!(
             result,
@@ -971,7 +1152,7 @@ mod tests {
             RuntimeFailureKindV1::EmbedFailed,
         ] {
             let runtime = FakeEmbeddingRuntime::new().with_open_failure(kind);
-            let result = runtime.open_session(&descriptor(8));
+            let result = runtime.open_session(&authority(8));
             match result {
                 Err(EmbedError::Runtime(failure)) => assert_eq!(failure.kind, kind),
                 other => panic!("expected typed runtime failure, got {other:?}"),
@@ -983,7 +1164,7 @@ mod tests {
     fn compatibility_failure_is_typed() {
         let runtime = FakeEmbeddingRuntime::new()
             .with_compatibility_failure(RuntimeFailureKindV1::IncompatibleRuntime);
-        let result = runtime.verify_artifact_compatibility(&descriptor(8));
+        let result = runtime.verify_artifact_compatibility(&authority(8));
         match result {
             Err(EmbedError::Runtime(failure)) => {
                 assert_eq!(failure.kind, RuntimeFailureKindV1::IncompatibleRuntime)
@@ -993,14 +1174,11 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_check_validates_descriptor_first() {
+    fn compatibility_check_consumes_admitted_authority() {
         let runtime = FakeEmbeddingRuntime::new();
-        let mut d = descriptor(8);
-        d.dimensions = 0;
-        assert!(matches!(
-            runtime.verify_artifact_compatibility(&d),
-            Err(EmbedError::InvalidArtifactDescriptor(_))
-        ));
+        runtime
+            .verify_artifact_compatibility(&authority(8))
+            .expect("admitted authority is compatible");
         assert_eq!(
             runtime
                 .counters()
@@ -1011,26 +1189,68 @@ mod tests {
     }
 
     #[test]
-    fn metric_normalization_precision_enumerations_render_stably() {
-        // The closed enumerations are the manifest echo vocabulary (see
-        // ESCALATION-2); every variant stays constructible and renders.
-        for metric in [
-            EmbeddingMetricV1::Cosine,
-            EmbeddingMetricV1::DotProduct,
-            EmbeddingMetricV1::EuclideanL2,
-        ] {
-            assert!(!metric.to_string().is_empty());
-        }
-        for normalization in [EmbeddingNormalizationV1::None, EmbeddingNormalizationV1::L2] {
-            assert!(!normalization.to_string().is_empty());
-        }
-        for precision in [
-            EmbeddingPrecisionV1::F32,
-            EmbeddingPrecisionV1::F16,
-            EmbeddingPrecisionV1::QuantizedI8,
-        ] {
-            assert!(!precision.to_string().is_empty());
-        }
+    fn manifest_bridges_exhaustively_cover_domain_vector_types() {
+        assert_eq!(
+            [
+                bridge_metric(SemanticMetricV1::Cosine),
+                bridge_metric(SemanticMetricV1::DotProduct),
+                bridge_metric(SemanticMetricV1::EuclideanL2),
+            ],
+            [
+                EmbeddingMetricV1::Cosine,
+                EmbeddingMetricV1::DotProduct,
+                EmbeddingMetricV1::EuclideanL2,
+            ]
+        );
+        assert_eq!(
+            [
+                bridge_normalization(ManifestNormalizationV1::L2),
+                bridge_normalization(ManifestNormalizationV1::None),
+            ],
+            [EmbeddingNormalizationV1::L2, EmbeddingNormalizationV1::None,]
+        );
+        assert_eq!(
+            [
+                bridge_precision(ManifestPrecisionV1::Fp32),
+                bridge_precision(ManifestPrecisionV1::Fp16),
+                bridge_precision(ManifestPrecisionV1::Bf16),
+                bridge_precision(ManifestPrecisionV1::Int8),
+            ],
+            [
+                EmbeddingPrecisionV1::Fp32,
+                EmbeddingPrecisionV1::Fp16,
+                EmbeddingPrecisionV1::Bf16,
+                EmbeddingPrecisionV1::Int8,
+            ]
+        );
+        assert_eq!(
+            [
+                bridge_pooling(ManifestPoolingV1::Mean),
+                bridge_pooling(ManifestPoolingV1::Cls),
+                bridge_pooling(ManifestPoolingV1::LastToken),
+                bridge_pooling(ManifestPoolingV1::MeanSqrtLength),
+            ],
+            [
+                EmbeddingPoolingV1::Mean,
+                EmbeddingPoolingV1::Cls,
+                EmbeddingPoolingV1::LastToken,
+                EmbeddingPoolingV1::MeanSqrtLength,
+            ]
+        );
+        assert_eq!(
+            [
+                bridge_truncation_side(TruncationSideV1::Left),
+                bridge_truncation_side(TruncationSideV1::Right),
+            ],
+            [
+                EmbeddingTruncationSideV1::Left,
+                EmbeddingTruncationSideV1::Right,
+            ]
+        );
+        assert_eq!(
+            bridge_device(DeviceClassV1::Cpu),
+            EmbeddingDeviceClassV1::Cpu
+        );
     }
 
     #[test]
@@ -1038,7 +1258,7 @@ mod tests {
         let runtime = FakeEmbeddingRuntime::new().with_resident_bytes_per_session(4096);
         let counters = runtime.counters();
         {
-            let session = runtime.open_session(&descriptor(8)).expect("session");
+            let session = runtime.open_session(&authority(8)).expect("session");
             assert_eq!(session.resident_bytes_estimate(), 4096);
             assert_eq!(counters.sessions_opened.load(Ordering::SeqCst), 1);
             assert_eq!(counters.sessions_closed.load(Ordering::SeqCst), 0);

@@ -11,9 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1, ContentDigest,
-    EmbeddingProjectionKeyV1, ManifestDigest, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionOperationV1, ProjectionOutcomeV1, canonical_sha256,
+    AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
+    ContentDigest, EmbeddingProjectionKeyV1, ManifestDigest, ProjectionBatchReceiptV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionOperationV1, ProjectionOutcomeV1,
+    canonical_sha256,
 };
 
 use crate::code_index::projection::{
@@ -129,7 +130,7 @@ pub struct VectorTombstoneV1 {
 /// Store-neutral handoff for one complete Plan 25 projection batch.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedVectorGenerationV1 {
-    pub embedding_key: EmbeddingProjectionKeyV1,
+    pub embedding_key: AdmittedEmbeddingProjectionKeyV1,
     pub request: ProjectionBatchRequestV1,
     pub receipt: ProjectionBatchReceiptV1,
     pub vectors: Vec<ProjectedChunkVectorV1>,
@@ -141,17 +142,13 @@ pub struct PreparedVectorGenerationV1 {
 /// become tombstones and reused chunks are represented by the canonical Plan
 /// 25 receipt so the store can copy their prior immutable vectors.
 pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
-    embedding_key: &EmbeddingProjectionKeyV1,
+    admitted_projection: &AdmittedEmbeddingProjectionKeyV1,
     request: ProjectionBatchRequestV1,
     canonical_chunks: &[CodeSearchChunkV1],
     encoder: &mut E,
 ) -> Result<PreparedVectorGenerationV1, SemanticProjectionErrorV1> {
-    embedding_key
-        .validate()
-        .map_err(|error| SemanticProjectionErrorV1::Contract(error.to_string()))?;
-    let target_key = embedding_key
-        .projection_key()
-        .map_err(|error| SemanticProjectionErrorV1::Contract(error.to_string()))?;
+    let embedding_key = admitted_projection.embedding_key();
+    let target_key = admitted_projection.projection_key().clone();
     if request.target_projection_key != target_key {
         return Err(SemanticProjectionErrorV1::ProjectionKeyMismatch);
     }
@@ -281,7 +278,7 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
     let receipt = build_batch_receipt(&request, &decisions)?;
     verify_batch_receipt(&request, &receipt)?;
     Ok(PreparedVectorGenerationV1 {
-        embedding_key: embedding_key.clone(),
+        embedding_key: admitted_projection.clone(),
         request,
         receipt,
         vectors,

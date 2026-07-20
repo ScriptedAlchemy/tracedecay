@@ -1,0 +1,694 @@
+//! Quarantined PR10 exact-flat semantic retrieval lane.
+//!
+//! The lane consumes only an admitted embedding projection, a request-local
+//! query-embedding port, and an immutable vector-generation read port. It
+//! performs no artifact admission, vector mutation, ANN lookup, fusion,
+//! reranking, hydration, activation, or calls into another retrieval lane.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tracedecay_domain::{
+    AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, CompactCandidate,
+    CursorPayloadDigest, EmbeddingMetricV1, EmbeddingProjectionKeyV1,
+    EphemeralSanitizedQueryViewV1, FixedPointScore, FreshnessCompatibilityV1, ManifestDigest,
+    ProjectionKeyV1, QueryDigest, RetrievalBudget, RetrievalBudgetUsage, RetrievalError,
+    RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch, RetrieverContinuation,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, VectorGenerationIdV1,
+};
+
+use super::ports::{CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError};
+
+const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
+const SEMANTIC_CHECKPOINT_DOMAIN: &str = "tracedecay.semantic-flat-checkpoint.v1";
+
+/// The only search implementation admitted by this quarantined lane.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SemanticSearchKindV1 {
+    #[serde(rename = "exact_flat")]
+    ExactFlat,
+}
+
+/// Canonical fixed-point semantic distance. Smaller values rank first.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CanonicalSemanticDistanceV1(i64);
+
+impl CanonicalSemanticDistanceV1 {
+    pub const fn micros(self) -> i64 {
+        self.0
+    }
+
+    fn as_descending_score(self) -> FixedPointScore {
+        let order_preserving = (self.0 as u64) ^ (1_u64 << 63);
+        FixedPointScore(u64::MAX - order_preserving)
+    }
+}
+
+/// Typed semantic evidence attached to one generic compact candidate.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeSemanticEvidenceV1 {
+    pub projection_key: EmbeddingProjectionKeyV1,
+    pub vector_generation: VectorGenerationIdV1,
+    pub chunk_id: CodeSearchChunkId,
+    pub distance: CanonicalSemanticDistanceV1,
+    pub search_kind: SemanticSearchKindV1,
+}
+
+/// Frozen semantic-lane request. The query view remains borrowed and
+/// non-serializable; only its privacy-bound digest may outlive the call.
+#[derive(Debug)]
+pub struct SemanticRetrievalRequestV1<'a> {
+    pub base: RetrievalRequest,
+    pub query_digest: QueryDigest,
+    pub query_view: &'a EphemeralSanitizedQueryViewV1,
+    pub projection: &'a AdmittedEmbeddingProjectionKeyV1,
+    pub capability_manifest_digest: ManifestDigest,
+    pub vector_generation: VectorGenerationIdV1,
+    pub code_generation: CodeGenerationId,
+    pub budget: RetrievalBudget,
+}
+
+impl SemanticRetrievalRequestV1<'_> {
+    pub fn validate(&self) -> Result<(), RetrievalPortError> {
+        self.base.budget.validate().map_err(contract_error)?;
+        self.budget.validate().map_err(contract_error)?;
+        self.query_digest.validate().map_err(contract_error)?;
+        self.code_generation.validate().map_err(contract_error)?;
+        self.capability_manifest_digest
+            .validate()
+            .map_err(contract_error)?;
+        self.vector_generation
+            .as_digest()
+            .validate()
+            .map_err(contract_error)?;
+        self.projection
+            .embedding_key()
+            .validate()
+            .map_err(contract_error)?;
+
+        if self.base.scope.privacy_domain != *self.projection.privacy_domain()
+            || self.query_digest.privacy_domain != *self.projection.privacy_domain()
+            || self.query_digest.key_epoch != self.projection.privacy_key_epoch()
+        {
+            return Err(RetrievalPortError::Contract(
+                "semantic request scope, query digest, and admitted projection must share one privacy domain and key epoch"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Request presented to the admitted projection/artifact query runtime.
+#[derive(Clone, Copy, Debug)]
+pub struct SemanticQueryEmbeddingRequestV1<'a> {
+    pub query_digest: &'a QueryDigest,
+    pub query_view: &'a EphemeralSanitizedQueryViewV1,
+    pub projection: &'a AdmittedEmbeddingProjectionKeyV1,
+}
+
+/// Request-local query vector. It deliberately implements neither
+/// serialization nor cloning and is dropped after the exact-flat scan.
+pub struct EphemeralQueryEmbeddingV1 {
+    query_digest: QueryDigest,
+    projection: AdmittedEmbeddingProjectionKeyV1,
+    values: Vec<f32>,
+}
+
+impl EphemeralQueryEmbeddingV1 {
+    pub fn new(
+        query_digest: QueryDigest,
+        projection: AdmittedEmbeddingProjectionKeyV1,
+        values: Vec<f32>,
+    ) -> Result<Self, RetrievalPortError> {
+        query_digest.validate().map_err(contract_error)?;
+        if query_digest.privacy_domain != *projection.privacy_domain()
+            || query_digest.key_epoch != projection.privacy_key_epoch()
+        {
+            return Err(RetrievalPortError::Contract(
+                "query embedding digest does not match the admitted projection privacy identity"
+                    .to_owned(),
+            ));
+        }
+        validate_vector(
+            &values,
+            projection.embedding_key().dimensions,
+            "query embedding",
+        )?;
+        Ok(Self {
+            query_digest,
+            projection,
+            values,
+        })
+    }
+}
+
+/// Root-private adapter over the already-admitted projection/artifact
+/// authority. Implementations may infer one query vector and nothing else.
+pub trait SemanticQueryEmbeddingPort {
+    fn embed_query(
+        &self,
+        request: SemanticQueryEmbeddingRequestV1<'_>,
+    ) -> Result<EphemeralQueryEmbeddingV1, RetrievalPortError>;
+}
+
+/// Frozen identity passed to the immutable vector read port.
+#[derive(Clone, Copy, Debug)]
+pub struct SemanticVectorReadRequestV1<'a> {
+    pub vector_generation: &'a VectorGenerationIdV1,
+    pub projection_key: &'a ProjectionKeyV1,
+    pub source_generation: &'a CodeGenerationId,
+    pub capability_manifest_digest: &'a ManifestDigest,
+    pub search_kind: SemanticSearchKindV1,
+}
+
+/// One immutable vector row and its generic candidate binding.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticVectorRecordV1 {
+    pub vector_generation: VectorGenerationIdV1,
+    pub projection_key: ProjectionKeyV1,
+    pub source_generation: CodeGenerationId,
+    pub chunk_id: CodeSearchChunkId,
+    pub candidate: CompactCandidate,
+    pub binding: CodeCandidateBindingV1,
+    pub values: Vec<f32>,
+}
+
+/// Store-owned coverage for one complete exact-flat generation scan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SemanticVectorScanSummaryV1 {
+    pub examined: u64,
+    pub eligible: u64,
+    pub excluded: u64,
+    pub unknown: u64,
+}
+
+/// Read-only port over one immutable, fully published vector generation.
+/// The callback shape lets the lane scan without retaining or copying the
+/// complete vector set.
+pub trait SemanticVectorReadPort {
+    fn scan_exact_flat(
+        &self,
+        request: SemanticVectorReadRequestV1<'_>,
+        visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
+    ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError>;
+}
+
+/// Request-scoped cancellation and monotonic deadline authority.
+pub trait SemanticExecutionControl {
+    fn is_cancelled(&self) -> bool;
+    /// Monotonic elapsed time in the same request-relative domain as
+    /// `RetrievalBudget::deadline_micros`.
+    fn elapsed_micros(&self) -> u64;
+}
+
+/// Independently inspectable semantic-lane port.
+pub trait SemanticLaneRetriever {
+    fn retrieve_semantic(
+        &self,
+        request: &SemanticRetrievalRequestV1<'_>,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError>;
+}
+
+/// Exact-flat semantic retriever. Its only dependencies are the admitted
+/// query embedder, immutable vectors, and request execution control.
+pub struct SemanticCodeRetriever<'a, E, V, C> {
+    embedder: &'a E,
+    vectors: &'a V,
+    control: &'a C,
+}
+
+impl<'a, E, V, C> SemanticCodeRetriever<'a, E, V, C> {
+    pub const fn new(embedder: &'a E, vectors: &'a V, control: &'a C) -> Self {
+        Self {
+            embedder,
+            vectors,
+            control,
+        }
+    }
+}
+
+impl<E, V, C> SemanticCodeRetriever<'_, E, V, C>
+where
+    E: SemanticQueryEmbeddingPort,
+    V: SemanticVectorReadPort,
+    C: SemanticExecutionControl,
+{
+    fn enforce_record(
+        request: &SemanticRetrievalRequestV1<'_>,
+        record: &SemanticVectorRecordV1,
+        query: &EphemeralQueryEmbeddingV1,
+    ) -> Result<(CompactCandidate, CodeSemanticEvidenceV1), RetrievalPortError> {
+        if record.vector_generation != request.vector_generation
+            || record.projection_key != *request.projection.projection_key()
+        {
+            return Err(RetrievalPortError::IncompatibleProjection);
+        }
+        if record.source_generation != request.code_generation
+            || record.binding.occurrence.generation != request.code_generation
+        {
+            return Err(RetrievalPortError::GenerationMismatch);
+        }
+        if record.binding.occurrence.chunk.as_ref() != Some(&record.chunk_id)
+            || record.binding.candidate_anchor != record.candidate.anchor_id
+            || record.binding.source_occurrence != record.candidate.source_occurrence_id
+        {
+            return Err(RetrievalPortError::Contract(
+                "semantic vector row does not bind its chunk and candidate occurrence".to_owned(),
+            ));
+        }
+        if record.candidate.retriever != RetrieverKind::Semantic
+            || record.candidate.exact_admission_proof.is_some()
+        {
+            return Err(RetrievalPortError::Contract(
+                "semantic vectors may emit only non-exact semantic candidates".to_owned(),
+            ));
+        }
+        if record.candidate.repository_id.as_ref() != Some(&request.base.scope.root.repository)
+            || record.candidate.freshness.compatibility != FreshnessCompatibilityV1::Current
+        {
+            return Err(RetrievalPortError::Contract(
+                "semantic candidate is outside the frozen repository or freshness scope".to_owned(),
+            ));
+        }
+        validate_vector(
+            &record.values,
+            request.projection.embedding_key().dimensions,
+            "stored semantic vector",
+        )?;
+        let distance = canonical_distance(
+            request.projection.embedding_key().metric,
+            &query.values,
+            &record.values,
+        )?;
+        let mut candidate = record.candidate.clone();
+        candidate.raw_score = distance.as_descending_score();
+        Ok((
+            candidate,
+            CodeSemanticEvidenceV1 {
+                projection_key: request.projection.embedding_key().clone(),
+                vector_generation: request.vector_generation.clone(),
+                chunk_id: record.chunk_id.clone(),
+                distance,
+                search_kind: SemanticSearchKindV1::ExactFlat,
+            },
+        ))
+    }
+
+    fn retrieve_complete(
+        &self,
+        request: &SemanticRetrievalRequestV1<'_>,
+        query: &EphemeralQueryEmbeddingV1,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
+        if query.projection != *request.projection || query.query_digest != request.query_digest {
+            return Err(RetrievalPortError::IncompatibleProjection);
+        }
+
+        let mut ranked = Vec::new();
+        let mut seen_occurrences = BTreeSet::new();
+        let scan_request = SemanticVectorReadRequestV1 {
+            vector_generation: &request.vector_generation,
+            projection_key: request.projection.projection_key(),
+            source_generation: &request.code_generation,
+            capability_manifest_digest: &request.capability_manifest_digest,
+            search_kind: SemanticSearchKindV1::ExactFlat,
+        };
+        let scan = self.vectors.scan_exact_flat(scan_request, &mut |record| {
+            if self.control.is_cancelled() {
+                return Err(RetrievalPortError::Cancelled);
+            }
+            if deadline_exhausted(request, self.control) {
+                return Err(RetrievalPortError::BudgetExceeded);
+            }
+            let (candidate, evidence) = Self::enforce_record(request, record, query)?;
+            if !seen_occurrences.insert(candidate.source_occurrence_id.clone()) {
+                return Err(RetrievalPortError::Contract(
+                    "semantic vector generation contains duplicate source occurrences".to_owned(),
+                ));
+            }
+            ranked.push((candidate, evidence));
+            Ok(())
+        });
+        let summary = match scan {
+            Ok(summary) => summary,
+            Err(error) => {
+                return port_error_outcome(
+                    error,
+                    budget_usage(request, ranked.len() as u64, 0, self.control),
+                );
+            }
+        };
+
+        if self.control.is_cancelled() {
+            return Ok(RetrieverOutcome::Cancelled);
+        }
+        if deadline_exhausted(request, self.control) {
+            return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
+                request,
+                ranked.len() as u64,
+                0,
+                self.control,
+            )));
+        }
+        if summary.eligible != ranked.len() as u64 {
+            return Err(RetrievalPortError::Contract(
+                "semantic vector scan coverage does not match the visited eligible rows".to_owned(),
+            ));
+        }
+        let accounted = summary
+            .eligible
+            .checked_add(summary.excluded)
+            .and_then(|count| count.checked_add(summary.unknown))
+            .ok_or_else(|| {
+                RetrievalPortError::Contract("semantic scan coverage overflowed".to_owned())
+            })?;
+        if summary.examined != accounted {
+            return Err(RetrievalPortError::Contract(
+                "semantic vector scan coverage is incomplete".to_owned(),
+            ));
+        }
+
+        ranked.sort_by(|left, right| {
+            left.1
+                .distance
+                .cmp(&right.1.distance)
+                .then_with(|| {
+                    left.0
+                        .source_occurrence_id
+                        .cmp(&right.0.source_occurrence_id)
+                })
+                .then_with(|| {
+                    left.0
+                        .retriever_evidence_anchor
+                        .cmp(&right.0.retriever_evidence_anchor)
+                })
+                .then_with(|| left.1.chunk_id.cmp(&right.1.chunk_id))
+        });
+        let cap = request
+            .budget
+            .max_candidates_per_lane
+            .min(request.base.budget.max_candidates_per_lane) as usize;
+        let truncated = ranked.len().saturating_sub(cap);
+        ranked.truncate(cap);
+
+        let mut candidates = Vec::with_capacity(ranked.len());
+        let mut evidence_by_occurrence = BTreeMap::new();
+        for (ordinal, (mut candidate, evidence)) in ranked.into_iter().enumerate() {
+            candidate.ordinal_rank = ordinal as u32;
+            evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
+            candidates.push(candidate);
+        }
+        let checkpoint_digest = semantic_checkpoint_digest(request, &candidates)?;
+        let batch = RetrieverBatch {
+            candidates,
+            evidence_by_occurrence,
+            coverage: RetrieverCoverage {
+                examined: summary.examined,
+                eligible: summary.eligible,
+                excluded: summary.excluded,
+                capped: truncated as u64,
+                unknown: summary.unknown,
+            },
+            continuation: Some(RetrieverContinuation {
+                lane: RetrieverKind::Semantic,
+                checkpoint_digest,
+                exhausted: truncated == 0,
+            }),
+        };
+        batch
+            .validate()
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        if self.control.is_cancelled() {
+            return Ok(RetrieverOutcome::Cancelled);
+        }
+        if deadline_exhausted(request, self.control) {
+            return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
+                request,
+                summary.examined,
+                batch.candidates.len() as u64,
+                self.control,
+            )));
+        }
+        Ok(RetrieverOutcome::Complete(batch))
+    }
+}
+
+impl<E, V, C> SemanticLaneRetriever for SemanticCodeRetriever<'_, E, V, C>
+where
+    E: SemanticQueryEmbeddingPort,
+    V: SemanticVectorReadPort,
+    C: SemanticExecutionControl,
+{
+    fn retrieve_semantic(
+        &self,
+        request: &SemanticRetrievalRequestV1<'_>,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
+        request.validate()?;
+        if self.control.is_cancelled() {
+            return Ok(RetrieverOutcome::Cancelled);
+        }
+        if deadline_exhausted(request, self.control) {
+            return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
+                request,
+                0,
+                0,
+                self.control,
+            )));
+        }
+        let query = match self.embedder.embed_query(SemanticQueryEmbeddingRequestV1 {
+            query_digest: &request.query_digest,
+            query_view: request.query_view,
+            projection: request.projection,
+        }) {
+            Ok(query) => query,
+            Err(error) => {
+                return port_error_outcome(error, budget_usage(request, 0, 0, self.control));
+            }
+        };
+        if self.control.is_cancelled() {
+            return Ok(RetrieverOutcome::Cancelled);
+        }
+        if deadline_exhausted(request, self.control) {
+            return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
+                request,
+                0,
+                0,
+                self.control,
+            )));
+        }
+        self.retrieve_complete(request, &query)
+    }
+}
+
+impl<'request, E, V, C> Retriever<SemanticRetrievalRequestV1<'request>, CodeSemanticEvidenceV1>
+    for SemanticCodeRetriever<'_, E, V, C>
+where
+    E: SemanticQueryEmbeddingPort,
+    V: SemanticVectorReadPort,
+    C: SemanticExecutionControl,
+{
+    fn retrieve(
+        &self,
+        request: &SemanticRetrievalRequestV1<'request>,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalError> {
+        self.retrieve_semantic(request)
+            .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
+    }
+}
+
+impl<'request, E, V, C>
+    CompactCandidateLane<SemanticRetrievalRequestV1<'request>, CodeSemanticEvidenceV1>
+    for SemanticCodeRetriever<'_, E, V, C>
+where
+    E: SemanticQueryEmbeddingPort,
+    V: SemanticVectorReadPort,
+    C: SemanticExecutionControl,
+{
+    fn candidates(
+        &self,
+        request: &SemanticRetrievalRequestV1<'request>,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
+        self.retrieve_semantic(request)
+    }
+}
+
+fn validate_vector(values: &[f32], dimensions: u32, label: &str) -> Result<(), RetrievalPortError> {
+    if values.len() != dimensions as usize {
+        return Err(RetrievalPortError::IncompatibleProjection);
+    }
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(RetrievalPortError::Contract(format!(
+            "{label} contains a non-finite value"
+        )));
+    }
+    Ok(())
+}
+
+fn canonical_distance(
+    metric: EmbeddingMetricV1,
+    query: &[f32],
+    document: &[f32],
+) -> Result<CanonicalSemanticDistanceV1, RetrievalPortError> {
+    if query.len() != document.len() || query.is_empty() {
+        return Err(RetrievalPortError::IncompatibleProjection);
+    }
+    let distance = match metric {
+        EmbeddingMetricV1::Cosine => {
+            let mut dot = 0.0_f64;
+            let mut query_norm = 0.0_f64;
+            let mut document_norm = 0.0_f64;
+            for (&query_value, &document_value) in query.iter().zip(document) {
+                let query_value = f64::from(query_value);
+                let document_value = f64::from(document_value);
+                dot += query_value * document_value;
+                query_norm += query_value * query_value;
+                document_norm += document_value * document_value;
+            }
+            if query_norm == 0.0 || document_norm == 0.0 {
+                return Err(RetrievalPortError::Contract(
+                    "cosine distance is undefined for a zero-norm vector".to_owned(),
+                ));
+            }
+            1.0 - (dot / (query_norm.sqrt() * document_norm.sqrt())).clamp(-1.0, 1.0)
+        }
+        EmbeddingMetricV1::DotProduct => {
+            let mut dot = 0.0_f64;
+            for (&query_value, &document_value) in query.iter().zip(document) {
+                dot += f64::from(query_value) * f64::from(document_value);
+            }
+            -dot
+        }
+        EmbeddingMetricV1::EuclideanL2 => {
+            let mut squared = 0.0_f64;
+            for (&query_value, &document_value) in query.iter().zip(document) {
+                let delta = f64::from(query_value) - f64::from(document_value);
+                squared += delta * delta;
+            }
+            squared.sqrt()
+        }
+    };
+    if !distance.is_finite() {
+        return Err(RetrievalPortError::Contract(
+            "semantic distance is not finite".to_owned(),
+        ));
+    }
+    let scaled = (distance * SEMANTIC_DISTANCE_SCALE).round();
+    if scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return Err(RetrievalPortError::Contract(
+            "semantic distance exceeds the canonical fixed-point range".to_owned(),
+        ));
+    }
+    Ok(CanonicalSemanticDistanceV1(scaled as i64))
+}
+
+fn semantic_checkpoint_digest(
+    request: &SemanticRetrievalRequestV1<'_>,
+    candidates: &[CompactCandidate],
+) -> Result<CursorPayloadDigest, RetrievalPortError> {
+    let scope_digest = request
+        .base
+        .scope
+        .compute_digest()
+        .map_err(contract_error)?;
+    let snapshot_digest = request
+        .base
+        .snapshot
+        .compute_digest()
+        .map_err(contract_error)?;
+    let prefix = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.source_occurrence_id.as_str(),
+                candidate.retriever_evidence_anchor.as_str(),
+                candidate.raw_score.micros(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&(
+        SEMANTIC_CHECKPOINT_DOMAIN,
+        RetrieverKind::Semantic.as_str(),
+        scope_digest,
+        snapshot_digest,
+        &request.query_digest,
+        request.code_generation.as_str(),
+        request.vector_generation.as_digest(),
+        request.projection.projection_key(),
+        request.projection.privacy_domain(),
+        request.projection.privacy_key_epoch(),
+        &request.capability_manifest_digest,
+        prefix,
+    ))
+    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+    CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
+        .map_err(contract_error)
+}
+
+fn deadline_exhausted<C: SemanticExecutionControl>(
+    request: &SemanticRetrievalRequestV1<'_>,
+    control: &C,
+) -> bool {
+    let elapsed = elapsed_micros(request, control);
+    request
+        .budget
+        .deadline_micros
+        .is_some_and(|deadline| elapsed >= deadline)
+        || request
+            .base
+            .budget
+            .deadline_micros
+            .is_some_and(|deadline| elapsed >= deadline)
+}
+
+fn elapsed_micros<C: SemanticExecutionControl>(
+    _request: &SemanticRetrievalRequestV1<'_>,
+    control: &C,
+) -> u64 {
+    control.elapsed_micros()
+}
+
+fn budget_usage<C: SemanticExecutionControl>(
+    request: &SemanticRetrievalRequestV1<'_>,
+    candidates_examined: u64,
+    candidates_returned: u64,
+    control: &C,
+) -> RetrievalBudgetUsage {
+    RetrievalBudgetUsage {
+        candidates_examined,
+        candidates_returned,
+        hydrated_results: 0,
+        hydration_bytes: 0,
+        elapsed_micros: elapsed_micros(request, control),
+    }
+}
+
+fn port_error_outcome<E>(
+    error: RetrievalPortError,
+    usage: RetrievalBudgetUsage,
+) -> Result<RetrieverOutcome<RetrieverBatch<E>>, RetrievalPortError> {
+    match error {
+        RetrievalPortError::AuthorityUnavailable(detail) => Ok(RetrieverOutcome::Unavailable(
+            RetrievalFailure::AuthorityUnavailable { detail },
+        )),
+        RetrievalPortError::IncompatibleProjection => Ok(RetrieverOutcome::Unavailable(
+            RetrievalFailure::IncompatibleProjection {
+                detail: "semantic projection identity is incompatible".to_owned(),
+            },
+        )),
+        RetrievalPortError::StaleEvidence => {
+            Ok(RetrieverOutcome::Unavailable(RetrievalFailure::StaleSource))
+        }
+        RetrievalPortError::Cancelled => Ok(RetrieverOutcome::Cancelled),
+        RetrievalPortError::BudgetExceeded => Ok(RetrieverOutcome::BudgetExceeded(usage)),
+        error => Err(error),
+    }
+}
+
+fn contract_error(error: impl std::fmt::Display) -> RetrievalPortError {
+    RetrievalPortError::Contract(error.to_string())
+}
+
+#[cfg(test)]
+mod tests;

@@ -221,8 +221,7 @@ fn code_index_is_filesystem_store_model_and_transport_free() {
     let roots = [PathBuf::from("src/code_index")]
         .into_iter()
         .collect::<BTreeSet<_>>();
-    let sources =
-        filesystem_rust_sources(&repository, &roots).expect("resolve code-index sources");
+    let sources = filesystem_rust_sources(&repository, &roots).expect("resolve code-index sources");
     assert!(!sources.is_empty(), "code-index sources must exist");
 
     let forbidden: &[&[&str]] = &[

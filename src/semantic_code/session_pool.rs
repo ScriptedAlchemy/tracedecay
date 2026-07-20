@@ -17,27 +17,31 @@
 //!
 //! QUARANTINE STATUS: temporarily unlinked. Registration happens at
 //! integration by the Sol coordinator; this file must not be referenced from
-//! `src/lib.rs` or `src/semantic_code/mod.rs` in this packet. It is std-only
-//! (plus its sibling `fastembed_adapter` port surface) so it compiles
-//! standalone via `#[path]` inclusion.
+//! `src/lib.rs` or `src/semantic_code/mod.rs` in this packet. It depends only
+//! on the domain projection contract plus its sibling `fastembed_adapter` port
+//! surface, so it remains a quarantined `#[path]`-testable packet.
 //!
 //! See `fastembed_adapter.rs` for the ESCALATION list; ESCALATION-3
-//! (projection identity as opaque digest + privacy domain + key epoch,
-//! bridged from `EmbeddingProjectionKeyV1` at integration) and ESCALATION-4
+//! (one admitted domain projection/privacy authority) and ESCALATION-4
 //! (deadlines as `Duration` against the injected clock, bridged from PR9
 //! `RetrievalBudget`) shape this file directly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use tracedecay_domain::{AdmittedEmbeddingProjectionKeyV1, PrivacyDomainId, ProjectionKeyV1};
+
 use super::fastembed_adapter::{
-    CancellationSignal, EmbedError, EmbeddingRuntime, EmbeddingSession, VerifiedEmbeddingArtifactV1,
+    AdmittedProjectionArtifactV1, CancellationSignal, EmbedError, EmbeddingRuntime,
+    EmbeddingSession,
 };
+
+const WAITER_WAKEUP_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Monotonic time source. Reaping and blocking-acquire deadlines are driven
 /// entirely by this clock, so tests inject [`ManualClock`] and never depend
@@ -91,32 +95,31 @@ impl MonotonicClock for ManualClock {
     }
 }
 
-/// The complete projection/privacy identity of a warmed session (Plan 31:
-/// sessions are keyed by embedding projection key; privacy-domain/key-epoch
-/// changes produce zero session cache hits).
-///
-/// `projection_profile_digest` is the canonical digest of the semantic
-/// projection profile (at integration: Plan 25 `ProjectionKeyV1.profile_digest`
-/// carrying Plan 31's `EmbeddingProjectionKeyV1`). It is opaque here because
-/// the domain value is owned by a different packet.
+/// The complete projection/privacy identity of a warmed session. It can only
+/// be created from the domain's admitted embedding projection key, so a
+/// projection, privacy-domain, or key-epoch change produces zero cache hits.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SessionIdentityV1 {
-    pub projection_profile_digest: String,
-    pub privacy_domain: String,
-    pub key_epoch: u64,
+pub(super) struct SessionIdentityV1 {
+    admitted_projection: AdmittedEmbeddingProjectionKeyV1,
 }
 
 impl SessionIdentityV1 {
-    pub fn new(
-        projection_profile_digest: impl Into<String>,
-        privacy_domain: impl Into<String>,
-        key_epoch: u64,
-    ) -> Self {
+    fn from_authority(authority: &AdmittedProjectionArtifactV1) -> Self {
         Self {
-            projection_profile_digest: projection_profile_digest.into(),
-            privacy_domain: privacy_domain.into(),
-            key_epoch,
+            admitted_projection: authority.projection().clone(),
         }
+    }
+
+    pub fn projection_key(&self) -> &ProjectionKeyV1 {
+        self.admitted_projection.projection_key()
+    }
+
+    pub fn privacy_domain(&self) -> &PrivacyDomainId {
+        self.admitted_projection.privacy_domain()
+    }
+
+    pub fn privacy_key_epoch(&self) -> u64 {
+        self.admitted_projection.privacy_key_epoch()
     }
 }
 
@@ -247,7 +250,9 @@ struct IdleEntry<S> {
 struct PoolState<S> {
     idle: HashMap<SessionIdentityV1, Vec<IdleEntry<S>>>,
     active: usize,
-    queued_waiters: usize,
+    waiters: VecDeque<u64>,
+    next_waiter_id: u64,
+    availability_epoch: u64,
     resident_bytes: u64,
     sessions_opened: usize,
     sessions_closed: usize,
@@ -260,7 +265,9 @@ impl<S> Default for PoolState<S> {
         Self {
             idle: HashMap::new(),
             active: 0,
-            queued_waiters: 0,
+            waiters: VecDeque::new(),
+            next_waiter_id: 0,
+            availability_epoch: 0,
             resident_bytes: 0,
             sessions_opened: 0,
             sessions_closed: 0,
@@ -270,11 +277,31 @@ impl<S> Default for PoolState<S> {
     }
 }
 
+impl<S> PoolState<S> {
+    fn next_waiter_id(&mut self) -> u64 {
+        let waiter_id = self.next_waiter_id;
+        self.next_waiter_id = self.next_waiter_id.wrapping_add(1);
+        waiter_id
+    }
+
+    fn allows_acquire(&self, waiter_id: Option<u64>) -> bool {
+        match self.waiters.front() {
+            Some(front) => waiter_id == Some(*front),
+            None => true,
+        }
+    }
+
+    fn mark_availability_changed(&mut self) {
+        self.availability_epoch = self.availability_epoch.wrapping_add(1);
+    }
+}
+
 struct PoolInner<R: EmbeddingRuntime, C: MonotonicClock> {
     runtime: R,
     clock: C,
     config: SessionPoolConfigV1,
     state: Mutex<PoolState<R::Session>>,
+    wakeups: Condvar,
 }
 
 impl<R: EmbeddingRuntime, C: MonotonicClock> PoolInner<R, C> {
@@ -286,7 +313,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> PoolInner<R, C> {
 /// Bounded pool of warmed embedding sessions over one [`EmbeddingRuntime`]
 /// (Plan 31: cold and warm sessions, OOM, cancellation, and offline startup
 /// are exercised against this pool with the deterministic fake runtime).
-pub struct SessionPool<R: EmbeddingRuntime, C: MonotonicClock> {
+pub(super) struct SessionPool<R: EmbeddingRuntime, C: MonotonicClock> {
     inner: Arc<PoolInner<R, C>>,
 }
 
@@ -303,6 +330,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                 clock,
                 config,
                 state: Mutex::new(PoolState::default()),
+                wakeups: Condvar::new(),
             }),
         })
     }
@@ -311,34 +339,72 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
     /// matching identity or opens a new one within the bounds; otherwise
     /// fails with a typed error. Never blocks and never substitutes a
     /// session from another identity.
-    pub fn acquire(
+    pub(super) fn acquire(
         &self,
-        identity: &SessionIdentityV1,
-        artifact: &VerifiedEmbeddingArtifactV1,
+        authority: &AdmittedProjectionArtifactV1,
     ) -> Result<PooledSession<R, C>, SessionAcquireError> {
+        self.verify_artifact(authority)?;
+        self.acquire_verified(authority, None)
+    }
+
+    fn verify_artifact(
+        &self,
+        authority: &AdmittedProjectionArtifactV1,
+    ) -> Result<(), SessionAcquireError> {
         self.inner
             .runtime
-            .verify_artifact_compatibility(artifact)
-            .map_err(SessionAcquireError::Open)?;
+            .verify_artifact_compatibility(authority)
+            .map_err(SessionAcquireError::Open)
+    }
+
+    fn acquire_verified(
+        &self,
+        authority: &AdmittedProjectionArtifactV1,
+        waiter_id: Option<u64>,
+    ) -> Result<PooledSession<R, C>, SessionAcquireError> {
+        let identity = SessionIdentityV1::from_authority(authority);
         let now = self.inner.clock.now();
         let mut state = self.inner.lock_state();
         if state.closed {
             return Err(SessionAcquireError::Closed);
         }
-        reap_expired_locked(&mut state, now, self.inner.config.idle_timeout);
-        let reusable = state.idle.get_mut(identity).and_then(|entries| {
+        let reaped = reap_expired_locked(&mut state, now, self.inner.config.idle_timeout);
+        if reaped != 0 {
+            state.mark_availability_changed();
+        }
+        if !state.allows_acquire(waiter_id) {
+            let active = state.active;
+            drop(state);
+            if reaped != 0 {
+                self.inner.wakeups.notify_all();
+            }
+            return Err(SessionAcquireError::Exhausted {
+                active,
+                max: self.inner.config.max_sessions,
+            });
+        }
+        let reusable = state.idle.get_mut(&identity).and_then(|entries| {
             let index = entries
                 .iter()
-                .rposition(|entry| entry.session.descriptor() == artifact)?;
+                .rposition(|entry| entry.session.authority() == authority)?;
             Some(entries.swap_remove(index))
         });
         if let Some(entry) = reusable {
             state.active += 1;
-            return Ok(self.make_guard(identity.clone(), entry.session, entry.resident_bytes));
+            drop(state);
+            if reaped != 0 {
+                self.inner.wakeups.notify_all();
+            }
+            return Ok(self.make_guard(identity, entry.session, entry.resident_bytes));
         }
         if state.active >= self.inner.config.max_sessions {
+            let active = state.active;
+            drop(state);
+            if reaped != 0 {
+                self.inner.wakeups.notify_all();
+            }
             return Err(SessionAcquireError::Exhausted {
-                active: state.active,
+                active,
                 max: self.inner.config.max_sessions,
             });
         }
@@ -347,11 +413,14 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         state.active += 1;
         drop(state);
 
-        let session = match self.inner.runtime.open_session(artifact) {
+        let session = match self.inner.runtime.open_session(authority) {
             Ok(session) => session,
             Err(err) => {
                 let mut state = self.inner.lock_state();
                 state.active -= 1;
+                state.mark_availability_changed();
+                drop(state);
+                self.inner.wakeups.notify_all();
                 return Err(SessionAcquireError::Open(err));
             }
         };
@@ -359,7 +428,9 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         let mut state = self.inner.lock_state();
         if state.closed {
             state.active -= 1;
+            state.mark_availability_changed();
             drop(state);
+            self.inner.wakeups.notify_all();
             drop(session);
             return Err(SessionAcquireError::Closed);
         }
@@ -367,11 +438,13 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             .inner
             .config
             .memory_ceiling_bytes
-            .min(artifact.resident_byte_ceiling);
+            .min(authority.resident_byte_ceiling());
         if state.resident_bytes + resident_bytes > effective_ceiling {
             let used = state.resident_bytes;
             state.active -= 1;
+            state.mark_availability_changed();
             drop(state);
+            self.inner.wakeups.notify_all();
             drop(session);
             return Err(SessionAcquireError::MemoryCeilingExceeded {
                 used_bytes: used,
@@ -381,56 +454,82 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         }
         state.resident_bytes += resident_bytes;
         state.sessions_opened += 1;
-        Ok(self.make_guard(identity.clone(), session, resident_bytes))
+        Ok(self.make_guard(identity, session, resident_bytes))
     }
 
     /// Bounded blocking acquisition with FIFO-fair waiter accounting.
-    /// Retries while the pool is exhausted or over the memory ceiling, until
-    /// the cancellation signal fires or `budget` (measured on the injected
-    /// clock) elapses. Returns typed errors; never waits past the budget.
-    pub fn acquire_blocking(
+    /// Waits on resource, cancellation, and deadline wakeups until the caller
+    /// reaches the head of the FIFO queue and a resource is available.
+    pub(super) fn acquire_blocking(
         &self,
-        identity: &SessionIdentityV1,
-        artifact: &VerifiedEmbeddingArtifactV1,
+        authority: &AdmittedProjectionArtifactV1,
         budget: Duration,
         cancel: &dyn CancellationSignal,
     ) -> Result<PooledSession<R, C>, SessionAcquireError> {
-        {
+        if cancel.cancelled() {
+            return Err(SessionAcquireError::Cancelled);
+        }
+        let start = self.inner.clock.now();
+        let (waiter_id, mut observed_epoch) = {
             let mut state = self.inner.lock_state();
             if state.closed {
                 return Err(SessionAcquireError::Closed);
             }
-            if state.queued_waiters >= self.inner.config.max_queued_waiters {
+            if state.waiters.len() >= self.inner.config.max_queued_waiters {
                 return Err(SessionAcquireError::QueueFull {
-                    queued: state.queued_waiters,
+                    queued: state.waiters.len(),
                     max: self.inner.config.max_queued_waiters,
                 });
             }
-            state.queued_waiters += 1;
-        }
+            let waiter_id = state.next_waiter_id();
+            state.waiters.push_back(waiter_id);
+            (waiter_id, state.availability_epoch.wrapping_sub(1))
+        };
         let _permit = WaiterPermit {
             inner: Arc::clone(&self.inner),
+            waiter_id,
         };
-        let start = self.inner.clock.now();
+        self.verify_artifact(authority)?;
         loop {
-            match self.acquire(identity, artifact) {
-                Ok(guard) => return Ok(guard),
-                Err(
-                    retryable @ (SessionAcquireError::Exhausted { .. }
-                    | SessionAcquireError::MemoryCeilingExceeded { .. }),
-                ) => {
-                    drop(retryable);
-                    if cancel.cancelled() {
-                        return Err(SessionAcquireError::Cancelled);
-                    }
-                    let waited = self.inner.clock.now().saturating_sub(start);
-                    if waited >= budget {
-                        return Err(SessionAcquireError::DeadlineExceeded { waited, budget });
-                    }
-                    std::thread::yield_now();
-                }
-                Err(err) => return Err(err),
+            if cancel.cancelled() {
+                return Err(SessionAcquireError::Cancelled);
             }
+            let waited = self.inner.clock.now().saturating_sub(start);
+            if waited >= budget {
+                return Err(SessionAcquireError::DeadlineExceeded { waited, budget });
+            }
+
+            let should_attempt = {
+                let state = self.inner.lock_state();
+                if state.closed {
+                    return Err(SessionAcquireError::Closed);
+                }
+                state.allows_acquire(Some(waiter_id)) && state.availability_epoch != observed_epoch
+            };
+            if should_attempt {
+                match self.acquire_verified(authority, Some(waiter_id)) {
+                    Ok(guard) => return Ok(guard),
+                    Err(
+                        retryable @ (SessionAcquireError::Exhausted { .. }
+                        | SessionAcquireError::MemoryCeilingExceeded { .. }),
+                    ) => {
+                        drop(retryable);
+                        observed_epoch = self.inner.lock_state().availability_epoch;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+
+            let remaining = budget.saturating_sub(waited);
+            let timeout = remaining.min(WAITER_WAKEUP_INTERVAL);
+            let state = self.inner.lock_state();
+            let (state, _) = self
+                .inner
+                .wakeups
+                .wait_timeout(state, timeout)
+                .unwrap_or_else(|error| error.into_inner());
+            drop(state);
         }
     }
 
@@ -440,7 +539,15 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
     pub fn reap_idle(&self) -> usize {
         let now = self.inner.clock.now();
         let mut state = self.inner.lock_state();
-        reap_expired_locked(&mut state, now, self.inner.config.idle_timeout)
+        let reaped = reap_expired_locked(&mut state, now, self.inner.config.idle_timeout);
+        if reaped != 0 {
+            state.mark_availability_changed();
+        }
+        drop(state);
+        if reaped != 0 {
+            self.inner.wakeups.notify_all();
+        }
+        reaped
     }
 
     pub fn stats(&self) -> SessionPoolStats {
@@ -448,7 +555,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         SessionPoolStats {
             active: state.active,
             idle: state.idle.values().map(Vec::len).sum(),
-            queued_waiters: state.queued_waiters,
+            queued_waiters: state.waiters.len(),
             resident_bytes: state.resident_bytes,
             sessions_opened: state.sessions_opened,
             sessions_closed: state.sessions_closed,
@@ -471,6 +578,9 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         state.idle.clear();
         state.resident_bytes = 0;
         state.sessions_closed += drained;
+        state.mark_availability_changed();
+        drop(state);
+        self.inner.wakeups.notify_all();
         drained
     }
 
@@ -520,7 +630,7 @@ fn reap_expired_locked<S>(
 /// RAII checkout guard. Dereferences to the warmed session; dropping the
 /// guard returns the session to the idle pool (or closes it when the pool
 /// is closed).
-pub struct PooledSession<R: EmbeddingRuntime, C: MonotonicClock> {
+pub(super) struct PooledSession<R: EmbeddingRuntime, C: MonotonicClock> {
     inner: Arc<PoolInner<R, C>>,
     identity: SessionIdentityV1,
     session: Option<R::Session>,
@@ -562,7 +672,9 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> Drop for PooledSession<R, C> {
         if state.closed {
             state.resident_bytes = state.resident_bytes.saturating_sub(self.resident_bytes);
             state.sessions_closed += 1;
+            state.mark_availability_changed();
             drop(state);
+            self.inner.wakeups.notify_all();
             drop(session);
         } else {
             state
@@ -574,60 +686,227 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> Drop for PooledSession<R, C> {
                     released_at: now,
                     resident_bytes: self.resident_bytes,
                 });
+            state.mark_availability_changed();
+            drop(state);
+            self.inner.wakeups.notify_all();
         }
     }
 }
 
-/// Decrements the queued-waiter count when a blocking acquisition exits for
-/// any reason.
+/// Removes a waiter from the FIFO queue when a blocking acquisition exits for
+/// any reason, waking the next waiter when it was at the head.
 struct WaiterPermit<R: EmbeddingRuntime, C: MonotonicClock> {
     inner: Arc<PoolInner<R, C>>,
+    waiter_id: u64,
 }
 
 impl<R: EmbeddingRuntime, C: MonotonicClock> Drop for WaiterPermit<R, C> {
     fn drop(&mut self) {
         let mut state = self.inner.lock_state();
-        state.queued_waiters = state.queued_waiters.saturating_sub(1);
+        if let Some(index) = state
+            .waiters
+            .iter()
+            .position(|waiter_id| *waiter_id == self.waiter_id)
+        {
+            state.waiters.remove(index);
+            state.mark_availability_changed();
+        }
+        drop(state);
+        self.inner.wakeups.notify_all();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::atomic::Ordering as AtomicOrdering;
+    use std::sync::mpsc;
     use std::thread;
 
     use super::*;
     // Two `super` steps resolve to the directory module that holds both
     // packet files in every layout (scratch `#[path]` crate root and the
     // integrated `src/semantic_code/` module alike).
+    use super::super::artifact_store::AdmittedArtifactV1;
     use super::super::fastembed_adapter::{
-        BoundedSanitizedTextBatchV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-        EmbeddingPrecisionV1, FakeEmbeddingRuntime, ManualCancellation, RuntimeFailureKindV1,
+        AdmittedProjectionArtifactV1, BoundedSanitizedTextBatchV1, FakeEmbeddingRuntime,
+        ManualCancellation, ProjectionArtifactPinV1, RuntimeFailureKindV1,
+    };
+    use super::super::manifest::{
+        ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
+        DetachedSignatureV1, DeviceClassV1, Ed25519SignatureHex,
+        EmbeddingNormalizationV1 as ManifestNormalizationV1,
+        EmbeddingPoolingV1 as ManifestPoolingV1, EmbeddingPrecisionV1 as ManifestPrecisionV1,
+        MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ManifestSignedPayloadV1, ModelArtifactManifestV1,
+        PlatformTargetV1, ResourceCeilingV1, RuntimeCompatibilityV1, SemanticMetricV1,
+        Sha256DigestHex, SignatureAlgorithmV1, TruncationPolicyV1, TruncationSideV1,
+        UpstreamSourceV1,
+    };
+    use tracedecay_domain::{
+        ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+        EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
+        EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId,
     };
 
-    fn artifact() -> VerifiedEmbeddingArtifactV1 {
-        VerifiedEmbeddingArtifactV1 {
-            artifact_digest: "aa55aa55aa55aa55".to_string(),
-            model_root: PathBuf::from("/plan02-store/artifacts/aa55"),
-            model_file: "model.onnx".to_string(),
-            tokenizer_file: "tokenizer.json".to_string(),
-            config_file: "config.json".to_string(),
+    fn domain_id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("canonical domain fixture identity")
+    }
+
+    fn domain_digest(label: u8) -> ManifestDigest {
+        domain_id(&format!("sha256:{}", format!("{label:02x}").repeat(32)))
+    }
+
+    fn manifest_digest(digest: &Sha256DigestHex) -> ManifestDigest {
+        domain_id(&format!("sha256:{}", digest.as_str()))
+    }
+
+    fn admitted_artifact() -> AdmittedArtifactV1 {
+        let model_digest = Sha256DigestHex::of_bytes(b"model");
+        let tokenizer_digest = Sha256DigestHex::of_bytes(b"tokenizer");
+        let config_digest = Sha256DigestHex::of_bytes(b"config");
+        let query_digest = Sha256DigestHex::of_bytes(b"query");
+        let document_digest = Sha256DigestHex::of_bytes(b"document");
+        let manifest = ModelArtifactManifestV1 {
+            payload: ManifestSignedPayloadV1 {
+                schema: MODEL_ARTIFACT_MANIFEST_SCHEMA_V1.to_owned(),
+                artifact_id: "fixture-embedding".to_owned(),
+                signing_root_id: "fixture-root".to_owned(),
+                signing_root_epoch: 1,
+                profile_kind: ArtifactProfileKindV1::Embedding,
+                spdx_license: "MIT".to_owned(),
+                model_member: ArtifactMemberPinV1 {
+                    digest: model_digest.clone(),
+                    byte_length: 5,
+                },
+                tokenizer_digest: tokenizer_digest.clone(),
+                config_digest: config_digest.clone(),
+                query_instruction_digest: Some(query_digest.clone()),
+                document_instruction_digest: Some(document_digest.clone()),
+                members: vec![
+                    ArtifactPackageMemberV1 {
+                        role: ArtifactMemberRoleV1::Model,
+                        path: "model.onnx".to_owned(),
+                        digest: model_digest,
+                        byte_length: 5,
+                    },
+                    ArtifactPackageMemberV1 {
+                        role: ArtifactMemberRoleV1::Tokenizer,
+                        path: "tokenizer.json".to_owned(),
+                        digest: tokenizer_digest,
+                        byte_length: 9,
+                    },
+                    ArtifactPackageMemberV1 {
+                        role: ArtifactMemberRoleV1::Config,
+                        path: "config.json".to_owned(),
+                        digest: config_digest,
+                        byte_length: 6,
+                    },
+                    ArtifactPackageMemberV1 {
+                        role: ArtifactMemberRoleV1::QueryInstruction,
+                        path: "query.txt".to_owned(),
+                        digest: query_digest,
+                        byte_length: 5,
+                    },
+                    ArtifactPackageMemberV1 {
+                        role: ArtifactMemberRoleV1::DocumentInstruction,
+                        path: "document.txt".to_owned(),
+                        digest: document_digest,
+                        byte_length: 8,
+                    },
+                ],
+                dimensions: 8,
+                metric: SemanticMetricV1::Cosine,
+                normalization: ManifestNormalizationV1::L2,
+                pooling: ManifestPoolingV1::Mean,
+                truncation: TruncationPolicyV1 {
+                    side: TruncationSideV1::Right,
+                    max_length: 512,
+                },
+                precision: ManifestPrecisionV1::Fp32,
+                runtime: RuntimeCompatibilityV1 {
+                    runtime: "fastembed-ort".to_owned(),
+                    build_revision: "ort-test-rev-1".to_owned(),
+                    platforms: vec![PlatformTargetV1 {
+                        os: "linux".to_owned(),
+                        arch: "x86_64".to_owned(),
+                    }],
+                },
+                device: DeviceClassV1::Cpu,
+                resource_ceiling: ResourceCeilingV1 {
+                    max_model_bytes: 1024,
+                    max_tokenizer_bytes: 1024,
+                    max_resident_bytes: 64 * 1024 * 1024,
+                    max_threads: 4,
+                    max_batch_size: 8,
+                    max_sequence_length: 512,
+                    load_deadline_ms: 30_000,
+                },
+                upstream: UpstreamSourceV1 {
+                    name: "fixture/model".to_owned(),
+                    version: "1".to_owned(),
+                    revision: "fixture-revision".to_owned(),
+                },
+            },
+            signature: DetachedSignatureV1 {
+                algorithm: SignatureAlgorithmV1::Ed25519,
+                trust_root_id: "fixture-root".to_owned(),
+                trust_root_epoch: 1,
+                signature: Ed25519SignatureHex::new("00".repeat(64)).expect("signature fixture"),
+            },
+        };
+        AdmittedArtifactV1::test_fixture(manifest)
+    }
+
+    fn projection_for(artifact: &AdmittedArtifactV1) -> EmbeddingProjectionKeyV1 {
+        let payload = &artifact.manifest().payload;
+        EmbeddingProjectionKeyV1 {
+            model_artifact_digest: manifest_digest(artifact.artifact_digest()),
+            tokenizer_digest: manifest_digest(&payload.tokenizer_digest),
+            config_digest: manifest_digest(&payload.config_digest),
+            query_instruction_digest: payload
+                .query_instruction_digest
+                .as_ref()
+                .map(manifest_digest),
+            document_instruction_digest: payload
+                .document_instruction_digest
+                .as_ref()
+                .map(manifest_digest),
+            pooling: EmbeddingPoolingV1::Mean,
+            truncation_side: EmbeddingTruncationSideV1::Right,
+            truncation_length: 512,
+            runtime_backend: "fastembed-ort".to_owned(),
+            runtime_build_revision: "ort-test-rev-1".to_owned(),
+            device_class: EmbeddingDeviceClassV1::Cpu,
             dimensions: 8,
             metric: EmbeddingMetricV1::Cosine,
             normalization: EmbeddingNormalizationV1::L2,
-            precision: EmbeddingPrecisionV1::F32,
-            query_instruction: None,
-            document_instruction: None,
-            max_batch_texts: 8,
-            max_batch_bytes: 16 * 1024,
-            resident_byte_ceiling: 64 * 1024 * 1024,
-            runtime_build_revision: "fastembed-test-rev-1".to_string(),
+            precision: EmbeddingPrecisionV1::Fp32,
+            chunk_schema_revision: "code-search-chunk.v1".to_owned(),
+            chunker_revision: domain_id::<ChunkerRevision>("chunker.v1"),
+            privacy_domain: domain_id::<PrivacyDomainId>("privacy.domain-a"),
+            privacy_key_epoch: 7,
         }
     }
 
-    fn identity(domain: &str) -> SessionIdentityV1 {
-        SessionIdentityV1::new("profile-digest-1", domain, 7)
+    fn authority() -> AdmittedProjectionArtifactV1 {
+        authority_with_privacy("domain-a", 7)
+    }
+
+    fn authority_with_privacy(domain: &str, key_epoch: u64) -> AdmittedProjectionArtifactV1 {
+        let artifact = admitted_artifact();
+        let mut projection = projection_for(&artifact);
+        projection.privacy_domain = domain_id::<PrivacyDomainId>(&format!("privacy.{domain}"));
+        projection.privacy_key_epoch = key_epoch;
+        let projection = projection.admit().expect("valid projection fixture");
+        AdmittedProjectionArtifactV1::admit(&artifact, &projection)
+            .expect("matching projection and artifact")
+    }
+
+    fn identity_with_epoch(domain: &str, key_epoch: u64) -> SessionIdentityV1 {
+        SessionIdentityV1::from_authority(&authority_with_privacy(domain, key_epoch))
     }
 
     fn config(max_sessions: usize, idle_timeout: Duration, ceiling: u64) -> SessionPoolConfigV1 {
@@ -664,9 +943,9 @@ mod tests {
     #[test]
     fn acquire_release_reuses_warmed_session() {
         let pool = fake_pool(2, Duration::from_secs(60), 1 << 20);
-        let id = identity("domain-a");
+        let authority = authority();
         {
-            let _guard = pool.acquire(&id, &artifact()).expect("first acquire");
+            let _guard = pool.acquire(&authority).expect("first acquire");
             assert_eq!(pool.stats().active, 1);
         }
         let stats = pool.stats();
@@ -674,7 +953,7 @@ mod tests {
         assert_eq!(stats.idle, 1);
         assert_eq!(stats.sessions_opened, 1);
         {
-            let _guard = pool.acquire(&id, &artifact()).expect("second acquire");
+            let _guard = pool.acquire(&authority).expect("second acquire");
             let stats = pool.stats();
             assert_eq!(stats.active, 1);
             assert_eq!(stats.idle, 0);
@@ -688,15 +967,15 @@ mod tests {
     #[test]
     fn pool_bound_exhaustion_is_typed_not_blocking() {
         let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
-        let id = identity("domain-a");
-        let _held = pool.acquire(&id, &artifact()).expect("first acquire");
-        let result = pool.acquire(&id, &artifact());
+        let authority = authority();
+        let _held = pool.acquire(&authority).expect("first acquire");
+        let result = pool.acquire(&authority);
         assert_eq!(
             result.err(),
             Some(SessionAcquireError::Exhausted { active: 1, max: 1 })
         );
         drop(_held);
-        pool.acquire(&id, &artifact())
+        pool.acquire(&authority)
             .expect("acquire succeeds after release");
     }
 
@@ -704,9 +983,9 @@ mod tests {
     fn memory_ceiling_is_enforced_with_typed_error() {
         // Each fake session reports 1024 resident bytes; ceiling allows one.
         let pool = fake_pool(4, Duration::from_secs(60), 1536);
-        let id = identity("domain-a");
-        let _held = pool.acquire(&id, &artifact()).expect("first acquire");
-        let result = pool.acquire(&id, &artifact());
+        let authority = authority();
+        let _held = pool.acquire(&authority).expect("first acquire");
+        let result = pool.acquire(&authority);
         assert_eq!(
             result.err(),
             Some(SessionAcquireError::MemoryCeilingExceeded {
@@ -723,45 +1002,169 @@ mod tests {
     #[test]
     fn identity_separation_blocks_cross_privacy_reuse() {
         let pool = fake_pool(4, Duration::from_secs(60), 1 << 20);
-        let artifact = artifact();
+        let domain_a = authority_with_privacy("domain-a", 7);
+        let domain_b = authority_with_privacy("domain-b", 7);
         {
-            let _guard = pool.acquire(&identity("domain-a"), &artifact).expect("a");
+            let _guard = pool.acquire(&domain_a).expect("a");
         }
-        let _b = pool
-            .acquire(&identity("domain-b"), &artifact)
-            .expect("distinct domain");
+        let _b = pool.acquire(&domain_b).expect("distinct domain");
         let stats = pool.stats();
         assert_eq!(
             stats.sessions_opened, 2,
             "a privacy-domain change never reuses the other domain's session"
         );
         // Same domain, different key epoch also misses.
-        let mut epoch_shifted = identity("domain-a");
-        epoch_shifted.key_epoch = 8;
-        let _c = pool.acquire(&epoch_shifted, &artifact).expect("epoch");
+        let epoch_shifted = authority_with_privacy("domain-a", 8);
+        let _c = pool.acquire(&epoch_shifted).expect("epoch");
         assert_eq!(pool.stats().sessions_opened, 3);
         // Same identity as the first still hits its warmed session.
-        let _d = pool.acquire(&identity("domain-a"), &artifact).expect("hit");
+        let _d = pool.acquire(&domain_a).expect("hit");
         assert_eq!(pool.stats().sessions_opened, 3);
     }
 
     #[test]
-    fn artifact_descriptor_change_never_reuses_a_warmed_session() {
-        let pool = fake_pool(2, Duration::from_secs(60), 1 << 20);
-        let id = identity("domain-a");
-        {
-            let _guard = pool.acquire(&id, &artifact()).expect("first artifact");
-        }
-        let mut replacement = artifact();
-        replacement.artifact_digest = "replacement-artifact-digest".to_string();
-        let guard = pool
-            .acquire(&id, &replacement)
-            .expect("replacement artifact");
-        assert_eq!(guard.descriptor(), &replacement);
+    fn pool_identity_derives_projection_and_privacy_from_admission() {
+        let identity = identity_with_epoch("domain-a", 7);
+        let same = identity_with_epoch("domain-a", 7);
+        let different_domain = identity_with_epoch("domain-b", 7);
+        let different_epoch = identity_with_epoch("domain-a", 8);
+
+        assert_eq!(identity, same);
+        assert_ne!(identity, different_domain);
+        assert_ne!(identity, different_epoch);
+        assert_eq!(identity.projection_key(), same.projection_key());
         assert_eq!(
-            pool.stats().sessions_opened,
-            2,
-            "artifact descriptor changes cannot hit a stale warmed session"
+            identity.privacy_domain(),
+            &domain_id::<PrivacyDomainId>("privacy.domain-a")
+        );
+        assert_eq!(identity.privacy_key_epoch(), 7);
+    }
+
+    #[test]
+    fn projection_artifact_admission_rejects_every_mismatched_pin_before_open() {
+        let artifact = admitted_artifact();
+        let base = projection_for(&artifact);
+        let runtime = FakeEmbeddingRuntime::new();
+        let counters = runtime.counters();
+
+        let cases = [
+            (
+                ProjectionArtifactPinV1::ArtifactDigest,
+                (|key: &mut EmbeddingProjectionKeyV1| key.model_artifact_digest = domain_digest(9))
+                    as fn(&mut EmbeddingProjectionKeyV1),
+            ),
+            (ProjectionArtifactPinV1::TokenizerDigest, |key| {
+                key.tokenizer_digest = domain_digest(9)
+            }),
+            (ProjectionArtifactPinV1::ConfigDigest, |key| {
+                key.config_digest = domain_digest(9)
+            }),
+            (ProjectionArtifactPinV1::QueryInstructionDigest, |key| {
+                key.query_instruction_digest = None
+            }),
+            (ProjectionArtifactPinV1::DocumentInstructionDigest, |key| {
+                key.document_instruction_digest = None
+            }),
+            (ProjectionArtifactPinV1::Pooling, |key| {
+                key.pooling = EmbeddingPoolingV1::Cls
+            }),
+            (ProjectionArtifactPinV1::TruncationSide, |key| {
+                key.truncation_side = EmbeddingTruncationSideV1::Left
+            }),
+            (ProjectionArtifactPinV1::TruncationLength, |key| {
+                key.truncation_length = 256
+            }),
+            (ProjectionArtifactPinV1::RuntimeBackend, |key| {
+                key.runtime_backend = "other-runtime".to_owned()
+            }),
+            (ProjectionArtifactPinV1::RuntimeBuildRevision, |key| {
+                key.runtime_build_revision = "other-revision".to_owned()
+            }),
+            (ProjectionArtifactPinV1::Dimensions, |key| {
+                key.dimensions += 1
+            }),
+            (ProjectionArtifactPinV1::Metric, |key| {
+                key.metric = EmbeddingMetricV1::DotProduct
+            }),
+            (ProjectionArtifactPinV1::Normalization, |key| {
+                key.normalization = EmbeddingNormalizationV1::None
+            }),
+            (ProjectionArtifactPinV1::Precision, |key| {
+                key.precision = EmbeddingPrecisionV1::Fp16
+            }),
+        ];
+
+        for (expected, mutate) in cases {
+            let mut key = base.clone();
+            mutate(&mut key);
+            let admitted = key.admit().expect("mutated key remains structurally valid");
+            assert_eq!(
+                AdmittedProjectionArtifactV1::admit(&artifact, &admitted),
+                Err(expected),
+                "mismatch must identify its exact pin"
+            );
+        }
+        assert_eq!(
+            counters.compatibility_checks.load(AtomicOrdering::SeqCst),
+            0,
+            "pin mismatch is rejected before runtime compatibility"
+        );
+        assert_eq!(counters.sessions_opened.load(AtomicOrdering::SeqCst), 0);
+        drop(runtime);
+    }
+
+    #[test]
+    fn projection_artifact_admission_rejects_artifact_authority_mismatches() {
+        let valid = admitted_artifact();
+        let projection = projection_for(&valid)
+            .admit()
+            .expect("valid projection fixture");
+        let manifest = valid.manifest().clone();
+        let wrong_artifact = AdmittedArtifactV1::test_fixture_with_identities(
+            manifest.clone(),
+            Sha256DigestHex::of_bytes(b"wrong-artifact"),
+            manifest.canonical_digest(),
+        );
+        assert_eq!(
+            AdmittedProjectionArtifactV1::admit(&wrong_artifact, &projection),
+            Err(ProjectionArtifactPinV1::ArtifactIdentity)
+        );
+
+        let wrong_manifest = AdmittedArtifactV1::test_fixture_with_identities(
+            manifest.clone(),
+            manifest.signed_identity_digest(),
+            Sha256DigestHex::of_bytes(b"wrong-manifest"),
+        );
+        assert_eq!(
+            AdmittedProjectionArtifactV1::admit(&wrong_manifest, &projection),
+            Err(ProjectionArtifactPinV1::ManifestIdentity)
+        );
+
+        let mut reranker_manifest = manifest;
+        reranker_manifest.payload.profile_kind = ArtifactProfileKindV1::Reranker;
+        let reranker = AdmittedArtifactV1::test_fixture(reranker_manifest);
+        let reranker_projection = projection_for(&reranker)
+            .admit()
+            .expect("valid projection fixture");
+        assert_eq!(
+            AdmittedProjectionArtifactV1::admit(&reranker, &reranker_projection),
+            Err(ProjectionArtifactPinV1::ProfileKind)
+        );
+    }
+
+    #[test]
+    fn projection_artifact_authority_owns_privacy_domain_and_epoch() {
+        let first = authority_with_privacy("domain-a", 7);
+        let different_domain = authority_with_privacy("domain-b", 7);
+        let different_epoch = authority_with_privacy("domain-a", 8);
+
+        assert_ne!(
+            SessionIdentityV1::from_authority(&first),
+            SessionIdentityV1::from_authority(&different_domain)
+        );
+        assert_ne!(
+            SessionIdentityV1::from_authority(&first),
+            SessionIdentityV1::from_authority(&different_epoch)
         );
     }
 
@@ -777,7 +1180,7 @@ mod tests {
         )
         .expect("valid config");
         let err = pool
-            .acquire(&identity("domain-a"), &artifact())
+            .acquire(&authority())
             .err()
             .expect("compatibility failure");
         assert!(matches!(
@@ -794,8 +1197,15 @@ mod tests {
 
     #[test]
     fn manifest_resident_ceiling_bounds_opened_session() {
-        let mut artifact = artifact();
-        artifact.resident_byte_ceiling = 1024;
+        let artifact = admitted_artifact();
+        let mut manifest = artifact.manifest().clone();
+        manifest.payload.resource_ceiling.max_resident_bytes = 1024;
+        let artifact = AdmittedArtifactV1::test_fixture(manifest);
+        let projection = projection_for(&artifact)
+            .admit()
+            .expect("valid projection fixture");
+        let authority = AdmittedProjectionArtifactV1::admit(&artifact, &projection)
+            .expect("matching authority");
         let pool = SessionPool::new(
             FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1025),
             ManualClock::new(),
@@ -803,7 +1213,7 @@ mod tests {
         )
         .expect("valid config");
         let err = pool
-            .acquire(&identity("domain-a"), &artifact)
+            .acquire(&authority)
             .err()
             .expect("resident ceiling failure");
         assert_eq!(
@@ -827,9 +1237,9 @@ mod tests {
             config(2, Duration::from_secs(30), 1 << 20),
         )
         .expect("valid config");
-        let id = identity("domain-a");
+        let authority = authority();
         {
-            let _guard = pool.acquire(&id, &artifact()).expect("acquire");
+            let _guard = pool.acquire(&authority).expect("acquire");
         }
         assert_eq!(pool.stats().idle, 1);
 
@@ -849,12 +1259,12 @@ mod tests {
     #[test]
     fn acquire_reaps_expired_idle_before_reuse() {
         let pool = fake_pool(2, Duration::from_secs(10), 1 << 20);
-        let id = identity("domain-a");
+        let authority = authority();
         {
-            let _guard = pool.acquire(&id, &artifact()).expect("acquire");
+            let _guard = pool.acquire(&authority).expect("acquire");
         }
         pool.inner.clock.advance(Duration::from_secs(11));
-        let _guard = pool.acquire(&id, &artifact()).expect("second acquire");
+        let _guard = pool.acquire(&authority).expect("second acquire");
         let stats = pool.stats();
         assert_eq!(stats.sessions_reaped, 1, "expired idle reaped on acquire");
         assert_eq!(stats.sessions_opened, 2, "a fresh session was opened");
@@ -868,7 +1278,7 @@ mod tests {
             config(2, Duration::from_secs(60), 1 << 20),
         )
         .expect("valid config");
-        let result = pool.acquire(&identity("domain-a"), &artifact());
+        let result = pool.acquire(&authority());
         match result.err() {
             Some(SessionAcquireError::Open(EmbedError::Runtime(failure))) => {
                 assert_eq!(failure.kind, RuntimeFailureKindV1::OutOfMemory)
@@ -890,12 +1300,12 @@ mod tests {
             config(1, Duration::from_secs(60), 1 << 20),
         )
         .expect("valid config");
-        let id = identity("domain-a");
-        let held = pool.acquire(&id, &artifact()).expect("held");
+        let authority = authority();
+        let held = pool.acquire(&authority).expect("held");
         let cancel = ManualCancellation::new();
         thread::scope(|scope| {
-            let waiting = scope
-                .spawn(|| pool.acquire_blocking(&id, &artifact(), Duration::from_secs(5), &cancel));
+            let waiting =
+                scope.spawn(|| pool.acquire_blocking(&authority, Duration::from_secs(5), &cancel));
             while pool.stats().queued_waiters == 0 {
                 thread::yield_now();
             }
@@ -908,20 +1318,140 @@ mod tests {
     }
 
     #[test]
+    fn blocking_acquire_waits_without_repeated_runtime_admission() {
+        let runtime = FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024);
+        let counters = runtime.counters();
+        let pool = SessionPool::new(
+            runtime,
+            SystemMonotonicClock::default(),
+            config(1, Duration::from_secs(60), 1 << 20),
+        )
+        .expect("valid config");
+        let authority = authority();
+        let held = pool.acquire(&authority).expect("held");
+        let cancel = ManualCancellation::new();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let result = pool
+                    .acquire_blocking(&authority, Duration::from_secs(5), &cancel)
+                    .map(drop);
+                done_tx.send(result).expect("send waiter result");
+            });
+            while pool.stats().queued_waiters == 0 {
+                thread::yield_now();
+            }
+            thread::sleep(Duration::from_millis(25));
+            assert_eq!(
+                counters.compatibility_checks.load(AtomicOrdering::SeqCst),
+                2,
+                "the queued waiter performs one admission check, not a retry spin"
+            );
+
+            drop(held);
+            assert!(
+                done_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("waiter completes after release")
+                    .is_ok()
+            );
+        });
+    }
+
+    #[test]
+    fn blocking_acquire_serves_waiters_in_fifo_order() {
+        let pool = SessionPool::new(
+            FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
+            SystemMonotonicClock::default(),
+            config(1, Duration::from_secs(60), 1 << 20),
+        )
+        .expect("valid config");
+        let authority = authority();
+        let held = pool.acquire(&authority).expect("held");
+        let cancel = ManualCancellation::new();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+
+        thread::scope(|scope| {
+            let first_acquired_tx = acquired_tx.clone();
+            let first_pool = &pool;
+            let first_authority = &authority;
+            let first_cancel = &cancel;
+            scope.spawn(move || {
+                let guard = first_pool
+                    .acquire_blocking(first_authority, Duration::from_secs(5), first_cancel)
+                    .expect("first waiter acquires");
+                first_acquired_tx
+                    .send("first")
+                    .expect("report first waiter");
+                release_first_rx.recv().expect("release first waiter");
+                drop(guard);
+            });
+            while pool.stats().queued_waiters < 1 {
+                thread::yield_now();
+            }
+
+            let second_acquired_tx = acquired_tx.clone();
+            let second_pool = &pool;
+            let second_authority = &authority;
+            let second_cancel = &cancel;
+            scope.spawn(move || {
+                let guard = second_pool
+                    .acquire_blocking(second_authority, Duration::from_secs(5), second_cancel)
+                    .expect("second waiter acquires");
+                second_acquired_tx
+                    .send("second")
+                    .expect("report second waiter");
+                drop(guard);
+            });
+            while pool.stats().queued_waiters < 2 {
+                thread::yield_now();
+            }
+
+            drop(held);
+            assert_eq!(
+                acquired_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("first acquisition result"),
+                "first"
+            );
+            assert!(
+                acquired_rx.recv_timeout(Duration::from_millis(25)).is_err(),
+                "the second waiter cannot bypass the first checked-out session"
+            );
+            release_first_tx.send(()).expect("release first waiter");
+            assert_eq!(
+                acquired_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("second acquisition result"),
+                "second"
+            );
+        });
+    }
+
+    #[test]
     fn blocking_acquire_reports_deadline_on_injected_clock() {
         let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
-        let id = identity("domain-a");
-        let _held = pool.acquire(&id, &artifact()).expect("held");
+        let authority = authority();
+        let _held = pool.acquire(&authority).expect("held");
         let cancel = ManualCancellation::new();
+        let (done_tx, done_rx) = mpsc::channel();
         thread::scope(|scope| {
-            let waiting = scope.spawn(|| {
-                pool.acquire_blocking(&id, &artifact(), Duration::from_secs(10), &cancel)
+            scope.spawn(|| {
+                done_tx
+                    .send(pool.acquire_blocking(&authority, Duration::from_secs(10), &cancel))
+                    .expect("send deadline result");
             });
             while pool.stats().queued_waiters == 0 {
                 thread::yield_now();
             }
             pool.inner.clock.advance(Duration::from_secs(11));
-            let err = waiting.join().expect("no panic").err();
+            let result = done_rx.recv_timeout(Duration::from_secs(1));
+            if result.is_err() {
+                cancel.cancel();
+            }
+            let err = result.expect("deadline wakes queued waiter").err();
             assert!(
                 matches!(
                     err,
@@ -937,18 +1467,24 @@ mod tests {
     #[test]
     fn blocking_acquire_honors_cancellation() {
         let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
-        let id = identity("domain-a");
-        let _held = pool.acquire(&id, &artifact()).expect("held");
+        let authority = authority();
+        let _held = pool.acquire(&authority).expect("held");
         let cancel = ManualCancellation::new();
+        let (done_tx, done_rx) = mpsc::channel();
         thread::scope(|scope| {
-            let waiting = scope.spawn(|| {
-                pool.acquire_blocking(&id, &artifact(), Duration::from_secs(600), &cancel)
+            scope.spawn(|| {
+                done_tx
+                    .send(pool.acquire_blocking(&authority, Duration::from_secs(600), &cancel))
+                    .expect("send cancellation result");
             });
             while pool.stats().queued_waiters == 0 {
                 thread::yield_now();
             }
             cancel.cancel();
-            let err = waiting.join().expect("no panic").err();
+            let err = done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("cancellation wakes queued waiter")
+                .err();
             assert_eq!(err, Some(SessionAcquireError::Cancelled));
         });
         assert_eq!(pool.stats().queued_waiters, 0);
@@ -967,17 +1503,17 @@ mod tests {
             },
         )
         .expect("valid config");
-        let id = identity("domain-a");
-        let _held = pool.acquire(&id, &artifact()).expect("held");
+        let authority = authority();
+        let _held = pool.acquire(&authority).expect("held");
         let cancel = ManualCancellation::new();
         thread::scope(|scope| {
-            let waiting = scope
-                .spawn(|| pool.acquire_blocking(&id, &artifact(), Duration::from_secs(5), &cancel));
+            let waiting =
+                scope.spawn(|| pool.acquire_blocking(&authority, Duration::from_secs(5), &cancel));
             while pool.stats().queued_waiters == 0 {
                 thread::yield_now();
             }
             let err = pool
-                .acquire_blocking(&id, &artifact(), Duration::from_secs(5), &cancel)
+                .acquire_blocking(&authority, Duration::from_secs(5), &cancel)
                 .err();
             assert_eq!(
                 err,
@@ -995,9 +1531,9 @@ mod tests {
     #[test]
     fn close_closes_idle_and_rejects_new_acquisitions() {
         let pool = fake_pool(2, Duration::from_secs(60), 1 << 20);
-        let id = identity("domain-a");
+        let authority = authority();
         {
-            let _guard = pool.acquire(&id, &artifact()).expect("acquire");
+            let _guard = pool.acquire(&authority).expect("acquire");
         }
         assert_eq!(pool.stats().idle, 1);
         assert_eq!(pool.close(), 1, "one idle session closed");
@@ -1006,7 +1542,7 @@ mod tests {
         assert_eq!(stats.sessions_closed, 1);
         assert_eq!(stats.resident_bytes, 0);
         assert_eq!(
-            pool.acquire(&id, &artifact()).err(),
+            pool.acquire(&authority).err(),
             Some(SessionAcquireError::Closed)
         );
         assert_eq!(pool.close(), 0, "close is idempotent");
@@ -1015,8 +1551,8 @@ mod tests {
     #[test]
     fn active_session_closes_on_release_after_pool_close() {
         let pool = fake_pool(2, Duration::from_secs(60), 1 << 20);
-        let id = identity("domain-a");
-        let guard = pool.acquire(&id, &artifact()).expect("acquire");
+        let authority = authority();
+        let guard = pool.acquire(&authority).expect("acquire");
         assert_eq!(pool.close(), 0);
         drop(guard);
         let stats = pool.stats();
@@ -1029,13 +1565,14 @@ mod tests {
     #[test]
     fn pooled_guard_derefs_to_session_and_embeds() {
         let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
-        let id = identity("domain-a");
-        let mut guard = pool.acquire(&id, &artifact()).expect("acquire");
+        let authority = authority();
+        let id = SessionIdentityV1::from_authority(&authority);
+        let mut guard = pool.acquire(&authority).expect("acquire");
         assert_eq!(guard.identity(), &id);
         assert_eq!(
-            guard.descriptor().artifact_digest,
-            artifact().artifact_digest,
-            "session echoes its verified-artifact descriptor"
+            guard.authority(),
+            &authority,
+            "session echoes its admitted projection-artifact authority"
         );
         let batch = BoundedSanitizedTextBatchV1::try_new(vec!["fn main()".to_string()], 8, 1024)
             .expect("batch");
@@ -1055,9 +1592,9 @@ mod tests {
             config(2, Duration::from_secs(5), 1 << 20),
         )
         .expect("valid config");
-        let id = identity("domain-a");
+        let authority = authority();
         {
-            let _g = pool.acquire(&id, &artifact()).expect("one");
+            let _g = pool.acquire(&authority).expect("one");
         }
         pool.inner.clock.advance(Duration::from_secs(6));
         assert_eq!(pool.reap_idle(), 1);

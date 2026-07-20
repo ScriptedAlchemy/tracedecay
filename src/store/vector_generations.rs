@@ -12,10 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkId, ContentDigest, EmbeddingProjectionKeyV1, ManifestDigest,
-    ProjectionBatchReceiptV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, canonical_sha256,
+    AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, ContentDigest,
+    ManifestDigest, ProjectionBatchReceiptV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, canonical_sha256,
 };
+
+pub use tracedecay_domain::VectorGenerationIdV1;
 
 use crate::code_index::projection::verify_batch_receipt;
 use crate::semantic_code::projector::{
@@ -24,16 +26,6 @@ use crate::semantic_code::projector::{
 
 const VECTOR_GENERATION_BUILD_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-build.v1";
 const VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-manifest.v1";
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct VectorGenerationIdV1(ManifestDigest);
-
-impl VectorGenerationIdV1 {
-    pub fn as_digest(&self) -> &ManifestDigest {
-        &self.0
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
@@ -109,6 +101,15 @@ impl PublishedVectorGenerationV1 {
     pub fn manifest_digest(&self) -> &ManifestDigest {
         &self.manifest_digest
     }
+
+    fn same_vector_content(&self, other: &Self) -> bool {
+        self.projection_key == other.projection_key
+            && self.source_generation == other.source_generation
+            && self.source_manifest_digest == other.source_manifest_digest
+            && self.vectors == other.vectors
+            && self.tombstones == other.tombstones
+            && self.manifest_digest == other.manifest_digest
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,7 +154,7 @@ pub enum VectorGenerationStoreErrorV1 {
 #[derive(Clone)]
 struct StagedVectorGenerationV1 {
     plan: VectorGenerationPlanV1,
-    embedding_key: Option<EmbeddingProjectionKeyV1>,
+    embedding_key: Option<AdmittedEmbeddingProjectionKeyV1>,
     vectors: BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
     tombstones: BTreeMap<CodeSearchChunkId, ContentDigest>,
     batches: Vec<PreparedVectorGenerationV1>,
@@ -300,15 +301,16 @@ impl FakeVectorGenerationStoreV1 {
                     let vector = vector_by_chunk.get(&receipt.chunk_id).ok_or_else(|| {
                         VectorGenerationStoreErrorV1::MissingAppliedVector(receipt.chunk_id.clone())
                     })?;
-                    validate_vector_row(&next.plan, &prepared.embedding_key, vector)?;
+                    validate_prepared_vector_row(&prepared, vector)?;
                     if receipt.outcome != ProjectionOutcomeV1::Applied
                         || receipt.output_digest.as_ref() != Some(&vector.output_digest)
                     {
                         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
                     }
                     next.tombstones.remove(&receipt.chunk_id);
-                    next.vectors
-                        .insert(receipt.chunk_id.clone(), (*vector).clone());
+                    let mut rebound = (*vector).clone();
+                    rebound.source_manifest_digest = next.plan.source_manifest_digest.clone();
+                    next.vectors.insert(receipt.chunk_id.clone(), rebound);
                 }
                 ProjectionOperationV1::Deleted => {
                     let tombstone = tombstone_by_chunk
@@ -407,27 +409,9 @@ impl FakeVectorGenerationStoreV1 {
             validate_vector_row(&staged.plan, embedding_key, vector)?;
         }
 
-        let vector_digests = staged
-            .vectors
-            .values()
-            .map(|vector| (&vector.chunk_id, &vector.output_digest))
-            .collect::<Vec<_>>();
-        let tombstone_ids = staged.tombstones.keys().collect::<Vec<_>>();
-        let receipt_digests = staged
-            .batches
-            .iter()
-            .map(|batch| &batch.receipt.publication_digest)
-            .collect::<Vec<_>>();
-        let manifest_digest = canonical_sha256(&(
-            VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN,
-            &staged.plan,
-            vector_digests,
-            tombstone_ids,
-            receipt_digests,
-            &staged.checkpoint,
-        ))
-        .map_err(|error| VectorGenerationStoreErrorV1::InvalidPlan(error.to_string()))?;
-        let generation_id = VectorGenerationIdV1(manifest_digest.clone());
+        let manifest_digest =
+            generation_identity_digest(&staged.plan, &staged.vectors, &staged.tombstones)?;
+        let generation_id = VectorGenerationIdV1::new(manifest_digest.clone());
         let generation = PublishedVectorGenerationV1 {
             generation_id: generation_id.clone(),
             projection_key: staged.plan.target_projection_key,
@@ -444,13 +428,16 @@ impl FakeVectorGenerationStoreV1 {
             manifest_digest: manifest_digest.clone(),
         };
         let mut next = self.published.clone();
-        if let Some(existing) = next.generations.get(&generation_id) {
-            if existing != &generation {
+        let checkpoint = if let Some(existing) = next.generations.get(&generation_id) {
+            if !existing.same_vector_content(&generation) {
                 return Err(VectorGenerationStoreErrorV1::ImmutableGenerationConflict);
             }
+            existing.checkpoint.clone()
         } else {
+            let checkpoint = generation.checkpoint.clone();
             next.generations.insert(generation_id.clone(), generation);
-        }
+            checkpoint
+        };
         next.active_generation = Some(generation_id.clone());
         if self.fail_before_publication_swap {
             self.fail_before_publication_swap = false;
@@ -460,7 +447,7 @@ impl FakeVectorGenerationStoreV1 {
         Ok(VectorGenerationPublicationV1 {
             generation_id,
             manifest_digest,
-            checkpoint: staged.checkpoint,
+            checkpoint,
         })
     }
 
@@ -489,6 +476,31 @@ impl FakeVectorGenerationStoreV1 {
     pub fn fail_before_publication_swap_once(&mut self) {
         self.fail_before_publication_swap = true;
     }
+}
+
+/// Derive the immutable vector-generation identity from projected content,
+/// not from resumable execution evidence. Receipt batches and checkpoints
+/// remain available for audit but must not change the generation they produced.
+fn generation_identity_digest(
+    plan: &VectorGenerationPlanV1,
+    vectors: &BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
+    tombstones: &BTreeMap<CodeSearchChunkId, ContentDigest>,
+) -> Result<ManifestDigest, VectorGenerationStoreErrorV1> {
+    let vector_digests = vectors
+        .iter()
+        .map(|(chunk_id, vector)| (chunk_id, &vector.output_digest))
+        .collect::<Vec<_>>();
+    let tombstone_digests = tombstones.iter().collect::<Vec<_>>();
+    canonical_sha256(&(
+        VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN,
+        &plan.target_projection_key,
+        &plan.source_generation,
+        &plan.source_manifest_digest,
+        &plan.expected_chunk_ids,
+        vector_digests,
+        tombstone_digests,
+    ))
+    .map_err(|error| VectorGenerationStoreErrorV1::InvalidPlan(error.to_string()))
 }
 
 fn validate_plan(plan: &VectorGenerationPlanV1) -> Result<(), VectorGenerationStoreErrorV1> {
@@ -523,24 +535,32 @@ fn validate_batch_identity(
         || prepared.receipt.target_projection_key != plan.target_projection_key
         || prepared.request.changes.to_generation != plan.source_generation
         || prepared.receipt.source_generation != plan.source_generation
-        || prepared.request.changes.manifest_digest != plan.source_manifest_digest
-        || prepared.receipt.source_manifest_digest != plan.source_manifest_digest
     {
         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
     }
-    let semantic_key = prepared
-        .embedding_key
-        .projection_key()
-        .map_err(|error| VectorGenerationStoreErrorV1::InvalidPlan(error.to_string()))?;
-    if semantic_key != plan.target_projection_key {
+    if prepared.embedding_key.projection_key() != &plan.target_projection_key {
         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
     }
     Ok(())
 }
 
+fn validate_prepared_vector_row(
+    prepared: &PreparedVectorGenerationV1,
+    vector: &ProjectedChunkVectorV1,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    if vector.projection_key != prepared.request.target_projection_key
+        || vector.source_generation != prepared.request.changes.to_generation
+        || vector.source_manifest_digest != prepared.request.changes.manifest_digest
+    {
+        return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+    }
+    vector.validate(prepared.embedding_key.embedding_key().dimensions)?;
+    Ok(())
+}
+
 fn validate_vector_row(
     plan: &VectorGenerationPlanV1,
-    embedding_key: &EmbeddingProjectionKeyV1,
+    embedding_key: &AdmittedEmbeddingProjectionKeyV1,
     vector: &ProjectedChunkVectorV1,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
     if vector.projection_key != plan.target_projection_key
@@ -549,7 +569,7 @@ fn validate_vector_row(
     {
         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
     }
-    vector.validate(embedding_key.dimensions)?;
+    vector.validate(embedding_key.embedding_key().dimensions)?;
     Ok(())
 }
 
@@ -581,4 +601,94 @@ fn validate_base_digest(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("canonical test identity")
+    }
+
+    fn manifest_digest(byte: char) -> ManifestDigest {
+        id(&format!("sha256:{}", byte.to_string().repeat(64)))
+    }
+
+    fn content_digest(byte: char) -> ContentDigest {
+        id(&format!("sha256:{}", byte.to_string().repeat(64)))
+    }
+
+    #[test]
+    fn generation_identity_ignores_batch_execution_history() {
+        let projection_key = ProjectionKeyV1 {
+            kind: ProjectionKindV1::Embedding,
+            schema_revision: "embedding.v1".to_owned(),
+            profile_digest: manifest_digest('a'),
+        };
+        let source_generation = id::<CodeGenerationId>("code-generation.1");
+        let source_manifest_digest = manifest_digest('b');
+        let chunk_id = id::<CodeSearchChunkId>("chunk.v1.alpha");
+        let plan = VectorGenerationPlanV1 {
+            target_projection_key: projection_key.clone(),
+            source_generation: source_generation.clone(),
+            source_manifest_digest: source_manifest_digest.clone(),
+            expected_chunk_ids: vec![chunk_id.clone()],
+            base_generation: None,
+        };
+        let vectors = BTreeMap::from([(
+            chunk_id.clone(),
+            ProjectedChunkVectorV1 {
+                projection_key,
+                source_generation,
+                source_manifest_digest,
+                chunk_id,
+                chunk_digest: content_digest('c'),
+                values: vec![0.25],
+                output_digest: content_digest('d'),
+            },
+        )]);
+        let tombstones = BTreeMap::new();
+
+        let first = generation_identity_digest(&plan, &vectors, &tombstones)
+            .expect("identity from vector content");
+        let second = generation_identity_digest(&plan, &vectors, &tombstones)
+            .expect("identity remains independent from receipt/checkpoint batching");
+
+        assert_eq!(first, second);
+
+        let checkpoint = VectorProjectionCheckpointV1 {
+            target_projection_key: plan.target_projection_key.clone(),
+            source_generation: plan.source_generation.clone(),
+            source_manifest_digest: plan.source_manifest_digest.clone(),
+            completed_batches: 1,
+            last_request_digest: Some(manifest_digest('e')),
+            last_publication_digest: Some(manifest_digest('f')),
+        };
+        let published = PublishedVectorGenerationV1 {
+            generation_id: VectorGenerationIdV1::new(first.clone()),
+            projection_key: plan.target_projection_key.clone(),
+            source_generation: plan.source_generation.clone(),
+            source_manifest_digest: plan.source_manifest_digest.clone(),
+            vectors: vectors.clone(),
+            tombstones: vec![],
+            receipts: vec![],
+            checkpoint,
+            manifest_digest: first,
+        };
+        let mut replayed = published.clone();
+        replayed.checkpoint.completed_batches = 2;
+        replayed.checkpoint.last_request_digest = Some(manifest_digest('0'));
+        replayed.checkpoint.last_publication_digest = Some(manifest_digest('1'));
+
+        assert_ne!(published.checkpoint, replayed.checkpoint);
+        assert!(
+            published.same_vector_content(&replayed),
+            "execution checkpoint history does not redefine immutable vector content"
+        );
+    }
 }

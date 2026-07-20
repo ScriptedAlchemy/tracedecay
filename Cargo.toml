@@ -175,12 +175,16 @@ notify = "6"
 hmac = { version = "0.13.0", features = ["zeroize"] }
 zeroize = "1.9.0"
 tempfile = "3"
+ed25519-dalek = { version = "3.0.0", features = ["signature"] }
+cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"
 tar = "0.4"
 
 [target.'cfg(windows)'.dependencies]
+fsys = "1.1.0"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
@@ -241,18 +245,6 @@ debug = 0
 [profile.test.package."*"]
 debug = 0
 
-# Compile the SQLite stack with optimizations even in dev/test builds. The
-# bundled SQLite C sources in libsql-ffi are otherwise built at -O0 (cc honors
-# cargo's OPT_LEVEL), and nearly every test creates databases and runs many
-# queries — unoptimized SQLite dominates test runtime, worst on Windows CI.
-# The `test` profile inherits these dev package overrides. Deliberately
-# scoped to the libsql and tokenizer layers only; do not blanket-override "*".
-[profile.dev.package.libsql-ffi]
-opt-level = 2
-
-[profile.dev.package.libsql-sys]
-opt-level = 2
-
 # The first token count pays a one-time BPE model load (embedded-vocabulary
 # base64 decode + BPE regex compile) that costs seconds in unoptimized
 # builds; the dashboard token-count warm task and its tests hit it on every
@@ -260,19 +252,7 @@ opt-level = 2
 [profile.dev.package.tiktoken-rs]
 opt-level = 2
 
-[profile.dev.package.base64]
-opt-level = 2
-
-[profile.dev.package.fancy-regex]
-opt-level = 2
-
 [profile.dev.package.regex]
-opt-level = 2
-
-[profile.dev.package.regex-automata]
-opt-level = 2
-
-[profile.dev.package.regex-syntax]
 opt-level = 2
 
 # libsql 0.9.30 vendored with a one-line teardown fix (vendor/libsql):
