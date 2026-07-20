@@ -17,6 +17,12 @@ struct DispatchedToolCall {
     elapsed_us: Option<u64>,
 }
 
+struct ToolTokenAccounting {
+    raw_file_tokens: u64,
+    response_tokens: u64,
+    net_saved_tokens: u64,
+}
+
 /// Hand-maintained schema documentation for the `tracedecay://schema` resource.
 /// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
 const SCHEMA_MARKDOWN: &str = r"# tracedecay SQLite schema
@@ -618,6 +624,93 @@ impl McpServer {
         })
     }
 
+    fn route_tool_arguments(
+        &self,
+        id: &Value,
+        tool_name: &str,
+        arguments: Value,
+        route_cache: &HookProjectRouteCache,
+        memory_request_scope: &str,
+    ) -> Value {
+        let mut handler_arguments = route_cache.apply_to_tool_arguments(tool_name, arguments);
+        if crate::analytics::is_skill_view_tool(tool_name)
+            && let Some(request_id) = json_rpc_request_id_string(id)
+            && let Some(map) = handler_arguments.as_object_mut()
+        {
+            map.insert("__mcp_request_id".to_string(), json!(request_id));
+        }
+        inject_trusted_memory_request_id(
+            tool_name,
+            id,
+            memory_request_scope,
+            &mut handler_arguments,
+        );
+        handler_arguments
+    }
+
+    async fn execute_tool_dispatch(
+        &self,
+        cg: &TraceDecay,
+        tool_name: &str,
+        handler_arguments: Value,
+        server_stats: Option<Value>,
+        implicit_project_path: Option<&Path>,
+    ) -> Result<ToolResult> {
+        let engine_identity = cg.db_path();
+        let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
+            self.identical_read_coalescer.claim(
+                engine_identity.to_string_lossy().as_ref(),
+                tool_name,
+                &handler_arguments,
+                self.scope_prefix(),
+            )
+        });
+        let dispatch = Box::pin(handle_tool_call_with_registry_and_implicit_project(
+            cg,
+            tool_name,
+            handler_arguments,
+            server_stats,
+            self.scope_prefix(),
+            ToolCallRegistryOptions {
+                global_db: self.registry_db.as_deref(),
+                profile_root: self.profile_root.as_deref(),
+                allow_default_registry_fallback: self.allow_default_registry_fallback,
+                implicit_project_path,
+                automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
+                automation_writer: self.dashboard_automation_writer.clone(),
+                diagnostics_cache: Some(&self.diagnostics_cache),
+                diagnostics_lsp: Some(&self.diagnostics_lsp),
+                session_authorities: crate::mcp::tools::SessionAuthorities::new(
+                    self.session_db.as_ref(),
+                    self.user_session_db.as_ref(),
+                )
+                .with_refresh_services(
+                    self.project_session_refresh_service.as_deref(),
+                    self.user_session_refresh_service.as_deref(),
+                )
+                .with_retrieval_services(
+                    self.project_session_retrieval_service.as_deref(),
+                    self.user_session_retrieval_service.as_deref(),
+                ),
+            },
+        ));
+
+        if let Some(read_flight) = read_flight {
+            match read_flight {
+                ReadFlightClaim::Leader(leader) => match dispatch.await {
+                    Ok(result) => Ok((*leader.complete(result)).clone()),
+                    Err(error) => Err(error),
+                },
+                ReadFlightClaim::Follower(follower) => match follower.wait().await {
+                    Some(result) => Ok((*result).clone()),
+                    None => dispatch.await,
+                },
+            }
+        } else {
+            dispatch.await
+        }
+    }
+
     async fn dispatch_tool_call(
         &self,
         id: &Value,
@@ -669,74 +762,17 @@ impl McpServer {
         } else {
             None
         };
-        let mut handler_arguments = route_cache.apply_to_tool_arguments(tool_name, arguments);
-        if crate::analytics::is_skill_view_tool(tool_name)
-            && let Some(request_id) = json_rpc_request_id_string(id)
-            && let Some(map) = handler_arguments.as_object_mut()
-        {
-            map.insert("__mcp_request_id".to_string(), json!(request_id));
-        }
-        inject_trusted_memory_request_id(
-            tool_name,
-            id,
-            memory_request_scope,
-            &mut handler_arguments,
-        );
-
-        let engine_identity = cg.db_path();
-        let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
-            self.identical_read_coalescer.claim(
-                engine_identity.to_string_lossy().as_ref(),
-                tool_name,
-                &handler_arguments,
-                self.scope_prefix(),
-            )
-        });
-        let outcome = {
-            let dispatch = Box::pin(handle_tool_call_with_registry_and_implicit_project(
+        let handler_arguments =
+            self.route_tool_arguments(id, tool_name, arguments, route_cache, memory_request_scope);
+        let outcome = self
+            .execute_tool_dispatch(
                 &cg,
                 tool_name,
                 handler_arguments,
                 server_stats,
-                self.scope_prefix(),
-                ToolCallRegistryOptions {
-                    global_db: self.registry_db.as_deref(),
-                    profile_root: self.profile_root.as_deref(),
-                    allow_default_registry_fallback: self.allow_default_registry_fallback,
-                    implicit_project_path,
-                    automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
-                    automation_writer: self.dashboard_automation_writer.clone(),
-                    diagnostics_cache: Some(&self.diagnostics_cache),
-                    diagnostics_lsp: Some(&self.diagnostics_lsp),
-                    session_authorities: crate::mcp::tools::SessionAuthorities::new(
-                        self.session_db.as_ref(),
-                        self.user_session_db.as_ref(),
-                    )
-                    .with_refresh_services(
-                        self.project_session_refresh_service.as_deref(),
-                        self.user_session_refresh_service.as_deref(),
-                    )
-                    .with_retrieval_services(
-                        self.project_session_retrieval_service.as_deref(),
-                        self.user_session_retrieval_service.as_deref(),
-                    ),
-                },
-            ));
-            if let Some(read_flight) = read_flight {
-                match read_flight {
-                    ReadFlightClaim::Leader(leader) => match dispatch.await {
-                        Ok(result) => Ok((*leader.complete(result)).clone()),
-                        Err(error) => Err(error),
-                    },
-                    ReadFlightClaim::Follower(follower) => match follower.wait().await {
-                        Some(result) => Ok((*result).clone()),
-                        None => dispatch.await,
-                    },
-                }
-            } else {
-                dispatch.await
-            }
-        };
+                implicit_project_path,
+            )
+            .await;
 
         DispatchedToolCall {
             cg,
@@ -756,31 +792,30 @@ impl McpServer {
         }
     }
 
-    async fn record_success_accounting(
-        &self,
-        cg: &TraceDecay,
-        tool_name: &str,
-        request_id: &Value,
-        analytics_arguments: &Value,
-        analytics_session_id: &Option<String>,
-        elapsed_us: Option<u64>,
-        result: &mut ToolResult,
-    ) {
-        // Estimate approximate token count of the graph response
-        // ("after"), before any banners/metrics lines are appended.
-        let response_tokens: u64 = result
+    fn response_token_count(result: &ToolResult) -> u64 {
+        result
             .value
             .get("content")
-            .and_then(|c| c.as_array())
-            .map_or(0, |arr| {
-                let total_chars: usize = arr
+            .and_then(|content| content.as_array())
+            .map_or(0, |content| {
+                let total_chars: usize = content
                     .iter()
-                    .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
                     .map(str::len)
                     .sum();
                 (total_chars / 4) as u64
-            });
+            })
+    }
 
+    async fn apply_token_accounting(
+        &self,
+        cg: &TraceDecay,
+        tool_name: &str,
+        result: &mut ToolResult,
+    ) -> ToolTokenAccounting {
+        // Estimate approximate token count of the graph response
+        // ("after"), before any banners/metrics lines are appended.
+        let response_tokens = Self::response_token_count(result);
         // "Before" counterfactual: reading every referenced file raw,
         // in full. Counters credit only the net saving per call —
         // before minus what this response actually delivered.
@@ -807,6 +842,25 @@ impl McpServer {
                 "\ntracedecay_metrics: before={raw_file_tokens} after={response_tokens}"
             )}));
         }
+
+        ToolTokenAccounting {
+            raw_file_tokens,
+            response_tokens,
+            net_saved_tokens,
+        }
+    }
+
+    fn spawn_success_analytics(
+        &self,
+        cg: &TraceDecay,
+        tool_name: &str,
+        request_id: &Value,
+        analytics_arguments: &Value,
+        analytics_session_id: &Option<String>,
+        elapsed_us: Option<u64>,
+        accounting: ToolTokenAccounting,
+        result: &ToolResult,
+    ) {
         let analytics_outcome = if tool_result_has_semantic_error(result) {
             "error"
         } else {
@@ -819,6 +873,11 @@ impl McpServer {
         // [`Self::ledger_writes_settled`] without making it awaited
         // anywhere on the request path.
         if let Some(gdb) = self.global_db.clone() {
+            let ToolTokenAccounting {
+                raw_file_tokens,
+                response_tokens,
+                net_saved_tokens,
+            } = accounting;
             let project_path_str = GlobalDb::canonical_project_key(cg.project_root());
             let tool_name_owned = tool_name.to_string();
             let ts = crate::tracedecay::current_timestamp();
@@ -857,6 +916,29 @@ impl McpServer {
                 }
             });
         }
+    }
+
+    async fn record_success_accounting(
+        &self,
+        cg: &TraceDecay,
+        tool_name: &str,
+        request_id: &Value,
+        analytics_arguments: &Value,
+        analytics_session_id: &Option<String>,
+        elapsed_us: Option<u64>,
+        result: &mut ToolResult,
+    ) {
+        let accounting = self.apply_token_accounting(cg, tool_name, result).await;
+        self.spawn_success_analytics(
+            cg,
+            tool_name,
+            request_id,
+            analytics_arguments,
+            analytics_session_id,
+            elapsed_us,
+            accounting,
+            result,
+        );
     }
 
     async fn append_version_and_automation_notices(

@@ -13,7 +13,7 @@ use tracedecay::branch_meta::{BranchMeta, save_branch_meta};
 use tracedecay::mcp::McpServer;
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay::storage::{resolve_layout_for_current_profile, resolve_response_handle_root};
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
+use tracedecay::tracedecay::TraceDecay;
 
 // ---------------------------------------------------------------------------
 // Shared helpers

@@ -1,9 +1,7 @@
 //! `move_symbol_test` domain tests, split mechanically from `mcp_handler_test.rs`.
 
-use crate::common;
 use crate::support::*;
 use serde_json::{Value, json};
-use std::fmt::Write as _;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;

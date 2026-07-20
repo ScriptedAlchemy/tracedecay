@@ -2,7 +2,6 @@
 
 use crate::support::*;
 use serde_json::{Value, json};
-use std::fmt::Write as _;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;

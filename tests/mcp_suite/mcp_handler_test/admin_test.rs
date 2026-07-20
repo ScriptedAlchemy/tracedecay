@@ -3,12 +3,9 @@
 use crate::fixture;
 use crate::support::*;
 use serde_json::{Value, json};
-use std::fmt::Write as _;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs as unix_fs;
 use tracedecay::global_db::GlobalDb;
-use tracedecay::mcp::{McpServer, McpTransport, ToolResult, get_tool_definitions};
+use tracedecay::mcp::get_tool_definitions;
 
 #[tokio::test]
 async fn project_registry_tools_are_bounded_read_only_and_contextual() {

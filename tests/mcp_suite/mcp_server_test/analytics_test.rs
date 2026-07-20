@@ -2,8 +2,7 @@
 
 use crate::common::EnvVarGuard;
 use crate::mcp_server_test::support::*;
-use serde_json::{Value, json};
-use std::fmt::Write as _;
+use serde_json::json;
 
 #[tokio::test]
 // Intentional: serializes env-mutating savings tests; #[tokio::test]

@@ -2,11 +2,8 @@
 
 use crate::fixture;
 use crate::support::*;
-use serde_json::{Value, json};
-use std::fmt::Write as _;
+use serde_json::json;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs as unix_fs;
 use tempfile::TempDir;
 use tracedecay::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,

@@ -1,19 +1,12 @@
 //! `graph_analysis_test` domain tests, split mechanically from `mcp_handler_test.rs`.
 
-use crate::fixture;
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs as unix_fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, SystemTime};
-use tracedecay::mcp::{McpServer, McpTransport, ToolResult, get_tool_definitions};
-use tracedecay::storage::{
-    resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_response_handle_root,
-};
+use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
 #[tokio::test]

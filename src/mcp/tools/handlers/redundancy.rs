@@ -316,7 +316,11 @@ async fn ensure_fingerprints(
 
 struct FingerprintLoad {
     fingerprints: HashMap<String, Fingerprint>,
+    // Plan 33 item 4 acceptance instrumentation: read by cfg(test)
+    // cold/partial/warm call-count parity assertions.
+    #[allow(dead_code)]
     parsed_files: usize,
+    #[allow(dead_code)]
     computed_fingerprints: usize,
 }
 

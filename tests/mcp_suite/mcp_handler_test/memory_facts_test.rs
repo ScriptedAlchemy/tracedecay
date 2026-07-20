@@ -1,33 +1,13 @@
 //! `memory_facts_test` domain tests, split mechanically from `mcp_handler_test.rs`.
 
-use crate::common;
-use crate::fixture;
 use crate::support::*;
 use serde_json::{Value, json};
-use std::fmt::Write as _;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs as unix_fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use tracedecay::memory::store::MemoryStore;
-use tracedecay::storage::{
-    resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_response_handle_root,
-};
+use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
-use tracedecay_domain::{
-    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
-    DurableObservationV1, MessageOccurrenceIdV1, MessageOccurrenceRecordV1, ObservationId,
-    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadAccessState, PayloadReferenceV1, ProjectId,
-    ProjectionGenerationId, ProjectionOutputOrdinalV1, ProviderId, RetentionClass,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1,
-    SignedCursorKeyRefV1, UtcMicros, derive_exact_observation_anchor_id,
-};
 
 #[tokio::test]
 async fn fact_store_large_list_response_reports_store_failure_actionably() {

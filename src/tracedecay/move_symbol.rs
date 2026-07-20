@@ -1319,6 +1319,7 @@ mod tests {
 
     #[tokio::test]
     async fn move_symbol_apply_refreshes_caller_graph() {
+        let _profile = crate::config::PinnedUserDataDir::new();
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         std::fs::create_dir_all(project.join("src")).unwrap();

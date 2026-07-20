@@ -1,13 +1,12 @@
 //! `hooks_branch_test` domain tests, split mechanically from `mcp_server_test.rs`.
 
 use crate::mcp_server_test::support::*;
-use serde_json::{Value, json};
-use std::fmt::Write as _;
+use serde_json::json;
 use std::fs;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[tokio::test]
 async fn hook_event_workspace_context_routes_followup_graph_reads() {

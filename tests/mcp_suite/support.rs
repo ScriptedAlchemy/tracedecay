@@ -5,23 +5,16 @@ use crate::common;
 use crate::fixture;
 use serde_json::{Value, json};
 use std::ffi::OsString;
-use std::fmt::Write as _;
 use std::fs;
 use std::ops::{Deref, DerefMut};
-#[cfg(unix)]
-use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
-use tracedecay::automation::managed_skills::{
-    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    approve_managed_skill, create_managed_skill_draft,
-};
 use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
-use tracedecay::mcp::{McpServer, McpTransport, ToolResult, get_tool_definitions};
+use tracedecay::mcp::{McpServer, McpTransport, ToolResult};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::storage::{
     resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_response_handle_root,

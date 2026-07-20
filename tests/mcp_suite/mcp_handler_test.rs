@@ -19,7 +19,4 @@ mod status_runtime_test;
 
 // Backwards-compatible paths for sibling suite modules that import
 // helpers via `crate::mcp_handler_test::…`.
-pub(crate) use crate::support::{
-    GLOBAL_DB_ENV_LOCK, extract_json, extract_text, find_node_id, handle_tool_call,
-    index_all_retrying_sync_lock, setup_empty_project, setup_project,
-};
+pub(crate) use crate::support::{GLOBAL_DB_ENV_LOCK, setup_project};

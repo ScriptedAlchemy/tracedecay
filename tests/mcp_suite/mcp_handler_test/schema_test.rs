@@ -2,8 +2,7 @@
 
 use crate::support::*;
 use serde_json::{Value, json};
-use std::fmt::Write as _;
-use tracedecay::mcp::{McpServer, McpTransport, ToolResult, get_tool_definitions};
+use tracedecay::mcp::get_tool_definitions;
 use tracedecay::tracedecay::TraceDecay;
 #[test]
 fn outline_schema_requires_file_without_provider_property() {

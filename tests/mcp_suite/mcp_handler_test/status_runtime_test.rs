@@ -1,15 +1,11 @@
 //! `status_runtime_test` domain tests, split mechanically from `mcp_handler_test.rs`.
 
-use crate::fixture;
 use crate::support::*;
 use serde_json::{Value, json};
-use std::fmt::Write as _;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs as unix_fs;
 use std::sync::Arc;
 use tracedecay::global_db::GlobalDb;
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::sessions::SessionRecord;
 
 // ---------------------------------------------------------------------------
 // 8. tracedecay_status
