@@ -1050,6 +1050,71 @@ async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::R
                WHERE session_refresh_receipts.session_id = session_refresh_operations.session_id
                  AND session_refresh_receipts.operation_id = session_refresh_operations.operation_id
            );
+         UPDATE session_temporal_generations
+         SET state = (
+                 SELECT receipt.terminal_state
+                 FROM session_refresh_bindings AS binding
+                 JOIN session_refresh_receipts AS receipt
+                   ON receipt.session_id = binding.session_id
+                  AND receipt.operation_id = binding.operation_id
+                 WHERE binding.session_id = session_temporal_generations.session_id
+                   AND binding.generation = session_temporal_generations.generation
+             ),
+             completed_at = (
+                 SELECT receipt.terminal_at
+                 FROM session_refresh_bindings AS binding
+                 JOIN session_refresh_receipts AS receipt
+                   ON receipt.session_id = binding.session_id
+                  AND receipt.operation_id = binding.operation_id
+                 WHERE binding.session_id = session_temporal_generations.session_id
+                   AND binding.generation = session_temporal_generations.generation
+             )
+         WHERE EXISTS (
+             SELECT 1
+             FROM session_refresh_bindings AS binding
+             JOIN session_refresh_operations AS operation
+               ON operation.session_id = binding.session_id
+              AND operation.operation_id = binding.operation_id
+             JOIN session_refresh_receipts AS receipt
+               ON receipt.session_id = binding.session_id
+              AND receipt.operation_id = binding.operation_id
+             WHERE binding.session_id = session_temporal_generations.session_id
+               AND binding.generation = session_temporal_generations.generation
+               AND operation.state = 'running'
+               AND receipt.terminal_state IN ('failed', 'cancelled')
+         );
+         UPDATE session_refresh_operations
+         SET state = (
+                 SELECT receipt.terminal_state
+                 FROM session_refresh_receipts AS receipt
+                 WHERE receipt.session_id = session_refresh_operations.session_id
+                   AND receipt.operation_id = session_refresh_operations.operation_id
+             ),
+             updated_at = (
+                 SELECT receipt.terminal_at
+                 FROM session_refresh_receipts AS receipt
+                 WHERE receipt.session_id = session_refresh_operations.session_id
+                   AND receipt.operation_id = session_refresh_operations.operation_id
+             ),
+             terminal_at = (
+                 SELECT receipt.terminal_at
+                 FROM session_refresh_receipts AS receipt
+                 WHERE receipt.session_id = session_refresh_operations.session_id
+                   AND receipt.operation_id = session_refresh_operations.operation_id
+             ),
+             failure_code = (
+                 SELECT receipt.failure_code
+                 FROM session_refresh_receipts AS receipt
+                 WHERE receipt.session_id = session_refresh_operations.session_id
+                   AND receipt.operation_id = session_refresh_operations.operation_id
+             )
+         WHERE state = 'running'
+           AND EXISTS (
+               SELECT 1 FROM session_refresh_receipts AS receipt
+               WHERE receipt.session_id = session_refresh_operations.session_id
+                 AND receipt.operation_id = session_refresh_operations.operation_id
+                 AND receipt.terminal_state IN ('complete', 'failed', 'cancelled')
+           );
          INSERT INTO session_refresh_receipts (
              session_id, operation_id, terminal_state, frontier_json,
              coverage_json, failure_code, terminal_at
@@ -1079,7 +1144,7 @@ async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::R
          UPDATE session_temporal_generations
          SET state = 'failed',
              completed_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000000
-         WHERE state IN ('building', 'ready')
+         WHERE state <> 'failed'
            AND EXISTS (
                SELECT 1
                FROM session_refresh_bindings AS binding
