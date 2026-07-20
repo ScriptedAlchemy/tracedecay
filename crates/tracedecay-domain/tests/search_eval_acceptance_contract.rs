@@ -2,14 +2,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::{
+    AgentAdjudicatedLabelProvenanceV1, AgentAdjudicationStateV1, AgentJudgmentProvenanceV1,
     CandidateListV1, DecisionOwnerId, EvalCandidateAnchorV1, EvalCandidateV1, EvalOutcomeV1,
     EvalPartitionV1, EvalQueryV1, EvalRunScopeV1, EvaluationFixtureBundleV1, EvidenceIndexV1,
-    FixtureAuthorityV1, FixtureManifestV1, HoldoutRevealCapabilityV1, LabelSetDigest, LabelSetId,
-    LabelSetV1, QueryWorkloadV1, RelevanceJudgmentV1, RetrieverLaneId, RunManifestV1,
-    SavedCandidateSetDigest, SavedCandidateSetV1, WorkloadDigest,
+    FixtureAuthorityV1, FixtureContentDigest, FixtureManifestV1, HoldoutLabelAuthorityV1,
+    HoldoutRevealCapabilityV1, JudgmentId, LabelSetDigest, LabelSetId, LabelSetV1, QueryWorkloadV1,
+    RelevanceJudgmentV1, RetrieverLaneId, RunManifestV1, SavedCandidateSetDigest,
+    SavedCandidateSetV1, WorkloadDigest,
 };
 
 const ZERO_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+const ONE_DIGEST: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+const TWO_DIGEST: &str = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+const THREE_DIGEST: &str =
+    "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+const FOUR_DIGEST: &str = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+const FIVE_DIGEST: &str = "sha256:5555555555555555555555555555555555555555555555555555555555555555";
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/search_quality")
@@ -109,24 +117,36 @@ fn pre_reveal_validation_rejects_contract_only_authority() {
 fn reveal_capability_binds_locator_seal_and_frozen_run_digest() {
     let mut manifest: FixtureManifestV1 = read_json("fixture-manifest-v1.json");
     manifest.authority = FixtureAuthorityV1::LockedQuality;
+    manifest.holdout_seal.labels_content_digest =
+        Some(FixtureContentDigest::new(ZERO_DIGEST).unwrap());
+    manifest.holdout_seal.label_authority = Some(HoldoutLabelAuthorityV1::Deterministic);
     let workload = workload();
     let run = locked_manifest(&manifest, &workload);
     run.validate_pre_reveal(&manifest, &workload).unwrap();
 
     let capability = HoldoutRevealCapabilityV1 {
         schema_revision: 1,
-        locator: manifest.holdout_seal.locator.clone(),
-        signature_locator: manifest.holdout_seal.signature_locator.clone(),
+        labels_locator: manifest.holdout_seal.locator.clone(),
+        envelope_locator: manifest.holdout_seal.signature_locator.clone(),
         seal_digest: manifest.holdout_seal.seal_digest.clone(),
         run_id: run.run_id.clone(),
         run_manifest_digest: run.digest.clone(),
         revealed_by: DecisionOwnerId::new("owner-search-quality-lead").unwrap(),
-        sealed_labels_path: "/authorized/holdout/judgments-v1.jsonl".to_string(),
-        signed_envelope_path: "/authorized/holdout/judgments-v1.signature".to_string(),
+        operation: "evaluate_locked_quality_v1".to_string(),
+        not_before_unix: 100,
+        expires_at_unix: 200,
     };
 
     let receipt = capability
-        .issue_receipt(&run, &manifest.holdout_seal, &manifest.decision_owners)
+        .issue_receipt(
+            &run,
+            &manifest.holdout_seal,
+            &manifest.decision_owners,
+            FixtureContentDigest::new(ZERO_DIGEST).unwrap(),
+            manifest.decision_owners[0].clone(),
+            "root-v1".to_string(),
+            150,
+        )
         .unwrap();
     assert_eq!(receipt.run_id, run.run_id);
     assert_eq!(receipt.run_manifest_digest, run.digest);
@@ -141,6 +161,10 @@ fn reveal_capability_binds_locator_seal_and_frozen_run_digest() {
                 &wrong_run,
                 &manifest.holdout_seal,
                 &manifest.decision_owners,
+                FixtureContentDigest::new(ZERO_DIGEST).unwrap(),
+                manifest.decision_owners[0].clone(),
+                "root-v1".to_string(),
+                150,
             )
             .unwrap_err()
             .to_string()
@@ -209,6 +233,193 @@ fn saved_candidate_ablations_filter_frozen_lists_without_mutating_them() {
             .to_string()
             .contains("unknown saved-candidate lane")
     );
+}
+
+#[test]
+fn locked_pr9_baseline_requires_exact_lexical_and_graph_for_every_query() {
+    let mut manifest: FixtureManifestV1 = read_json("fixture-manifest-v1.json");
+    manifest.authority = FixtureAuthorityV1::LockedQuality;
+    manifest.holdout_seal.labels_content_digest =
+        Some(FixtureContentDigest::new(ZERO_DIGEST).unwrap());
+    manifest.holdout_seal.label_authority = Some(HoldoutLabelAuthorityV1::HumanAuthoritative);
+    let workload = workload();
+    let run = locked_manifest(&manifest, &workload);
+    let candidate_lists = run
+        .execution_order
+        .iter()
+        .flat_map(|query_id| {
+            ["exact", "lexical", "graph"].map(|lane| CandidateListV1 {
+                query_id: query_id.clone(),
+                lane: RetrieverLaneId::new(lane).unwrap(),
+                candidates: Vec::new(),
+            })
+        })
+        .collect();
+    let mut saved = SavedCandidateSetV1 {
+        schema_revision: 1,
+        run_id: run.run_id.clone(),
+        run_manifest_digest: run.digest.clone(),
+        scope: EvalRunScopeV1::Locked,
+        workload_digest: workload.digest.clone(),
+        candidate_lists,
+        digest: SavedCandidateSetDigest::new(ZERO_DIGEST).unwrap(),
+    };
+    saved.digest = saved.compute_digest().unwrap();
+    saved
+        .validate_pr9_baseline_for_run(&run, &workload)
+        .unwrap();
+
+    saved
+        .candidate_lists
+        .retain(|list| list.lane.as_str() != "graph");
+    saved.digest = saved.compute_digest().unwrap();
+    assert!(
+        saved
+            .validate_pr9_baseline_for_run(&run, &workload)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly exact, lexical, and graph")
+    );
+}
+
+#[test]
+fn domain_exposes_structure_checks_not_receipt_authority_injection() {
+    let source = include_str!("../src/evaluation.rs");
+    assert!(!source.contains("pub trait HoldoutReceiptAuthorityV1"));
+    assert!(!source.contains("validate_for_accepted_run"));
+    assert!(!source.contains("receipt_authority: &A"));
+    assert!(source.contains("validate_structure_for_run"));
+}
+
+fn agent_judgment(
+    id: &str,
+    instance: &str,
+    timestamp: u64,
+    artifact_digest: &str,
+    label_set_digest: &str,
+) -> AgentJudgmentProvenanceV1 {
+    AgentJudgmentProvenanceV1 {
+        independent_judgment_id: JudgmentId::new(id).unwrap(),
+        adjudicator_instance_id: instance.to_string(),
+        adjudicator_model: "sol".to_string(),
+        adjudicator_version: "gpt-5.6-sol".to_string(),
+        judged_at_unix: timestamp,
+        blinded_packet_digest: FixtureContentDigest::new(ONE_DIGEST).unwrap(),
+        immutable_judgment_artifact_digest: FixtureContentDigest::new(artifact_digest).unwrap(),
+        label_set_digest: LabelSetDigest::new(label_set_digest).unwrap(),
+    }
+}
+
+fn agent_provenance(state: AgentAdjudicationStateV1) -> AgentAdjudicatedLabelProvenanceV1 {
+    AgentAdjudicatedLabelProvenanceV1 {
+        delegated_by: DecisionOwnerId::new("owner-search-quality-lead").unwrap(),
+        signed_delegation_digest: FixtureContentDigest::new(TWO_DIGEST).unwrap(),
+        blinded_packet_digest: FixtureContentDigest::new(ONE_DIGEST).unwrap(),
+        final_label_set_digest: Some(LabelSetDigest::new(FIVE_DIGEST).unwrap()),
+        state,
+        independent_judgments: vec![
+            agent_judgment(
+                "judgment-opaque-a",
+                "sol-instance-a",
+                100,
+                THREE_DIGEST,
+                FIVE_DIGEST,
+            ),
+            agent_judgment(
+                "judgment-opaque-b",
+                "sol-instance-b",
+                101,
+                FOUR_DIGEST,
+                FIVE_DIGEST,
+            ),
+        ],
+        separate_adjudication: None,
+    }
+}
+
+#[test]
+fn agent_authority_requires_two_independent_blinded_judgments() {
+    let provenance = agent_provenance(AgentAdjudicationStateV1::Agreement);
+    assert!(provenance.is_sealable().unwrap());
+
+    let mut incomplete = provenance;
+    incomplete.independent_judgments.pop();
+    assert!(incomplete.is_sealable().is_err());
+}
+
+#[test]
+fn disagreement_requires_a_distinct_separate_adjudicator() {
+    let mut pending = agent_provenance(AgentAdjudicationStateV1::DisagreementPendingAdjudication);
+    pending.independent_judgments[1].label_set_digest = LabelSetDigest::new(FOUR_DIGEST).unwrap();
+    pending.final_label_set_digest = None;
+    assert!(!pending.is_sealable().unwrap());
+
+    let mut adjudicated = pending;
+    adjudicated.state = AgentAdjudicationStateV1::SeparatelyAdjudicated;
+    adjudicated.final_label_set_digest = Some(LabelSetDigest::new(FIVE_DIGEST).unwrap());
+    adjudicated.separate_adjudication = Some(agent_judgment(
+        "judgment-opaque-c",
+        "sol-instance-c",
+        102,
+        "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        FIVE_DIGEST,
+    ));
+    assert!(adjudicated.is_sealable().unwrap());
+
+    adjudicated.separate_adjudication = Some(agent_judgment(
+        "judgment-opaque-c",
+        "sol-instance-a",
+        102,
+        "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        FIVE_DIGEST,
+    ));
+    assert!(adjudicated.is_sealable().is_err());
+}
+
+#[test]
+fn adjudication_state_is_derived_from_exactly_two_results() {
+    let mut agreement = agent_provenance(AgentAdjudicationStateV1::Agreement);
+    agreement.independent_judgments.push(agent_judgment(
+        "judgment-opaque-extra",
+        "sol-instance-extra",
+        103,
+        "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        FIVE_DIGEST,
+    ));
+    assert!(agreement.validate().is_err());
+
+    let mut false_agreement = agent_provenance(AgentAdjudicationStateV1::Agreement);
+    false_agreement.independent_judgments[1].label_set_digest =
+        LabelSetDigest::new(FOUR_DIGEST).unwrap();
+    assert!(false_agreement.validate().is_err());
+
+    let mut false_disagreement =
+        agent_provenance(AgentAdjudicationStateV1::DisagreementPendingAdjudication);
+    false_disagreement.final_label_set_digest = None;
+    assert!(false_disagreement.validate().is_err());
+}
+
+#[test]
+fn agent_provenance_rejects_placeholder_reused_and_mismatched_digests() {
+    let mut placeholder = agent_provenance(AgentAdjudicationStateV1::Agreement);
+    placeholder.signed_delegation_digest = FixtureContentDigest::new(ZERO_DIGEST).unwrap();
+    assert!(placeholder.validate().is_err());
+
+    let mut mismatched_packet = agent_provenance(AgentAdjudicationStateV1::Agreement);
+    mismatched_packet.independent_judgments[0].blinded_packet_digest =
+        FixtureContentDigest::new(TWO_DIGEST).unwrap();
+    assert!(mismatched_packet.validate().is_err());
+
+    let mut reused_artifact = agent_provenance(AgentAdjudicationStateV1::Agreement);
+    reused_artifact.independent_judgments[1].immutable_judgment_artifact_digest = reused_artifact
+        .independent_judgments[0]
+        .immutable_judgment_artifact_digest
+        .clone();
+    assert!(reused_artifact.validate().is_err());
+
+    let mut mismatched_final = agent_provenance(AgentAdjudicationStateV1::Agreement);
+    mismatched_final.final_label_set_digest = Some(LabelSetDigest::new(FOUR_DIGEST).unwrap());
+    assert!(mismatched_final.validate().is_err());
 }
 
 #[test]

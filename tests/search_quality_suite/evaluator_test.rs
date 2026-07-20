@@ -25,14 +25,14 @@ fn canonical_validator_accepts_only_the_frozen_real_fixture_packet() {
 #[test]
 fn contract_only_compare_blocks_without_reading_capability_or_creating_promotion() {
     let temp = tempfile::tempdir().unwrap();
-    let capability = temp.path().join("capability.json");
-    fs::write(&capability, b"this must not be parsed before a locked run").unwrap();
 
     let result = compare(&CompareOptions {
         fixture_root: fixtures::fixture_root(),
         run_manifest: None,
         output_root: temp.path().join("runs"),
-        holdout_capability: Some(capability),
+        holdout_capability: Some(
+            "authorized-store://search-quality/holdout/v1/reveal-capability/unopened".to_string(),
+        ),
         saved_candidates: None,
         required_outcome: Some(EvalOutcomeV1::Accepted),
     })
