@@ -1654,7 +1654,7 @@ pub(in crate::global_db::schema_contract) const INVARIANTS: &[Invariant] = &[
                 LEFT JOIN session_temporal_generations AS generation
                   ON generation.session_id = binding.session_id
                  AND generation.generation = binding.generation
-                WHERE binding.operation_id IS NULL
+                WHERE (binding.operation_id IS NULL AND operation.state <> 'running')
                    OR (operation.state <> 'running' AND receipt.operation_id IS NULL)
                    OR (operation.state <> 'running'
                        AND (
