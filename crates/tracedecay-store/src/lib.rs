@@ -4,6 +4,7 @@
 //! Connection ownership, transaction boundaries, recovery policy, and storage
 //! resolution remain with the application crate's authoritative store adapter.
 
+pub mod configuration;
 pub mod diagnostics;
 pub mod memory;
 pub mod observation;
@@ -11,6 +12,10 @@ pub mod projection;
 pub mod session;
 pub mod transcript;
 
+pub use configuration::{
+    ConfigurationCommitV1, ConfigurationMutationReceiptV1, ConfigurationRevisionRecordV1,
+    ConfigurationRevisionStore, ConfigurationStoreError, ConfigurationStoreResult,
+};
 pub use diagnostics::{
     DiagnosticPublicationDispositionV1, DiagnosticPublicationReceiptV1, DiagnosticStore,
     DiagnosticStoreError, DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1,

@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, TraceDecayError};
 
+pub mod registry;
+pub mod resolver;
+pub mod scope_control;
+pub mod topology;
+
 /// Name of the configuration file stored inside the data directory.
 pub const CONFIG_FILENAME: &str = "config.json";
 

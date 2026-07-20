@@ -6,7 +6,7 @@ use super::schema_contract::{
     validate_registry_schema_contract,
 };
 use super::{
-    GlobalDb, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
+    GlobalDb, configuration, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
     ensure_session_parent_columns, global_db_operation_error, observation, observation_projection,
     session_temporal,
 };
@@ -100,6 +100,20 @@ pub(super) async fn ensure_registry(db: &GlobalDb) -> crate::errors::Result<()> 
         .await
         .map_err(|error| global_db_operation_error("migrate global project rows", error))?;
     Ok(())
+}
+
+pub(super) async fn ensure_configuration(db: &GlobalDb) -> crate::errors::Result<()> {
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .map_err(|error| global_db_operation_error("begin configuration schema", error))?;
+    configuration::ensure_configuration_schema(&transaction)
+        .await
+        .map_err(|error| global_db_operation_error("initialize configuration schema", error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| global_db_operation_error("commit configuration schema", error))
 }
 
 pub(super) async fn ensure_transcript(db: &GlobalDb) -> crate::errors::Result<()> {

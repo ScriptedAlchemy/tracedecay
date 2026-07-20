@@ -31,6 +31,7 @@ use crate::sessions::{
     },
 };
 
+pub mod configuration;
 mod observation;
 mod observation_projection;
 mod observation_store;
@@ -1482,6 +1483,7 @@ impl GlobalDb {
         let db = Self::open_local(db_path, false, authority, Some(slot)).await?;
 
         schema_stages::ensure_registry(&db).await?;
+        schema_stages::ensure_configuration(&db).await?;
         schema_stages::ensure_transcript(&db).await?;
         schema_stages::ensure_observation_authority(&db).await?;
         schema_stages::ensure_composed_context(&db).await?;

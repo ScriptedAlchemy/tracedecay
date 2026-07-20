@@ -4,8 +4,10 @@
 //! persistence, query execution, policy evaluation, host integration, or async work.
 
 pub mod code_intelligence;
+pub mod configuration;
 pub mod diagnostics;
 pub mod evaluation;
+pub mod feedback;
 pub mod git;
 pub mod integration;
 pub mod memory;
@@ -16,8 +18,10 @@ pub mod retrieval;
 pub mod session;
 
 pub use code_intelligence::*;
+pub use configuration::*;
 pub use diagnostics::*;
 pub use evaluation::*;
+pub use feedback::*;
 pub use git::*;
 pub use integration::*;
 pub use memory::*;

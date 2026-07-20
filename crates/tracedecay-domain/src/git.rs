@@ -16,6 +16,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::research::time::UtcMicros;
 use crate::research::{DomainError, ManifestDigest, RepositoryId, WorktreeId, canonical_sha256};
 
+pub mod repository_state;
+
+pub use repository_state::*;
+
 /// Schema version label for the typed read-only Git intelligence payloads.
 pub const GIT_INTELLIGENCE_SCHEMA_VERSION_V1: &str = "tracedecay.git-intelligence.v1";
 

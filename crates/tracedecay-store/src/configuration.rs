@@ -1,0 +1,149 @@
+//! Persistence contracts for the revisioned configuration control plane.
+//!
+//! Concrete SQLite mechanics live in the root adapter. This crate keeps
+//! storage ports typed, append-only, and free of transport/daemon concerns.
+
+use thiserror::Error;
+use tracedecay_domain::configuration::{
+    ConfigurationAuditEvent, ConfigurationIdempotencyKey, ConfigurationReceiptId,
+    ConfigurationRevisionId, ConfigurationSnapshotV1, ProtectedChangePlan,
+};
+use tracedecay_domain::{ActorId, DomainError, ManifestDigest, UtcMicros};
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ConfigurationStoreError {
+    #[error("configuration store conflict")]
+    RevisionConflict,
+    #[error("configuration change plan expired")]
+    PlanExpired,
+    #[error("configuration change plan is stale")]
+    PlanStale,
+    #[error("configuration idempotency key conflicts with prior input")]
+    IdempotencyConflict,
+    #[error("configuration store data is invalid: {0}")]
+    InvalidData(String),
+    #[error("configuration store unavailable")]
+    Unavailable,
+}
+
+impl From<DomainError> for ConfigurationStoreError {
+    fn from(error: DomainError) -> Self {
+        Self::InvalidData(error.to_string())
+    }
+}
+
+pub type ConfigurationStoreResult<T> = Result<T, ConfigurationStoreError>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigurationRevisionRecordV1 {
+    pub revision_id: ConfigurationRevisionId,
+    pub parent_revision_id: Option<ConfigurationRevisionId>,
+    pub snapshot: ConfigurationSnapshotV1,
+    pub actor_id: ActorId,
+    pub operation_kind: String,
+    pub created_at: UtcMicros,
+}
+
+impl ConfigurationRevisionRecordV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.revision_id.validate()?;
+        self.parent_revision_id
+            .as_ref()
+            .map_or(Ok(()), ConfigurationRevisionId::validate)?;
+        self.snapshot.validate()?;
+        self.actor_id.validate()?;
+        if self.operation_kind.is_empty()
+            || self.operation_kind.trim() != self.operation_kind
+            || self.operation_kind.chars().any(char::is_control)
+        {
+            return Err(DomainError::NonCanonical {
+                field: "configuration operation kind",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigurationMutationReceiptV1 {
+    pub receipt_id: ConfigurationReceiptId,
+    pub actor_id: ActorId,
+    pub idempotency_key: ConfigurationIdempotencyKey,
+    pub base_revision_id: ConfigurationRevisionId,
+    pub result_revision_id: ConfigurationRevisionId,
+    pub operation_digest: ManifestDigest,
+    pub receipt_digest: ManifestDigest,
+    pub created_at: UtcMicros,
+}
+
+impl ConfigurationMutationReceiptV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.receipt_id.validate()?;
+        self.actor_id.validate()?;
+        self.idempotency_key.validate()?;
+        self.base_revision_id.validate()?;
+        self.result_revision_id.validate()?;
+        self.operation_digest.validate()?;
+        self.receipt_digest.validate()
+    }
+}
+
+/// Atomic write requested by the application layer. A concrete store must
+/// append the revision, receipt, plan terminal event (when applicable), and
+/// audit event in one transaction or commit none of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigurationCommitV1 {
+    pub expected_base_revision_id: ConfigurationRevisionId,
+    pub next_revision: ConfigurationRevisionRecordV1,
+    pub receipt: ConfigurationMutationReceiptV1,
+    pub change_plan: Option<ProtectedChangePlan>,
+    pub audit_event: ConfigurationAuditEvent,
+}
+
+impl ConfigurationCommitV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.expected_base_revision_id.validate()?;
+        self.next_revision.validate()?;
+        self.receipt.validate()?;
+        self.change_plan
+            .as_ref()
+            .map_or(Ok(()), ProtectedChangePlan::validate)?;
+        self.audit_event.validate()?;
+        if self.expected_base_revision_id != self.receipt.base_revision_id
+            || self.next_revision.revision_id != self.receipt.result_revision_id
+        {
+            return Err(DomainError::SnapshotMismatch {
+                field: "configuration commit revision binding",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Append-only configuration persistence contract.
+pub trait ConfigurationRevisionStore {
+    fn current_revision(&self) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1>;
+
+    fn read_revision(
+        &self,
+        revision_id: &ConfigurationRevisionId,
+    ) -> ConfigurationStoreResult<Option<ConfigurationRevisionRecordV1>>;
+
+    fn save_change_plan(&self, plan: &ProtectedChangePlan) -> ConfigurationStoreResult<()>;
+
+    fn read_change_plan(
+        &self,
+        plan_id: &tracedecay_domain::configuration::ChangePlanId,
+    ) -> ConfigurationStoreResult<Option<ProtectedChangePlan>>;
+
+    fn commit(
+        &self,
+        commit: ConfigurationCommitV1,
+    ) -> ConfigurationStoreResult<ConfigurationMutationReceiptV1>;
+
+    fn audit(
+        &self,
+        after: Option<&tracedecay_domain::configuration::ConfigurationAuditEventId>,
+        limit: usize,
+    ) -> ConfigurationStoreResult<Vec<ConfigurationAuditEvent>>;
+}
