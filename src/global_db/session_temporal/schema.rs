@@ -1179,9 +1179,22 @@ async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::
     let mut missing = conn
         .query(
             "SELECT COUNT(*)
-             FROM session_temporal_generations
-             WHERE state = 'active'
-               AND json_type(frozen_watermarks_json, '$.cursor_key') IS NOT 'object'",
+             FROM session_temporal_generations AS generation
+             WHERE generation.state = 'active'
+               AND (
+                   json_type(generation.frozen_watermarks_json, '$.cursor_key') IS NOT 'object'
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM session_query_cursor_keys AS key
+                       WHERE key.key_id = json_extract(
+                           generation.frozen_watermarks_json, '$.cursor_key.key_id'
+                       )
+                         AND key.key_version = CAST(json_extract(
+                           generation.frozen_watermarks_json, '$.cursor_key.version'
+                         ) AS INTEGER)
+                         AND key.retired_at IS NULL
+                   )
+               )",
             (),
         )
         .await
@@ -1256,8 +1269,7 @@ async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::
              '$.cursor_key',
              json_object('key_id', ?1, 'version', ?2)
          )
-         WHERE state = 'active'
-           AND json_type(frozen_watermarks_json, '$.cursor_key') IS NOT 'object'",
+         WHERE state = 'active'",
         params![key_id, key_version],
     )
     .await
