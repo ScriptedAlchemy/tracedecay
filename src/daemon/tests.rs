@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 
+#[cfg(unix)]
 use super::scheduler::{AutomationSchedulerExitBarrier, AutomationSchedulerLifecycle};
 #[cfg(unix)]
 use super::{
@@ -63,6 +64,62 @@ fn test_handshake_defaults() -> DaemonHandshake {
 #[cfg(unix)]
 fn test_automation_scheduler_handle(task: JoinHandle<()>) -> AutomationSchedulerHandle {
     AutomationSchedulerHandle::for_test(task)
+}
+
+#[cfg(unix)]
+async fn wait_for_automation_scheduler_state(
+    engine: &DaemonEngine,
+    deadline: tokio::time::Instant,
+    description: &str,
+    mut matches: impl FnMut(
+        &std::collections::HashMap<ProjectServerKey, AutomationSchedulerHandle>,
+    ) -> bool,
+) {
+    let message = format!("timed out waiting for {description}");
+    tokio::time::timeout(remaining_test_budget(deadline, &message), async {
+        loop {
+            let changed = engine.automation_scheduler_state_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let schedulers = engine
+                .store_administration
+                .automation_schedulers()
+                .lock()
+                .await;
+            if matches(&schedulers) {
+                return;
+            }
+            drop(schedulers);
+            changed.await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{message}"));
+}
+
+#[cfg(unix)]
+async fn wait_for_finished_task(
+    task: &JoinHandle<()>,
+    deadline: tokio::time::Instant,
+    description: &str,
+) {
+    let message = format!("timed out waiting for {description}");
+    tokio::time::timeout(remaining_test_budget(deadline, &message), async {
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{message}"));
+}
+
+#[cfg(unix)]
+fn remaining_test_budget(deadline: tokio::time::Instant, message: &str) -> std::time::Duration {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        panic!("{message}");
+    }
+    remaining
 }
 
 #[cfg(unix)]

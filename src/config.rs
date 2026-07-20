@@ -1004,15 +1004,12 @@ pub fn is_excluded(file_path: &str, config: &TraceDecayConfig) -> bool {
     false
 }
 
-/// Serializes lib unit tests that mutate process-wide storage env vars
-/// (`TRACEDECAY_DATA_DIR` and related HOME/profile pins). Parallel tests
-/// otherwise race on profile resolution and hook analytics paths.
-#[cfg(test)]
-pub static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Serializes test and benchmark code that mutates process-wide storage env
+/// vars (`TRACEDECAY_DATA_DIR` and related HOME/profile pins).
+static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Acquires [`USER_DATA_DIR_TEST_LOCK`], recovering even when poisoned.
-#[cfg(test)]
-pub fn lock_user_data_dir_test_env() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn lock_user_data_dir_test_env() -> std::sync::MutexGuard<'static, ()> {
     USER_DATA_DIR_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

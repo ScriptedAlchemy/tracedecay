@@ -127,6 +127,8 @@ pub(crate) struct DaemonClientSaturationResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+// Variant names are the serialized wire contract (`*_capacity_reached`); renaming is not allowed.
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum DaemonClientSaturationKind {
     ClientCapacityReached,
     PerClientCapacityReached,

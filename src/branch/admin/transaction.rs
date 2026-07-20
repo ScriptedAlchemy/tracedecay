@@ -1,4 +1,3 @@
-#[cfg(not(windows))]
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};

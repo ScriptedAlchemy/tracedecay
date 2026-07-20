@@ -5,16 +5,26 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 
 use super::{
-    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake, binary_version,
-    client_connection, connect_to_daemon_connection, connect_to_daemon_connection_within,
-    connect_with_restart_grace, connection_for_socket_path, default_available_socket_path,
-    log_daemon_event, next_daemon_response_line, version_skew_action, write_daemon_preamble,
+    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
+    PROJECT_WARMING_RETRY_HINT, client_connection, connect_to_daemon_connection,
+    connect_to_daemon_connection_within, default_available_socket_path, next_daemon_response_line,
+    write_daemon_preamble,
+};
+#[cfg(unix)]
+use super::{
+    binary_version, connect_with_restart_grace, connection_for_socket_path, log_daemon_event,
+    version_skew_action,
 };
 use crate::errors::{Result, TraceDecayError};
-use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport};
+#[cfg(unix)]
+use crate::mcp::{ErrorCode, JsonRpcResponse};
+use crate::mcp::{JsonRpcRequest, McpTransport, StdioTransport};
+
+const PROJECT_WARMING_RETRY_GRACE: Duration = Duration::from_secs(2);
+const PROJECT_WARMING_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
 ///
@@ -246,7 +256,7 @@ pub(crate) async fn proxy_request_line_to_daemon(
         return Ok(ProxyInitializeMetadata::default());
     }
 
-    match send_daemon_request_line(socket_path, handshake, line).await {
+    match send_daemon_request_line_with_project_warming_retry(socket_path, handshake, line).await {
         Ok(responses) => {
             let metadata = proxy_initialize_metadata(line, &responses);
             if let Some(warning) = daemon_version_skew_warning(line, &responses, binary_version()) {
@@ -294,6 +304,40 @@ pub(crate) async fn send_daemon_request_line(
         None,
     )
     .await
+}
+
+fn responses_are_project_warming(responses: &[String]) -> bool {
+    responses.len() == 1
+        && serde_json::from_str::<serde_json::Value>(&responses[0])
+            .ok()
+            .and_then(|response| {
+                response
+                    .get("error")?
+                    .get("message")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .is_some_and(|message| message.contains(PROJECT_WARMING_RETRY_HINT))
+}
+
+async fn send_daemon_request_line_with_project_warming_retry(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    line: &str,
+) -> Result<Vec<String>> {
+    let deadline = Instant::now() + PROJECT_WARMING_RETRY_GRACE;
+    let mut responses = send_daemon_request_line(socket_path, handshake, line).await?;
+    while responses_are_project_warming(&responses) {
+        let Some(remaining) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+        else {
+            break;
+        };
+        tokio::time::sleep(remaining.min(PROJECT_WARMING_RETRY_INTERVAL)).await;
+        responses = send_daemon_request_line(socket_path, handshake, line).await?;
+    }
+    Ok(responses)
 }
 
 pub(crate) async fn send_daemon_request_line_with_liveness_poll(
@@ -485,7 +529,9 @@ async fn proxy_one_request(
     if line.trim().is_empty() {
         return Ok(());
     }
-    for response in send_daemon_request_line(socket_path, handshake, line).await? {
+    for response in
+        send_daemon_request_line_with_project_warming_retry(socket_path, handshake, line).await?
+    {
         transport.write_line(&response).await?;
         if !response.ends_with('\n') {
             transport.write_line("\n").await?;

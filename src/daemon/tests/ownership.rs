@@ -236,11 +236,15 @@ async fn interrupted_post_insert_activation_retains_maintenance_ownership() {
         matches!(cancellation, Err(error) if error.is_cancelled()),
         "requesting future must actually be cancelled"
     );
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
         while engine
             .automation_config_probe_attempts
             .load(std::sync::atomic::Ordering::Relaxed)
             == 0
+            || engine
+                .memory_repair_start_attempts
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 0
         {
             tokio::task::yield_now().await;
         }
@@ -675,22 +679,13 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
     let shutdown = tokio::spawn(async move {
         shutdown_engine.shutdown_all().await;
     });
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if engine
-                .store_administration
-                .automation_schedulers()
-                .lock()
-                .await
-                .is_empty()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("shutdown did not drain automation ownership");
+    wait_for_automation_scheduler_state(
+        &engine,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        "shutdown automation ownership drain",
+        |schedulers| schedulers.is_empty(),
+    )
+    .await;
 
     assert!(
         !shutdown.is_finished(),
@@ -1200,7 +1195,7 @@ async fn released_repair_tombstone_allows_one_eventual_replacement() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn released_automation_tombstone_allows_one_eventual_replacement() {
     use crate::automation::scheduler::{AutomationSchedulerControl, save_scheduler_control};
     use crate::dashboard::AutomationSchedulerReconcileOutcome;
@@ -1238,7 +1233,10 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
 
     let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
-    started_rx.await.expect("noncooperative owner started");
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        .await
+        .expect("noncooperative owner start timed out")
+        .expect("noncooperative owner start sender dropped");
     let engine = DaemonEngine::default();
     engine
         .store_administration
@@ -1247,23 +1245,46 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
         .await
         .insert(old.clone(), test_automation_scheduler_handle(task));
 
-    let timed_out = tokio::time::timeout(
-        std::time::Duration::from_secs(4),
-        engine.rekey_project_maintenance(
-            &old,
-            new.clone(),
-            project.clone(),
-            handshake.clone(),
-            true,
-        ),
+    let retirement_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    let retirement = {
+        let engine = engine.clone();
+        let old = old.clone();
+        let new = new.clone();
+        let project = project.clone();
+        let handshake = handshake.clone();
+        tokio::spawn(async move {
+            engine
+                .rekey_project_maintenance(&old, new, project, handshake, true)
+                .await
+        })
+    };
+    wait_for_automation_scheduler_state(
+        &engine,
+        retirement_deadline,
+        "retiring scheduler tombstone",
+        |schedulers| {
+            schedulers
+                .get(&old)
+                .is_some_and(|owner| owner.lifecycle == AutomationSchedulerLifecycle::Retiring)
+        },
     )
     .await;
+    let timed_out = tokio::time::timeout(
+        remaining_test_budget(
+            retirement_deadline,
+            "initial scheduler retirement did not finish",
+        ),
+        retirement,
+    )
+    .await
+    .expect("initial scheduler retirement did not finish")
+    .expect("initial scheduler retirement task panicked");
     let reconcile = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         engine.ensure_automation_scheduler(new.clone(), project.clone(), handshake.clone()),
     )
     .await
-    .ok();
+    .expect("scheduler reconcile did not observe the retiring tombstone");
     let no_overlap = {
         let schedulers = engine
             .store_administration
@@ -1274,18 +1295,60 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     };
 
     release.release();
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(2), completed_rx).await;
-    let replaced = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        engine.rekey_project_maintenance(
-            &old,
-            new.clone(),
-            project.clone(),
-            handshake.clone(),
-            true,
+    let release_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    tokio::time::timeout(
+        remaining_test_budget(
+            release_deadline,
+            "noncooperative owner completion timed out",
         ),
+        completed_rx,
+    )
+    .await
+    .expect("noncooperative owner completion timed out")
+    .expect("noncooperative owner completion sender dropped");
+    wait_for_automation_scheduler_state(
+        &engine,
+        release_deadline,
+        "released scheduler tombstone",
+        |schedulers| !schedulers.contains_key(&old),
     )
     .await;
+    let replacement_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let replacement = {
+        let engine = engine.clone();
+        let old = old.clone();
+        let new = new.clone();
+        let project = project.clone();
+        let handshake = handshake.clone();
+        tokio::spawn(async move {
+            engine
+                .rekey_project_maintenance(&old, new, project, handshake, true)
+                .await
+        })
+    };
+    wait_for_automation_scheduler_state(
+        &engine,
+        replacement_deadline,
+        "one live replacement scheduler",
+        |schedulers| {
+            schedulers.len() == 1
+                && schedulers
+                    .get(&new)
+                    .and_then(|owner| owner.task.as_ref())
+                    .is_some_and(|task| !task.is_finished())
+        },
+    )
+    .await;
+    let replaced = tokio::time::timeout(
+        remaining_test_budget(
+            replacement_deadline,
+            "replacement rekey did not finish after owner publication",
+        ),
+        replacement,
+    )
+    .await
+    .expect("replacement rekey did not finish after owner publication")
+    .expect("replacement rekey task panicked");
     let (owner_count, owns_new, live_replacement) = {
         let schedulers = engine
             .store_administration
@@ -1303,23 +1366,13 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     };
     engine.shutdown_all().await;
 
-    assert_eq!(
-        timed_out,
-        Ok(super::super::MaintenanceRekeyOutcome::Retiring)
-    );
-    assert_eq!(
-        reconcile,
-        Some(AutomationSchedulerReconcileOutcome::Retiring)
-    );
+    assert_eq!(timed_out, super::super::MaintenanceRekeyOutcome::Retiring);
+    assert_eq!(reconcile, AutomationSchedulerReconcileOutcome::Retiring);
     assert!(
         no_overlap,
         "replacement must not overlap the retiring owner"
     );
-    assert!(completed.is_ok(), "noncooperative owner was not released");
-    assert_eq!(
-        replaced,
-        Ok(super::super::MaintenanceRekeyOutcome::Completed)
-    );
+    assert_eq!(replaced, super::super::MaintenanceRekeyOutcome::Completed);
     assert_eq!(owner_count, 1, "exactly one scheduler owner must remain");
     assert!(owns_new, "the released tombstone must permit replacement");
     assert!(

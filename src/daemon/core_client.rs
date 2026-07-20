@@ -7,14 +7,18 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant, timeout};
 
+#[cfg(unix)]
+use super::unavailable_error;
 use super::{
     BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonEndpoint, DaemonHandshake,
-    JsonRpcRequest, JsonRpcResponse, Result, TraceDecayError, authority, cold_doctor_runtime_value,
-    default_socket_path, doctor_runtime_tool_result, unavailable_error,
+    JsonRpcRequest, JsonRpcResponse, PROJECT_WARMING_RETRY_HINT, Result, TraceDecayError,
+    authority, cold_doctor_runtime_value, default_socket_path, doctor_runtime_tool_result,
 };
 
 pub(crate) const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+const PROJECT_WARMING_RETRY_GRACE: Duration = Duration::from_secs(2);
+const PROJECT_WARMING_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How long daemon clients keep retrying a failed connect before giving up.
 ///
@@ -419,13 +423,55 @@ pub async fn call_tool_within(
     .await
 }
 
+fn is_project_warming_error(error: &TraceDecayError) -> bool {
+    error.to_string().contains(PROJECT_WARMING_RETRY_HINT)
+}
+
+async fn call_tool_with_project_warming_retry(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    deadline: Instant,
+) -> Result<serde_json::Value> {
+    loop {
+        match call_tool_within(
+            socket_path,
+            handshake,
+            tool_name,
+            arguments.clone(),
+            deadline,
+        )
+        .await
+        {
+            Err(error) if is_project_warming_error(&error) => {
+                let remaining = DaemonClientDeadline::until(deadline)?.remaining()?;
+                tokio::time::sleep(remaining.min(PROJECT_WARMING_RETRY_INTERVAL)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 pub async fn call_default_tool(
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
-    call_tool(&socket_path, handshake, tool_name, arguments).await
+    match call_tool(&socket_path, handshake, tool_name, arguments.clone()).await {
+        Err(error) if is_project_warming_error(&error) => {
+            call_tool_with_project_warming_retry(
+                &socket_path,
+                handshake,
+                tool_name,
+                arguments,
+                Instant::now() + PROJECT_WARMING_RETRY_GRACE,
+            )
+            .await
+        }
+        result => result,
+    }
 }
 
 pub async fn call_default_tool_within(
@@ -435,7 +481,8 @@ pub async fn call_default_tool_within(
     deadline: Instant,
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
-    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
+    call_tool_with_project_warming_retry(&socket_path, handshake, tool_name, arguments, deadline)
+        .await
 }
 
 pub async fn call_default_doctor_runtime(

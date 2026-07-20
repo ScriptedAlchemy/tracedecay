@@ -268,7 +268,7 @@ async fn notify_kiro_post_tool_use(event_json: &str, telemetry: &super::analytic
     let Some(project_root) = kiro_project_root(event_json) else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::has_initialized_store(&project_root).await {
+    if !crate::tracedecay::TraceDecay::is_initialized(&project_root) {
         return;
     }
     let rel_paths = kiro_post_tool_use_rel_paths(event_json, &project_root);

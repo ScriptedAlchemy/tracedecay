@@ -320,7 +320,12 @@ async fn disabled_finished_scheduler_reenables_with_a_fresh_owner() {
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
     save_scheduled_automation(&dashboard_root, false).await;
     let finished = tokio::spawn(async {});
-    tokio::task::yield_now().await;
+    wait_for_finished_task(
+        &finished,
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(2),
+        "finished scheduler task",
+    )
+    .await;
     assert!(finished.is_finished());
     let engine = DaemonEngine::default();
     engine
@@ -373,15 +378,30 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
     .expect("project init");
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     save_scheduled_automation(&dashboard_root, true).await;
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &client_identity.profile_root,
+        1,
+        "concurrent-reenable-test",
+    )
+    .expect("daemon database scope");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
         ..test_handshake_defaults()
     };
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    let finished = tokio::spawn(async {});
-    tokio::task::yield_now().await;
+    let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+    let finished = tokio::spawn(async move {
+        let _ = finished_tx.send(());
+    });
+    tokio::time::timeout(tokio::time::Duration::from_secs(2), finished_rx)
+        .await
+        .expect("finished owner barrier timed out")
+        .expect("finished owner barrier sender dropped");
     let engine = DaemonEngine::default();
+    engine
+        .automation_configured_override
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     engine
         .store_administration
         .automation_schedulers()
@@ -389,14 +409,54 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
         .await
         .insert(key.clone(), test_automation_scheduler_handle(finished));
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        tokio::join!(
-            engine.ensure_automation_scheduler(key.clone(), project.clone(), handshake.clone()),
-            engine.ensure_automation_scheduler(key.clone(), project, handshake)
-        );
-    })
+    let reenable_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(4);
+    let (first_completed_tx, first_completed_rx) = tokio::sync::oneshot::channel();
+    let first = {
+        let engine = engine.clone();
+        let key = key.clone();
+        let project = project.clone();
+        let handshake = handshake.clone();
+        tokio::spawn(async move {
+            let outcome = engine
+                .ensure_automation_scheduler(key, project, handshake)
+                .await;
+            let _ = first_completed_tx.send(());
+            outcome
+        })
+    };
+    let (second_completed_tx, second_completed_rx) = tokio::sync::oneshot::channel();
+    let second = {
+        let engine = engine.clone();
+        let key = key.clone();
+        tokio::spawn(async move {
+            let outcome = engine
+                .ensure_automation_scheduler(key, project, handshake)
+                .await;
+            let _ = second_completed_tx.send(());
+            outcome
+        })
+    };
+
+    tokio::time::timeout(
+        remaining_test_budget(
+            reenable_deadline,
+            "timed out waiting for concurrent re-enable completion",
+        ),
+        async { tokio::try_join!(first_completed_rx, second_completed_rx) },
+    )
     .await
-    .expect("concurrent re-enable must not deadlock");
+    .expect("timed out waiting for concurrent re-enable completion")
+    .expect("concurrent re-enable completion sender dropped");
+    let (first, second) = tokio::time::timeout(
+        remaining_test_budget(
+            reenable_deadline,
+            "concurrent re-enable tasks did not finish after owner publication",
+        ),
+        async { tokio::try_join!(first, second) },
+    )
+    .await
+    .expect("concurrent re-enable tasks did not finish after owner publication")
+    .expect("concurrent re-enable task panicked");
 
     let schedulers = engine
         .store_administration
@@ -415,6 +475,17 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
     );
     drop(schedulers);
     engine.shutdown_all().await;
+
+    assert!(matches!(
+        (first, second),
+        (
+            crate::dashboard::AutomationSchedulerReconcileOutcome::Started,
+            crate::dashboard::AutomationSchedulerReconcileOutcome::RunningNotified
+        ) | (
+            crate::dashboard::AutomationSchedulerReconcileOutcome::RunningNotified,
+            crate::dashboard::AutomationSchedulerReconcileOutcome::Started
+        )
+    ));
 }
 
 #[cfg(unix)]
@@ -699,23 +770,13 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
         opens_before,
         "profile reconcile must not open uncached projects"
     );
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if engine
-                .store_administration
-                .automation_schedulers()
-                .lock()
-                .await
-                .len()
-                == 2
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("profile scheduler broadcast timed out");
+    wait_for_automation_scheduler_state(
+        &engine,
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(4),
+        "profile scheduler broadcast",
+        |schedulers| schedulers.len() == 2,
+    )
+    .await;
 
     drop(first_server);
     drop(second_server);
@@ -805,7 +866,12 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
     .expect("save automation config");
 
     let finished = tokio::spawn(async {});
-    tokio::task::yield_now().await;
+    wait_for_finished_task(
+        &finished,
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(2),
+        "finished scheduler task",
+    )
+    .await;
     assert!(finished.is_finished());
     engine
         .store_administration
@@ -840,22 +906,13 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
         report["outcome"], "started",
         "a finished handle must not be reported as a successful notification"
     );
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if engine
-                .store_administration
-                .automation_schedulers()
-                .lock()
-                .await
-                .contains_key(&key)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("automation scheduler reconciliation timed out");
+    wait_for_automation_scheduler_state(
+        &engine,
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(4),
+        "automation scheduler reconciliation",
+        |schedulers| schedulers.contains_key(&key),
+    )
+    .await;
 
     let schedulers = engine
         .store_administration

@@ -37,8 +37,10 @@ pub use ingest::{
 };
 pub(crate) use ingest::{ingest_for_project_capped_with_admission, ingest_legacy_pinned_profile};
 
+#[cfg(all(test, windows))]
+pub(crate) use coverage::sqlite_incarnation;
 #[cfg(test)]
-pub(crate) use coverage::{admit_rows, drain_hermes_projections, sqlite_incarnation};
+pub(crate) use coverage::{admit_rows, drain_hermes_projections};
 #[cfg(test)]
 pub(crate) use observation::{
     HermesAdmissionAction, HermesObservationRecord, HermesProjectionMetadata,

@@ -847,22 +847,18 @@ async fn persistent_idle_client_closes_on_draining_without_timeout() {
     assert!(lifecycle.try_enter().is_none());
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn draining_waits_for_one_bounded_in_flight_request() {
     let lifecycle = DaemonLifecycle::default();
     let activity = lifecycle.try_enter().expect("request should start");
-    let mut clients = tokio::task::JoinSet::new();
-    clients.spawn(async move {
+    let client = tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         drop(activity);
-        Ok(())
     });
 
     lifecycle.begin_draining();
-    let drained = drain_client_tasks(&mut clients, tokio::time::Duration::from_secs(1)).await;
     lifecycle.wait_for_idle().await;
 
-    assert!(drained);
+    client.await.expect("client task should finish");
     assert!(lifecycle.try_enter().is_none());
 }

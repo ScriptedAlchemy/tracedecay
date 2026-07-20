@@ -11,9 +11,7 @@ use tokio::time::Duration;
 /// being killed with `SIGKILL` mid-checkpoint.
 #[cfg(unix)]
 pub(crate) const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
-#[cfg(unix)]
 pub(crate) const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
-#[cfg(unix)]
 pub(crate) const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Default)]
@@ -71,7 +69,6 @@ impl DaemonLifecycle {
         }
     }
 
-    #[cfg(unix)]
     pub(crate) async fn wait_for_idle(&self) {
         loop {
             let notified = self.inner.idle.notified();

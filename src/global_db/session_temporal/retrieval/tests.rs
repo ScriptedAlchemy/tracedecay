@@ -8,7 +8,6 @@ use super::candidates::*;
 use super::cursors::*;
 use super::queries::*;
 use super::records::*;
-use super::rows::*;
 use super::*;
 use crate::global_db::{GlobalDb, GlobalDbReadSnapshot};
 use crate::query::temporal::candidates::CandidateChannel;

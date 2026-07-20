@@ -100,7 +100,7 @@ async fn notify_post_tool_use_inner(
     let Some(root) = crate::config::discover_project_root_with_identity(&cwd).await else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
+    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         return;
     }
 

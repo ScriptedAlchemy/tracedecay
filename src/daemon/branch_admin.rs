@@ -648,7 +648,6 @@ impl StoreAdministration {
         }
     }
 
-    #[cfg(unix)]
     pub(super) async fn reconcile_cached_automation_for_profile(
         &self,
         profile_root: &Path,

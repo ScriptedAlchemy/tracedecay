@@ -564,7 +564,7 @@ pub async fn combined_session_memory_digest(
     if !memory_injection_enabled() {
         return None;
     }
-    let project = if crate::tracedecay::TraceDecay::has_initialized_store(root).await {
+    let project = if crate::tracedecay::TraceDecay::is_initialized(root) {
         select_digest_facts(digest_candidates(root).await, SESSION_DIGEST_FACT_COUNT)
     } else {
         Vec::new()
@@ -739,7 +739,7 @@ async fn regenerate_cursor_memory_rule_with_home(root: &Path, home: &Path) -> bo
     if !plugin_dir.join(".cursor-plugin/plugin.json").exists() {
         return false;
     }
-    let facts = if crate::tracedecay::TraceDecay::has_initialized_store(root).await {
+    let facts = if crate::tracedecay::TraceDecay::is_initialized(root) {
         select_digest_facts(digest_candidates(root).await, SESSION_DIGEST_FACT_COUNT)
     } else {
         Vec::new()

@@ -7,9 +7,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 
 use super::{
-    BrokerStream, DaemonHandshake, JsonRpcRequest, SOCKET_ENV, connection_for_socket_path,
-    current_daemon_connection, write_daemon_preamble,
+    BrokerStream, DaemonHandshake, JsonRpcRequest, current_daemon_connection, write_daemon_preamble,
 };
+#[cfg(unix)]
+use super::{SOCKET_ENV, connection_for_socket_path};
 
 /// A domain-catalogued host whose lifecycle hooks notify the daemon.
 pub use tracedecay_domain::HostIntegrationIdV1 as HookAgent;

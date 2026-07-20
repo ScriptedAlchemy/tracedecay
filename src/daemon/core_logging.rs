@@ -1,9 +1,12 @@
 //! Daemon log formatting and git-watcher event recovery for `tracedecay doctor`.
 
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use super::{Path, SERVICE_NAME, TraceDecayError};
+#[cfg(unix)]
+use super::SERVICE_NAME;
+use super::{Path, TraceDecayError};
 /// A single git-watcher lifecycle event recovered from the daemon log, for the
 /// `tracedecay doctor` watcher-health section.
 #[cfg(unix)]

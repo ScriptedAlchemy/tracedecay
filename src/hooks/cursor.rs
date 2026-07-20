@@ -347,7 +347,7 @@ fn cursor_session_start_hook_event(parsed: &Value) -> Option<crate::daemon::Daem
 /// always-on plugin rule cannot know.
 async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
     let (initialized, staleness, tokens_saved) = match root {
-        Some(r) if crate::tracedecay::TraceDecay::has_initialized_store(r).await => {
+        Some(r) if crate::tracedecay::TraceDecay::is_initialized(r) => {
             let (staleness, tokens_saved) = cursor_index_signals_for_root(r).await;
             (true, staleness, tokens_saved)
         }
@@ -515,7 +515,7 @@ async fn deduped_cursor_hint_for_initialized_store(
     hint: ToolHint,
 ) -> Option<ToolHint> {
     let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
-    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
+    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         record_hint_analytics(
             Some(&root),
             "suppressed_uninitialized",
@@ -710,7 +710,7 @@ async fn notify_cursor_after_file_edit(
     let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
+    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         return;
     }
     let rels = cursor_after_file_edit_rel_paths(event_json, &root);
@@ -741,7 +741,7 @@ async fn notify_cursor_after_shell_event(
     let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
+    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         return;
     }
     let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
@@ -762,7 +762,7 @@ async fn notify_cursor_workspace_open(
     let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
+    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         return;
     }
     super::notify_hook_event_with_telemetry(

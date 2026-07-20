@@ -728,9 +728,7 @@ where
             continue;
         };
         let exact_root = same_local_path(&manifest.project_root, project_root);
-        if manifest.project_id.is_some()
-            && manifest.project_id.as_deref() == excluded_project_id
-        {
+        if manifest.project_id.is_some() && manifest.project_id.as_deref() == excluded_project_id {
             selected_manifest_matches_exact_root |= exact_root;
             continue;
         }

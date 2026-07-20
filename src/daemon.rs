@@ -15,7 +15,9 @@ use tokio::net::UnixStream;
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
-use tokio::time::{Duration, timeout};
+#[cfg(any(unix, test))]
+use tokio::time::Duration;
+use tokio::time::timeout;
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
@@ -44,6 +46,8 @@ use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint}
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
+pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
+    "is warming in the background; retry the same tool shortly";
 #[cfg(unix)]
 const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 #[cfg(unix)]
@@ -474,6 +478,8 @@ struct DaemonEngine {
     memory_repair_start_attempts: Arc<AtomicUsize>,
     #[cfg(test)]
     automation_config_probe_attempts: Arc<AtomicUsize>,
+    #[cfg(test)]
+    automation_configured_override: Arc<AtomicBool>,
     #[cfg(test)]
     automation_scheduler_exit_barrier:
         Arc<tokio::sync::Mutex<Option<Arc<scheduler::AutomationSchedulerExitBarrier>>>>,
@@ -1923,36 +1929,34 @@ async fn serve_broker_socket_client(
     }
     let server = if let Some(project_path) = handshake.project_path.as_ref() {
         let mut project_open = engine.spawn_direct_project_server_open(handshake.clone());
-        let server = match tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            &mut project_open,
-        )
-        .await
-        {
-            Ok(Ok(Ok(server))) => server,
-            Ok(Ok(Err(error))) => {
-                write_project_open_error(&mut transport, &first_request_line, &error).await?;
-                return Err(error);
-            }
-            Ok(Err(error)) => {
-                let error = TraceDecayError::Config {
-                    message: format!("project warm-up task failed: {error}"),
-                };
-                write_project_open_error(&mut transport, &first_request_line, &error).await?;
-                return Err(error);
-            }
-            Err(_) => {
-                let error = TraceDecayError::Config {
-                    message: format!(
-                        "TraceDecay project '{}' is warming in the background; retry the same tool shortly",
-                        project_path.display()
-                    ),
-                };
-                drop(setup_activity);
-                write_project_open_error(&mut transport, &first_request_line, &error).await?;
-                return Ok(());
-            }
-        };
+        let server =
+            match tokio::time::timeout(std::time::Duration::from_millis(500), &mut project_open)
+                .await
+            {
+                Ok(Ok(Ok(server))) => server,
+                Ok(Ok(Err(error))) => {
+                    write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                    return Err(error);
+                }
+                Ok(Err(error)) => {
+                    let error = TraceDecayError::Config {
+                        message: format!("project warm-up task failed: {error}"),
+                    };
+                    write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                    return Err(error);
+                }
+                Err(_) => {
+                    let error = TraceDecayError::Config {
+                        message: format!(
+                            "TraceDecay project '{}' {PROJECT_WARMING_RETRY_HINT}",
+                            project_path.display(),
+                        ),
+                    };
+                    drop(setup_activity);
+                    write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                    return Ok(());
+                }
+            };
         Some(server)
     } else {
         None
@@ -2032,6 +2036,8 @@ async fn serve_windows_broker_client(
 }
 
 #[cfg(any(not(unix), test))]
+// Cohesive per-connection serving context; bundling into a params struct would churn every caller.
+#[allow(clippy::too_many_arguments)]
 async fn serve_windows_broker_client_with_class(
     stream: BrokerStream,
     auth_token: &str,

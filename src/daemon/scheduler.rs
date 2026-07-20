@@ -483,23 +483,33 @@ impl DaemonEngine {
         #[cfg(test)]
         self.automation_config_probe_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let configured = match Box::pin(automation_scheduler_has_work_for_project(
-            &project_path,
-            &handshake,
-        ))
-        .await
-        {
-            Ok(configured) => configured,
-            Err(e) => {
-                log_daemon_event(
-                    "scheduler_config",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("outcome", "error".to_string()),
-                        ("error", e.to_string()),
-                    ],
-                );
-                return AutomationSchedulerReconcileOutcome::NotConfigured;
+        #[cfg(test)]
+        let forced_configured = self
+            .automation_configured_override
+            .load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let forced_configured = false;
+        let configured = if forced_configured {
+            true
+        } else {
+            match Box::pin(automation_scheduler_has_work_for_project(
+                &project_path,
+                &handshake,
+            ))
+            .await
+            {
+                Ok(configured) => configured,
+                Err(e) => {
+                    log_daemon_event(
+                        "scheduler_config",
+                        &[
+                            ("project", project_path.display().to_string()),
+                            ("outcome", "error".to_string()),
+                            ("error", e.to_string()),
+                        ],
+                    );
+                    return AutomationSchedulerReconcileOutcome::NotConfigured;
+                }
             }
         };
         if !configured {
@@ -806,10 +816,14 @@ impl DaemonEngine {
                 Arc::clone(&handle.termination),
             )
         };
+        #[cfg(test)]
+        self.automation_scheduler_state_changed.notify_waiters();
         if let Some((owner, task)) = task {
             let completed = Arc::clone(&completion);
             let reaper_administration = self.store_administration.clone();
             let reaper_owner = owner.clone();
+            #[cfg(test)]
+            let state_changed = Arc::clone(&self.automation_scheduler_state_changed);
             self.store_administration.spawn_retirement_reaper(
                 reservation,
                 MaintenanceReaperKind::Automation,
@@ -827,6 +841,8 @@ impl DaemonEngine {
                             schedulers.remove(&reaper_owner);
                         }
                     }
+                    #[cfg(test)]
+                    state_changed.notify_waiters();
                 },
             );
         }

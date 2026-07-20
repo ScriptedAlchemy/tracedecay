@@ -494,6 +494,94 @@ async fn proxied_request_survives_daemon_restart_window() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn proxy_retries_bounded_project_warming_responses() {
+    let dir = TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let daemon = tokio::spawn(async move {
+        for response_kind in 0..2 {
+            let (stream, _addr) = listener.accept().await.expect("accept proxied client");
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(reader).lines();
+            let handshake_line = lines
+                .next_line()
+                .await
+                .expect("read handshake")
+                .expect("handshake line");
+            DaemonHandshake::from_line(&handshake_line).expect("parse handshake");
+            let request_line = lines
+                .next_line()
+                .await
+                .expect("read request")
+                .expect("request line");
+            let request: Value = serde_json::from_str(&request_line).expect("request json");
+            let response = if response_kind == 0 {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": {
+                        "code": -32603,
+                        "message": "config error: TraceDecay project '/tmp/project' is warming in the background; retry the same tool shortly"
+                    }
+                })
+            } else {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": { "generation": 2 }
+                })
+            };
+            writer
+                .write_all(
+                    serde_json::to_string(&response)
+                        .expect("response json")
+                        .as_bytes(),
+                )
+                .await
+                .expect("write response");
+            writer.write_all(b"\n").await.expect("write newline");
+            writer.shutdown().await.expect("shutdown fake daemon");
+        }
+    });
+
+    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let proxy_socket = socket.clone();
+    let proxy = tokio::spawn(async move {
+        super::super::proxy_transport_to_daemon(
+            &proxy_socket,
+            &test_handshake_defaults(),
+            None,
+            &mut transport,
+        )
+        .await
+    });
+
+    sender
+        .send(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 41,
+                "method": "tools/call"
+            }))
+            .expect("request json"),
+        )
+        .expect("send request");
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("proxy response timed out")
+        .expect("proxy response");
+    let response: Value = serde_json::from_str(response.trim()).expect("response json");
+    assert_eq!(response["result"]["generation"], json!(2));
+
+    drop(sender);
+    await_test_task(proxy, "warming retry proxy task")
+        .await
+        .expect("proxy transport");
+    await_test_task(daemon, "warming retry daemon task").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn long_lived_proxy_reconnects_after_daemon_socket_rebind() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");

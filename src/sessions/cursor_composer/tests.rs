@@ -1,26 +1,17 @@
 use super::capture::*;
-use super::ingest::*;
+#[cfg(windows)]
+use super::ingest::snapshot_generation;
 use super::observation::normalize_cursor_composer_envelope_observation;
 use super::sqlite::*;
 use super::store::*;
 use super::*;
 
-use std::fmt::Write as _;
-
-use libsql::{Builder, OpenFlags};
+use libsql::Builder;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::{CanonicalObservationFactV1, CanonicalWorkflowSemanticKindV1};
-use tracedecay_domain::{
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ProviderId, SessionId,
-};
-use tracedecay_store::ObservationPersistOutcome;
+use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 
-use crate::privacy::MAX_OBSERVATION_RECORD_BYTES;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
-use crate::sessions::snapshot_observation::MAX_SNAPSHOT_METADATA_BYTES;
-use crate::sessions::source::MAX_JSONL_RECORD_BYTES;
 
 #[cfg(windows)]
 #[test]

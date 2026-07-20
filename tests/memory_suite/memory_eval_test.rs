@@ -375,6 +375,7 @@ fn query_scalar(fixture: &Fixture, sql: &str) -> i64 {
     let db_path = fixture.db_path();
     runtime().block_on(async move {
         let db = libsql::Builder::new_local(&db_path)
+            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .build()
             .await
             .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
@@ -397,6 +398,7 @@ fn fact_ids_by_source(fixture: &Fixture) -> HashMap<String, HashSet<i64>> {
     let db_path = fixture.db_path();
     runtime().block_on(async move {
         let db = libsql::Builder::new_local(&db_path)
+            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .build()
             .await
             .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
