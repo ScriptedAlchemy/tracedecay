@@ -516,7 +516,9 @@ async fn transport_selects_one_service_and_all_registered_never_invokes() {
         json!({"query": "database backup", "format": "json"}),
     )
     .await;
-    assert_eq!(project["outcome"], "unavailable");
+    // A fresh root with no active generations is empty (zero hits), not
+    // unavailable: refresh is a separate explicit durable operation.
+    assert_eq!(project["outcome"], "complete_zero");
     assert_eq!(
         server
             .project_session_retrieval_calls
@@ -537,7 +539,7 @@ async fn transport_selects_one_service_and_all_registered_never_invokes() {
         }),
     )
     .await;
-    assert_eq!(profile["outcome"], "unavailable");
+    assert_eq!(profile["outcome"], "complete_zero");
     assert_eq!(
         server
             .project_session_retrieval_calls
