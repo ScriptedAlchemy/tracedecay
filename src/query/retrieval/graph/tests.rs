@@ -48,7 +48,6 @@ fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {
 
 fn base_request(max_candidates_per_lane: u32) -> RetrievalRequest {
     RetrievalRequest {
-        query: "callers of reserve_stock".to_owned(),
         principal: id::<PrincipalId>("principal.fixture"),
         scope: RetrievalScope {
             privacy_domain: id("privacy.fixture"),
@@ -128,6 +127,7 @@ fn graph_pair(
         repository_id: None,
         session_or_thread_id: None,
         logical_copy_cluster_id: None,
+        logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
         retriever: RetrieverKind::Graph,
         retriever_revision: id("retriever.graph.v1"),

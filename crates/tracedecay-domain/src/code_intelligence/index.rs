@@ -10,14 +10,14 @@
 
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::research::DomainError;
 use crate::research::id::{
     CommitId, ManifestDigest, PrivacyDomainId, RefId, RepositoryId, RetrievalAnchorId,
     SanitizationReceiptId, WorktreeId,
 };
 use crate::research::time::UtcMicros;
+use crate::research::{DomainError, canonical_sha256};
 
 use super::identity::{
     ChunkerRevision, CodeGenerationId, CodeSearchChunkId, ContentDigest, ExtractorRevision,
@@ -195,11 +195,14 @@ pub enum IntakeRejectionV1 {
 /// The sealed manifest of one immutable logical generation (Plan 25:
 /// generations are planned, sealed, digested, and never mutated after
 /// publication).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeGenerationManifestV1 {
     pub generation_id: CodeGenerationId,
     pub snapshot_digest: ManifestDigest,
+    /// Canonical digest of every input that controls incremental invalidation
+    /// and therefore the generation's immutable publication fence.
+    pub invalidation_digest: ManifestDigest,
     pub registry_revision: LanguageRegistryRevision,
     pub grammar_revisions: Vec<(LanguageId, GrammarRevision)>,
     pub extractor_revisions: Vec<(LanguageId, ExtractorRevision)>,
@@ -209,6 +212,70 @@ pub struct CodeGenerationManifestV1 {
     pub privacy_key_epoch: u64,
     pub parent_generation: Option<CodeGenerationId>,
     pub seal: GenerationSealV1,
+}
+
+const LEGACY_GENERATION_INVALIDATION_DIGEST_DOMAIN: &str =
+    "tracedecay.code-generation-legacy-v1-migration.v1";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeGenerationManifestWireV1 {
+    generation_id: CodeGenerationId,
+    snapshot_digest: ManifestDigest,
+    #[serde(default)]
+    invalidation_digest: Option<ManifestDigest>,
+    registry_revision: LanguageRegistryRevision,
+    grammar_revisions: Vec<(LanguageId, GrammarRevision)>,
+    extractor_revisions: Vec<(LanguageId, ExtractorRevision)>,
+    sanitizer_revision: SanitizerRevision,
+    chunker_revision: ChunkerRevision,
+    privacy_domain: PrivacyDomainId,
+    privacy_key_epoch: u64,
+    parent_generation: Option<CodeGenerationId>,
+    seal: GenerationSealV1,
+}
+
+impl<'de> Deserialize<'de> for CodeGenerationManifestV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = CodeGenerationManifestWireV1::deserialize(deserializer)?;
+        let needs_legacy_migration = wire.invalidation_digest.is_none();
+        let mut manifest = Self {
+            generation_id: wire.generation_id,
+            snapshot_digest: wire.snapshot_digest,
+            invalidation_digest: wire
+                .invalidation_digest
+                .unwrap_or_else(zero_manifest_digest),
+            registry_revision: wire.registry_revision,
+            grammar_revisions: wire.grammar_revisions,
+            extractor_revisions: wire.extractor_revisions,
+            sanitizer_revision: wire.sanitizer_revision,
+            chunker_revision: wire.chunker_revision,
+            privacy_domain: wire.privacy_domain,
+            privacy_key_epoch: wire.privacy_key_epoch,
+            parent_generation: wire.parent_generation,
+            seal: wire.seal,
+        };
+        if needs_legacy_migration {
+            if !manifest
+                .uses_legacy_v1_identity()
+                .map_err(serde::de::Error::custom)?
+            {
+                return Err(serde::de::Error::missing_field("invalidation_digest"));
+            }
+            manifest.invalidation_digest = manifest
+                .expected_legacy_invalidation_digest()
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(manifest)
+    }
+}
+
+fn zero_manifest_digest() -> ManifestDigest {
+    ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
+        .expect("zero sha256 digest is canonical")
 }
 
 /// The seal applied before rows and the expected digest are handed to the
@@ -436,23 +503,67 @@ pub struct ChunkGenerationBindingV1 {
 }
 
 impl CodeGenerationManifestV1 {
+    pub fn uses_legacy_v1_identity(&self) -> Result<bool, DomainError> {
+        Ok(matches!(
+            generation_identity_kind(&self.generation_id)?,
+            GenerationIdentityKind::Legacy
+        ))
+    }
+
+    pub fn expected_legacy_invalidation_digest(&self) -> Result<ManifestDigest, DomainError> {
+        canonical_sha256(&(
+            LEGACY_GENERATION_INVALIDATION_DIGEST_DOMAIN,
+            &self.generation_id,
+            &self.snapshot_digest,
+            &self.registry_revision,
+            &self.grammar_revisions,
+            &self.extractor_revisions,
+            &self.sanitizer_revision,
+            &self.chunker_revision,
+            &self.privacy_domain,
+            self.privacy_key_epoch,
+            &self.parent_generation,
+        ))
+    }
+
     /// A manifest is single-generation: it names exactly one generation and
     /// at most one parent (Plan 25: mixed-generation manifests are rejected
     /// before publication).
     pub fn validate(&self) -> Result<(), DomainError> {
         self.generation_id.validate()?;
         self.snapshot_digest.validate()?;
+        self.invalidation_digest.validate()?;
         self.registry_revision.validate()?;
         self.sanitizer_revision.validate()?;
         self.chunker_revision.validate()?;
         self.privacy_domain.validate()?;
         self.seal.expected_digest.validate()?;
         self.seal.planner.validate()?;
+        match generation_identity_kind(&self.generation_id)? {
+            GenerationIdentityKind::Legacy => {
+                if self.invalidation_digest != self.expected_legacy_invalidation_digest()? {
+                    return Err(DomainError::DigestMismatch);
+                }
+            }
+            GenerationIdentityKind::Fingerprinted(fingerprint) => {
+                let expected = self
+                    .invalidation_digest
+                    .as_str()
+                    .strip_prefix("sha256:")
+                    .ok_or(DomainError::NonCanonical {
+                        field: "generation invalidation digest",
+                    })?;
+                if fingerprint != expected {
+                    return Err(DomainError::DigestMismatch);
+                }
+            }
+        }
         if self.parent_generation.as_ref() == Some(&self.generation_id) {
             return Err(DomainError::SelfSupersession);
         }
         if let Some(parent_generation) = &self.parent_generation {
             parent_generation.validate()?;
+            generation_identity_kind(parent_generation)?;
         }
         validate_language_revisions(
             &self.grammar_revisions,
@@ -478,6 +589,53 @@ impl CodeGenerationManifestV1 {
             });
         }
         Ok(())
+    }
+}
+
+enum GenerationIdentityKind<'a> {
+    Legacy,
+    Fingerprinted(&'a str),
+}
+
+fn generation_identity_kind(
+    generation_id: &CodeGenerationId,
+) -> Result<GenerationIdentityKind<'_>, DomainError> {
+    let mut parts = generation_id.as_str().split('.');
+    let scheme = parts.next();
+    let version = parts.next();
+    let discriminator = parts.next();
+    let sequence = parts.next();
+    let fingerprint = parts.next();
+    if scheme != Some("generation")
+        || version != Some("v1")
+        || parts.next().is_some()
+        || discriminator.is_none_or(|value| {
+            value.len() != 8
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        || sequence.is_none_or(|value| {
+            value.len() != 8 || !value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return Err(DomainError::NonCanonical {
+            field: "code generation identity",
+        });
+    }
+    match fingerprint {
+        None => Ok(GenerationIdentityKind::Legacy),
+        Some(value)
+            if value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+        {
+            Ok(GenerationIdentityKind::Fingerprinted(value))
+        }
+        Some(_) => Err(DomainError::NonCanonical {
+            field: "code generation identity fingerprint",
+        }),
     }
 }
 
@@ -542,9 +700,10 @@ mod tests {
     }
 
     fn generation_manifest() -> CodeGenerationManifestV1 {
-        CodeGenerationManifestV1 {
-            generation_id: id("generation.2"),
+        let mut manifest = CodeGenerationManifestV1 {
+            generation_id: id("generation.v1.aaaaaaaa.00000002"),
             snapshot_digest: id(&digest('a')),
+            invalidation_digest: id(&digest('b')),
             registry_revision: id("registry.v1"),
             grammar_revisions: vec![
                 (id("go"), id("grammar.go.v1")),
@@ -558,13 +717,17 @@ mod tests {
             chunker_revision: id("chunker.v1"),
             privacy_domain: id("privacy.fixture"),
             privacy_key_epoch: 1,
-            parent_generation: Some(id("generation.1")),
+            parent_generation: Some(id("generation.v1.aaaaaaaa.00000001")),
             seal: GenerationSealV1 {
                 expected_digest: id(&digest('d')),
                 sealed_at: UtcMicros(20),
                 planner: id("planner.v1"),
             },
-        }
+        };
+        manifest.invalidation_digest = manifest
+            .expected_legacy_invalidation_digest()
+            .expect("legacy invalidation digest");
+        manifest
     }
 
     #[test]

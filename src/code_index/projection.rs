@@ -3,9 +3,9 @@
 //! Projectors receive one immutable [`ProjectionBatchRequestV1`] and return
 //! one complete deterministic receipt. The orchestration helper verifies the
 //! request and receipt before constructing a publication handoff; malformed,
-//! partial, failed, or skipped batches never cross that boundary. No-op
-//! generations are completed locally from the explicit reused partition, so
-//! they make zero projector calls.
+//! partial, failed, or skipped batches never cross that boundary. A true
+//! no-op keeps its projection key and is completed locally from the explicit
+//! reused partition; a projection-key replay always reaches the projector.
 //!
 //! This module defines contracts only. Store-owned transactions, active
 //! pointers, retries, checkpoints, and scheduling remain outside the code
@@ -13,7 +13,8 @@
 
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeGenerationId, ManifestDigest, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
+    ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, ManifestDigest,
+    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionReplayReasonV1,
 };
 
 pub use super::receipts::{
@@ -88,14 +89,16 @@ impl ProjectionPublicationHandoffV1 {
 
 /// Execute projection work and prepare an atomic publication handoff.
 ///
-/// No-op requests bypass `sink` and deterministically emit reused receipts.
-/// All other requests invoke the sink exactly once. In either case the full
-/// receipt is verified before activation eligibility is checked.
+/// True no-op requests bypass `sink` and deterministically emit reused
+/// receipts. A projection-key change replays even an otherwise unchanged
+/// chunk set, so every other request invokes the sink exactly once. In either
+/// case the full receipt is verified before activation eligibility is checked.
 pub fn project_for_publication<S: CodeChunkProjectionSink>(
     sink: &mut S,
     request: ProjectionBatchRequestV1,
 ) -> Result<ProjectionPublicationHandoffV1, ProjectionPublicationErrorV1> {
-    let receipt = if changeset_is_noop(&request.changes) {
+    let request = expand_projection_key_replay(request)?;
+    let receipt = if request_is_true_noop(&request) {
         build_batch_receipt(&request, &decisions_for_noop(&request.changes))?
     } else {
         sink.project_changed_chunks(request.clone())?
@@ -105,4 +108,76 @@ pub fn project_for_publication<S: CodeChunkProjectionSink>(
         return Err(ProjectionPublicationErrorV1::NotActivatable);
     }
     Ok(ProjectionPublicationHandoffV1 { request, receipt })
+}
+
+fn expand_projection_key_replay(
+    mut request: ProjectionBatchRequestV1,
+) -> Result<ProjectionBatchRequestV1, ProjectionReceiptErrorV1> {
+    let expected_request = expected_request_digest(&request)
+        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    if request.request_digest != expected_request {
+        return Err(ProjectionReceiptErrorV1::DigestMismatch);
+    }
+    request
+        .changes
+        .validate()
+        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    if request.previous_projection_key.is_none() {
+        if request.replay_reason != ProjectionReplayReasonV1::InitialProjection {
+            return Err(ProjectionReceiptErrorV1::Contract(
+                "a request without a prior projection key requires initial_projection replay"
+                    .to_owned(),
+            ));
+        }
+        return Ok(request);
+    }
+    if request.previous_projection_key.as_ref() == Some(&request.target_projection_key) {
+        return Ok(request);
+    }
+    if request.replay_reason != ProjectionReplayReasonV1::ProjectionProfileChange {
+        return Err(ProjectionReceiptErrorV1::Contract(
+            "a projection-key change requires projection_profile_change replay".to_owned(),
+        ));
+    }
+
+    let mut added_or_changed = request
+        .changes
+        .added_or_changed
+        .iter()
+        .chain(&request.changes.reused)
+        .filter_map(|change| {
+            change
+                .current_digest
+                .clone()
+                .map(|current_digest| ChangedCodeChunkV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_digest: None,
+                    current_digest: Some(current_digest),
+                })
+        })
+        .collect::<Vec<_>>();
+    added_or_changed.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
+    let mut changes = ChangedCodeChunkSetV1 {
+        from_generation: request.changes.from_generation.clone(),
+        to_generation: request.changes.to_generation.clone(),
+        manifest_digest: request.changes.manifest_digest.clone(),
+        added_or_changed,
+        deleted: vec![],
+        reused: vec![],
+    };
+    changes.manifest_digest = changes
+        .compute_digest()
+        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    changes
+        .validate()
+        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    request.changes = changes;
+    request.request_digest = expected_request_digest(&request)
+        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    Ok(request)
+}
+
+fn request_is_true_noop(request: &ProjectionBatchRequestV1) -> bool {
+    changeset_is_noop(&request.changes)
+        && request.previous_projection_key.as_ref() == Some(&request.target_projection_key)
 }

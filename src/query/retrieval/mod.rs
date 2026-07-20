@@ -21,12 +21,17 @@ pub mod graph;
 pub mod hydrate;
 pub mod lexical;
 pub mod ports;
+pub mod request;
 pub mod unavailable;
 
 pub use self::ports::{
     ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
 };
+pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
 pub use self::unavailable::{CapabilityReportedLane, UnavailableLaneReportV1};
+
+#[cfg(test)]
+mod semantic;
 
 #[cfg(test)]
 mod tests;

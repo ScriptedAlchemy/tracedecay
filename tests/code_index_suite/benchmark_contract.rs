@@ -26,10 +26,7 @@ fn u64_at(value: &Value, pointer: &str) -> u64 {
 fn workload_pins_exact_current_and_ten_x_measurement_matrix() {
     let workload = load_json(WORKLOAD_PATH);
     assert_eq!(u64_at(&workload, "/schema_version"), 1);
-    assert_eq!(
-        workload["workload_id"].as_str(),
-        Some("pr9-code-index-v1")
-    );
+    assert_eq!(workload["workload_id"].as_str(), Some("pr9-code-index-v1"));
     assert_eq!(u64_at(&workload, "/repetitions/warmups"), 5);
     assert_eq!(u64_at(&workload, "/repetitions/measured"), 30);
 
@@ -72,9 +69,7 @@ fn workload_pins_exact_current_and_ten_x_measurement_matrix() {
         );
     }
     for field in ["content_digest", "descriptor_digest"] {
-        let digest = workload["corpus"][field]
-            .as_str()
-            .expect("pinned digest");
+        let digest = workload["corpus"][field].as_str().expect("pinned digest");
         assert!(
             digest
                 .strip_prefix("sha256:")

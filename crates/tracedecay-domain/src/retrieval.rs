@@ -184,6 +184,7 @@ retrieval_string_id!(
     AuthorizationRevision,
     RankingRevision,
     HydrationRevision,
+    RetrievalCursorKeyId,
     EvaluationDecisionId,
 );
 
@@ -193,6 +194,84 @@ retrieval_digest_id!(
     FreshnessVectorDigest,
     CursorPayloadDigest,
 );
+
+/// Opaque HMAC output that identifies one request-local query view without
+/// exposing its sanitized bytes.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct QueryMac(String);
+
+impl QueryMac {
+    pub fn new(value: impl Into<String>) -> Result<Self, RetrievalContractError> {
+        let value = value.into();
+        let valid = value.strip_prefix("hmac-sha256:").is_some_and(|encoded| {
+            encoded.len() == 64
+                && encoded
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+        if !valid {
+            return Err(RetrievalContractError::InvalidIdentity { field: "QueryMac" });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn validate(&self) -> Result<(), RetrievalContractError> {
+        Self::new(self.0.clone()).map(|_| ())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueryMac {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<String> for QueryMac {
+    type Error = RetrievalContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl fmt::Display for QueryMac {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Privacy- and key-epoch-bound identity for an ephemeral sanitized query
+/// view. The value is opaque and safe to place only in in-process request
+/// state, authenticated cursor identity, and privacy-separated cache keys.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QueryDigest {
+    pub privacy_domain: PrivacyDomainId,
+    pub key_epoch: u64,
+    pub mac: QueryMac,
+}
+
+impl QueryDigest {
+    pub fn new(privacy_domain: PrivacyDomainId, key_epoch: u64, mac: QueryMac) -> Self {
+        Self {
+            privacy_domain,
+            key_epoch,
+            mac,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), RetrievalContractError> {
+        self.mac.validate()
+    }
+}
 
 /// Validation failures for pure retrieval-kernel values.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -205,6 +284,8 @@ pub enum RetrievalContractError {
     Duplicate { field: &'static str },
     #[error("fixed-point arithmetic overflowed in {operation}")]
     FixedPointOverflow { operation: &'static str },
+    #[error("a score-domain calibration must have a positive raw score span")]
+    InvalidCalibrationRange,
     #[error("the PR9 fallback subpayload may only cover ExactLiteral, Lexical, and Graph lanes")]
     FallbackLaneViolation,
     #[error("the PR9 fallback subpayload must report all three PR9 lanes exactly once")]
@@ -305,6 +386,56 @@ impl FixedPointScore {
             .ok_or(RetrievalContractError::FixedPointOverflow {
                 operation: "weight",
             })
+    }
+}
+
+/// Versioned calibration curve for one declared raw-score domain. The
+/// calibrated feature is always in `[0, 1_000_000]`, while the raw score
+/// remains intact in every contribution for audit and replay.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScoreDomainCalibrationV1 {
+    pub calibration_profile_id: CalibrationProfileId,
+    pub score_domain: ScoreDomainId,
+    pub raw_min_micros: u64,
+    pub raw_max_micros: u64,
+}
+
+impl ScoreDomainCalibrationV1 {
+    pub fn validate(&self) -> Result<(), RetrievalContractError> {
+        if self.raw_max_micros <= self.raw_min_micros {
+            return Err(RetrievalContractError::InvalidCalibrationRange);
+        }
+        Ok(())
+    }
+
+    pub fn calibrate(&self, raw_score: FixedPointScore) -> Result<u32, RetrievalContractError> {
+        self.validate()?;
+        if raw_score.micros() <= self.raw_min_micros {
+            return Ok(0);
+        }
+        if raw_score.micros() >= self.raw_max_micros {
+            return Ok(1_000_000);
+        }
+        let offset = raw_score.micros().checked_sub(self.raw_min_micros).ok_or(
+            RetrievalContractError::FixedPointOverflow {
+                operation: "calibration offset",
+            },
+        )?;
+        let span = self
+            .raw_max_micros
+            .checked_sub(self.raw_min_micros)
+            .ok_or(RetrievalContractError::InvalidCalibrationRange)?;
+        let feature =
+            offset
+                .checked_mul(1_000_000)
+                .ok_or(RetrievalContractError::FixedPointOverflow {
+                    operation: "calibration scale",
+                })?
+                / span;
+        u32::try_from(feature).map_err(|_| RetrievalContractError::FixedPointOverflow {
+            operation: "calibration result",
+        })
     }
 }
 
@@ -440,6 +571,14 @@ pub enum RetrievalError {
     RequiredLaneUnavailable,
     #[error("cursor replay cannot recompute a differently completed candidate set")]
     CursorSetMismatch,
+    #[error("cursor authentication failed")]
+    CursorAuthenticationFailed,
+    #[error("cursor authentication key is unavailable")]
+    CursorKeyUnavailable,
+    #[error("cursor authentication key was revoked")]
+    CursorKeyRevoked,
+    #[error("cursor is expired")]
+    CursorExpired,
     #[error("request rejected: {0}")]
     InvalidRequest(String),
     #[error("authorization denied the request")]
@@ -452,7 +591,6 @@ pub enum RetrievalError {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalRequest {
-    pub query: String,
     pub principal: PrincipalId,
     pub scope: RetrievalScope,
     pub temporal_mode: TemporalModeV1,
@@ -620,6 +758,7 @@ pub struct CompactCandidate {
     pub repository_id: Option<crate::research::id::RepositoryId>,
     pub session_or_thread_id: Option<SessionOrThreadId>,
     pub logical_copy_cluster_id: Option<LogicalCopyClusterId>,
+    pub logical_copy_evidence_anchor: Option<RetrievalAnchorId>,
     pub evidence_role: EvidenceRole,
     pub retriever: RetrieverKind,
     pub retriever_revision: ComponentRevision,
@@ -814,6 +953,7 @@ pub struct OccurrenceProvenance {
     pub repository_id: Option<crate::research::id::RepositoryId>,
     pub session_or_thread_id: Option<SessionOrThreadId>,
     pub logical_copy_cluster_id: Option<LogicalCopyClusterId>,
+    pub logical_copy_evidence_anchor: Option<RetrievalAnchorId>,
     pub evidence_role: EvidenceRole,
     pub freshness: SourceFreshness,
 }
@@ -910,6 +1050,7 @@ pub struct FusionProfile {
     pub profile_id: FusionProfileId,
     pub evaluation_result_anchor: RetrievalAnchorId,
     pub calibrations: BTreeMap<RetrieverKind, CalibrationProfileId>,
+    pub score_domain_calibrations: BTreeMap<ScoreDomainId, ScoreDomainCalibrationV1>,
     pub weights_micros: BTreeMap<RetrieverKind, u32>,
     pub diversity_policy_id: DiversityPolicyId,
     pub rerank_policy_id: Option<RerankPolicyId>,
@@ -1017,7 +1158,10 @@ pub struct HydrationReceipt {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalCursor {
-    pub query_digest: CursorPayloadDigest,
+    pub key_id: RetrievalCursorKeyId,
+    pub key_epoch: u64,
+    pub privacy_domain: PrivacyDomainId,
+    pub query_digest: QueryDigest,
     pub profile_id: FusionProfileId,
     pub snapshot_digest: CandidateSetDigest,
     pub freshness_digest: FreshnessVectorDigest,
@@ -1028,12 +1172,22 @@ pub struct RetrievalCursor {
     pub ranking_revision: RankingRevision,
     /// First final ordinal in the next page of the frozen candidate set.
     pub next_ordinal: u32,
-    pub expiry: Option<UtcMicros>,
-    pub payload_digest: CursorPayloadDigest,
+    pub expiry: UtcMicros,
+    pub signature: QueryMac,
 }
 
 impl RetrievalCursor {
     pub fn validate(&self) -> Result<(), RetrievalContractError> {
+        self.key_id.validate()?;
+        self.query_digest.validate()?;
+        self.signature.validate()?;
+        if self.query_digest.key_epoch != self.key_epoch
+            || self.query_digest.privacy_domain != self.privacy_domain
+        {
+            return Err(RetrievalContractError::InvalidCursorBinding {
+                field: "query privacy/key binding",
+            });
+        }
         if self
             .lane_checkpoints
             .iter()
@@ -1283,6 +1437,7 @@ mod tests {
             repository_id: None,
             session_or_thread_id: None,
             logical_copy_cluster_id: None,
+            logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
             retriever,
             retriever_revision: id("retriever.fixture.v1"),
@@ -1306,6 +1461,7 @@ mod tests {
             repository_id: candidate.repository_id.clone(),
             session_or_thread_id: candidate.session_or_thread_id.clone(),
             logical_copy_cluster_id: candidate.logical_copy_cluster_id.clone(),
+            logical_copy_evidence_anchor: candidate.logical_copy_evidence_anchor.clone(),
             evidence_role: candidate.evidence_role,
             freshness: candidate.freshness.clone(),
         }

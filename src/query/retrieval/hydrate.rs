@@ -7,9 +7,12 @@
 //! diversity operate on compact candidates; final context hydration occurs
 //! only here.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use thiserror::Error;
 use tracedecay_domain::{
     HydrationReceipt, RankedCandidate, RetrievalAnchorId, RetrievalBudget, RetrievalRequest,
+    SourceOccurrenceId,
 };
 
 /// Failures of the hydration stage. Hydration denial removes the anchor and
@@ -33,6 +36,35 @@ pub struct HydrationPlanV1 {
     pub budget: RetrievalBudget,
 }
 
+/// Request-execution state sampled before each authorized hydration step.
+/// Implementations may read a cancellation token or a monotonic clock, but
+/// must not expose source payload.
+pub trait HydrationExecutionControlV1 {
+    fn now_micros(&self) -> i64;
+
+    fn is_cancelled(&self) -> bool;
+}
+
+/// Bounded permission issued only after a selected anchor passes its repeated
+/// authorization check. Sources receive this before payload work begins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HydrationWorkPermitV1 {
+    pub anchor_id: RetrievalAnchorId,
+    pub source_occurrence_ids: Vec<SourceOccurrenceId>,
+    pub remaining_bytes: u64,
+    pub remaining_deadline_micros: Option<u64>,
+}
+
+/// A payload-free estimate from an authorized source. The stage rejects an
+/// over-budget estimate before calling `hydrate_authorized`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HydrationPreflightOutcomeV1 {
+    Ready { estimated_bytes: u64 },
+    Unavailable(HydrationUnavailableV1),
+    BudgetExceeded,
+    Cancelled,
+}
+
 /// The late hydration stage contract (Plan 15: recheck authorization and
 /// hydrate final context for the selected anchors through each owning store;
 /// record one receipt per anchor).
@@ -46,6 +78,7 @@ pub trait LateHydrationStage {
         &self,
         request: &RetrievalRequest,
         plan: &HydrationPlanV1,
+        control: &dyn HydrationExecutionControlV1,
     ) -> Result<Vec<HydrationReceipt>, HydrationStageError>;
 }
 
@@ -121,16 +154,39 @@ pub trait LateHydrationSource<P> {
         candidate: &RankedCandidate,
     ) -> HydrationAuthorizationV1;
 
+    fn preflight_authorized(
+        &mut self,
+        request: &RetrievalRequest,
+        candidate: &RankedCandidate,
+        permit: &HydrationWorkPermitV1,
+    ) -> HydrationPreflightOutcomeV1;
+
     fn hydrate_authorized(
         &mut self,
         request: &RetrievalRequest,
         candidate: &RankedCandidate,
-        remaining_bytes: u64,
+        permit: &HydrationWorkPermitV1,
     ) -> HydrationReadOutcomeV1<P>;
 }
 
 pub struct DeterministicLateHydration<'a, S> {
     source: &'a mut S,
+}
+
+struct SystemHydrationExecutionControl;
+
+impl HydrationExecutionControlV1 for SystemHydrationExecutionControl {
+    fn now_micros(&self) -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_micros()).ok())
+            .unwrap_or(i64::MAX)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
 
 impl<'a, S> DeterministicLateHydration<'a, S> {
@@ -158,6 +214,20 @@ impl<'a, S> DeterministicLateHydration<'a, S> {
     where
         S: LateHydrationSource<P>,
     {
+        let control = SystemHydrationExecutionControl;
+        self.hydrate_with_control(request, selected, budget, &control)
+    }
+
+    pub fn hydrate_with_control<P>(
+        &mut self,
+        request: &RetrievalRequest,
+        selected: &[RankedCandidate],
+        budget: &RetrievalBudget,
+        control: &dyn HydrationExecutionControlV1,
+    ) -> Result<HydrationPageV1<P>, HydrationStageError>
+    where
+        S: LateHydrationSource<P>,
+    {
         budget
             .validate()
             .map_err(|error| HydrationStageError::Contract(error.to_string()))?;
@@ -167,8 +237,10 @@ impl<'a, S> DeterministicLateHydration<'a, S> {
         let mut receipts = Vec::with_capacity(selected.len());
 
         for ranked in selected {
-            let outcome = if bytes_hydrated >= budget.max_hydration_bytes {
-                HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
+            let outcome = if let Some(reason) =
+                prework_unavailable(request, budget, control, bytes_hydrated)
+            {
+                HydrationOutcomeV1::Unavailable(reason)
             } else {
                 match self.source.authorize(request, ranked) {
                     HydrationAuthorizationV1::Denied => HydrationOutcomeV1::Unavailable(
@@ -178,54 +250,46 @@ impl<'a, S> DeterministicLateHydration<'a, S> {
                         HydrationOutcomeV1::Unavailable(reason)
                     }
                     HydrationAuthorizationV1::Authorized => {
-                        let remaining = budget.max_hydration_bytes - bytes_hydrated;
-                        match self.source.hydrate_authorized(request, ranked, remaining) {
-                            HydrationReadOutcomeV1::Complete { payload, receipt } => {
-                                if !receipt.authorized {
-                                    HydrationOutcomeV1::Unavailable(
-                                        HydrationUnavailableV1::AuthorityUnavailable,
-                                    )
-                                } else if receipt.bytes_hydrated > remaining {
-                                    HydrationOutcomeV1::Unavailable(
-                                        HydrationUnavailableV1::BudgetExceeded,
-                                    )
-                                } else {
-                                    validate_receipt(ranked, &receipt)?;
-                                    bytes_hydrated += receipt.bytes_hydrated;
-                                    receipts.push(receipt);
-                                    HydrationOutcomeV1::Complete(payload)
-                                }
-                            }
-                            HydrationReadOutcomeV1::Partial {
-                                payload,
-                                receipt,
-                                reason,
-                            } => {
-                                if !receipt.authorized {
-                                    HydrationOutcomeV1::Unavailable(
-                                        HydrationUnavailableV1::AuthorityUnavailable,
-                                    )
-                                } else if receipt.bytes_hydrated > remaining {
-                                    HydrationOutcomeV1::Unavailable(
-                                        HydrationUnavailableV1::BudgetExceeded,
-                                    )
-                                } else {
-                                    validate_receipt(ranked, &receipt)?;
-                                    bytes_hydrated += receipt.bytes_hydrated;
-                                    receipts.push(receipt);
-                                    HydrationOutcomeV1::Partial { payload, reason }
-                                }
-                            }
-                            HydrationReadOutcomeV1::Unavailable(reason) => {
+                        let permit = work_permit(request, ranked, budget, control, bytes_hydrated);
+                        match self.source.preflight_authorized(request, ranked, &permit) {
+                            HydrationPreflightOutcomeV1::Unavailable(reason) => {
                                 HydrationOutcomeV1::Unavailable(reason)
                             }
-                            HydrationReadOutcomeV1::BudgetExceeded => {
+                            HydrationPreflightOutcomeV1::BudgetExceeded => {
                                 HydrationOutcomeV1::Unavailable(
                                     HydrationUnavailableV1::BudgetExceeded,
                                 )
                             }
-                            HydrationReadOutcomeV1::Cancelled => {
+                            HydrationPreflightOutcomeV1::Cancelled => {
                                 HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
+                            }
+                            HydrationPreflightOutcomeV1::Ready { estimated_bytes } => {
+                                if let Some(reason) =
+                                    prework_unavailable(request, budget, control, bytes_hydrated)
+                                {
+                                    HydrationOutcomeV1::Unavailable(reason)
+                                } else {
+                                    let permit = work_permit(
+                                        request,
+                                        ranked,
+                                        budget,
+                                        control,
+                                        bytes_hydrated,
+                                    );
+                                    if estimated_bytes > permit.remaining_bytes {
+                                        HydrationOutcomeV1::Unavailable(
+                                            HydrationUnavailableV1::BudgetExceeded,
+                                        )
+                                    } else {
+                                        self.hydrate_authorized(
+                                            request,
+                                            ranked,
+                                            &permit,
+                                            &mut bytes_hydrated,
+                                            &mut receipts,
+                                        )?
+                                    }
+                                }
                             }
                         }
                     }
@@ -238,13 +302,130 @@ impl<'a, S> DeterministicLateHydration<'a, S> {
         }
         Ok(HydrationPageV1 { results, receipts })
     }
+
+    fn hydrate_authorized<P>(
+        &mut self,
+        request: &RetrievalRequest,
+        ranked: &RankedCandidate,
+        permit: &HydrationWorkPermitV1,
+        bytes_hydrated: &mut u64,
+        receipts: &mut Vec<HydrationReceipt>,
+    ) -> Result<HydrationOutcomeV1<P>, HydrationStageError>
+    where
+        S: LateHydrationSource<P>,
+    {
+        Ok(
+            match self.source.hydrate_authorized(request, ranked, permit) {
+                HydrationReadOutcomeV1::Complete { payload, receipt } => {
+                    if !receipt.authorized {
+                        HydrationOutcomeV1::Unavailable(
+                            HydrationUnavailableV1::AuthorityUnavailable,
+                        )
+                    } else if receipt.bytes_hydrated > permit.remaining_bytes {
+                        HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
+                    } else {
+                        validate_receipt(ranked, permit, &receipt)?;
+                        *bytes_hydrated = bytes_hydrated
+                            .checked_add(receipt.bytes_hydrated)
+                            .ok_or(HydrationStageError::BudgetExceeded)?;
+                        receipts.push(receipt);
+                        HydrationOutcomeV1::Complete(payload)
+                    }
+                }
+                HydrationReadOutcomeV1::Partial {
+                    payload,
+                    receipt,
+                    reason,
+                } => {
+                    if !receipt.authorized {
+                        HydrationOutcomeV1::Unavailable(
+                            HydrationUnavailableV1::AuthorityUnavailable,
+                        )
+                    } else if receipt.bytes_hydrated > permit.remaining_bytes {
+                        HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
+                    } else {
+                        validate_receipt(ranked, permit, &receipt)?;
+                        *bytes_hydrated = bytes_hydrated
+                            .checked_add(receipt.bytes_hydrated)
+                            .ok_or(HydrationStageError::BudgetExceeded)?;
+                        receipts.push(receipt);
+                        HydrationOutcomeV1::Partial { payload, reason }
+                    }
+                }
+                HydrationReadOutcomeV1::Unavailable(reason) => {
+                    HydrationOutcomeV1::Unavailable(reason)
+                }
+                HydrationReadOutcomeV1::BudgetExceeded => {
+                    HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
+                }
+                HydrationReadOutcomeV1::Cancelled => {
+                    HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
+                }
+            },
+        )
+    }
+}
+
+fn prework_unavailable(
+    request: &RetrievalRequest,
+    budget: &RetrievalBudget,
+    control: &dyn HydrationExecutionControlV1,
+    bytes_hydrated: u64,
+) -> Option<HydrationUnavailableV1> {
+    if control.is_cancelled() {
+        return Some(HydrationUnavailableV1::Cancelled);
+    }
+    if bytes_hydrated >= budget.max_hydration_bytes {
+        return Some(HydrationUnavailableV1::BudgetExceeded);
+    }
+    let elapsed = control
+        .now_micros()
+        .saturating_sub(request.snapshot.captured_at.0)
+        .max(0) as u64;
+    budget
+        .deadline_micros
+        .is_some_and(|deadline| elapsed >= deadline)
+        .then_some(HydrationUnavailableV1::BudgetExceeded)
+}
+
+fn work_permit(
+    request: &RetrievalRequest,
+    ranked: &RankedCandidate,
+    budget: &RetrievalBudget,
+    control: &dyn HydrationExecutionControlV1,
+    bytes_hydrated: u64,
+) -> HydrationWorkPermitV1 {
+    let mut source_occurrence_ids = ranked
+        .candidate
+        .occurrences
+        .iter()
+        .map(|occurrence| occurrence.source_occurrence_id.clone())
+        .collect::<Vec<_>>();
+    source_occurrence_ids.sort();
+    source_occurrence_ids.dedup();
+    let elapsed = control
+        .now_micros()
+        .saturating_sub(request.snapshot.captured_at.0)
+        .max(0) as u64;
+    HydrationWorkPermitV1 {
+        anchor_id: ranked.candidate.anchor_id.clone(),
+        source_occurrence_ids,
+        remaining_bytes: budget.max_hydration_bytes.saturating_sub(bytes_hydrated),
+        remaining_deadline_micros: budget
+            .deadline_micros
+            .map(|deadline| deadline.saturating_sub(elapsed)),
+    }
 }
 
 fn validate_receipt(
     ranked: &RankedCandidate,
+    permit: &HydrationWorkPermitV1,
     receipt: &HydrationReceipt,
 ) -> Result<(), HydrationStageError> {
-    if receipt.anchor_id != ranked.candidate.anchor_id
+    if receipt.anchor_id != permit.anchor_id
+        || !permit
+            .source_occurrence_ids
+            .contains(&receipt.source_occurrence_id)
         || !ranked.candidate.occurrences.iter().any(|occurrence| {
             occurrence.source_occurrence_id == receipt.source_occurrence_id
                 && occurrence.freshness == receipt.freshness

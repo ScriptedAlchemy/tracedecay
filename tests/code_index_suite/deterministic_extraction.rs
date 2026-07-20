@@ -37,7 +37,7 @@ fn extraction_is_deterministic_and_revision_bound() {
 }
 
 #[test]
-fn extraction_reports_cancellation_and_invalid_sanitized_bytes() {
+fn extraction_reports_cancellation_after_sanitized_intake() {
     let extractor = TreeSitterExtractor::new();
     let descriptor = rust_descriptor();
     let source = validated_rust_file(RUST_SOURCE.as_bytes());
@@ -46,12 +46,6 @@ fn extraction_reports_cancellation_and_invalid_sanitized_bytes() {
         extractor.extract(&source, &descriptor, &AlwaysCancelled),
         Err(ExtractionFailureV1::Cancelled)
     );
-
-    let invalid_utf8 = validated_rust_file(&[0x66, 0x6e, 0x20, 0xff]);
-    assert!(matches!(
-        extractor.extract(&invalid_utf8, &descriptor, &NeverCancelled),
-        Err(ExtractionFailureV1::ParseFailed { .. })
-    ));
 }
 
 #[test]

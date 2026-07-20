@@ -195,6 +195,37 @@ fn superseded_and_cleared_records_remain_typed_historical_evidence() {
 }
 
 #[test]
+fn out_of_scope_historical_record_is_not_classified_as_lifecycle_history() {
+    let (snapshot, manifest) = generation();
+    let mut record = diagnostic(
+        "generation.prior",
+        "anchor.diagnostic.out-of-scope",
+        'a',
+        DiagnosticRecordStateV1::Superseded {
+            successor_generation: manifest.generation_id.clone(),
+        },
+    );
+    record.reference = Some(id("ref.other"));
+
+    let joined = GenerationDiagnosticJoinV1::join(
+        &manifest,
+        &snapshot,
+        &[record],
+        &watermark(
+            &snapshot,
+            &manifest,
+            DiagnosticJoinInputCoverageV1::Complete,
+        ),
+    )
+    .expect("out-of-scope evidence remains inspectable");
+
+    assert!(matches!(
+        joined.records[0].disposition,
+        GenerationDiagnosticDispositionV1::StaleScope
+    ));
+}
+
+#[test]
 fn stale_content_and_partial_capture_never_report_a_clean_current_set() {
     let (snapshot, manifest) = generation();
     let stale_generation = diagnostic(

@@ -1,8 +1,9 @@
+use tracedecay::code_index::chunks::content_digest as source_digest;
 use tracedecay::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_domain::{
-    CommitId, ContentDigest, FileOccurrenceId, IntakeRejectionV1, LanguageId, RefId, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1, UtcMicros, WorktreeId,
+    CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, IntakeRejectionV1, LanguageId,
+    RefId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1, WorktreeId,
 };
 
 use crate::support::{id, registry};
@@ -74,6 +75,68 @@ fn intake_is_receipt_bound_registry_backed_and_deterministic() {
     let second = intake().validate(admitted).expect("snapshot admitted");
     assert_eq!(first.intake_digest, second.intake_digest);
     assert_eq!(first.validated_at, UtcMicros(2_000_000));
+}
+
+#[test]
+fn intake_capability_binds_sanitized_bytes_digest_and_receipts() {
+    let bytes = b"pub fn admitted() {}\n";
+    let mut source = file(
+        "file.source",
+        "src/lib.rs",
+        Some("rust"),
+        SnapshotFileDispositionV1::Present,
+    );
+    source.content_digest = source_digest(bytes);
+
+    let admission = intake();
+    let capability = admission
+        .admit(snapshot(vec![source.clone()]))
+        .expect("receipt-bound snapshot capability");
+    let candidate = ValidatedCodeFileV1 {
+        generation_id: id::<CodeGenerationId>("generation.fixture"),
+        file: source.clone(),
+        snapshot_digest: capability.snapshot().intake_digest.clone(),
+        sanitized_bytes: bytes.to_vec(),
+    };
+    let bound = admission
+        .bind_file(&capability, candidate.clone())
+        .expect("matching file becomes receipt-bound");
+    assert_eq!(bound.sanitized_bytes(), bytes);
+
+    let mut forged_bytes = candidate.clone();
+    forged_bytes.sanitized_bytes = b"pub fn forged() {}\n".to_vec();
+    assert!(matches!(
+        admission.bind_file(&capability, forged_bytes),
+        Err(IntakeRejectionV1::UnsanitizedInput)
+    ));
+
+    let mut forged_utf8 = candidate.clone();
+    forged_utf8.sanitized_bytes = vec![b'f', b'n', b' ', 0xff];
+    forged_utf8.file.content_digest = source_digest(&forged_utf8.sanitized_bytes);
+    assert!(matches!(
+        admission.bind_file(&capability, forged_utf8),
+        Err(IntakeRejectionV1::UnsanitizedInput)
+    ));
+
+    let mut forged_snapshot = candidate.clone();
+    forged_snapshot.snapshot_digest = id(&format!("sha256:{}", "f".repeat(64)));
+    assert!(matches!(
+        admission.bind_file(&capability, forged_snapshot),
+        Err(IntakeRejectionV1::UnsanitizedInput)
+    ));
+
+    let mut alternate_snapshot = snapshot(vec![source]);
+    alternate_snapshot.sanitization_receipts =
+        vec![id::<SanitizationReceiptId>("receipt.alternate")];
+    let alternate_capability = admission
+        .admit(alternate_snapshot)
+        .expect("independently receipt-bound snapshot");
+    let mut forged_receipt = candidate;
+    forged_receipt.snapshot_digest = alternate_capability.snapshot().intake_digest.clone();
+    assert!(matches!(
+        admission.bind_file(&capability, forged_receipt),
+        Err(IntakeRejectionV1::UnsanitizedInput)
+    ));
 }
 
 #[test]

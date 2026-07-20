@@ -12,23 +12,23 @@ use sha2::{Digest, Sha256};
 use tracedecay::code_index::chunks::{
     CodeChunker, CodeFileChunksV1, DeterministicCodeChunker, content_digest,
 };
-use tracedecay::code_index::extract::{
-    LanguageExtractor, NeverCancelled, TreeSitterExtractor,
-};
-use tracedecay::code_index::incremental::{
-    GenerationChunkManifestV1, plan_chunk_increment,
+use tracedecay::code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
+use tracedecay::code_index::incremental::{GenerationChunkManifestV1, plan_chunk_increment};
+use tracedecay::code_index::intake::{
+    CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake,
 };
 use tracedecay::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay::code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
-    build_batch_receipt, expected_request_digest, project_for_publication,
+    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1, build_batch_receipt,
+    expected_request_digest, project_for_publication,
 };
 use tracedecay_domain::{
-    ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, ExtractionBatchV1,
-    FileOccurrenceId, LanguageDescriptorV1, LanguageId, ManifestDigest, PolicyRevisionId,
-    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId,
-    SanitizedCodeFileV1, SanitizerRevision, SnapshotFileDispositionV1, ValidatedCodeFileV1,
+    ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, ExtractionBatchV1, FileOccurrenceId,
+    LanguageDescriptorV1, LanguageId, ManifestDigest, PolicyRevisionId, ProjectionBatchReceiptV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    UtcMicros, ValidatedCodeFileV1,
 };
 
 const WORKLOAD_PATH: &str = "benchmarks/pr9-code-index/workload-v1.json";
@@ -538,10 +538,7 @@ fn execute_case(
             &extractor,
         )?)
     };
-    let corpus_bytes = sources
-        .iter()
-        .map(|source| source.bytes.len() as u64)
-        .sum();
+    let corpus_bytes = sources.iter().map(|source| source.bytes.len() as u64).sum();
 
     reset_peak_rss()?;
     let counters_before = process_counters()?;
@@ -636,17 +633,15 @@ fn execute_case(
     let mut sink = CountingSink { calls: 0 };
     let handoff = project_for_publication(&mut sink, request)
         .map_err(|error| format!("project {} changes: {error}", case.as_str()))?;
-    let output_bytes = serde_json::to_vec(&(
-        current.manifest.chunks(),
-        &changes,
-        handoff.receipt(),
-    ))
-    .map_err(|error| format!("serialize {} output evidence: {error}", case.as_str()))?
-    .len() as u64;
+    let output_bytes = serde_json::to_vec(&(current.manifest.chunks(), &changes, handoff.receipt()))
+        .map_err(|error| format!("serialize {} output evidence: {error}", case.as_str()))?
+        .len() as u64;
     let wall_ns = u64::try_from(started.elapsed().as_nanos())
         .map_err(|_| "sample wall time overflowed u64".to_owned())?;
     let counters_after = process_counters()?;
-    let cpu_ticks = counters_after.cpu_ticks.saturating_sub(counters_before.cpu_ticks);
+    let cpu_ticks = counters_after
+        .cpu_ticks
+        .saturating_sub(counters_before.cpu_ticks);
 
     Ok(RawSample {
         scale: scale.name.clone(),
@@ -697,12 +692,12 @@ fn build_artifact(
     extractor: &TreeSitterExtractor,
     chunker: &DeterministicCodeChunker,
 ) -> Result<FileArtifact, String> {
-    let validated = validated_file(source, generation_id)?;
+    let file = receipt_bound_file(source, generation_id)?;
     let extraction = extractor
-        .extract(&validated, descriptor, &NeverCancelled)
+        .extract(&file, descriptor, &NeverCancelled)
         .map_err(|error| format!("extract {}: {error:?}", source.logical_path))?;
     let chunks = chunker
-        .chunk_file(&validated, &extraction, descriptor, &NeverCancelled)
+        .chunk_file(&file, &extraction, descriptor, &NeverCancelled)
         .map_err(|error| format!("chunk {}: {error}", source.logical_path))?;
     Ok(FileArtifact {
         source: source.clone(),
@@ -777,11 +772,11 @@ fn rechunk(
     let mut artifacts = BTreeMap::new();
     for artifact in prior.artifacts.values() {
         let mut extraction = artifact.extraction.clone();
-        let validated = validated_file(&artifact.source, &generation_id)?;
+        let file = receipt_bound_file(&artifact.source, &generation_id)?;
         extraction.generation_id = generation_id.clone();
-        extraction.file_occurrence_id = validated.file.file_occurrence_id.clone();
+        extraction.file_occurrence_id = file.file.file_occurrence_id.clone();
         let chunks = chunker
-            .chunk_file(&validated, &extraction, descriptor, &NeverCancelled)
+            .chunk_file(&file, &extraction, descriptor, &NeverCancelled)
             .map_err(|error| format!("rechunk {}: {error}", artifact.source.logical_path))?;
         artifacts.insert(
             artifact.source.logical_path.clone(),
@@ -809,22 +804,49 @@ fn chunker(
     ))
 }
 
-fn validated_file(
+fn receipt_bound_file(
     source: &WorkloadFile,
     generation_id: &CodeGenerationId,
-) -> Result<ValidatedCodeFileV1, String> {
-    Ok(ValidatedCodeFileV1 {
-        generation_id: generation_id.clone(),
-        file: SanitizedCodeFileV1 {
-            file_occurrence_id: file_occurrence(&source.logical_path, generation_id)?,
-            logical_path: source.logical_path.clone(),
-            language: Some(id::<LanguageId>("rust")?),
-            content_digest: content_digest(&source.bytes),
-            disposition: SnapshotFileDispositionV1::Present,
-        },
-        snapshot_digest: digest_id::<ManifestDigest>(b"pr9-code-index-benchmark-snapshot")?,
-        sanitized_bytes: source.bytes.clone(),
-    })
+) -> Result<ReceiptBoundCodeFileV1, String> {
+    let file = SanitizedCodeFileV1 {
+        file_occurrence_id: file_occurrence(&source.logical_path, generation_id)?,
+        logical_path: source.logical_path.clone(),
+        language: Some(id::<LanguageId>("rust")?),
+        content_digest: content_digest(&source.bytes),
+        disposition: SnapshotFileDispositionV1::Present,
+    };
+    let sanitizer_revision = id::<SanitizerRevision>("sanitizer.pr9-benchmark.v1")?;
+    let intake = SanitizedCodeIntake::new(
+        StaticLanguageRegistry::new(),
+        sanitizer_revision.clone(),
+        UtcMicros(1_000_000),
+    );
+    let capability = intake
+        .admit(SanitizedCodeSnapshotV1 {
+            repository: id::<RepositoryId>("repo.pr9-code-index-benchmark")?,
+            worktree: None,
+            reference: None,
+            source_revision: None,
+            sanitizer_revision,
+            sanitization_receipts: vec![id::<SanitizationReceiptId>(
+                "receipt.pr9-code-index-benchmark.v1",
+            )?],
+            content_identity: content_digest(&source.bytes),
+            captured_at: UtcMicros(1_000_000),
+            files: vec![file.clone()],
+        })
+        .map_err(|error| format!("admit {}: {error:?}", source.logical_path))?;
+    intake
+        .bind_file(
+            &capability,
+            ValidatedCodeFileV1 {
+                generation_id: generation_id.clone(),
+                file,
+                snapshot_digest: capability.snapshot().intake_digest.clone(),
+                sanitized_bytes: source.bytes.clone(),
+            },
+        )
+        .map_err(|error| format!("bind {}: {error:?}", source.logical_path))
 }
 
 fn file_occurrence(
@@ -832,9 +854,13 @@ fn file_occurrence(
     generation_id: &CodeGenerationId,
 ) -> Result<FileOccurrenceId, String> {
     let digest = sha256_hex(
-        [logical_path.as_bytes(), b"\0", generation_id.as_str().as_bytes()]
-            .concat()
-            .as_slice(),
+        [
+            logical_path.as_bytes(),
+            b"\0",
+            generation_id.as_str().as_bytes(),
+        ]
+        .concat()
+        .as_slice(),
     );
     id::<FileOccurrenceId>(&format!("file.pr9-benchmark.{}", &digest[..32]))
 }
@@ -890,26 +916,32 @@ fn projection_decisions(changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjectionD
             outcome: ProjectionOutcomeV1::Applied,
             output_digest: change.current_digest.clone(),
         })
-        .chain(changes.deleted.iter().map(|change| {
-            ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: None,
-                operation: ProjectionOperationV1::Deleted,
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: None,
-            }
-        }))
-        .chain(changes.reused.iter().map(|change| {
-            ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: ProjectionOperationV1::Reused,
-                outcome: ProjectionOutcomeV1::Reused,
-                output_digest: None,
-            }
-        }))
+        .chain(
+            changes
+                .deleted
+                .iter()
+                .map(|change| ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: None,
+                    operation: ProjectionOperationV1::Deleted,
+                    outcome: ProjectionOutcomeV1::Applied,
+                    output_digest: None,
+                }),
+        )
+        .chain(
+            changes
+                .reused
+                .iter()
+                .map(|change| ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: change.current_digest.clone(),
+                    operation: ProjectionOperationV1::Reused,
+                    outcome: ProjectionOutcomeV1::Reused,
+                    output_digest: None,
+                }),
+        )
         .collect()
 }
 

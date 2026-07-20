@@ -232,7 +232,7 @@ where
         let source_exhausted = batch
             .continuation
             .as_ref()
-            .map_or(true, |continuation| continuation.exhausted);
+            .is_none_or(|continuation| continuation.exhausted);
         let mut admitted: Vec<(CompactCandidate, GraphLaneEvidence)> =
             Vec::with_capacity(batch.candidates.len());
         for candidate in &batch.candidates {

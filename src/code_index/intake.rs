@@ -6,9 +6,13 @@
 //! Filesystem watching, repository reads, snapshot coalescing, and redaction
 //! belong to capture, not this boundary (Plan 25, "Does not own").
 
+use std::{fmt::Write as _, ops::Deref};
+
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    DomainError, IntakeRejectionV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1, UtcMicros, ValidatedCodeSnapshotV1, canonical_sha256,
+    ContentDigest, DomainError, IntakeRejectionV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1, ValidatedCodeSnapshotV1,
+    canonical_sha256,
 };
 
 use super::languages::LanguageRegistry;
@@ -23,11 +27,76 @@ pub trait CodeIndexIntake {
         &self,
         snapshot: SanitizedCodeSnapshotV1,
     ) -> Result<ValidatedCodeSnapshotV1, IntakeRejectionV1>;
+
+    /// Mint an opaque capability for one admitted sanitized snapshot.
+    fn admit(
+        &self,
+        snapshot: SanitizedCodeSnapshotV1,
+    ) -> Result<SanitizedSnapshotCapabilityV1, IntakeRejectionV1>;
+
+    /// Bind one raw extraction input to an admitted snapshot capability.
+    fn bind_file(
+        &self,
+        capability: &SanitizedSnapshotCapabilityV1,
+        file: ValidatedCodeFileV1,
+    ) -> Result<ReceiptBoundCodeFileV1, IntakeRejectionV1>;
 }
 
 /// Domain separator for the canonical intake digest (Plan 25: digests are
 /// domain-separated so cross-contract collisions are impossible).
 pub const INTAKE_DIGEST_SEPARATOR: &str = "tracedecay.code-index-intake.v1";
+
+/// Content digest over byte-exact sanitized source.
+pub fn content_digest(bytes: &[u8]) -> ContentDigest {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity("sha256:".len() + 64);
+    encoded.push_str("sha256:");
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    ContentDigest::new(encoded).expect("sha256 hex is a valid content digest")
+}
+
+/// Opaque proof that [`CodeIndexIntake::admit`] accepted one exact sanitized
+/// snapshot. It is intentionally neither deserializable nor publicly
+/// constructible: only the intake boundary can mint source authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SanitizedSnapshotCapabilityV1 {
+    snapshot: ValidatedCodeSnapshotV1,
+}
+
+impl SanitizedSnapshotCapabilityV1 {
+    /// The immutable validated snapshot bound to this capability.
+    pub fn snapshot(&self) -> &ValidatedCodeSnapshotV1 {
+        &self.snapshot
+    }
+}
+
+/// Opaque extraction input whose bytes, file digest, snapshot digest, and
+/// sanitization receipts were bound by [`CodeIndexIntake::bind_file`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiptBoundCodeFileV1 {
+    file: ValidatedCodeFileV1,
+}
+
+impl ReceiptBoundCodeFileV1 {
+    /// The byte-exact sanitized source authorized for extraction and chunking.
+    pub fn sanitized_bytes(&self) -> &[u8] {
+        &self.file.sanitized_bytes
+    }
+
+    pub(crate) fn validated_file(&self) -> &ValidatedCodeFileV1 {
+        &self.file
+    }
+}
+
+impl Deref for ReceiptBoundCodeFileV1 {
+    type Target = ValidatedCodeFileV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
+}
 
 /// Registry-backed sanitized intake validator.
 ///
@@ -85,31 +154,8 @@ impl<R: LanguageRegistry> SanitizedCodeIntake<R> {
     pub fn registry(&self) -> &R {
         &self.registry
     }
-}
 
-/// Map a domain snapshot-validation error to the typed intake rejection.
-fn rejection_for(error: &DomainError) -> IntakeRejectionV1 {
-    match error {
-        // Duplicate or non-canonically-ordered receipts, occurrences, or
-        // paths mean the input mixes snapshots.
-        DomainError::DuplicateId { .. } => IntakeRejectionV1::MixedSnapshot,
-        DomainError::NonCanonical { field }
-            if *field == "snapshot sanitization receipt order"
-                || *field == "snapshot file order" =>
-        {
-            IntakeRejectionV1::MixedSnapshot
-        }
-        DomainError::Empty { field } if *field == "snapshot sanitization receipts" => {
-            IntakeRejectionV1::MissingReceipt
-        }
-        // Everything else (logical-path form, present-without-language,
-        // non-canonical identities) is unsanitized input.
-        _ => IntakeRejectionV1::UnsanitizedInput,
-    }
-}
-
-impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
-    fn validate(
+    fn validate_snapshot(
         &self,
         snapshot: SanitizedCodeSnapshotV1,
     ) -> Result<ValidatedCodeSnapshotV1, IntakeRejectionV1> {
@@ -151,6 +197,71 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
             intake_digest,
             validated_at: self.reference_time,
         })
+    }
+}
+
+/// Map a domain snapshot-validation error to the typed intake rejection.
+fn rejection_for(error: &DomainError) -> IntakeRejectionV1 {
+    match error {
+        // Duplicate or non-canonically-ordered receipts, occurrences, or
+        // paths mean the input mixes snapshots.
+        DomainError::DuplicateId { .. } => IntakeRejectionV1::MixedSnapshot,
+        DomainError::NonCanonical { field }
+            if *field == "snapshot sanitization receipt order"
+                || *field == "snapshot file order" =>
+        {
+            IntakeRejectionV1::MixedSnapshot
+        }
+        DomainError::Empty { field } if *field == "snapshot sanitization receipts" => {
+            IntakeRejectionV1::MissingReceipt
+        }
+        // Everything else (logical-path form, present-without-language,
+        // non-canonical identities) is unsanitized input.
+        _ => IntakeRejectionV1::UnsanitizedInput,
+    }
+}
+
+impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
+    fn validate(
+        &self,
+        snapshot: SanitizedCodeSnapshotV1,
+    ) -> Result<ValidatedCodeSnapshotV1, IntakeRejectionV1> {
+        self.validate_snapshot(snapshot)
+    }
+
+    fn admit(
+        &self,
+        snapshot: SanitizedCodeSnapshotV1,
+    ) -> Result<SanitizedSnapshotCapabilityV1, IntakeRejectionV1> {
+        self.validate_snapshot(snapshot)
+            .map(|snapshot| SanitizedSnapshotCapabilityV1 { snapshot })
+    }
+
+    fn bind_file(
+        &self,
+        capability: &SanitizedSnapshotCapabilityV1,
+        file: ValidatedCodeFileV1,
+    ) -> Result<ReceiptBoundCodeFileV1, IntakeRejectionV1> {
+        let expected = self.validate_snapshot(capability.snapshot.snapshot.clone())?;
+        if expected != capability.snapshot
+            || file.snapshot_digest != capability.snapshot.intake_digest
+            || file.file.disposition != SnapshotFileDispositionV1::Present
+            || content_digest(&file.sanitized_bytes) != file.file.content_digest
+            || std::str::from_utf8(&file.sanitized_bytes).is_err()
+        {
+            return Err(IntakeRejectionV1::UnsanitizedInput);
+        }
+        if capability
+            .snapshot
+            .snapshot
+            .files
+            .iter()
+            .find(|candidate| candidate.file_occurrence_id == file.file.file_occurrence_id)
+            != Some(&file.file)
+        {
+            return Err(IntakeRejectionV1::UnsanitizedInput);
+        }
+        Ok(ReceiptBoundCodeFileV1 { file })
     }
 }
 

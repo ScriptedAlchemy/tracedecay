@@ -11,10 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CodeGenerationId, CompactCandidate, CursorPayloadDigest, ExactAdmissionProof,
-    ExactAdmissionRuleRevision, ExactAdmissionValidator, ExactFieldV1, FixedPointScore,
-    RetrievalBudget, RetrievalError, RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch,
-    RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    CodeGenerationId, CompactCandidate, CursorPayloadDigest, EphemeralSanitizedQueryViewV1,
+    ExactAdmissionProof, ExactAdmissionRuleRevision, ExactAdmissionValidator, ExactFieldV1,
+    FixedPointScore, RetrievalBudget, RetrievalError, RetrievalFailure, RetrievalRequest,
+    Retriever, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
+    RetrieverOutcome,
 };
 
 use super::ports::{
@@ -24,10 +25,10 @@ use super::ports::{
 /// Typed exact-lane request (Plan 15 pipeline step 2: exact technical
 /// literals are parsed under a versioned exact-admission specification before
 /// any lane executes).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ExactLaneRequest {
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExactLaneRequest<'a> {
     pub base: RetrievalRequest,
+    pub query_view: &'a EphemeralSanitizedQueryViewV1,
     pub generation: CodeGenerationId,
     /// Candidate literals with their typed fields, pre-parsed by the central
     /// admission validator. The lane never re-derives exact status.
@@ -35,7 +36,7 @@ pub struct ExactLaneRequest {
     pub budget: RetrievalBudget,
 }
 
-impl ExactLaneRequest {
+impl ExactLaneRequest<'_> {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
         self.base
             .budget
@@ -97,7 +98,7 @@ pub struct ExactLaneEvidence {
 }
 
 impl ExactLaneEvidence {
-    pub fn validate(&self, request: &ExactLaneRequest) -> Result<(), RetrievalPortError> {
+    pub fn validate(&self, request: &ExactLaneRequest<'_>) -> Result<(), RetrievalPortError> {
         request.validate()?;
         if self.binding.occurrence.generation != request.generation {
             return Err(RetrievalPortError::GenerationMismatch);
@@ -133,7 +134,7 @@ pub trait ExactLaneRetriever {
     /// Retrieve the committed exact-tier candidate prefix for `request`.
     fn retrieve_exact(
         &self,
-        request: &ExactLaneRequest,
+        request: &ExactLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError>;
 }
 
@@ -144,7 +145,11 @@ pub trait ExactAdmissionAuthority: ExactAdmissionValidator {
     /// Parse `request.query` into typed literal candidates under the
     /// versioned admission specification, preserving original bytes and
     /// normalization provenance.
-    fn parse_literals(&self, request: &RetrievalRequest) -> Vec<ExactLiteralV1>;
+    fn parse_literals(
+        &self,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        request: &RetrievalRequest,
+    ) -> Vec<ExactLiteralV1>;
 }
 
 /// Versioned central exact-admission authority for PR9 code queries.
@@ -195,10 +200,14 @@ impl ExactAdmissionValidator for CentralExactAdmissionAuthorityV1 {
 }
 
 impl ExactAdmissionAuthority for CentralExactAdmissionAuthorityV1 {
-    fn parse_literals(&self, request: &RetrievalRequest) -> Vec<ExactLiteralV1> {
+    fn parse_literals(
+        &self,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        _request: &RetrievalRequest,
+    ) -> Vec<ExactLiteralV1> {
         let mut literals = Vec::new();
         let mut seen = BTreeSet::new();
-        for atom in exact_query_atoms(&request.query) {
+        for atom in exact_query_atoms(query_view.as_str()) {
             let field = atom
                 .field
                 .or_else(|| classify_unprefixed_exact(atom.text.as_str(), atom.quoted));
@@ -508,11 +517,11 @@ where
     /// request whose literals were not validator-produced.
     fn enforce_request_literals(
         &self,
-        request: &ExactLaneRequest,
+        request: &ExactLaneRequest<'_>,
     ) -> Result<(), RetrievalPortError> {
         let parsed: BTreeSet<(ExactFieldV1, Vec<u8>, Vec<u8>)> = self
             .authority
-            .parse_literals(&request.base)
+            .parse_literals(request.query_view, &request.base)
             .into_iter()
             .map(|literal| {
                 (
@@ -547,7 +556,7 @@ where
     /// scores, typed coverage, budget cutoff, and a checkpoint digest.
     fn enforce_batch(
         &self,
-        request: &ExactLaneRequest,
+        request: &ExactLaneRequest<'_>,
         batch: &RetrieverBatch<ExactLaneEvidence>,
     ) -> Result<RetrieverBatch<ExactLaneEvidence>, RetrievalPortError> {
         batch
@@ -685,7 +694,7 @@ where
 {
     fn retrieve_exact(
         &self,
-        request: &ExactLaneRequest,
+        request: &ExactLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
         self.enforce_request_literals(request)?;
@@ -713,28 +722,28 @@ where
     }
 }
 
-impl<A, P> Retriever<ExactLaneRequest, ExactLaneEvidence> for ExactLane<A, P>
+impl<'a, A, P> Retriever<ExactLaneRequest<'a>, ExactLaneEvidence> for ExactLane<A, P>
 where
     A: ExactAdmissionAuthority,
     P: ExactTermPostingReadPort,
 {
     fn retrieve(
         &self,
-        request: &ExactLaneRequest,
+        request: &ExactLaneRequest<'a>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalError> {
         self.retrieve_exact(request)
             .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
     }
 }
 
-impl<A, P> CompactCandidateLane<ExactLaneRequest, ExactLaneEvidence> for ExactLane<A, P>
+impl<'a, A, P> CompactCandidateLane<ExactLaneRequest<'a>, ExactLaneEvidence> for ExactLane<A, P>
 where
     A: ExactAdmissionAuthority,
     P: ExactTermPostingReadPort,
 {
     fn candidates(
         &self,
-        request: &ExactLaneRequest,
+        request: &ExactLaneRequest<'a>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
         self.retrieve_exact(request)
     }

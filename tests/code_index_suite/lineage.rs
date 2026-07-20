@@ -79,6 +79,39 @@ fn exact_content_evidence_classifies_moves_and_renames() {
 }
 
 #[test]
+fn content_digest_without_continuity_abstains() {
+    let prior = index(
+        1,
+        vec![symbol(
+            "symbol.prior",
+            'a',
+            "crate::unrelated_prior",
+            'f',
+            '0',
+        )],
+    );
+    let current = index(
+        2,
+        vec![symbol(
+            "symbol.current",
+            'b',
+            "crate::unrelated_current",
+            'e',
+            '0',
+        )],
+    );
+
+    let candidates = SymbolLineageResolver::new()
+        .resolve(&prior, &current)
+        .expect("lineage resolution remains explicit");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].method, LineageMethodV1::DeclaredAbstention);
+    assert_eq!(candidates[0].confidence, LineageConfidenceKindV1::Abstained);
+    assert!(candidates[0].evidence.prior_digest.is_none());
+}
+
+#[test]
 fn possible_split_abstains_for_each_current_symbol_instead_of_consuming_one_ancestor() {
     let prior = index(
         1,

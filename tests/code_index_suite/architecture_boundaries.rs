@@ -30,7 +30,9 @@ fn admit<I: CodeIndexIntake>(
     intake: &I,
     snapshot: SanitizedCodeSnapshotV1,
 ) -> ValidatedCodeSnapshotV1 {
-    intake.validate(snapshot).expect("admit through intake port")
+    intake
+        .validate(snapshot)
+        .expect("admit through intake port")
 }
 
 fn no_op_request() -> ProjectionBatchRequestV1 {

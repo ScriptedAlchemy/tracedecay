@@ -49,6 +49,8 @@ pub enum ProjectionReceiptErrorV1 {
     CrossGenerationReceipt(CodeSearchChunkId),
     #[error("a receipt carries the wrong projection key")]
     WrongProjectionKey,
+    #[error("a projection-key replay must apply every retained chunk under the target key")]
+    ProjectionKeyReplayRequiresAppliedWork,
     #[error("chunk {0} has an operation, outcome, or digest inconsistent with the request")]
     InconsistentOperation(CodeSearchChunkId),
     #[error("the receipt set is not in canonical chunk order")]
@@ -174,6 +176,7 @@ pub fn build_batch_receipt(
     if request.request_digest != expected_request {
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
+    validate_reuse_scope(request)?;
     let partitions = partitions_of(&request.changes)?;
 
     let mut seen = BTreeSet::new();
@@ -245,6 +248,7 @@ pub fn verify_batch_receipt(
     if request.request_digest != expected_request || batch.request_digest != expected_request {
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
+    validate_reuse_scope(request)?;
     if batch.target_projection_key != request.target_projection_key {
         return Err(ProjectionReceiptErrorV1::WrongProjectionKey);
     }
@@ -325,6 +329,17 @@ pub fn verify_batch_receipt(
         .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
     if batch.publication_digest != expected_publication {
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
+    }
+    Ok(())
+}
+
+fn validate_reuse_scope(
+    request: &ProjectionBatchRequestV1,
+) -> Result<(), ProjectionReceiptErrorV1> {
+    if request.previous_projection_key.as_ref() != Some(&request.target_projection_key)
+        && !request.changes.reused.is_empty()
+    {
+        return Err(ProjectionReceiptErrorV1::ProjectionKeyReplayRequiresAppliedWork);
     }
     Ok(())
 }
@@ -523,11 +538,12 @@ mod tests {
     }
 
     fn batch_request(changes: ChangedCodeChunkSetV1) -> ProjectionBatchRequestV1 {
+        let target_projection_key = projection_key();
         let mut request = ProjectionBatchRequestV1 {
             request_digest: manifest_digest('0'),
             changes,
-            previous_projection_key: None,
-            target_projection_key: projection_key(),
+            previous_projection_key: Some(target_projection_key.clone()),
+            target_projection_key,
             replay_reason: ProjectionReplayReasonV1::SourceEdit,
         };
         request.request_digest = expected_request_digest(&request).expect("request digest");

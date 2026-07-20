@@ -35,6 +35,10 @@ pub enum DedupeStageError {
 pub struct DedupeDecisionV1 {
     pub kept_occurrence: SourceOccurrenceId,
     pub collapsed_occurrences: Vec<SourceOccurrenceId>,
+    /// Full compact provenance of candidates excluded by a logical-copy
+    /// representative choice. It stays associated per candidate instead of
+    /// being reconstructed from parallel occurrence/contribution vectors.
+    pub collapsed_candidates: Vec<FusedCandidate>,
     pub copy_cluster: Option<LogicalCopyClusterId>,
     pub decision: RankingDecision,
 }
@@ -115,6 +119,7 @@ impl DeterministicDedupe {
                         .iter()
                         .map(|candidate| candidate.source_occurrence_id.clone())
                         .collect(),
+                    collapsed_candidates: Vec::new(),
                     copy_cluster: selected.logical_copy_cluster_id.clone(),
                     decision,
                 });
@@ -133,6 +138,12 @@ impl DeterministicDedupe {
         let mut clusters = BTreeMap::<LogicalCopyClusterId, Vec<FusedCandidate>>::new();
 
         for mut candidate in candidates {
+            if candidate.occurrences.iter().any(|occurrence| {
+                occurrence.logical_copy_cluster_id.is_some()
+                    && occurrence.logical_copy_evidence_anchor.is_none()
+            }) {
+                return Err(DedupeStageError::CopyRelationWithoutEvidence);
+            }
             let cluster_ids = candidate
                 .occurrences
                 .iter()
@@ -161,6 +172,14 @@ impl DeterministicDedupe {
                     detail: "preserved admitted contradiction".to_owned(),
                 });
                 independent.push(candidate);
+            } else if candidate
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.evidence_role == EvidenceRole::Corroboration)
+            {
+                // Corroboration is independent evidence, never a redundant
+                // copy selected away merely because it shares a copy cluster.
+                independent.push(candidate);
             } else if let Some(cluster) = cluster_ids.into_iter().next() {
                 if candidate.occurrences.is_empty() {
                     return Err(DedupeStageError::CopyRelationWithoutEvidence);
@@ -178,8 +197,8 @@ impl DeterministicDedupe {
             if !copies.is_empty() {
                 let evidence_anchor = representative
                     .occurrences
-                    .first()
-                    .map(|occurrence| occurrence.retriever_evidence_anchor.clone())
+                    .iter()
+                    .find_map(|occurrence| occurrence.logical_copy_evidence_anchor.clone())
                     .ok_or(DedupeStageError::CopyRelationWithoutEvidence)?;
                 let decision = RankingDecision {
                     kind: RankingDecisionKind::LogicalCopyRepresentativeSelection,
@@ -209,6 +228,7 @@ impl DeterministicDedupe {
                                 .map(|occurrence| occurrence.source_occurrence_id.clone())
                         })
                         .collect(),
+                    collapsed_candidates: copies.clone(),
                     copy_cluster: Some(cluster),
                     decision,
                 });
@@ -252,6 +272,7 @@ impl SameSourceDedupeStage for DeterministicDedupe {
                     DedupeDecisionV1 {
                         kept_occurrence: occurrence.clone(),
                         collapsed_occurrences: vec![occurrence; duplicates.len() - 1],
+                        collapsed_candidates: Vec::new(),
                         copy_cluster: duplicates[0].logical_copy_cluster_id.clone(),
                         decision,
                     }

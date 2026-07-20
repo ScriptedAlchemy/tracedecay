@@ -1,5 +1,6 @@
 mod composition;
 mod cursor;
+mod request;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -9,8 +10,8 @@ use tracedecay_domain::{
     ExactAdmissionRuleRevision, ExactFieldV1, FixedPointScore, FreshnessCompatibilityV1,
     FusionProfile, PrincipalId, RetrievalAnchorId, RetrievalBudget, RetrievalRequest,
     RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, SingleRootScopeV1, SourceFreshness, TemporalModeV1, UtcMicros,
-    VectorWatermark,
+    RetrieverOutcome, ScoreDomainCalibrationV1, SingleRootScopeV1, SourceFreshness, TemporalModeV1,
+    UtcMicros, VectorWatermark,
 };
 
 use super::fusion::CompositionLaneInput;
@@ -43,7 +44,6 @@ fn budget() -> RetrievalBudget {
 
 fn request() -> RetrievalRequest {
     RetrievalRequest {
-        query: "deterministic retrieval".to_owned(),
         principal: id::<PrincipalId>("principal.fixture"),
         scope: RetrievalScope {
             privacy_domain: id("privacy.fixture"),
@@ -76,6 +76,22 @@ fn profile() -> FusionProfile {
                 (
                     lane,
                     id::<CalibrationProfileId>(&format!("calibration.{}.v1", lane.as_str())),
+                )
+            })
+            .collect(),
+        score_domain_calibrations: RetrieverKind::PR9_FALLBACK_LANES
+            .into_iter()
+            .map(|lane| {
+                let score_domain: tracedecay_domain::ScoreDomainId =
+                    id(&format!("score.{}.v1", lane.as_str()));
+                (
+                    score_domain.clone(),
+                    ScoreDomainCalibrationV1 {
+                        calibration_profile_id: id(&format!("calibration.{}.v1", lane.as_str())),
+                        score_domain,
+                        raw_min_micros: 0,
+                        raw_max_micros: 1_000_000,
+                    },
                 )
             })
             .collect(),
@@ -133,6 +149,7 @@ fn candidate(
         repository_id: Some(id("repository.fixture")),
         session_or_thread_id: None,
         logical_copy_cluster_id: None,
+        logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
         retriever: lane,
         retriever_revision: id(&format!("retriever.{}.v1", lane.as_str())),

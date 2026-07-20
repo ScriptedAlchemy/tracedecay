@@ -9,21 +9,246 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
     CandidateContribution, CandidateSetDigest, CompactCandidate, ComponentRevision,
-    CursorPayloadDigest, ExactClass, FreshnessCompatibilityV1, FusedCandidate, FusionProfile,
-    LogicalEvidenceId, OccurrenceProvenance, PublicRetrieverStatus, RankedCandidate,
+    EphemeralSanitizedQueryViewV1, ExactClass, FixedPointScore, FreshnessCompatibilityV1,
+    FusedCandidate, FusionProfile, LogicalEvidenceId, OccurrenceProvenance, PrivacyDomainId,
+    PublicRetrieverStatus, QueryDigest, QueryMac, QueryNormalizationRevision, RankedCandidate,
     RankingDecision, RankingDecisionKind, RetrievalAnchorId, RetrievalContractError,
-    RetrievalCursor, RetrievalError, RetrievalRequest, RetrieverBatch, RetrieverContinuation,
-    RetrieverKind, RetrieverOutcome, SourceFreshness, SourceOccurrenceId,
+    RetrievalCursor, RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverBatch,
+    RetrieverContinuation, RetrieverKind, RetrieverOutcome, SanitizerRevision, SourceFreshness,
+    SourceOccurrenceId, UtcMicros,
 };
+use zeroize::Zeroizing;
 
 use super::dedupe::{DedupeDecisionV1, DeterministicDedupe};
 use super::diversity::{DeterministicDiversity, DiversityDecisionV1, DiversityStageError};
+
+const QUERY_DIGEST_MAC_DOMAIN: &str = "tracedecay.retrieval-query-mac.v1";
+const RETRIEVAL_CURSOR_MAC_DOMAIN: &str = "tracedecay.retrieval-cursor-mac.v1";
+const MIN_QUERY_MAC_SECRET_BYTES: usize = 32;
+const MAX_QUERY_MAC_SECRET_BYTES: usize = 256;
+
+/// Failure to authenticate a request-local query view for cursor identity.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum QueryDigestAuthenticationError {
+    #[error("query MAC key material is invalid")]
+    InvalidKeyMaterial,
+    #[error("query MAC key is unavailable")]
+    KeyUnavailable,
+    #[error("query MAC key was revoked")]
+    KeyRevoked,
+    #[error("query MAC privacy domain does not match the authorized request scope")]
+    PrivacyDomainMismatch,
+    #[error("query MAC canonicalization failed: {0}")]
+    Canonicalization(String),
+    #[error(transparent)]
+    Contract(#[from] RetrievalContractError),
+}
+
+struct RetrievalCursorKeyMaterialV1 {
+    secret: Zeroizing<Vec<u8>>,
+    revoked: bool,
+}
+
+/// Request-local cursor key policy. New cursors use the active key; retained
+/// non-revoked keys verify old cursors after rotation.
+pub struct RetrievalCursorKeyringV1 {
+    privacy_domain: PrivacyDomainId,
+    active: (RetrievalCursorKeyId, u64),
+    keys: BTreeMap<(RetrievalCursorKeyId, u64), RetrievalCursorKeyMaterialV1>,
+    cursor_ttl_micros: u64,
+}
+
+impl fmt::Debug for RetrievalCursorKeyringV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RetrievalCursorKeyringV1")
+            .field("privacy_domain", &self.privacy_domain)
+            .field("active", &self.active)
+            .field("retained_key_count", &self.keys.len())
+            .field("cursor_ttl_micros", &self.cursor_ttl_micros)
+            .field("key_material", &"REDACTED")
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+struct QueryMacInput<'a> {
+    domain: &'static str,
+    privacy_domain: &'a PrivacyDomainId,
+    key_epoch: u64,
+    query_bytes: &'a [u8],
+    sanitizer_revision: &'a SanitizerRevision,
+    normalization_revision: &'a QueryNormalizationRevision,
+}
+
+impl RetrievalCursorKeyringV1 {
+    pub fn new(
+        privacy_domain: PrivacyDomainId,
+        key_id: RetrievalCursorKeyId,
+        key_epoch: u64,
+        secret: impl Into<Vec<u8>>,
+        cursor_ttl_micros: u64,
+    ) -> Result<Self, QueryDigestAuthenticationError> {
+        if cursor_ttl_micros == 0 {
+            return Err(QueryDigestAuthenticationError::InvalidKeyMaterial);
+        }
+        let mut keyring = Self {
+            privacy_domain,
+            active: (key_id.clone(), key_epoch),
+            keys: BTreeMap::new(),
+            cursor_ttl_micros,
+        };
+        keyring.retain(key_id, key_epoch, secret)?;
+        Ok(keyring)
+    }
+
+    pub fn retain(
+        &mut self,
+        key_id: RetrievalCursorKeyId,
+        key_epoch: u64,
+        secret: impl Into<Vec<u8>>,
+    ) -> Result<(), QueryDigestAuthenticationError> {
+        let secret = Zeroizing::new(secret.into());
+        if !(MIN_QUERY_MAC_SECRET_BYTES..=MAX_QUERY_MAC_SECRET_BYTES).contains(&secret.len())
+            || self.keys.contains_key(&(key_id.clone(), key_epoch))
+        {
+            return Err(QueryDigestAuthenticationError::InvalidKeyMaterial);
+        }
+        self.keys.insert(
+            (key_id, key_epoch),
+            RetrievalCursorKeyMaterialV1 {
+                secret,
+                revoked: false,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn rotate(
+        &mut self,
+        key_id: RetrievalCursorKeyId,
+        key_epoch: u64,
+        secret: impl Into<Vec<u8>>,
+    ) -> Result<(), QueryDigestAuthenticationError> {
+        self.retain(key_id.clone(), key_epoch, secret)?;
+        self.active = (key_id, key_epoch);
+        Ok(())
+    }
+
+    pub fn revoke(
+        &mut self,
+        key_id: &RetrievalCursorKeyId,
+        key_epoch: u64,
+    ) -> Result<(), QueryDigestAuthenticationError> {
+        let key = self
+            .keys
+            .get_mut(&(key_id.clone(), key_epoch))
+            .ok_or(QueryDigestAuthenticationError::KeyUnavailable)?;
+        key.revoked = true;
+        Ok(())
+    }
+
+    pub fn digest_active_query(
+        &self,
+        request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+    ) -> Result<QueryDigest, QueryDigestAuthenticationError> {
+        self.digest_query_for(&self.active.0, self.active.1, request, query_view)
+    }
+
+    fn digest_query_for(
+        &self,
+        key_id: &RetrievalCursorKeyId,
+        key_epoch: u64,
+        request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+    ) -> Result<QueryDigest, QueryDigestAuthenticationError> {
+        if request.scope.privacy_domain != self.privacy_domain {
+            return Err(QueryDigestAuthenticationError::PrivacyDomainMismatch);
+        }
+        let material = self.key_material(key_id, key_epoch)?;
+        let input = QueryMacInput {
+            domain: QUERY_DIGEST_MAC_DOMAIN,
+            privacy_domain: &self.privacy_domain,
+            key_epoch,
+            query_bytes: query_view.as_bytes(),
+            sanitizer_revision: query_view.sanitizer_revision(),
+            normalization_revision: query_view.normalization_revision(),
+        };
+        let bytes = serde_json::to_vec(&input)
+            .map_err(|error| QueryDigestAuthenticationError::Canonicalization(error.to_string()))?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
+            .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
+        mac.update(&bytes);
+        let mac = QueryMac::new(format!(
+            "hmac-sha256:{}",
+            hex::encode(mac.finalize().into_bytes())
+        ))?;
+        Ok(QueryDigest::new(
+            self.privacy_domain.clone(),
+            key_epoch,
+            mac,
+        ))
+    }
+
+    fn active_key(&self) -> (&RetrievalCursorKeyId, u64) {
+        (&self.active.0, self.active.1)
+    }
+
+    fn expiry_from(&self, now: UtcMicros) -> Result<UtcMicros, RetrievalError> {
+        let ttl = i64::try_from(self.cursor_ttl_micros)
+            .map_err(|_| RetrievalError::InvalidRequest("cursor TTL overflowed".to_owned()))?;
+        now.0
+            .checked_add(ttl)
+            .map(UtcMicros)
+            .ok_or_else(|| RetrievalError::InvalidRequest("cursor expiry overflowed".to_owned()))
+    }
+
+    fn sign_cursor(&self, cursor: &RetrievalCursor) -> Result<QueryMac, RetrievalError> {
+        let material = self
+            .key_material(&cursor.key_id, cursor.key_epoch)
+            .map_err(map_cursor_key_error)?;
+        let bytes = cursor_authenticated_bytes(cursor)?;
+        keyed_mac(&material.secret, &bytes).map_err(map_cursor_key_error)
+    }
+
+    fn verify_cursor(&self, cursor: &RetrievalCursor) -> Result<(), RetrievalError> {
+        let material = self
+            .key_material(&cursor.key_id, cursor.key_epoch)
+            .map_err(map_cursor_key_error)?;
+        let bytes = cursor_authenticated_bytes(cursor)?;
+        let signature = query_mac_bytes(&cursor.signature).map_err(map_cursor_key_error)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
+            .map_err(|_| RetrievalError::CursorAuthenticationFailed)?;
+        mac.update(&bytes);
+        mac.verify_slice(&signature)
+            .map_err(|_| RetrievalError::CursorAuthenticationFailed)
+    }
+
+    fn key_material(
+        &self,
+        key_id: &RetrievalCursorKeyId,
+        key_epoch: u64,
+    ) -> Result<&RetrievalCursorKeyMaterialV1, QueryDigestAuthenticationError> {
+        let material = self
+            .keys
+            .get(&(key_id.clone(), key_epoch))
+            .ok_or(QueryDigestAuthenticationError::KeyUnavailable)?;
+        if material.revoked {
+            return Err(QueryDigestAuthenticationError::KeyRevoked);
+        }
+        Ok(material)
+    }
+}
 
 /// Failures of the fusion stage. Fusion never substitutes or simulates a
 /// missing lane; it composes the typed outcomes it is given.
@@ -233,9 +458,32 @@ impl CompositionKernel {
     pub fn paginate(
         &self,
         request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        keyring: &RetrievalCursorKeyringV1,
         output: &CompositionOutputV1,
         page_size: usize,
         cursor: Option<&RetrievalCursor>,
+    ) -> Result<CompositionPageV1, RetrievalError> {
+        self.paginate_at(
+            request,
+            query_view,
+            keyring,
+            output,
+            page_size,
+            cursor,
+            current_utc_micros()?,
+        )
+    }
+
+    pub fn paginate_at(
+        &self,
+        request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        keyring: &RetrievalCursorKeyringV1,
+        output: &CompositionOutputV1,
+        page_size: usize,
+        cursor: Option<&RetrievalCursor>,
+        now: UtcMicros,
     ) -> Result<CompositionPageV1, RetrievalError> {
         if page_size == 0 || page_size > request.budget.max_fused_candidates as usize {
             return Err(RetrievalError::InvalidRequest(
@@ -243,11 +491,18 @@ impl CompositionKernel {
             ));
         }
 
-        let query_digest = digest_cursor_value("tracedecay.retrieval-query.v1", request)?;
         let snapshot_digest = request.snapshot.compute_digest()?;
         let candidate_set_digest = digest_candidate_set(&output.ranked_candidates)?;
         let start = match cursor {
             Some(cursor) => {
+                keyring.verify_cursor(cursor)?;
+                if now.0 >= cursor.expiry.0 {
+                    return Err(RetrievalError::CursorExpired);
+                }
+                cursor.validate()?;
+                let query_digest = keyring
+                    .digest_query_for(&cursor.key_id, cursor.key_epoch, request, query_view)
+                    .map_err(|_| RetrievalError::CursorSetMismatch)?;
                 validate_cursor(
                     cursor,
                     request,
@@ -270,6 +525,9 @@ impl CompositionKernel {
             .min(output.ranked_candidates.len());
         let ranked_candidates = output.ranked_candidates[start..end].to_vec();
         let cursor = if end < output.ranked_candidates.len() {
+            let query_digest = keyring
+                .digest_active_query(request, query_view)
+                .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))?;
             Some(build_cursor(
                 request,
                 output,
@@ -278,6 +536,8 @@ impl CompositionKernel {
                 candidate_set_digest,
                 self.ranking_revision.clone(),
                 end as u32,
+                now,
+                keyring,
             )?)
         } else {
             None
@@ -440,9 +700,19 @@ impl DeterministicFixedPointFusion {
                 .weights_micros
                 .get(&candidate.retriever)
                 .ok_or(FusionStageError::ProfileLaneMismatch)?;
-            let calibrated_feature_micros = u32::try_from(candidate.raw_score.micros())
-                .map_err(|_| FusionStageError::InvalidCalibratedFeature)?;
-            let weighted_contribution_micros = candidate.raw_score.checked_weight(weight_micros)?;
+            let calibration = profile
+                .score_domain_calibrations
+                .get(&candidate.score_domain)
+                .ok_or(FusionStageError::ProfileLaneMismatch)?;
+            if calibration.calibration_profile_id != calibration_profile_id
+                || calibration.score_domain != candidate.score_domain
+            {
+                return Err(FusionStageError::ProfileLaneMismatch);
+            }
+            let calibrated_feature_micros = calibration.calibrate(candidate.raw_score)?;
+            let weighted_contribution_micros =
+                FixedPointScore(u64::from(calibrated_feature_micros))
+                    .checked_weight(weight_micros)?;
             let exact_class = candidate.exact_class();
             let occurrence = occurrence_from(&candidate);
             let contribution = CandidateContribution {
@@ -591,6 +861,10 @@ fn compact_candidate_cmp(left: &CompactCandidate, right: &CompactCandidate) -> O
             left.retriever_evidence_anchor
                 .cmp(&right.retriever_evidence_anchor)
         })
+        .then_with(|| {
+            left.logical_copy_evidence_anchor
+                .cmp(&right.logical_copy_evidence_anchor)
+        })
 }
 
 fn occurrence_from(candidate: &CompactCandidate) -> OccurrenceProvenance {
@@ -601,6 +875,7 @@ fn occurrence_from(candidate: &CompactCandidate) -> OccurrenceProvenance {
         repository_id: candidate.repository_id.clone(),
         session_or_thread_id: candidate.session_or_thread_id.clone(),
         logical_copy_cluster_id: candidate.logical_copy_cluster_id.clone(),
+        logical_copy_evidence_anchor: candidate.logical_copy_evidence_anchor.clone(),
         evidence_role: candidate.evidence_role,
         freshness: candidate.freshness.clone(),
     }
@@ -654,6 +929,10 @@ fn occurrence_cmp(left: &OccurrenceProvenance, right: &OccurrenceProvenance) -> 
         .then_with(|| {
             left.retriever_evidence_anchor
                 .cmp(&right.retriever_evidence_anchor)
+        })
+        .then_with(|| {
+            left.logical_copy_evidence_anchor
+                .cmp(&right.logical_copy_evidence_anchor)
         })
 }
 
@@ -716,14 +995,6 @@ fn digest_candidate_set(
         .and_then(|value| CandidateSetDigest::new(value).map_err(RetrievalError::from))
 }
 
-fn digest_cursor_value<T: Serialize>(
-    domain: &'static str,
-    value: &T,
-) -> Result<CursorPayloadDigest, RetrievalError> {
-    digest_value(domain, value)
-        .and_then(|value| CursorPayloadDigest::new(value).map_err(RetrievalError::from))
-}
-
 fn digest_value<T: Serialize + ?Sized>(
     domain: &'static str,
     value: &T,
@@ -737,13 +1008,19 @@ fn digest_value<T: Serialize + ?Sized>(
 fn build_cursor(
     request: &RetrievalRequest,
     output: &CompositionOutputV1,
-    query_digest: CursorPayloadDigest,
+    query_digest: QueryDigest,
     snapshot_digest: CandidateSetDigest,
     candidate_set_digest: CandidateSetDigest,
     ranking_revision: ComponentRevision,
     next_ordinal: u32,
+    now: UtcMicros,
+    keyring: &RetrievalCursorKeyringV1,
 ) -> Result<RetrievalCursor, RetrievalError> {
+    let (key_id, key_epoch) = keyring.active_key();
     let mut cursor = RetrievalCursor {
+        key_id: key_id.clone(),
+        key_epoch,
+        privacy_domain: request.scope.privacy_domain.clone(),
         query_digest,
         profile_id: output.profile_id.clone(),
         snapshot_digest,
@@ -756,53 +1033,58 @@ fn build_cursor(
             ranking_revision.as_str().to_owned(),
         )?,
         next_ordinal,
-        expiry: None,
-        payload_digest: CursorPayloadDigest::new(format!("sha256:{}", "0".repeat(64)))?,
+        expiry: keyring.expiry_from(now)?,
+        signature: QueryMac::new(format!("hmac-sha256:{}", "0".repeat(64)))?,
     };
-    cursor.payload_digest = cursor_payload_digest(&cursor)?;
+    cursor.signature = keyring.sign_cursor(&cursor)?;
     Ok(cursor)
 }
 
-fn cursor_payload_digest(cursor: &RetrievalCursor) -> Result<CursorPayloadDigest, RetrievalError> {
-    #[derive(Serialize)]
-    struct CursorPayload<'a> {
-        domain: &'static str,
-        query_digest: &'a CursorPayloadDigest,
-        profile_id: &'a tracedecay_domain::FusionProfileId,
-        snapshot_digest: &'a CandidateSetDigest,
-        freshness_digest: &'a tracedecay_domain::FreshnessVectorDigest,
-        authorization_revision: &'a tracedecay_domain::AuthorizationRevision,
-        candidate_set_digest: &'a CandidateSetDigest,
-        public_lane_statuses: &'a BTreeMap<RetrieverKind, PublicRetrieverStatus>,
-        lane_checkpoints: &'a [RetrieverContinuation],
-        ranking_revision: &'a tracedecay_domain::RankingRevision,
-        next_ordinal: u32,
-        expiry: &'a Option<tracedecay_domain::UtcMicros>,
-    }
-    digest_cursor_value(
-        "tracedecay.retrieval-cursor.v1",
-        &CursorPayload {
-            domain: "tracedecay.retrieval-cursor.v1",
-            query_digest: &cursor.query_digest,
-            profile_id: &cursor.profile_id,
-            snapshot_digest: &cursor.snapshot_digest,
-            freshness_digest: &cursor.freshness_digest,
-            authorization_revision: &cursor.authorization_revision,
-            candidate_set_digest: &cursor.candidate_set_digest,
-            public_lane_statuses: &cursor.public_lane_statuses,
-            lane_checkpoints: &cursor.lane_checkpoints,
-            ranking_revision: &cursor.ranking_revision,
-            next_ordinal: cursor.next_ordinal,
-            expiry: &cursor.expiry,
-        },
-    )
+#[derive(Serialize)]
+struct CursorAuthenticatedPayload<'a> {
+    domain: &'static str,
+    key_id: &'a RetrievalCursorKeyId,
+    key_epoch: u64,
+    privacy_domain: &'a PrivacyDomainId,
+    query_digest: &'a QueryDigest,
+    profile_id: &'a tracedecay_domain::FusionProfileId,
+    snapshot_digest: &'a CandidateSetDigest,
+    freshness_digest: &'a tracedecay_domain::FreshnessVectorDigest,
+    authorization_revision: &'a tracedecay_domain::AuthorizationRevision,
+    candidate_set_digest: &'a CandidateSetDigest,
+    public_lane_statuses: &'a BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    lane_checkpoints: &'a [RetrieverContinuation],
+    ranking_revision: &'a tracedecay_domain::RankingRevision,
+    next_ordinal: u32,
+    expiry: UtcMicros,
+}
+
+fn cursor_authenticated_bytes(cursor: &RetrievalCursor) -> Result<Vec<u8>, RetrievalError> {
+    serde_json::to_vec(&CursorAuthenticatedPayload {
+        domain: RETRIEVAL_CURSOR_MAC_DOMAIN,
+        key_id: &cursor.key_id,
+        key_epoch: cursor.key_epoch,
+        privacy_domain: &cursor.privacy_domain,
+        query_digest: &cursor.query_digest,
+        profile_id: &cursor.profile_id,
+        snapshot_digest: &cursor.snapshot_digest,
+        freshness_digest: &cursor.freshness_digest,
+        authorization_revision: &cursor.authorization_revision,
+        candidate_set_digest: &cursor.candidate_set_digest,
+        public_lane_statuses: &cursor.public_lane_statuses,
+        lane_checkpoints: &cursor.lane_checkpoints,
+        ranking_revision: &cursor.ranking_revision,
+        next_ordinal: cursor.next_ordinal,
+        expiry: cursor.expiry,
+    })
+    .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
 }
 
 fn validate_cursor(
     cursor: &RetrievalCursor,
     request: &RetrievalRequest,
     output: &CompositionOutputV1,
-    query_digest: &CursorPayloadDigest,
+    query_digest: &QueryDigest,
     snapshot_digest: &CandidateSetDigest,
     candidate_set_digest: &CandidateSetDigest,
     ranking_revision: &ComponentRevision,
@@ -819,9 +1101,51 @@ fn validate_cursor(
         || cursor.public_lane_statuses != output.public_lane_statuses
         || cursor.lane_checkpoints != output.lane_checkpoints
         || cursor.ranking_revision != expected_ranking_revision
-        || cursor.payload_digest != cursor_payload_digest(cursor)?
+        || cursor.privacy_domain != request.scope.privacy_domain
     {
         return Err(RetrievalError::CursorSetMismatch);
     }
     Ok(())
+}
+
+fn keyed_mac(
+    secret: &[u8],
+    authenticated: &[u8],
+) -> Result<QueryMac, QueryDigestAuthenticationError> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret)
+        .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
+    mac.update(authenticated);
+    QueryMac::new(format!(
+        "hmac-sha256:{}",
+        hex::encode(mac.finalize().into_bytes())
+    ))
+    .map_err(QueryDigestAuthenticationError::from)
+}
+
+fn query_mac_bytes(mac: &QueryMac) -> Result<Vec<u8>, QueryDigestAuthenticationError> {
+    let encoded = mac
+        .as_str()
+        .strip_prefix("hmac-sha256:")
+        .ok_or(QueryDigestAuthenticationError::InvalidKeyMaterial)?;
+    hex::decode(encoded).map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)
+}
+
+fn map_cursor_key_error(error: QueryDigestAuthenticationError) -> RetrievalError {
+    match error {
+        QueryDigestAuthenticationError::KeyUnavailable => RetrievalError::CursorKeyUnavailable,
+        QueryDigestAuthenticationError::KeyRevoked => RetrievalError::CursorKeyRevoked,
+        QueryDigestAuthenticationError::InvalidKeyMaterial
+        | QueryDigestAuthenticationError::PrivacyDomainMismatch
+        | QueryDigestAuthenticationError::Canonicalization(_)
+        | QueryDigestAuthenticationError::Contract(_) => RetrievalError::CursorAuthenticationFailed,
+    }
+}
+
+fn current_utc_micros() -> Result<UtcMicros, RetrievalError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| RetrievalError::InvalidRequest("system clock precedes epoch".to_owned()))?;
+    let micros = i64::try_from(duration.as_micros())
+        .map_err(|_| RetrievalError::InvalidRequest("system clock overflowed".to_owned()))?;
+    Ok(UtcMicros(micros))
 }

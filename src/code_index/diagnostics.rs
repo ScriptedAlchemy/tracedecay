@@ -211,6 +211,16 @@ fn disposition_for(
     record: &GenerationDiagnosticV1,
     partial_reasons: &mut Vec<GenerationDiagnosticPartialReasonV1>,
 ) -> GenerationDiagnosticDispositionV1 {
+    if record.repository != snapshot.snapshot.repository
+        || record.worktree != snapshot.snapshot.worktree
+        || record.reference != snapshot.snapshot.reference
+        || record.source_revision != snapshot.snapshot.source_revision
+    {
+        partial_reasons.push(GenerationDiagnosticPartialReasonV1::StaleScope {
+            anchor: record.diagnostic_anchor.clone(),
+        });
+        return GenerationDiagnosticDispositionV1::StaleScope;
+    }
     match &record.state {
         DiagnosticRecordStateV1::Superseded {
             successor_generation,
@@ -250,16 +260,6 @@ fn disposition_for(
         return GenerationDiagnosticDispositionV1::StaleGeneration {
             record_generation: record.generation_id.clone(),
         };
-    }
-    if record.repository != snapshot.snapshot.repository
-        || record.worktree != snapshot.snapshot.worktree
-        || record.reference != snapshot.snapshot.reference
-        || record.source_revision != snapshot.snapshot.source_revision
-    {
-        partial_reasons.push(GenerationDiagnosticPartialReasonV1::StaleScope {
-            anchor: record.diagnostic_anchor.clone(),
-        });
-        return GenerationDiagnosticDispositionV1::StaleScope;
     }
     let Some(expected_content) = files.get(&record.file_occurrence_id).copied() else {
         partial_reasons.push(GenerationDiagnosticPartialReasonV1::MissingFile {

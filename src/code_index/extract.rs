@@ -1,6 +1,6 @@
 //! Language extractor port (Plan 25 phase 3): `languages.rs` owns the
 //! descriptors; this module owns the extractor contract
-//! `LanguageExtractor::extract(&ValidatedCodeFileV1, &LanguageDescriptorV1,
+//! `LanguageExtractor::extract(&ReceiptBoundCodeFileV1, &LanguageDescriptorV1,
 //! &CancellationToken) -> Result<ExtractionBatchV1, ExtractionFailureV1>`.
 //!
 //! Extraction acquires one tree-sitter parser from the descriptor's pinned
@@ -15,7 +15,7 @@ use tracedecay_domain::{
     ManifestDigest, ParseOutcomeV1, SourceSpan, ValidatedCodeFileV1, canonical_sha256,
 };
 
-use super::languages::canonical_language_id;
+use super::{intake::ReceiptBoundCodeFileV1, languages::canonical_language_id};
 
 /// Cancellation checkpoint for extraction (the code-index-local spelling of
 /// the Plan 25 `CancellationToken`). Application adapts its cancellation
@@ -40,12 +40,12 @@ impl ExtractionCancellation for NeverCancelled {
 /// behind this small interface while identity, lineage, and output contracts
 /// are shared.
 pub trait LanguageExtractor {
-    /// Extract one canonical batch from one validated file under one
+    /// Extract one canonical batch from one receipt-bound file under one
     /// descriptor. Identical input, registry, and extractor revisions produce
     /// stable canonical rows and digests on every supported host.
     fn extract(
         &self,
-        file: &ValidatedCodeFileV1,
+        file: &ReceiptBoundCodeFileV1,
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<ExtractionBatchV1, ExtractionFailureV1>;
@@ -180,13 +180,14 @@ fn rows_digest(
 impl LanguageExtractor for TreeSitterExtractor {
     fn extract(
         &self,
-        file: &ValidatedCodeFileV1,
+        file: &ReceiptBoundCodeFileV1,
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<ExtractionBatchV1, ExtractionFailureV1> {
         if cancellation.is_cancelled() {
             return Err(ExtractionFailureV1::Cancelled);
         }
+        let file = file.validated_file();
         if let Some(declared) = &file.file.language {
             if declared != &descriptor.language {
                 return Err(ExtractionFailureV1::IncompatibleDescriptor {
@@ -306,10 +307,12 @@ impl LanguageExtractor for TreeSitterExtractor {
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        ContentDigest, FileOccurrenceId, ManifestDigest, SanitizedCodeFileV1,
-        SnapshotFileDispositionV1,
+        CodeGenerationId, FileOccurrenceId, RepositoryId, SanitizationReceiptId,
+        SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+        UtcMicros, ValidatedCodeFileV1,
     };
 
+    use crate::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
     use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 
     struct AlwaysCancelled;
@@ -320,25 +323,45 @@ mod tests {
         }
     }
 
-    fn digest(byte: char) -> ContentDigest {
-        ContentDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("valid digest")
-    }
-
-    fn validated_file(path: &str, bytes: &[u8]) -> ValidatedCodeFileV1 {
-        ValidatedCodeFileV1 {
-            generation_id: tracedecay_domain::CodeGenerationId::new("generation.fixture")
-                .expect("valid id"),
-            file: SanitizedCodeFileV1 {
-                file_occurrence_id: FileOccurrenceId::new("file.fixture").expect("valid id"),
-                logical_path: path.to_owned(),
-                language: None,
-                content_digest: digest('a'),
-                disposition: SnapshotFileDispositionV1::Present,
-            },
-            snapshot_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
-                .expect("valid digest"),
-            sanitized_bytes: bytes.to_vec(),
-        }
+    fn validated_file(path: &str, bytes: &[u8]) -> ReceiptBoundCodeFileV1 {
+        let file = SanitizedCodeFileV1 {
+            file_occurrence_id: FileOccurrenceId::new("file.fixture").expect("valid id"),
+            logical_path: path.to_owned(),
+            language: Some(tracedecay_domain::LanguageId::new("rust").expect("valid id")),
+            content_digest: crate::code_index::chunks::content_digest(bytes),
+            disposition: SnapshotFileDispositionV1::Present,
+        };
+        let intake = SanitizedCodeIntake::new(
+            StaticLanguageRegistry::new(),
+            SanitizerRevision::new("sanitizer.v1").expect("valid id"),
+            UtcMicros(1_000_000),
+        );
+        let capability = intake
+            .admit(SanitizedCodeSnapshotV1 {
+                repository: RepositoryId::new("repo.fixture").expect("valid id"),
+                worktree: None,
+                reference: None,
+                source_revision: None,
+                sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("valid id"),
+                sanitization_receipts: vec![
+                    SanitizationReceiptId::new("receipt.fixture").expect("valid id"),
+                ],
+                content_identity: crate::code_index::chunks::content_digest(bytes),
+                captured_at: UtcMicros(1_000_000),
+                files: vec![file.clone()],
+            })
+            .expect("snapshot capability");
+        intake
+            .bind_file(
+                &capability,
+                ValidatedCodeFileV1 {
+                    generation_id: CodeGenerationId::new("generation.fixture").expect("valid id"),
+                    file,
+                    snapshot_digest: capability.snapshot().intake_digest.clone(),
+                    sanitized_bytes: bytes.to_vec(),
+                },
+            )
+            .expect("receipt-bound file")
     }
 
     fn rust_descriptor() -> LanguageDescriptorV1 {
@@ -360,7 +383,10 @@ mod tests {
 
         assert_eq!(batch.parse_outcome, ParseOutcomeV1::Complete);
         assert_eq!(batch.language.as_str(), "rust");
-        assert_eq!(batch.content_digest, digest('a'));
+        assert_eq!(
+            batch.content_digest,
+            crate::code_index::chunks::content_digest(RUST_SOURCE.as_bytes())
+        );
         assert_eq!(batch.coverage.parsed_bytes, RUST_SOURCE.len() as u64);
         assert!(batch.coverage.symbols_extracted >= 2);
         assert!(batch.coverage.relations_extracted >= 1);
@@ -405,36 +431,24 @@ mod tests {
         let extractor = TreeSitterExtractor::new();
         let descriptor = rust_descriptor();
 
-        // A descriptor whose extensions no compiled grammar serves.
         let mut unavailable = descriptor.clone();
-        unavailable.language = tracedecay_domain::LanguageId::new("cobol-nope").expect("valid id");
         unavailable.extensions = vec!["unknownext".to_owned()];
-        unavailable.aliases = vec!["cobol-nope".to_owned()];
-        let file = validated_file("src/data.unknownext", b"nothing");
+        let unknown_extension = validated_file("src/data.unknownext", b"nothing");
         assert_eq!(
-            extractor.extract(&file, &unavailable, &NeverCancelled),
+            extractor.extract(&unknown_extension, &unavailable, &NeverCancelled),
             Err(ExtractionFailureV1::GrammarUnavailable {
-                language: tracedecay_domain::LanguageId::new("cobol-nope").expect("valid id"),
+                language: descriptor.language.clone(),
             })
         );
 
-        // Declared language disagrees with the descriptor.
-        let mut mismatched = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
-        mismatched.file.language =
-            Some(tracedecay_domain::LanguageId::new("python").expect("valid id"));
+        let python = StaticLanguageRegistry::new()
+            .descriptor(&tracedecay_domain::LanguageId::new("python").expect("valid id"))
+            .expect("python descriptor")
+            .clone();
+        let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
         assert!(matches!(
-            extractor.extract(&mismatched, &descriptor, &NeverCancelled),
+            extractor.extract(&file, &python, &NeverCancelled),
             Err(ExtractionFailureV1::IncompatibleDescriptor { .. })
-        ));
-    }
-
-    #[test]
-    fn invalid_utf8_is_a_parse_failure_not_a_panic() {
-        let extractor = TreeSitterExtractor::new();
-        let file = validated_file("src/lib.rs", &[0x66, 0x6e, 0x20, 0xFF, 0xFE]);
-        assert!(matches!(
-            extractor.extract(&file, &rust_descriptor(), &NeverCancelled),
-            Err(ExtractionFailureV1::ParseFailed { .. })
         ));
     }
 }

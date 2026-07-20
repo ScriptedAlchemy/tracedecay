@@ -13,7 +13,7 @@
           "chunks_reused": 0,
           "projection_calls": 1,
           "input_bytes": 116543,
-          "output_bytes": 5067582
+          "output_bytes": 3834873
         },
         {
           "name": "warm_one_file",
@@ -23,7 +23,7 @@
           "chunks_reused": 1504,
           "projection_calls": 1,
           "input_bytes": 13616,
-          "output_bytes": 5216520
+          "output_bytes": 3983368
         },
         {
           "name": "deletion",
@@ -33,7 +33,7 @@
           "chunks_reused": 956,
           "projection_calls": 1,
           "input_bytes": 0,
-          "output_bytes": 3809077
+          "output_bytes": 3058532
         },
         {
           "name": "no_op",
@@ -43,7 +43,7 @@
           "chunks_reused": 1505,
           "projection_calls": 0,
           "input_bytes": 0,
-          "output_bytes": 5215104
+          "output_bytes": 3982395
         },
         {
           "name": "chunker_replay",
@@ -53,7 +53,7 @@
           "chunks_reused": 0,
           "projection_calls": 1,
           "input_bytes": 116543,
-          "output_bytes": 6577125
+          "output_bytes": 5344416
         },
         {
           "name": "incompatible_rebuild",
@@ -63,7 +63,7 @@
           "chunks_reused": 0,
           "projection_calls": 1,
           "input_bytes": 116543,
-          "output_bytes": 6586155
+          "output_bytes": 5353446
         }
       ]
     },
@@ -78,7 +78,7 @@
           "chunks_reused": 0,
           "projection_calls": 1,
           "input_bytes": 1165430,
-          "output_bytes": 50668926
+          "output_bytes": 38341836
         },
         {
           "name": "warm_one_file",
@@ -88,7 +88,7 @@
           "chunks_reused": 15049,
           "projection_calls": 1,
           "input_bytes": 13616,
-          "output_bytes": 52145275
+          "output_bytes": 39817742
         },
         {
           "name": "deletion",
@@ -98,7 +98,7 @@
           "chunks_reused": 14501,
           "projection_calls": 1,
           "input_bytes": 0,
-          "output_bytes": 50737833
+          "output_bytes": 38892907
         },
         {
           "name": "no_op",
@@ -108,7 +108,7 @@
           "chunks_reused": 15050,
           "projection_calls": 0,
           "input_bytes": 0,
-          "output_bytes": 52143859
+          "output_bytes": 39816769
         },
         {
           "name": "chunker_replay",
@@ -118,7 +118,7 @@
           "chunks_reused": 0,
           "projection_calls": 1,
           "input_bytes": 1165430,
-          "output_bytes": 65764104
+          "output_bytes": 53437014
         },
         {
           "name": "incompatible_rebuild",
@@ -128,7 +128,7 @@
           "chunks_reused": 0,
           "projection_calls": 1,
           "input_bytes": 1165430,
-          "output_bytes": 65854404
+          "output_bytes": 53527314
         }
       ]
     }

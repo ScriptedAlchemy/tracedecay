@@ -7,11 +7,12 @@ use tracedecay::query::retrieval::ports::{
     RetrievalPortError,
 };
 use tracedecay_domain::{
-    AuthorizationRevision, CodeGenerationId, CompactCandidate, ExactAdmissionProof,
-    ExactAdmissionRuleRevision, ExactFieldV1, ExactTechnicalTermKindV1, FreshnessVectorDigest,
-    PrincipalId, PrivacyDomainId, RepositoryId, RetrievalAnchorId, RetrievalBudget,
-    RetrievalContractError, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SingleRootScopeV1,
-    SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark,
+    AuthorizationRevision, CodeGenerationId, CompactCandidate, EphemeralSanitizedQueryViewV1,
+    ExactAdmissionProof, ExactAdmissionRuleRevision, ExactFieldV1, ExactTechnicalTermKindV1,
+    FreshnessVectorDigest, PrincipalId, PrivacyDomainId, QueryNormalizationRevision, RepositoryId,
+    RetrievalAnchorId, RetrievalBudget, RetrievalContractError, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, SanitizerRevision, SingleRootScopeV1, SourceOccurrenceId, TemporalModeV1,
+    UtcMicros, VectorWatermark,
 };
 
 fn id<T>(value: &str) -> T
@@ -22,7 +23,7 @@ where
     T::try_from(value.to_owned()).expect("valid fixture identity")
 }
 
-fn request_and_proof() -> (ExactLaneRequest, ExactAdmissionProof) {
+fn request_and_proof() -> (ExactLaneRequest<'static>, ExactAdmissionProof) {
     let scope = RetrievalScope {
         privacy_domain: PrivacyDomainId::new("privacy.contract").unwrap(),
         root: SingleRootScopeV1 {
@@ -53,7 +54,6 @@ fn request_and_proof() -> (ExactLaneRequest, ExactAdmissionProof) {
         deadline_micros: None,
     };
     let base = RetrievalRequest {
-        query: "ExactAdmissionProof".to_owned(),
         principal: PrincipalId::new("principal.contract").unwrap(),
         scope,
         temporal_mode: TemporalModeV1::Current,
@@ -76,9 +76,18 @@ fn request_and_proof() -> (ExactLaneRequest, ExactAdmissionProof) {
         authorization_revision,
         snapshot_digest,
     };
+    let query_view = Box::leak(Box::new(
+        EphemeralSanitizedQueryViewV1::sanitize(
+            "ExactAdmissionProof",
+            SanitizerRevision::new("query-sanitizer.contract.v1").unwrap(),
+            QueryNormalizationRevision::new("query-normalization.contract.v1").unwrap(),
+        )
+        .expect("query sanitizes"),
+    ));
     (
         ExactLaneRequest {
             base,
+            query_view,
             generation: CodeGenerationId::new("generation.contract").unwrap(),
             literals: vec![literal],
             budget,

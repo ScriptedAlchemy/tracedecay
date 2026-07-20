@@ -14,11 +14,62 @@ use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, CommitId, ContentDigest, FileOccurrenceId,
     GitChangeKindV1, GitDegradationV1, GitDiffScopeV1, GitDiffV1, GitFileModeV1, GitHunkV1,
-    GitOidV1, ManifestDigest, RepositoryId, SanitizedCodeFileV1, SnapshotFileDispositionV1,
-    UtcMicros, ValidatedCodeSnapshotV1, WorktreeId,
+    GitOidV1, ManifestDigest, RefId, RepositoryId, SanitizedCodeFileV1, SnapshotFileDispositionV1,
+    UtcMicros, ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
 };
 
 use super::capabilities::expected_seal_digest;
+
+const GIT_JOIN_EVIDENCE_SEPARATOR: &str = "tracedecay.generation-git-evidence.v1";
+
+/// Immutable native-Git scope captured with a generation join.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationGitEvidenceScopeV1 {
+    pub worktree: Option<WorktreeId>,
+    pub index_tree: Option<GitOidV1>,
+    pub tree: Option<GitOidV1>,
+    pub reference: Option<RefId>,
+    pub options_digest: ManifestDigest,
+}
+
+impl GenerationGitEvidenceScopeV1 {
+    fn validate(&self) -> Result<(), GenerationGitJoinErrorV1> {
+        if let Some(worktree) = &self.worktree {
+            worktree
+                .validate()
+                .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+        }
+        if let Some(index_tree) = &self.index_tree {
+            index_tree
+                .validate()
+                .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+        }
+        if let Some(tree) = &self.tree {
+            tree.validate()
+                .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+        }
+        if let Some(reference) = &self.reference {
+            reference
+                .validate()
+                .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+        }
+        self.options_digest
+            .validate()
+            .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))
+    }
+}
+
+#[derive(Serialize)]
+struct GenerationGitEvidenceDigestInput<'a> {
+    domain: &'static str,
+    repository: &'a RepositoryId,
+    source_revision: &'a Option<CommitId>,
+    snapshot_content_identity: &'a ContentDigest,
+    scope: &'a GenerationGitEvidenceScopeV1,
+    diff_scope: &'a GitDiffScopeV1,
+    diff: &'a GitDiffV1,
+}
 
 /// Plan-36/capture watermark retained separately from the code-generation
 /// watermark. Equality against the sanitized snapshot is required before any
@@ -27,14 +78,36 @@ use super::capabilities::expected_seal_digest;
 #[serde(deny_unknown_fields)]
 pub struct GenerationGitWatermarkV1 {
     pub repository: RepositoryId,
-    pub worktree: Option<WorktreeId>,
     pub source_revision: Option<CommitId>,
     pub snapshot_content_identity: ContentDigest,
-    /// Independent digest of the native Git/capture observation. This is
-    /// preserved as provenance and is not substituted for the code snapshot
-    /// digest.
+    /// Exact worktree/index/tree/ref/options evidence captured by native Git.
+    pub scope: GenerationGitEvidenceScopeV1,
+    /// The typed diff operation whose options and hunk sides are sealed into
+    /// `git_snapshot_digest`.
+    pub diff_scope: GitDiffScopeV1,
+    /// Canonical digest of the immutable scope and complete typed native diff.
+    /// It binds both old and new blob/path/range hunk sides.
     pub git_snapshot_digest: ManifestDigest,
     pub captured_at: UtcMicros,
+}
+
+impl GenerationGitWatermarkV1 {
+    pub fn recompute_evidence_digest(
+        &self,
+        diff: &GitDiffV1,
+    ) -> Result<ManifestDigest, GenerationGitJoinErrorV1> {
+        self.scope.validate()?;
+        canonical_sha256(&GenerationGitEvidenceDigestInput {
+            domain: GIT_JOIN_EVIDENCE_SEPARATOR,
+            repository: &self.repository,
+            source_revision: &self.source_revision,
+            snapshot_content_identity: &self.snapshot_content_identity,
+            scope: &self.scope,
+            diff_scope: &self.diff_scope,
+            diff,
+        })
+        .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))
+    }
 }
 
 /// Exact content identity observed for one path by the Git/capture boundary.
@@ -131,10 +204,14 @@ pub enum GenerationGitJoinErrorV1 {
     RepositoryMismatch,
     #[error("the Git/capture watermark names another worktree")]
     WorktreeMismatch,
+    #[error("the Git/capture watermark names another reference")]
+    ReferenceMismatch,
     #[error("the Git/capture watermark names another source revision")]
     StaleSourceRevision,
     #[error("the Git/capture content watermark is stale")]
     StaleContentWatermark,
+    #[error("the Git/capture evidence digest does not bind this typed diff")]
+    StaleGitEvidence,
     #[error("duplicate Git content identity for {0}")]
     DuplicateContentIdentity(String),
     #[error("Git evidence for {0} has no exact content identity")]
@@ -163,9 +240,9 @@ impl GenerationGitJoinV1 {
         file_contents: &[GitFileContentIdentityV1],
     ) -> Result<Self, GenerationGitJoinErrorV1> {
         validate_generation_snapshot(generation, snapshot)?;
-        validate_git_watermark(snapshot, diff, git_watermark)?;
         diff.validate()
             .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+        validate_git_watermark(snapshot, diff, git_watermark)?;
 
         let content_by_path = index_content_identity(file_contents)?;
         let snapshot_by_path: BTreeMap<&str, &SanitizedCodeFileV1> = snapshot
@@ -307,14 +384,22 @@ fn validate_git_watermark(
     {
         return Err(GenerationGitJoinErrorV1::RepositoryMismatch);
     }
-    if watermark.worktree != snapshot.snapshot.worktree {
+    if watermark.scope.worktree != snapshot.snapshot.worktree {
         return Err(GenerationGitJoinErrorV1::WorktreeMismatch);
+    }
+    if watermark.scope.reference != snapshot.snapshot.reference {
+        return Err(GenerationGitJoinErrorV1::ReferenceMismatch);
     }
     if watermark.source_revision != snapshot.snapshot.source_revision {
         return Err(GenerationGitJoinErrorV1::StaleSourceRevision);
     }
     if watermark.snapshot_content_identity != snapshot.snapshot.content_identity {
         return Err(GenerationGitJoinErrorV1::StaleContentWatermark);
+    }
+    if watermark.diff_scope != diff.scope
+        || watermark.recompute_evidence_digest(diff)? != watermark.git_snapshot_digest
+    {
+        return Err(GenerationGitJoinErrorV1::StaleGitEvidence);
     }
     Ok(())
 }

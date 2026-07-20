@@ -156,6 +156,7 @@ code_id!(
     ExtractorRevision,
     ChunkerRevision,
     SanitizerRevision,
+    QueryNormalizationRevision,
     LanguageRegistryRevision,
     PolicyRevisionId,
 );

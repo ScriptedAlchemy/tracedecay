@@ -13,10 +13,12 @@ use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, CommitId, ComponentVersion, ContentDigest,
     FileOccurrenceId, GenerationTestAttributionV1, ManifestDigest, SymbolOccurrenceId,
-    TestAttributionEvidenceClassV1, ValidatedCodeSnapshotV1,
+    TestAttributionEvidenceClassV1, ValidatedCodeSnapshotV1, canonical_sha256,
 };
 
 use super::capabilities::expected_seal_digest;
+
+const TEST_ATTRIBUTION_EVIDENCE_SEPARATOR: &str = "tracedecay.test-attribution-evidence.v1";
 
 /// Completeness reported by the test-attribution producer.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +40,42 @@ pub struct TestAttributionWatermarkV1 {
     pub attribution_revision: ComponentVersion,
     pub evidence_digest: ManifestDigest,
     pub coverage: TestAttributionJoinInputCoverageV1,
+}
+
+#[derive(Serialize)]
+struct TestAttributionEvidenceDigestInput<'a> {
+    domain: &'static str,
+    generation_id: &'a CodeGenerationId,
+    snapshot_digest: &'a ManifestDigest,
+    content_identity: &'a ContentDigest,
+    source_revision: &'a Option<CommitId>,
+    attribution_revision: &'a ComponentVersion,
+    coverage: &'a TestAttributionJoinInputCoverageV1,
+    attributions: &'a [GenerationTestAttributionV1],
+    occurrences: &'a [TestAttributionOccurrenceV1],
+}
+
+impl TestAttributionWatermarkV1 {
+    pub fn recompute_evidence_digest(
+        &self,
+        attributions: &[GenerationTestAttributionV1],
+        occurrences: &[TestAttributionOccurrenceV1],
+    ) -> Result<ManifestDigest, GenerationTestJoinErrorV1> {
+        let attributions = canonical_attributions(attributions)?;
+        let occurrences = canonical_occurrences(occurrences)?;
+        canonical_sha256(&TestAttributionEvidenceDigestInput {
+            domain: TEST_ATTRIBUTION_EVIDENCE_SEPARATOR,
+            generation_id: &self.generation_id,
+            snapshot_digest: &self.snapshot_digest,
+            content_identity: &self.content_identity,
+            source_revision: &self.source_revision,
+            attribution_revision: &self.attribution_revision,
+            coverage: &self.coverage,
+            attributions: &attributions,
+            occurrences: &occurrences,
+        })
+        .map_err(|error| GenerationTestJoinErrorV1::Contract(error.to_string()))
+    }
 }
 
 /// Exact generation-local symbol occurrence/content binding supplied by the
@@ -152,29 +190,18 @@ impl GenerationTestJoinV1 {
         validate_generation_snapshot(generation, snapshot)?;
         validate_watermark(generation, snapshot, watermark)?;
         let occurrence_by_id = index_occurrences(occurrences)?;
+        let attributions = canonical_attributions(attributions)?;
+        if watermark.recompute_evidence_digest(&attributions, occurrences)?
+            != watermark.evidence_digest
+        {
+            return Err(GenerationTestJoinErrorV1::StaleAttributionWatermark);
+        }
         let content_by_file: BTreeMap<&FileOccurrenceId, &ContentDigest> = snapshot
             .snapshot
             .files
             .iter()
             .map(|file| (&file.file_occurrence_id, &file.content_digest))
             .collect();
-
-        let mut attributions = attributions.to_vec();
-        for attribution in &attributions {
-            validate_attribution(attribution)?;
-        }
-        attributions.sort_by(|left, right| {
-            (
-                &left.test_occurrence,
-                left.evidence_class,
-                &left.covered_occurrences,
-            )
-                .cmp(&(
-                    &right.test_occurrence,
-                    right.evidence_class,
-                    &right.covered_occurrences,
-                ))
-        });
 
         let mut partial_reasons = match &watermark.coverage {
             TestAttributionJoinInputCoverageV1::Complete => Vec::new(),
@@ -227,6 +254,43 @@ impl GenerationTestJoinV1 {
             coverage,
         })
     }
+}
+
+fn canonical_attributions(
+    attributions: &[GenerationTestAttributionV1],
+) -> Result<Vec<GenerationTestAttributionV1>, GenerationTestJoinErrorV1> {
+    let mut canonical = attributions.to_vec();
+    for attribution in &canonical {
+        validate_attribution(attribution)?;
+    }
+    canonical.sort_by(|left, right| {
+        (
+            &left.generation_id,
+            &left.source_revision,
+            &left.test_occurrence,
+            &left.covered_occurrences,
+            left.evidence_class,
+            &left.attribution_revision,
+        )
+            .cmp(&(
+                &right.generation_id,
+                &right.source_revision,
+                &right.test_occurrence,
+                &right.covered_occurrences,
+                right.evidence_class,
+                &right.attribution_revision,
+            ))
+    });
+    Ok(canonical)
+}
+
+fn canonical_occurrences(
+    occurrences: &[TestAttributionOccurrenceV1],
+) -> Result<Vec<TestAttributionOccurrenceV1>, GenerationTestJoinErrorV1> {
+    index_occurrences(occurrences)?;
+    let mut canonical = occurrences.to_vec();
+    canonical.sort_by(|left, right| left.occurrence_id.cmp(&right.occurrence_id));
+    Ok(canonical)
 }
 
 fn disposition_for(

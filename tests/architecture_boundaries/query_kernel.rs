@@ -30,6 +30,12 @@ const QUERY_ALLOWED_ROOTS: &[&str] = &[
     "tracedecay_store",
     "zeroize",
 ];
+const QUERY_ALLOWED_CRATE_PATHS: &[&[&str]] = &[&[
+    "crate",
+    "code_index",
+    "chunks",
+    "ExtractionAdmittedCodeSearchChunkV1",
+]];
 const QUERY_ALLOWED_MACROS: &[&str] = &[
     "assert",
     "assert_eq",
@@ -38,6 +44,7 @@ const QUERY_ALLOWED_MACROS: &[&str] = &[
     "debug_assert_eq",
     "debug_assert_ne",
     "format",
+    "include_str",
     "matches",
     "panic",
     "unreachable",
@@ -218,6 +225,15 @@ fn validate_graph_query_path(
     let Some(root) = path.first() else {
         return true;
     };
+    if QUERY_ALLOWED_CRATE_PATHS.iter().any(|allowed| {
+        path.len() >= allowed.len()
+            && path
+                .iter()
+                .zip(allowed.iter())
+                .all(|(actual, expected)| actual == expected)
+    }) {
+        return true;
+    }
     let normalized = normalize_identifier(root);
     if QUERY_ALLOWED_ROOTS.contains(&normalized.as_str())
         || QUERY_ALLOWED_PRELUDE_PATH_ROOTS.contains(&root.as_str())
@@ -680,7 +696,7 @@ fn validate_query_macros(tokens: &[Token], violations: &mut BTreeSet<String>) {
         if tokens.get(index + 1) != Some(&Token::Punct('!')) {
             continue;
         }
-        if name == "macro_rules" {
+        if matches!(name.as_str(), "if" | "macro_rules") {
             continue;
         }
         if !matches!(tokens.get(index + 2), Some(Token::Punct('(' | '[' | '{'))) {

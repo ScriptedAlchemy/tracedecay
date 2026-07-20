@@ -6,13 +6,14 @@ use tracedecay::query::retrieval::exact::{
 };
 use tracedecay::query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageInput,
+    RetrievalCursorKeyringV1,
 };
 use tracedecay::query::retrieval::graph::{
     GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
 };
 use tracedecay::query::retrieval::hydrate::{
-    DeterministicLateHydration, HydrationAuthorizationV1, HydrationReadOutcomeV1,
-    LateHydrationSource,
+    DeterministicLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
+    HydrationReadOutcomeV1, HydrationWorkPermitV1, LateHydrationSource,
 };
 use tracedecay::query::retrieval::lexical::{
     CodeLexicalProjectionAdapterV1, LexicalLane, LexicalLaneRetriever,
@@ -22,10 +23,12 @@ use tracedecay::query::retrieval::ports::{
 };
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, CodeSearchChunkGrainV1, CompactCandidate,
-    ComponentRevision, DiversityPolicy, EdgeAuthorityV1, ExactAdmissionRuleRevision, ExactClass,
-    ExactTechnicalTermKindV1, FixedPointScore, FreshnessCompatibilityV1, FusionProfile,
-    HydrationReceipt, RankedCandidate, RelationEdgeKindV1, RetrievalAnchorId, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SourceSpan, SymbolOccurrenceId,
+    ComponentRevision, DiversityPolicy, EdgeAuthorityV1, EphemeralSanitizedQueryViewV1,
+    ExactAdmissionRuleRevision, ExactClass, ExactTechnicalTermKindV1, FixedPointScore,
+    FreshnessCompatibilityV1, FusionProfile, HydrationReceipt, QueryNormalizationRevision,
+    RankedCandidate, RelationEdgeKindV1, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, SourceSpan, SymbolOccurrenceId, UtcMicros,
 };
 
 use crate::candidate_producers::{
@@ -38,6 +41,8 @@ enum GraphDisposition {
     Denied,
     Unavailable,
 }
+
+const CURSOR_NOW: UtcMicros = UtcMicros(10);
 
 #[derive(Clone)]
 enum GraphPortReply {
@@ -95,6 +100,25 @@ fn profile() -> FusionProfile {
                 )
             })
             .collect(),
+        score_domain_calibrations: [
+            (RetrieverKind::ExactLiteral, "score.exact.v1"),
+            (RetrieverKind::Lexical, "score.lexical.v1"),
+            (RetrieverKind::Graph, "score.graph.v1"),
+        ]
+        .into_iter()
+        .map(|(lane, score_domain)| {
+            let score_domain: tracedecay_domain::ScoreDomainId = id(score_domain);
+            (
+                score_domain.clone(),
+                ScoreDomainCalibrationV1 {
+                    calibration_profile_id: id(&format!("calibration.{}.v1", lane.as_str())),
+                    score_domain,
+                    raw_min_micros: 0,
+                    raw_max_micros: 1_000_000,
+                },
+            )
+        })
+        .collect(),
         weights_micros: BTreeMap::from([
             (RetrieverKind::ExactLiteral, 1_000_000),
             (RetrieverKind::Lexical, 1_000_000),
@@ -117,6 +141,26 @@ fn no_caps() -> DiversityPolicy {
         per_copy_cluster: None,
         per_evidence_role: None,
     }
+}
+
+fn query_view(query: &str) -> EphemeralSanitizedQueryViewV1 {
+    EphemeralSanitizedQueryViewV1::sanitize(
+        query,
+        id::<SanitizerRevision>("query-sanitizer.v1"),
+        id::<QueryNormalizationRevision>("query-normalization.v1"),
+    )
+    .expect("bounded sanitized query view")
+}
+
+fn cursor_keys(request: &tracedecay_domain::RetrievalRequest) -> RetrievalCursorKeyringV1 {
+    RetrievalCursorKeyringV1::new(
+        request.scope.privacy_domain.clone(),
+        id::<RetrievalCursorKeyId>("retrieval-key.fixture"),
+        1,
+        vec![7_u8; 32],
+        100,
+    )
+    .expect("retrieval cursor keyring")
 }
 
 fn graph_request(
@@ -241,7 +285,7 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
             2,
             CodeSearchChunkGrainV1::SymbolSignature,
             "fn target_alpha",
-            &[(ExactTechnicalTermKindV1::WholeSymbol, "target")],
+            &[],
             &["target", "alpha"],
         ),
         chunk(
@@ -249,7 +293,7 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
             3,
             CodeSearchChunkGrainV1::SymbolSignature,
             "fn target_beta",
-            &[(ExactTechnicalTermKindV1::WholeSymbol, "target")],
+            &[],
             &["target", "beta"],
         ),
         chunk(
@@ -257,7 +301,7 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
             4,
             CodeSearchChunkGrainV1::SymbolSignature,
             "fn target_gamma",
-            &[(ExactTechnicalTermKindV1::WholeSymbol, "target")],
+            &[],
             &["target", "gamma"],
         ),
     ];
@@ -269,9 +313,11 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
 
     let authority =
         CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1"));
+    let exact_query_view = query_view("--release");
     let exact_request = ExactLaneRequest {
-        literals: authority.parse_literals(&request),
+        literals: authority.parse_literals(&exact_query_view, &request),
         base: request.clone(),
+        query_view: &exact_query_view,
         generation: generation.clone(),
         budget: budget(16),
     };
@@ -279,7 +325,7 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
         .retrieve_exact(&exact_request)
         .expect("exact lane completes");
 
-    let mut lexical_request = lexical_request("--release", &["target"], &[], &[], 0, 16);
+    let mut lexical_request = lexical_request("--release", &[], &["target"], &[], 0, 16);
     lexical_request.base = request.clone();
     let lexical_outcome = LexicalLane::new(projection)
         .retrieve_lexical(&lexical_request)
@@ -346,9 +392,19 @@ fn protected_exact_precedes_higher_scoring_lexical_and_graph_evidence() {
 fn shuffled_lane_completion_is_byte_stable() {
     let fixture = fixture(GraphDisposition::Complete);
     let expected = fixture.compose(fixture.lanes.clone());
+    let query_view = query_view("--release");
+    let cursor_keys = cursor_keys(&fixture.request);
     let expected_page = fixture
         .kernel
-        .paginate(&fixture.request, &expected, 2, None)
+        .paginate_at(
+            &fixture.request,
+            &query_view,
+            &cursor_keys,
+            &expected,
+            2,
+            None,
+            CURSOR_NOW,
+        )
         .expect("first page is available");
 
     for iteration in 0..100 {
@@ -361,7 +417,15 @@ fn shuffled_lane_completion_is_byte_stable() {
         let output = fixture.compose(shuffled);
         let page = fixture
             .kernel
-            .paginate(&fixture.request, &output, 2, None)
+            .paginate_at(
+                &fixture.request,
+                &query_view,
+                &cursor_keys,
+                &output,
+                2,
+                None,
+                CURSOR_NOW,
+            )
             .expect("shuffled first page is available");
         assert_eq!(output, expected, "shuffle {iteration} changed composition");
         assert_eq!(
@@ -390,15 +454,35 @@ fn denied_graph_lane_does_not_change_public_results_or_cursor_bytes() {
         denied_output.internal_lane_outcomes,
         unavailable_output.internal_lane_outcomes
     );
+    let denied_query_view = query_view("--release");
+    let denied_cursor_keys = cursor_keys(&denied.request);
     let denied_cursor = denied
         .kernel
-        .paginate(&denied.request, &denied_output, 2, None)
+        .paginate_at(
+            &denied.request,
+            &denied_query_view,
+            &denied_cursor_keys,
+            &denied_output,
+            2,
+            None,
+            CURSOR_NOW,
+        )
         .expect("denied page")
         .cursor
         .expect("denied overflow cursor");
+    let unavailable_query_view = query_view("--release");
+    let unavailable_cursor_keys = cursor_keys(&unavailable.request);
     let unavailable_cursor = unavailable
         .kernel
-        .paginate(&unavailable.request, &unavailable_output, 2, None)
+        .paginate_at(
+            &unavailable.request,
+            &unavailable_query_view,
+            &unavailable_cursor_keys,
+            &unavailable_output,
+            2,
+            None,
+            CURSOR_NOW,
+        )
         .expect("unavailable page")
         .cursor
         .expect("unavailable overflow cursor");
@@ -411,12 +495,22 @@ fn cursor_spillback_covers_three_pages_without_reordering_or_duplication() {
     let output = fixture.compose(fixture.lanes.clone());
     assert_eq!(output.ranked_candidates.len(), 6);
 
+    let query_view = query_view("--release");
+    let cursor_keys = cursor_keys(&fixture.request);
     let mut cursor = None;
     let mut paged = Vec::new();
     for page_number in 0..3 {
         let page = fixture
             .kernel
-            .paginate(&fixture.request, &output, 2, cursor.as_ref())
+            .paginate_at(
+                &fixture.request,
+                &query_view,
+                &cursor_keys,
+                &output,
+                2,
+                cursor.as_ref(),
+                CURSOR_NOW,
+            )
             .expect("cursor page is valid");
         assert_eq!(page.ranked_candidates.len(), 2);
         paged.extend(page.ranked_candidates);
@@ -448,13 +542,22 @@ impl LateHydrationSource<String> for RecordingHydrationSource {
         HydrationAuthorizationV1::Authorized
     }
 
+    fn preflight_authorized(
+        &mut self,
+        _request: &tracedecay_domain::RetrievalRequest,
+        _candidate: &RankedCandidate,
+        _permit: &HydrationWorkPermitV1,
+    ) -> HydrationPreflightOutcomeV1 {
+        HydrationPreflightOutcomeV1::Ready { estimated_bytes: 1 }
+    }
+
     fn hydrate_authorized(
         &mut self,
         _request: &tracedecay_domain::RetrievalRequest,
         candidate: &RankedCandidate,
-        remaining_bytes: u64,
+        permit: &HydrationWorkPermitV1,
     ) -> HydrationReadOutcomeV1<String> {
-        assert!(remaining_bytes > 0);
+        assert!(permit.remaining_bytes > 0);
         let occurrence = candidate
             .candidate
             .occurrences

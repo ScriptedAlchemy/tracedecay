@@ -28,8 +28,9 @@ use tracedecay_domain::{
     ChunkGenerationBindingV1, ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1,
     CodeSearchChunkId, CodeSearchChunkV1, CodeSearchDocumentV1, ComponentVersion, ContentDigest,
     ExtractorRevision, FileOccurrenceId, GenerationSealV1, GrammarRevision, LanguageId,
-    ManifestDigest, PrivacyDomainId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SnapshotFileDispositionV1, UtcMicros, ValidatedCodeSnapshotV1, canonical_sha256,
+    LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, RepositoryId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeSnapshotV1,
+    canonical_sha256,
 };
 
 use super::capabilities::expected_seal_digest;
@@ -41,6 +42,9 @@ pub const GENERATION_PLANNER_ID: &str = "code-index-generation-planner.v1";
 
 /// Domain separator for per-repository generation-identity discriminators.
 pub const GENERATION_ID_SEPARATOR: &str = "tracedecay.code-generation-id.v1";
+
+/// Domain separator for immutable generation invalidation inputs.
+pub const GENERATION_INVALIDATION_SEPARATOR: &str = "tracedecay.code-generation-invalidation.v1";
 
 /// Generation-planning failures.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -126,6 +130,9 @@ pub struct GenerationIncrementPlanV1 {
     /// Empty when the plan is incremental; non-empty triggers mean every
     /// present file re-extracts (a declared full rebuild).
     pub rebuild_triggers: Vec<RebuildTriggerV1>,
+    /// Complete canonical invalidation inputs. Capture hints are deliberately
+    /// excluded because they are evidence, not reuse authority.
+    pub invalidation_digest: ManifestDigest,
     /// Canonically ordered by logical path.
     pub files: Vec<FileExtractionPlanV1>,
     /// The capture-declared changed logical paths, recorded as evidence.
@@ -141,6 +148,24 @@ impl GenerationIncrementPlanV1 {
     pub fn is_full_rebuild(&self) -> bool {
         !self.rebuild_triggers.is_empty()
     }
+}
+
+#[derive(Serialize)]
+struct GenerationInvalidationDigestInput<'a> {
+    domain: &'static str,
+    repository: &'a RepositoryId,
+    parent_generation: Option<&'a CodeGenerationId>,
+    parent_publication_fence: Option<&'a ManifestDigest>,
+    snapshot_digest: &'a ManifestDigest,
+    registry_revision: &'a LanguageRegistryRevision,
+    grammar_revisions: &'a [(LanguageId, GrammarRevision)],
+    extractor_revisions: &'a [(LanguageId, ExtractorRevision)],
+    sanitizer_revision: &'a tracedecay_domain::SanitizerRevision,
+    chunker_revision: &'a ChunkerRevision,
+    privacy_domain: &'a PrivacyDomainId,
+    privacy_key_epoch: u64,
+    planner: &'a ComponentVersion,
+    rebuild_triggers: &'a [RebuildTriggerV1],
 }
 
 /// The deterministic generation planner. One planner is bound to one
@@ -192,13 +217,17 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
         repository_discriminator(&self.repository)
     }
 
-    /// Mint the next monotonic generation identity: genesis
-    /// `generation.v1.<repo>.00000001`, or the parent sequence + 1. The parent
+    /// Mint the next monotonic, collision-resistant generation identity:
+    /// `generation.v1.<repo>.<sequence>.<invalidation-digest>`. The parent
     /// must carry this planner's repository discriminator.
     pub fn next_generation_id(
         &self,
         parent: Option<&CodeGenerationId>,
+        invalidation_digest: &ManifestDigest,
     ) -> Result<CodeGenerationId, GenerationPlanningErrorV1> {
+        invalidation_digest
+            .validate()
+            .map_err(|error| GenerationPlanningErrorV1::Contract(error.to_string()))?;
         let discriminator = self.discriminator()?;
         let sequence = match parent {
             None => 1,
@@ -211,8 +240,18 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
                 })?
             }
         };
-        CodeGenerationId::new(format!("generation.v1.{discriminator}.{sequence:08}"))
-            .map_err(|error| GenerationPlanningErrorV1::Contract(error.to_string()))
+        let fingerprint = invalidation_digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or_else(|| {
+                GenerationPlanningErrorV1::Contract(
+                    "invalidation digest is not a sha256 manifest digest".to_owned(),
+                )
+            })?;
+        CodeGenerationId::new(format!(
+            "generation.v1.{discriminator}.{sequence:08}.{fingerprint}"
+        ))
+        .map_err(|error| GenerationPlanningErrorV1::Contract(error.to_string()))
     }
 
     /// Plan and seal one immutable generation from one validated snapshot.
@@ -227,23 +266,53 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
         parent: Option<&CodeGenerationManifestV1>,
         sealed_at: UtcMicros,
     ) -> Result<CodeGenerationManifestV1, GenerationPlanningErrorV1> {
+        self.plan_generation_with_invalidation(snapshot, parent, &BTreeSet::new(), sealed_at)
+    }
+
+    /// Plan and seal one immutable generation while binding every inferred and
+    /// explicitly declared rebuild cause into its identity and publication
+    /// fence.
+    pub fn plan_generation_with_invalidation(
+        &self,
+        snapshot: &ValidatedCodeSnapshotV1,
+        parent: Option<&CodeGenerationManifestV1>,
+        invalidations: &BTreeSet<RebuildTriggerV1>,
+        sealed_at: UtcMicros,
+    ) -> Result<CodeGenerationManifestV1, GenerationPlanningErrorV1> {
         if snapshot.snapshot.repository != self.repository {
             return Err(GenerationPlanningErrorV1::Contract(
                 "snapshot repository does not match the planner repository".to_owned(),
             ));
         }
-        let parent_generation = match parent {
-            None => None,
-            Some(parent) => Some(self.verified_parent(parent)?),
-        };
-        let generation_id = self.next_generation_id(parent_generation.as_ref())?;
+        if let Some(parent) = parent {
+            self.verified_parent(parent)?;
+        }
+        let parent_generation = parent.map(|parent| parent.generation_id.clone());
         let (grammar_revisions, extractor_revisions) =
             self.language_revisions(&snapshot.snapshot)?;
+        let registry_revision = self.registry.registry_revision();
+        let mut rebuild_triggers = parent
+            .map(|parent| self.rebuild_triggers(parent, &snapshot.snapshot))
+            .unwrap_or_default();
+        rebuild_triggers.extend(invalidations.iter().cloned());
+        rebuild_triggers.sort();
+        rebuild_triggers.dedup();
+        let invalidation_digest = self.invalidation_digest(
+            parent,
+            snapshot,
+            &registry_revision,
+            &grammar_revisions,
+            &extractor_revisions,
+            &rebuild_triggers,
+        )?;
+        let generation_id =
+            self.next_generation_id(parent_generation.as_ref(), &invalidation_digest)?;
 
         let mut manifest = CodeGenerationManifestV1 {
             generation_id,
             snapshot_digest: snapshot.intake_digest.clone(),
-            registry_revision: self.registry.registry_revision(),
+            invalidation_digest,
+            registry_revision,
             grammar_revisions,
             extractor_revisions,
             sanitizer_revision: snapshot.snapshot.sanitizer_revision.clone(),
@@ -314,6 +383,17 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
         rebuild_triggers.extend(invalidations.iter().cloned());
         rebuild_triggers.sort();
         rebuild_triggers.dedup();
+        let (grammar_revisions, extractor_revisions) =
+            self.language_revisions(&current.snapshot)?;
+        let registry_revision = self.registry.registry_revision();
+        let invalidation_digest = self.invalidation_digest(
+            Some(prior_manifest),
+            current,
+            &registry_revision,
+            &grammar_revisions,
+            &extractor_revisions,
+            &rebuild_triggers,
+        )?;
         let full_rebuild = !rebuild_triggers.is_empty();
 
         let mut plans: Vec<FileExtractionPlanV1> = Vec::new();
@@ -371,6 +451,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
         Ok(GenerationIncrementPlanV1 {
             prior_generation,
             rebuild_triggers,
+            invalidation_digest,
             files: plans,
             capture_changed_files: changed_files.iter().cloned().collect(),
             carried_forward,
@@ -436,6 +517,34 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
             extractor_revisions.push((language, descriptor.extractor_revision.clone()));
         }
         Ok((grammar_revisions, extractor_revisions))
+    }
+
+    fn invalidation_digest(
+        &self,
+        parent: Option<&CodeGenerationManifestV1>,
+        snapshot: &ValidatedCodeSnapshotV1,
+        registry_revision: &LanguageRegistryRevision,
+        grammar_revisions: &[(LanguageId, GrammarRevision)],
+        extractor_revisions: &[(LanguageId, ExtractorRevision)],
+        rebuild_triggers: &[RebuildTriggerV1],
+    ) -> Result<ManifestDigest, GenerationPlanningErrorV1> {
+        canonical_sha256(&GenerationInvalidationDigestInput {
+            domain: GENERATION_INVALIDATION_SEPARATOR,
+            repository: &self.repository,
+            parent_generation: parent.map(|parent| &parent.generation_id),
+            parent_publication_fence: parent.map(|parent| &parent.seal.expected_digest),
+            snapshot_digest: &snapshot.intake_digest,
+            registry_revision,
+            grammar_revisions,
+            extractor_revisions,
+            sanitizer_revision: &snapshot.snapshot.sanitizer_revision,
+            chunker_revision: &self.chunker_revision,
+            privacy_domain: &self.privacy_domain,
+            privacy_key_epoch: self.privacy_key_epoch,
+            planner: &self.planner,
+            rebuild_triggers,
+        })
+        .map_err(|error| GenerationPlanningErrorV1::Contract(error.to_string()))
     }
 
     /// Field-specific invalidation (Plan 25): grammar, extractor, sanitizer,
@@ -507,14 +616,22 @@ fn repository_discriminator(
         .collect())
 }
 
-/// Parse an identity minted by this planner: `generation.v1.<repo>.<seq>`.
+/// Parse an identity minted by this planner. Legacy
+/// `generation.v1.<repo>.<seq>` parents remain accepted; current identities
+/// include a SHA-256 invalidation fingerprint suffix.
 fn parse_minted_generation_id(generation_id: &CodeGenerationId) -> Option<(String, u64)> {
     let mut parts = generation_id.as_str().split('.');
     let scheme = parts.next()?;
     let version = parts.next()?;
     let discriminator = parts.next()?;
     let sequence = parts.next()?;
+    let fingerprint = parts.next();
     if scheme != "generation" || version != "v1" || parts.next().is_some() {
+        return None;
+    }
+    if fingerprint.is_some_and(|fingerprint| {
+        fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
         return None;
     }
     Some((discriminator.to_owned(), sequence.parse().ok()?))
@@ -552,6 +669,9 @@ pub fn join_chunks_to_generation(
     document: &CodeSearchDocumentV1,
     chunks: &[CodeSearchChunkV1],
 ) -> Result<Vec<ChunkGenerationBindingV1>, GenerationJoinErrorV1> {
+    generation
+        .validate()
+        .map_err(|_| GenerationJoinErrorV1::UnsealedGeneration)?;
     let expected =
         expected_seal_digest(generation).map_err(|_| GenerationJoinErrorV1::UnsealedGeneration)?;
     if generation.seal.expected_digest != expected {
@@ -705,9 +825,9 @@ mod tests {
             .plan_generation(&snapshot, Some(&child), UtcMicros(5_000))
             .expect("grandchild generation");
 
-        assert!(genesis.generation_id.as_str().ends_with(".00000001"));
-        assert!(child.generation_id.as_str().ends_with(".00000002"));
-        assert!(grandchild.generation_id.as_str().ends_with(".00000003"));
+        assert!(genesis.generation_id.as_str().contains(".00000001."));
+        assert!(child.generation_id.as_str().contains(".00000002."));
+        assert!(grandchild.generation_id.as_str().contains(".00000003."));
         // Zero-padded sequences keep lexicographic order aligned with the
         // monotonic sequence.
         assert!(genesis.generation_id < child.generation_id);
@@ -737,7 +857,7 @@ mod tests {
         let other_genesis = other_planner
             .plan_generation(&other_snapshot, None, UtcMicros(3_000))
             .expect("other repository genesis");
-        assert!(other_genesis.generation_id.as_str().ends_with(".00000001"));
+        assert!(other_genesis.generation_id.as_str().contains(".00000001."));
         assert_ne!(other_genesis.generation_id, genesis.generation_id);
     }
 
@@ -814,8 +934,11 @@ mod tests {
 
         // Foreign parent: an identity this planner never minted.
         let mut foreign = genesis.clone();
-        foreign.generation_id = id("generation.2");
+        foreign.generation_id = id("generation.v1.00000002.00000001");
         foreign.parent_generation = None;
+        foreign.invalidation_digest = foreign
+            .expected_legacy_invalidation_digest()
+            .expect("foreign invalidation digest");
         foreign.seal.expected_digest = expected_seal_digest(&foreign).expect("foreign reseal");
         assert_eq!(
             planner.plan_generation(&snapshot, Some(&foreign), UtcMicros(4_000)),
@@ -932,9 +1055,13 @@ mod tests {
         let plan = planner
             .plan_increment(&prior_manifest, &prior_snapshot, &current, &hinted)
             .expect("increment plan");
+        let unhinted = planner
+            .plan_increment(&prior_manifest, &prior_snapshot, &current, &BTreeSet::new())
+            .expect("unhinted increment plan");
 
         assert_eq!(plan.carried_forward, 1);
         assert_eq!(plan.reextract, 1);
+        assert_eq!(plan.invalidation_digest, unhinted.invalidation_digest);
         assert!(matches!(
             plan.files[0].action,
             FileExtractionActionV1::CarryForward { .. }

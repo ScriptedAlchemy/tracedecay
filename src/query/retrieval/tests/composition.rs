@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use tracedecay_domain::{
     DiversityPolicy, EvidenceRole, ExactClass, HydrationReceipt, PublicRetrieverStatus,
     RankingDecisionKind, RetrievalFailure, RetrieverKind, RetrieverOutcome,
+    ScoreDomainCalibrationV1,
 };
 
 use super::{
@@ -10,8 +11,9 @@ use super::{
 };
 use crate::query::retrieval::fusion::{CompositionKernel, FusionStageInput};
 use crate::query::retrieval::hydrate::{
-    DeterministicLateHydration, HydrationAuthorizationV1, HydrationOutcomeV1,
-    HydrationReadOutcomeV1, HydrationUnavailableV1, LateHydrationSource,
+    DeterministicLateHydration, HydrationAuthorizationV1, HydrationExecutionControlV1,
+    HydrationOutcomeV1, HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationStageError,
+    HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
 };
 
 fn receipt(
@@ -152,6 +154,60 @@ fn fusion_retains_every_occurrence_evidence_pair_and_contribution() {
 }
 
 #[test]
+fn fusion_calibrates_raw_scores_in_their_declared_score_domain() {
+    let normal = candidate(RetrieverKind::Lexical, "normal-domain", 1_000_000, 0);
+    let mut shifted = candidate(RetrieverKind::Lexical, "shifted-domain", 1_000_000, 1);
+    shifted.score_domain = id("score.lexical.shifted.v1");
+
+    let mut fusion_profile = profile();
+    fusion_profile.score_domain_calibrations.insert(
+        id("score.lexical.shifted.v1"),
+        ScoreDomainCalibrationV1 {
+            calibration_profile_id: id("calibration.lexical.v1"),
+            score_domain: id("score.lexical.shifted.v1"),
+            raw_min_micros: 0,
+            raw_max_micros: 2_000_000,
+        },
+    );
+
+    let output = CompositionKernel::new(id("ranking.fixture.v1"))
+        .compose(
+            &FusionStageInput {
+                profile: fusion_profile,
+                lanes: composition_lanes(vec![
+                    (
+                        RetrieverKind::ExactLiteral,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                    (
+                        RetrieverKind::Lexical,
+                        RetrieverOutcome::Complete(batch(vec![normal, shifted], "lexical")),
+                    ),
+                    (
+                        RetrieverKind::Graph,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                ]),
+            },
+            &no_caps(),
+        )
+        .expect("composition succeeds");
+
+    let calibrated = output
+        .ranked_candidates
+        .iter()
+        .map(|ranked| {
+            (
+                ranked.candidate.anchor_id.as_str(),
+                ranked.candidate.contributions[0].calibrated_feature_micros,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(calibrated["anchor.normal-domain"], 1_000_000);
+    assert_eq!(calibrated["anchor.shifted-domain"], 500_000);
+}
+
+#[test]
 fn same_source_duplicate_rows_collapse_only_for_the_same_evidence_pair() {
     let lexical = candidate(RetrieverKind::Lexical, "duplicate", 800_000, 0);
     let mut graph = candidate(RetrieverKind::Graph, "duplicate", 400_000, 0);
@@ -245,14 +301,20 @@ fn partial_optional_batches_contribute_without_losing_the_typed_outcome() {
 fn logical_copies_and_file_caps_preserve_contradictions_deterministically() {
     let mut primary = candidate(RetrieverKind::Lexical, "primary", 900_000, 0);
     primary.logical_copy_cluster_id = Some(id("copy.same"));
+    primary.logical_copy_evidence_anchor =
+        Some(tracedecay_domain::RetrievalAnchorId::new("copy-evidence.same").unwrap());
     primary.freshness.source_instance = id("file.same");
 
     let mut copy = candidate(RetrieverKind::Lexical, "copy", 800_000, 1);
     copy.logical_copy_cluster_id = Some(id("copy.same"));
+    copy.logical_copy_evidence_anchor =
+        Some(tracedecay_domain::RetrievalAnchorId::new("copy-evidence.same").unwrap());
     copy.freshness.source_instance = id("file.same");
 
     let mut contradiction = candidate(RetrieverKind::Lexical, "contradiction", 700_000, 2);
     contradiction.logical_copy_cluster_id = Some(id("copy.same"));
+    contradiction.logical_copy_evidence_anchor =
+        Some(tracedecay_domain::RetrievalAnchorId::new("copy-evidence.same").unwrap());
     contradiction.evidence_role = EvidenceRole::Contradiction;
     contradiction.freshness.source_instance = id("file.same");
 
@@ -306,6 +368,91 @@ fn logical_copies_and_file_caps_preserve_contradictions_deterministically() {
     assert_eq!(output.diversity_decisions.len(), 0);
 }
 
+#[test]
+fn logical_copy_collapse_requires_relation_evidence_and_retains_every_copy_provenance() {
+    let mut unproven_primary = candidate(RetrieverKind::Lexical, "unproven-primary", 900_000, 0);
+    unproven_primary.logical_copy_cluster_id = Some(id("copy.unproven"));
+    let mut unproven_copy = candidate(RetrieverKind::Lexical, "unproven-copy", 800_000, 1);
+    unproven_copy.logical_copy_cluster_id = Some(id("copy.unproven"));
+    let unproven = CompositionKernel::new(id("ranking.fixture.v1"))
+        .compose(
+            &FusionStageInput {
+                profile: profile(),
+                lanes: composition_lanes(vec![
+                    (
+                        RetrieverKind::ExactLiteral,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                    (
+                        RetrieverKind::Lexical,
+                        RetrieverOutcome::Complete(batch(
+                            vec![unproven_primary, unproven_copy],
+                            "lexical",
+                        )),
+                    ),
+                    (
+                        RetrieverKind::Graph,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                ]),
+            },
+            &no_caps(),
+        )
+        .expect_err("unproven logical copies fail closed");
+    assert!(
+        unproven
+            .to_string()
+            .contains("logical-copy relation lacks its evidence anchor")
+    );
+
+    let mut primary = candidate(RetrieverKind::Lexical, "proven-primary", 900_000, 0);
+    primary.logical_copy_cluster_id = Some(id("copy.proven"));
+    primary.logical_copy_evidence_anchor =
+        Some(tracedecay_domain::RetrievalAnchorId::new("copy-evidence.proven").unwrap());
+    let mut copy = candidate(RetrieverKind::Lexical, "proven-copy", 800_000, 1);
+    copy.logical_copy_cluster_id = Some(id("copy.proven"));
+    copy.logical_copy_evidence_anchor =
+        Some(tracedecay_domain::RetrievalAnchorId::new("copy-evidence.proven").unwrap());
+    let output = CompositionKernel::new(id("ranking.fixture.v1"))
+        .compose(
+            &FusionStageInput {
+                profile: profile(),
+                lanes: composition_lanes(vec![
+                    (
+                        RetrieverKind::ExactLiteral,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                    (
+                        RetrieverKind::Lexical,
+                        RetrieverOutcome::Complete(batch(vec![primary, copy], "lexical")),
+                    ),
+                    (
+                        RetrieverKind::Graph,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                ]),
+            },
+            &no_caps(),
+        )
+        .expect("proven logical copies compose");
+
+    let decision = output
+        .dedupe_decisions
+        .iter()
+        .find(|decision| decision.copy_cluster.as_ref() == Some(&id("copy.proven")))
+        .expect("copy-collapse decision");
+    assert_eq!(decision.collapsed_candidates.len(), 1);
+    let collapsed = &decision.collapsed_candidates[0];
+    assert_eq!(collapsed.anchor_id.as_str(), "anchor.proven-copy");
+    assert_eq!(
+        collapsed.occurrences[0]
+            .logical_copy_evidence_anchor
+            .as_ref()
+            .map(tracedecay_domain::RetrievalAnchorId::as_str),
+        Some("copy-evidence.proven")
+    );
+}
+
 #[derive(Default)]
 struct FakeHydrationSource {
     authorization: BTreeMap<String, HydrationAuthorizationV1>,
@@ -324,11 +471,20 @@ impl LateHydrationSource<String> for FakeHydrationSource {
             .unwrap_or(HydrationAuthorizationV1::Authorized)
     }
 
+    fn preflight_authorized(
+        &mut self,
+        _request: &tracedecay_domain::RetrievalRequest,
+        _candidate: &tracedecay_domain::RankedCandidate,
+        _permit: &HydrationWorkPermitV1,
+    ) -> HydrationPreflightOutcomeV1 {
+        HydrationPreflightOutcomeV1::Ready { estimated_bytes: 1 }
+    }
+
     fn hydrate_authorized(
         &mut self,
         _request: &tracedecay_domain::RetrievalRequest,
         candidate: &tracedecay_domain::RankedCandidate,
-        _remaining_bytes: u64,
+        _permit: &HydrationWorkPermitV1,
     ) -> HydrationReadOutcomeV1<String> {
         let anchor = candidate.candidate.anchor_id.as_str().to_owned();
         self.reads.push(anchor.clone());
@@ -414,16 +570,33 @@ impl LateHydrationSource<String> for PartialHydrationSource {
         HydrationAuthorizationV1::Authorized
     }
 
+    fn preflight_authorized(
+        &mut self,
+        _request: &tracedecay_domain::RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+        permit: &HydrationWorkPermitV1,
+    ) -> HydrationPreflightOutcomeV1 {
+        let bytes = if candidate.candidate.anchor_id.as_str() == "anchor.first" {
+            4
+        } else {
+            3
+        };
+        assert!(bytes <= permit.remaining_bytes);
+        HydrationPreflightOutcomeV1::Ready {
+            estimated_bytes: bytes,
+        }
+    }
+
     fn hydrate_authorized(
         &mut self,
         _request: &tracedecay_domain::RetrievalRequest,
         candidate: &tracedecay_domain::RankedCandidate,
-        remaining_bytes: u64,
+        permit: &HydrationWorkPermitV1,
     ) -> HydrationReadOutcomeV1<String> {
         let anchor = candidate.candidate.anchor_id.as_str().to_owned();
         self.reads.push(anchor.clone());
         let bytes = if anchor == "anchor.first" { 4 } else { 3 };
-        assert!(bytes <= remaining_bytes);
+        assert!(bytes <= permit.remaining_bytes);
         if anchor == "anchor.second" {
             HydrationReadOutcomeV1::Partial {
                 payload: anchor,
@@ -494,5 +667,248 @@ fn hydration_preserves_partial_outcomes_and_stops_at_the_ranked_prefix_bound() {
             .map(|receipt| receipt.bytes_hydrated)
             .sum::<u64>(),
         7
+    );
+}
+
+#[derive(Clone, Copy)]
+struct FixedHydrationExecutionControl {
+    now_micros: i64,
+    cancelled: bool,
+}
+
+impl HydrationExecutionControlV1 for FixedHydrationExecutionControl {
+    fn now_micros(&self) -> i64 {
+        self.now_micros
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+}
+
+struct PreflightHydrationSource {
+    authorizations: usize,
+    preflights: usize,
+    reads: usize,
+    estimated_bytes: u64,
+    mismatched_receipt: bool,
+}
+
+impl LateHydrationSource<String> for PreflightHydrationSource {
+    fn authorize(
+        &mut self,
+        _request: &tracedecay_domain::RetrievalRequest,
+        _candidate: &tracedecay_domain::RankedCandidate,
+    ) -> HydrationAuthorizationV1 {
+        self.authorizations += 1;
+        HydrationAuthorizationV1::Authorized
+    }
+
+    fn preflight_authorized(
+        &mut self,
+        _request: &tracedecay_domain::RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+        permit: &HydrationWorkPermitV1,
+    ) -> HydrationPreflightOutcomeV1 {
+        self.preflights += 1;
+        assert_eq!(permit.anchor_id, candidate.candidate.anchor_id);
+        assert!(!permit.source_occurrence_ids.is_empty());
+        HydrationPreflightOutcomeV1::Ready {
+            estimated_bytes: self.estimated_bytes,
+        }
+    }
+
+    fn hydrate_authorized(
+        &mut self,
+        _request: &tracedecay_domain::RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+        permit: &HydrationWorkPermitV1,
+    ) -> HydrationReadOutcomeV1<String> {
+        assert!(self.estimated_bytes <= permit.remaining_bytes);
+        self.reads += 1;
+        let mut receipt = receipt(candidate, self.estimated_bytes);
+        if self.mismatched_receipt {
+            receipt.source_occurrence_id = id("occurrence.not-permitted");
+        }
+        HydrationReadOutcomeV1::Complete {
+            payload: candidate.candidate.anchor_id.as_str().to_owned(),
+            receipt,
+        }
+    }
+}
+
+fn single_ranked_candidate() -> Vec<tracedecay_domain::RankedCandidate> {
+    CompositionKernel::new(id("ranking.fixture.v1"))
+        .compose(
+            &FusionStageInput {
+                profile: profile(),
+                lanes: composition_lanes(vec![
+                    (
+                        RetrieverKind::ExactLiteral,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                    (
+                        RetrieverKind::Lexical,
+                        RetrieverOutcome::Complete(batch(
+                            vec![candidate(RetrieverKind::Lexical, "hydration", 900_000, 0)],
+                            "lexical",
+                        )),
+                    ),
+                    (
+                        RetrieverKind::Graph,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                ]),
+            },
+            &no_caps(),
+        )
+        .expect("composition succeeds")
+        .ranked_candidates
+}
+
+#[test]
+fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
+    let request = request();
+    let ranked = single_ranked_candidate();
+    let active = FixedHydrationExecutionControl {
+        now_micros: request.snapshot.captured_at.0,
+        cancelled: false,
+    };
+
+    let mut byte_budget = budget();
+    byte_budget.max_hydration_bytes = 4;
+    let mut byte_source = PreflightHydrationSource {
+        authorizations: 0,
+        preflights: 0,
+        reads: 0,
+        estimated_bytes: 5,
+        mismatched_receipt: false,
+    };
+    let byte_page = DeterministicLateHydration::new(&mut byte_source)
+        .hydrate_with_control(&request, &ranked, &byte_budget, &active)
+        .expect("preflight byte rejection is a positional result");
+    assert_eq!(byte_source.authorizations, 1);
+    assert_eq!(byte_source.preflights, 1);
+    assert_eq!(byte_source.reads, 0);
+    assert!(matches!(
+        byte_page.results[0].outcome,
+        HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
+    ));
+    assert!(byte_page.receipts.is_empty());
+
+    let cancelled = FixedHydrationExecutionControl {
+        now_micros: request.snapshot.captured_at.0,
+        cancelled: true,
+    };
+    let mut cancelled_source = PreflightHydrationSource {
+        authorizations: 0,
+        preflights: 0,
+        reads: 0,
+        estimated_bytes: 1,
+        mismatched_receipt: false,
+    };
+    let cancelled_page = DeterministicLateHydration::new(&mut cancelled_source)
+        .hydrate_with_control(&request, &ranked, &budget(), &cancelled)
+        .expect("cancellation is a positional result");
+    assert_eq!(
+        (
+            cancelled_source.authorizations,
+            cancelled_source.preflights,
+            cancelled_source.reads,
+        ),
+        (0, 0, 0)
+    );
+    assert!(matches!(
+        cancelled_page.results[0].outcome,
+        HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
+    ));
+
+    let mut deadline_budget = budget();
+    deadline_budget.deadline_micros = Some(1);
+    let expired = FixedHydrationExecutionControl {
+        now_micros: request.snapshot.captured_at.0 + 1,
+        cancelled: false,
+    };
+    let mut deadline_source = PreflightHydrationSource {
+        authorizations: 0,
+        preflights: 0,
+        reads: 0,
+        estimated_bytes: 1,
+        mismatched_receipt: false,
+    };
+    let deadline_page = DeterministicLateHydration::new(&mut deadline_source)
+        .hydrate_with_control(&request, &ranked, &deadline_budget, &expired)
+        .expect("expired deadline is a positional result");
+    assert_eq!(
+        (
+            deadline_source.authorizations,
+            deadline_source.preflights,
+            deadline_source.reads,
+        ),
+        (0, 0, 0)
+    );
+    assert!(matches!(
+        deadline_page.results[0].outcome,
+        HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
+    ));
+}
+
+#[test]
+fn default_hydration_control_enforces_elapsed_deadline_before_payload_work() {
+    let mut request = request();
+    request.snapshot.captured_at = tracedecay_domain::UtcMicros(0);
+    let ranked = single_ranked_candidate();
+    let mut deadline_budget = budget();
+    deadline_budget.deadline_micros = Some(1);
+    let mut source = PreflightHydrationSource {
+        authorizations: 0,
+        preflights: 0,
+        reads: 0,
+        estimated_bytes: 1,
+        mismatched_receipt: false,
+    };
+
+    let page = DeterministicLateHydration::new(&mut source)
+        .hydrate(&request, &ranked, &deadline_budget)
+        .expect("expired deadline is a positional result");
+
+    assert_eq!(
+        (source.authorizations, source.preflights, source.reads),
+        (0, 0, 0)
+    );
+    assert!(matches!(
+        page.results[0].outcome,
+        HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
+    ));
+}
+
+#[test]
+fn hydration_rejects_receipts_outside_the_issued_work_permit() {
+    let request = request();
+    let ranked = single_ranked_candidate();
+    let control = FixedHydrationExecutionControl {
+        now_micros: request.snapshot.captured_at.0,
+        cancelled: false,
+    };
+    let mut source = PreflightHydrationSource {
+        authorizations: 0,
+        preflights: 0,
+        reads: 0,
+        estimated_bytes: 1,
+        mismatched_receipt: true,
+    };
+
+    assert!(matches!(
+        DeterministicLateHydration::new(&mut source).hydrate_with_control(
+            &request,
+            &ranked,
+            &budget(),
+            &control,
+        ),
+        Err(HydrationStageError::Contract(_))
+    ));
+    assert_eq!(
+        (source.authorizations, source.preflights, source.reads),
+        (1, 1, 1)
     );
 }

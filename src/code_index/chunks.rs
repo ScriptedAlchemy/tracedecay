@@ -14,7 +14,7 @@ use tracedecay_domain::{
     ValidatedCodeFileV1,
 };
 
-use super::extract::ExtractionCancellation;
+use super::{extract::ExtractionCancellation, intake::ReceiptBoundCodeFileV1};
 
 /// Chunker failures. Partial coverage is evidence, not an error; errors are
 /// reserved for contract violations.
@@ -33,12 +33,12 @@ pub enum ChunkingFailureV1 {
 /// The deterministic chunker contract (Plan 25: `src/code_index/chunks.rs`
 /// builds chunks and their parent/child hierarchy).
 pub trait CodeChunker {
-    /// Build every chunk for one validated file plus its extraction batch,
+    /// Build every chunk for one receipt-bound file plus its extraction batch,
     /// covering every eligible sanitized byte with a declared chunk or an
     /// explicit unsupported/excluded range.
     fn chunk_file(
         &self,
-        file: &ValidatedCodeFileV1,
+        file: &ReceiptBoundCodeFileV1,
         batch: &ExtractionBatchV1,
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
@@ -51,6 +51,65 @@ pub trait CodeChunker {
 pub struct CodeFileChunksV1 {
     pub document: CodeSearchDocumentV1,
     pub chunks: Vec<CodeSearchChunkV1>,
+}
+
+/// Opaque capability proving the exact chunk bytes produced by one
+/// parser-backed extraction. It has no public constructor.
+#[derive(Clone, Debug)]
+pub struct ExactExtractionAuthorityV1 {
+    chunk_digests: BTreeMap<CodeSearchChunkId, String>,
+}
+
+/// One chunk re-admitted through parser-backed extraction authority.
+#[derive(Clone, Debug)]
+pub struct ExtractionAdmittedCodeSearchChunkV1 {
+    chunk: CodeSearchChunkV1,
+}
+
+impl ExtractionAdmittedCodeSearchChunkV1 {
+    pub fn chunk(&self) -> &CodeSearchChunkV1 {
+        &self.chunk
+    }
+
+    pub(crate) fn into_inner(self) -> CodeSearchChunkV1 {
+        self.chunk
+    }
+}
+
+impl ExactExtractionAuthorityV1 {
+    fn mint(chunks: &[CodeSearchChunkV1]) -> Result<Self, ChunkingFailureV1> {
+        let mut chunk_digests = BTreeMap::new();
+        for chunk in chunks {
+            chunk_digests.insert(
+                chunk.id.clone(),
+                canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk)?,
+            );
+        }
+        Ok(Self { chunk_digests })
+    }
+
+    pub fn admit(
+        &self,
+        chunk: CodeSearchChunkV1,
+    ) -> Result<ExtractionAdmittedCodeSearchChunkV1, ChunkingFailureV1> {
+        chunk
+            .validate()
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?;
+        let digest = canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, &chunk)?;
+        if self.chunk_digests.get(&chunk.id) != Some(&digest) {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "chunk does not match parser-backed exact extraction authority".to_owned(),
+            ));
+        }
+        Ok(ExtractionAdmittedCodeSearchChunkV1 { chunk })
+    }
+
+    pub fn admit_all(
+        &self,
+        chunks: Vec<CodeSearchChunkV1>,
+    ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
+        chunks.into_iter().map(|chunk| self.admit(chunk)).collect()
+    }
 }
 
 impl CodeFileChunksV1 {
@@ -94,22 +153,69 @@ impl CodeFileChunksV1 {
         }
         Ok(())
     }
+
+    /// Rebind carried-forward chunks to their next generation without
+    /// changing logical chunk identity or content evidence. Symbol occurrence
+    /// IDs are rematerialized from the prior exact occurrence so they cannot
+    /// cross the generation boundary.
+    pub fn rematerialize_for_generation(
+        &self,
+        generation_id: CodeGenerationId,
+        file_occurrence_id: FileOccurrenceId,
+    ) -> Result<Self, ChunkingFailureV1> {
+        self.validate()?;
+        if self.document.generation_id == generation_id
+            && self.document.file_occurrence_id == file_occurrence_id
+        {
+            return Ok(self.clone());
+        }
+
+        let mut rematerialized = self.clone();
+        rematerialized.document.generation_id = generation_id.clone();
+        rematerialized.document.file_occurrence_id = file_occurrence_id.clone();
+
+        let mut occurrences: BTreeMap<SymbolOccurrenceId, SymbolOccurrenceId> = BTreeMap::new();
+        for chunk in &mut rematerialized.chunks {
+            chunk.anchor.generation_id = generation_id.clone();
+            chunk.anchor.file_occurrence_id = file_occurrence_id.clone();
+            if let Some(prior_occurrence) = chunk.anchor.symbol_occurrence_id.clone() {
+                let current_occurrence = match occurrences.get(&prior_occurrence) {
+                    Some(current) => current.clone(),
+                    None => {
+                        let current = rematerialized_symbol_occurrence_id(
+                            &generation_id,
+                            &file_occurrence_id,
+                            &prior_occurrence,
+                        )?;
+                        occurrences.insert(prior_occurrence, current.clone());
+                        current
+                    }
+                };
+                chunk.anchor.symbol_occurrence_id = Some(current_occurrence);
+            }
+        }
+
+        rematerialized.validate()?;
+        Ok(rematerialized)
+    }
 }
 
-use std::collections::BTreeSet;
-use std::fmt::Write as _;
+use std::collections::{BTreeMap, BTreeSet};
 
-use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkLogicalIdentityV1, ChunkerRevision, CodeGenerationId,
     CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchEligibilityV1,
-    ContentDigest, ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileIdentityDigest,
-    FileOccurrenceId, MAX_CHUNK_TEXT_BYTES, ParseOutcomeV1, PolicyRevisionId, RepositoryId,
-    SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest,
-    SymbolOccurrenceId, canonical_sha256,
+    ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileIdentityDigest, FileOccurrenceId,
+    MAX_CHUNK_TEXT_BYTES, ParseOutcomeV1, PolicyRevisionId, RepositoryId, SanitizerRevision,
+    SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
+    canonical_sha256,
 };
 
 use crate::types::{Node, NodeKind};
+
+/// Compatibility re-export for callers that previously obtained raw source
+/// digests from the chunking module.
+pub use super::intake::content_digest;
 
 /// Pinned fallback window size for oversized regions with no usable
 /// structural boundary (Plan 25).
@@ -129,6 +235,13 @@ pub const SYMBOL_IDENTITY_SEPARATOR: &str = "tracedecay.code-symbol-identity.v1"
 
 /// Domain separator for symbol occurrence identity digests.
 pub const SYMBOL_OCCURRENCE_SEPARATOR: &str = "tracedecay.code-symbol-occurrence.v1";
+
+/// Domain separator for carried symbol-occurrence rematerialization.
+pub const SYMBOL_OCCURRENCE_REMATERIALIZATION_SEPARATOR: &str =
+    "tracedecay.code-symbol-occurrence-rematerialization.v1";
+
+/// Domain separator for parser-backed exact extraction authority.
+pub const EXACT_EXTRACTION_AUTHORITY_SEPARATOR: &str = "tracedecay.exact-extraction-authority.v1";
 
 /// The deterministic five-grain chunker.
 ///
@@ -188,6 +301,21 @@ impl DeterministicCodeChunker {
         &self.generation_id
     }
 
+    /// Chunk one receipt-bound file and return the opaque capability required
+    /// to re-admit its exact extraction evidence into lexical projection.
+    pub fn chunk_file_with_authority(
+        &self,
+        file: &ReceiptBoundCodeFileV1,
+        batch: &ExtractionBatchV1,
+        descriptor: &LanguageDescriptorV1,
+        cancellation: &dyn ExtractionCancellation,
+    ) -> Result<(CodeFileChunksV1, ExactExtractionAuthorityV1), ChunkingFailureV1> {
+        let result =
+            <Self as CodeChunker>::chunk_file(self, file, batch, descriptor, cancellation)?;
+        let authority = ExactExtractionAuthorityV1::mint(&result.chunks)?;
+        Ok((result, authority))
+    }
+
     fn file_identity(&self, logical_path: &str) -> Result<FileIdentityDigest, ChunkingFailureV1> {
         canonical_digest(
             FILE_IDENTITY_SEPARATOR,
@@ -230,15 +358,42 @@ fn canonical_digest<T: serde::Serialize>(
         .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
 }
 
-/// Content digest over raw chunk text bytes.
-pub fn content_digest(bytes: &[u8]) -> ContentDigest {
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity("sha256:".len() + 64);
-    encoded.push_str("sha256:");
-    for byte in digest {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    ContentDigest::new(encoded).expect("sha256 hex is a valid content digest")
+fn symbol_occurrence_id(
+    generation_id: &CodeGenerationId,
+    file_occurrence_id: &FileOccurrenceId,
+    identity: &SymbolIdentityDigest,
+) -> Result<SymbolOccurrenceId, ChunkingFailureV1> {
+    canonical_digest(
+        SYMBOL_OCCURRENCE_SEPARATOR,
+        &(
+            generation_id.as_str(),
+            file_occurrence_id.as_str(),
+            identity.as_str(),
+        ),
+    )
+    .and_then(|digest| {
+        SymbolOccurrenceId::new(format!("symbol.v1.{digest}"))
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
+    })
+}
+
+fn rematerialized_symbol_occurrence_id(
+    generation_id: &CodeGenerationId,
+    file_occurrence_id: &FileOccurrenceId,
+    prior_occurrence: &SymbolOccurrenceId,
+) -> Result<SymbolOccurrenceId, ChunkingFailureV1> {
+    canonical_digest(
+        SYMBOL_OCCURRENCE_REMATERIALIZATION_SEPARATOR,
+        &(
+            generation_id.as_str(),
+            file_occurrence_id.as_str(),
+            prior_occurrence.as_str(),
+        ),
+    )
+    .and_then(|digest| {
+        SymbolOccurrenceId::new(format!("symbol.v1.{digest}"))
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
+    })
 }
 
 /// Kinds whose nodes never become symbol chunks: imports, preprocessor
@@ -263,6 +418,7 @@ fn is_symbol_kind(kind: &NodeKind) -> bool {
 /// One extracted symbol reduced to chunk-relevant, identity-stable facts.
 struct SymbolRow {
     span: SourceSpan,
+    name: String,
     parent: Option<usize>,
     identity: SymbolIdentityDigest,
     occurrence: SymbolOccurrenceId,
@@ -393,20 +549,7 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
             }
         }
         if let Some(kind) = classify_token(token) {
-            let canonical = match kind {
-                ExactTechnicalTermKindV1::CliFlag
-                | ExactTechnicalTermKindV1::ConfigurationKey
-                | ExactTechnicalTermKindV1::ToolName => token.to_lowercase().into_bytes(),
-                _ => token.as_bytes().to_vec(),
-            };
-            if seen_terms.insert((kind, canonical.clone())) {
-                terms.push(ExactTechnicalTermV1 {
-                    kind,
-                    original_bytes: token.as_bytes().to_vec(),
-                    canonical_bytes: canonical,
-                    span,
-                });
-            }
+            mint_exact_term(&mut terms, &mut seen_terms, kind, token.as_bytes(), span);
         }
     }
     let mut line_start = 0usize;
@@ -420,7 +563,6 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
             ),
             ("runtime error:", ExactTechnicalTermKindV1::RuntimeErrorText),
             ("panic:", ExactTechnicalTermKindV1::RuntimeErrorText),
-            ("error:", ExactTechnicalTermKindV1::CompilerErrorText),
         ]
         .into_iter()
         .find_map(|(marker, kind)| {
@@ -444,39 +586,65 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
             let end = line_without_newline.trim_end().len();
             if start < end {
                 let original = &line_without_newline.as_bytes()[start..end];
-                let canonical = original.to_vec();
-                if seen_terms.insert((kind, canonical.clone())) {
-                    terms.push(ExactTechnicalTermV1 {
-                        kind,
-                        original_bytes: original.to_vec(),
-                        canonical_bytes: canonical,
-                        span: SourceSpan {
-                            start_byte: base_offset + (line_start + start) as u64,
-                            end_byte: base_offset + (line_start + end) as u64,
-                        },
-                    });
-                }
+                mint_exact_term(
+                    &mut terms,
+                    &mut seen_terms,
+                    kind,
+                    original,
+                    SourceSpan {
+                        start_byte: base_offset + (line_start + start) as u64,
+                        end_byte: base_offset + (line_start + end) as u64,
+                    },
+                );
             }
         }
         line_start += line.len();
     }
     terms.sort_by(|left, right| {
         (
-            left.span.start_byte,
-            left.span.end_byte,
-            left.kind,
-            &left.canonical_bytes,
-            &left.original_bytes,
+            left.span().start_byte,
+            left.span().end_byte,
+            left.kind(),
+            left.canonical_bytes(),
+            left.original_bytes(),
         )
             .cmp(&(
-                right.span.start_byte,
-                right.span.end_byte,
-                right.kind,
-                &right.canonical_bytes,
-                &right.original_bytes,
+                right.span().start_byte,
+                right.span().end_byte,
+                right.kind(),
+                right.canonical_bytes(),
+                right.original_bytes(),
             ))
     });
     (terms, subtokens)
+}
+
+/// Mint a whole technical term only after a type-specific recognizer has
+/// established its syntax. Subtokens intentionally remain broader evidence.
+fn mint_exact_term(
+    terms: &mut Vec<ExactTechnicalTermV1>,
+    seen_terms: &mut BTreeSet<(ExactTechnicalTermKindV1, Vec<u8>)>,
+    kind: ExactTechnicalTermKindV1,
+    original_bytes: &[u8],
+    span: SourceSpan,
+) {
+    let term = if matches!(
+        kind,
+        ExactTechnicalTermKindV1::CompilerErrorText | ExactTechnicalTermKindV1::RuntimeErrorText
+    ) {
+        ExactTechnicalTermV1::untrusted_contextual_text_candidate(
+            kind,
+            original_bytes.to_vec(),
+            span,
+        )
+    } else {
+        ExactTechnicalTermV1::technical(kind, original_bytes.to_vec(), span)
+    };
+    if let Ok(term) = term
+        && seen_terms.insert((kind, term.canonical_bytes().to_vec()))
+    {
+        terms.push(term);
+    }
 }
 
 /// Classify one maximal token as a whole exact technical term kind, or
@@ -492,34 +660,40 @@ fn classify_token(token: &str) -> Option<ExactTechnicalTermKindV1> {
                 .next()
                 .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
     };
-    if token.starts_with("--")
-        && token.len() > 2
-        && token[2..]
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic())
-    {
+    if token.strip_prefix("--").is_some_and(|flag| {
+        !flag.is_empty()
+            && !flag.ends_with('-')
+            && flag
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic())
+            && flag.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            })
+    }) {
         return Some(ExactTechnicalTermKindV1::CliFlag);
     }
-    let head_digits = token.len() > 4
-        && token[..1]
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_uppercase())
-        && token[1..].chars().all(|c| c.is_ascii_digit());
-    if head_digits {
+    if ["E", "TS", "CS"].into_iter().any(|prefix| {
+        token.strip_prefix(prefix).is_some_and(|digits| {
+            digits.len() == 4 && digits.chars().all(|character| character.is_ascii_digit())
+        })
+    }) {
         return Some(ExactTechnicalTermKindV1::CompilerErrorCode);
     }
-    if token.starts_with("ERR_")
-        || (token.starts_with('E')
-            && token.len() > 1
-            && token[1..]
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
-    {
+    if token.strip_prefix("ERR_").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix.chars().all(|character| {
+                character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+            })
+    }) {
         return Some(ExactTechnicalTermKindV1::RuntimeErrorCode);
     }
-    if token.len() >= 7 && token.len() <= 40 && token.chars().all(|c| c.is_ascii_hexdigit()) {
+    if token.strip_prefix("commit:").is_some_and(|identifier| {
+        (7..=40).contains(&identifier.len())
+            && identifier
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+    }) {
         return Some(ExactTechnicalTermKindV1::CommitIdentifier);
     }
     if matches!(
@@ -538,12 +712,16 @@ fn classify_token(token: &str) -> Option<ExactTechnicalTermKindV1> {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
         })
+        && token
+            .rsplit('/')
+            .next()
+            .is_some_and(|filename| filename.contains('.'))
     {
         return Some(ExactTechnicalTermKindV1::Path);
     }
     if token.contains('.')
         && !token.contains('/')
-        && token.split('.').count() >= 2
+        && token.split('.').count() >= 3
         && token.split('.').all(|segment| {
             !segment.is_empty()
                 && segment
@@ -553,10 +731,32 @@ fn classify_token(token: &str) -> Option<ExactTechnicalTermKindV1> {
     {
         return Some(ExactTechnicalTermKindV1::ConfigurationKey);
     }
-    if is_ident(token) {
-        return Some(ExactTechnicalTermKindV1::WholeSymbol);
-    }
     None
+}
+
+fn symbol_name_span(source: &str, symbol: &SymbolRow) -> Option<SourceSpan> {
+    if symbol.name.is_empty() {
+        return None;
+    }
+    let start = usize::try_from(symbol.span.start_byte).ok()?;
+    let end = usize::try_from(symbol.span.end_byte).ok()?;
+    let body = source.get(start..end)?;
+    let is_identifier = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    body.match_indices(&symbol.name)
+        .find_map(|(relative, name)| {
+            let before = relative
+                .checked_sub(1)
+                .and_then(|index| body.as_bytes().get(index))
+                .copied();
+            let after = body.as_bytes().get(relative + name.len()).copied();
+            if before.is_some_and(is_identifier) || after.is_some_and(is_identifier) {
+                return None;
+            }
+            Some(SourceSpan {
+                start_byte: symbol.span.start_byte + relative as u64,
+                end_byte: symbol.span.start_byte + (relative + name.len()) as u64,
+            })
+        })
 }
 
 /// Split one token into lowercase language-profiled subtokens: path,
@@ -604,7 +804,7 @@ struct PendingChunk {
 impl CodeChunker for DeterministicCodeChunker {
     fn chunk_file(
         &self,
-        file: &ValidatedCodeFileV1,
+        file: &ReceiptBoundCodeFileV1,
         batch: &ExtractionBatchV1,
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
@@ -612,6 +812,7 @@ impl CodeChunker for DeterministicCodeChunker {
         if cancellation.is_cancelled() {
             return Err(ChunkingFailureV1::Cancelled);
         }
+        let file = file.validated_file();
         if batch.language != descriptor.language
             || batch.descriptor_revision != descriptor.descriptor_revision
             || batch.grammar_revision != descriptor.grammar_revision
@@ -769,6 +970,7 @@ impl DeterministicCodeChunker {
     ) -> Result<Vec<SymbolRow>, ChunkingFailureV1> {
         struct Raw {
             kind: &'static str,
+            name: String,
             qualified_name: String,
             span: SourceSpan,
         }
@@ -781,6 +983,7 @@ impl DeterministicCodeChunker {
                 let end = byte_offset(offsets, len, node.end_line, node.end_column);
                 Raw {
                     kind: node.kind.as_str(),
+                    name: node.name.clone(),
                     qualified_name: node.qualified_name.clone(),
                     span: SourceSpan {
                         start_byte: start.min(end),
@@ -832,16 +1035,11 @@ impl DeterministicCodeChunker {
                 SymbolIdentityDigest::new(digest)
                     .expect("canonical digest is a valid symbol identity digest")
             })?;
-            let occurrence = canonical_digest(
-                SYMBOL_OCCURRENCE_SEPARATOR,
-                &(file_occurrence_id.as_str(), identity.as_str()),
-            )
-            .and_then(|digest| {
-                SymbolOccurrenceId::new(format!("symbol.v1.{digest}"))
-                    .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
-            })?;
+            let occurrence =
+                symbol_occurrence_id(&self.generation_id, file_occurrence_id, &identity)?;
             rows.push(SymbolRow {
                 span: node.span,
+                name: node.name.clone(),
                 parent,
                 identity,
                 occurrence,
@@ -1047,7 +1245,35 @@ impl DeterministicCodeChunker {
                     )
                 })
                 .transpose()?;
-            let (exact_terms, subtokens) = classify_chunk_text(text, piece.span.start_byte);
+            let (mut exact_terms, subtokens) = classify_chunk_text(text, piece.span.start_byte);
+            if let Some(symbol) = symbol
+                && let Some(span) = symbol_name_span(source, symbol)
+                && span.start_byte >= piece.span.start_byte
+                && span.end_byte <= piece.span.end_byte
+                && let Ok(term) = ExactTechnicalTermV1::untrusted_whole_symbol_candidate(
+                    source.as_bytes()[span.start_byte as usize..span.end_byte as usize].to_vec(),
+                    span,
+                    symbol.occurrence.clone(),
+                )
+            {
+                exact_terms.push(term);
+                exact_terms.sort_by(|left, right| {
+                    (
+                        left.span().start_byte,
+                        left.span().end_byte,
+                        left.kind(),
+                        left.canonical_bytes(),
+                        left.original_bytes(),
+                    )
+                        .cmp(&(
+                            right.span().start_byte,
+                            right.span().end_byte,
+                            right.kind(),
+                            right.canonical_bytes(),
+                            right.original_bytes(),
+                        ))
+                });
+            }
             chunks.push(CodeSearchChunkV1 {
                 id,
                 anchor: CodeSearchChunkAnchorV1 {
@@ -1111,7 +1337,13 @@ fn offsets_line_end(source: &str, start: u64) -> u64 {
 /// gap-relative, never file-absolute, so pure line shifts outside the gap
 /// leave the chunk identity unchanged (content digests still track content),
 /// while the gap ordinal keeps two unowned regions from minting the same id.
-fn emit_windows(source: &str, start: u64, end: u64, gap_ordinal: u64, pending: &mut Vec<PendingChunk>) {
+fn emit_windows(
+    source: &str,
+    start: u64,
+    end: u64,
+    gap_ordinal: u64,
+    pending: &mut Vec<PendingChunk>,
+) {
     for window in fallback_windows(source, start, end) {
         let mut split_path = vec![u32::try_from(gap_ordinal).unwrap_or(u32::MAX)];
         split_path.extend(window_split_path(start, window));
@@ -1135,12 +1367,13 @@ mod tests {
         BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
         CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchEligibilityV1, ContentDigest,
         ExtractionCoverageV1, FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision,
-        LanguageId, ManifestDigest, ParseOutcomeV1, PolicyRevisionId, SanitizedCodeFileV1,
-        SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
-        SourceSpan,
+        LanguageId, ManifestDigest, ParseOutcomeV1, PolicyRevisionId, SanitizationReceiptId,
+        SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityDecision,
+        SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, UtcMicros, ValidatedCodeFileV1,
     };
 
     use crate::code_index::extract::{ExtractionCancellation, NeverCancelled};
+    use crate::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
     use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 
     struct AlwaysCancelled;
@@ -1233,22 +1466,46 @@ mod tests {
         )
     }
 
-    fn validated_file(path: &str, bytes: &[u8]) -> ValidatedCodeFileV1 {
-        ValidatedCodeFileV1 {
-            generation_id: id("generation.fixture"),
-            file: SanitizedCodeFileV1 {
-                file_occurrence_id: id("file.fixture"),
-                logical_path: path.to_owned(),
-                language: None,
-                content_digest: content_digest(bytes),
-                disposition: SnapshotFileDispositionV1::Present,
-            },
-            snapshot_digest: id::<ManifestDigest>(&digest('c')),
-            sanitized_bytes: bytes.to_vec(),
-        }
+    fn validated_file(path: &str, bytes: &[u8]) -> ReceiptBoundCodeFileV1 {
+        let file = SanitizedCodeFileV1 {
+            file_occurrence_id: id("file.fixture"),
+            logical_path: path.to_owned(),
+            language: Some(id::<LanguageId>("rust")),
+            content_digest: content_digest(bytes),
+            disposition: SnapshotFileDispositionV1::Present,
+        };
+        let intake = SanitizedCodeIntake::new(
+            StaticLanguageRegistry::new(),
+            id::<SanitizerRevision>("sanitizer.v1"),
+            UtcMicros(1_000_000),
+        );
+        let capability = intake
+            .admit(SanitizedCodeSnapshotV1 {
+                repository: id("repo.fixture"),
+                worktree: None,
+                reference: None,
+                source_revision: None,
+                sanitizer_revision: id("sanitizer.v1"),
+                sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.fixture")],
+                content_identity: content_digest(bytes),
+                captured_at: UtcMicros(1_000_000),
+                files: vec![file.clone()],
+            })
+            .expect("snapshot capability");
+        intake
+            .bind_file(
+                &capability,
+                ValidatedCodeFileV1 {
+                    generation_id: id("generation.fixture"),
+                    file,
+                    snapshot_digest: capability.snapshot().intake_digest.clone(),
+                    sanitized_bytes: bytes.to_vec(),
+                },
+            )
+            .expect("receipt-bound file")
     }
 
-    fn batch_for(file: &ValidatedCodeFileV1, outcome: ParseOutcomeV1) -> ExtractionBatchV1 {
+    fn batch_for(file: &ReceiptBoundCodeFileV1, outcome: ParseOutcomeV1) -> ExtractionBatchV1 {
         let descriptor = rust_descriptor();
         ExtractionBatchV1 {
             generation_id: file.generation_id.clone(),
@@ -1599,28 +1856,31 @@ mod tests {
     #[test]
     fn exact_terms_and_subtokens_are_classified() {
         let (terms, subtokens) = classify_chunk_text(
-            "std::collections::HashMap src/main.rs --release tracedecay.data.dir E0308 alpha betaValue",
+            "std::collections::HashMap src/main.rs --release tracedecay.data.dir E0308 pub fn alpha() {} betaValue",
             0,
         );
         let kinds: BTreeSet<ExactTechnicalTermKindV1> =
-            terms.iter().map(|term| term.kind).collect();
+            terms.iter().map(ExactTechnicalTermV1::kind).collect();
         assert!(kinds.contains(&ExactTechnicalTermKindV1::QualifiedName));
         assert!(kinds.contains(&ExactTechnicalTermKindV1::Path));
         assert!(kinds.contains(&ExactTechnicalTermKindV1::CliFlag));
         assert!(kinds.contains(&ExactTechnicalTermKindV1::ConfigurationKey));
         assert!(kinds.contains(&ExactTechnicalTermKindV1::CompilerErrorCode));
-        assert!(kinds.contains(&ExactTechnicalTermKindV1::WholeSymbol));
+        assert!(
+            !kinds.contains(&ExactTechnicalTermKindV1::WholeSymbol),
+            "text tokenization cannot mint symbol authority"
+        );
 
         let error_term = terms
             .iter()
-            .find(|term| term.kind == ExactTechnicalTermKindV1::CompilerErrorCode)
+            .find(|term| term.kind() == ExactTechnicalTermKindV1::CompilerErrorCode)
             .expect("error code term");
-        assert_eq!(error_term.original_bytes, b"E0308");
+        assert_eq!(error_term.original_bytes(), b"E0308");
         let flag = terms
             .iter()
-            .find(|term| term.kind == ExactTechnicalTermKindV1::CliFlag)
+            .find(|term| term.kind() == ExactTechnicalTermKindV1::CliFlag)
             .expect("flag term");
-        assert_eq!(flag.canonical_bytes, b"--release");
+        assert_eq!(flag.canonical_bytes(), b"--release");
 
         // Subtokens split snake/camel/qualified tokens, lowercased.
         for expected in [
@@ -1645,11 +1905,167 @@ mod tests {
         }
         // Deterministic.
         let again = classify_chunk_text(
-            "std::collections::HashMap src/main.rs --release tracedecay.data.dir E0308 alpha betaValue",
+            "std::collections::HashMap src/main.rs --release tracedecay.data.dir E0308 pub fn alpha() {} betaValue",
             0,
         );
         assert_eq!(terms, again.0);
         assert_eq!(subtokens, again.1);
+    }
+
+    #[test]
+    fn exact_term_minting_rejects_untyped_lookalikes() {
+        let (terms, _) = classify_chunk_text(
+            "ordinary prose\n\
+             A1234 E_NOT_A_CODE deadbeef foo.bar docs/readme\n\
+             error: loose prose\n\
+             compiler error: typed failure\n\
+             ERR_MODULE_NOT_FOUND commit:deadbeef tracedecay.data.dir src/main.rs\n\
+             // fn comment_fake() {}\n\
+             let source = \"fn string_fake() {}\";\n\
+             fn\nnewline_fake\n\
+             fn;;;punctuation_fake\n",
+            0,
+        );
+
+        for rejected in [
+            "ordinary",
+            "prose",
+            "A1234",
+            "E_NOT_A_CODE",
+            "deadbeef",
+            "foo.bar",
+            "docs/readme",
+            "loose prose",
+            "comment_fake",
+            "string_fake",
+            "newline_fake",
+            "punctuation_fake",
+        ] {
+            assert!(
+                terms
+                    .iter()
+                    .all(|term| term.original_bytes() != rejected.as_bytes()),
+                "{rejected:?} must remain subtoken-only evidence"
+            );
+        }
+
+        for (kind, accepted) in [
+            (ExactTechnicalTermKindV1::CompilerErrorText, "typed failure"),
+            (
+                ExactTechnicalTermKindV1::RuntimeErrorCode,
+                "ERR_MODULE_NOT_FOUND",
+            ),
+            (
+                ExactTechnicalTermKindV1::CommitIdentifier,
+                "commit:deadbeef",
+            ),
+            (
+                ExactTechnicalTermKindV1::ConfigurationKey,
+                "tracedecay.data.dir",
+            ),
+            (ExactTechnicalTermKindV1::Path, "src/main.rs"),
+        ] {
+            assert!(
+                terms.iter().any(|term| {
+                    term.kind() == kind && term.original_bytes() == accepted.as_bytes()
+                }),
+                "missing typed exact term {kind:?}: {accepted}"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_evidence_mints_only_real_whole_symbols() {
+        let source = r#"
+// fn comment_fake() {}
+const TEXT: &str = "fn string_fake() {}";
+// fn
+// newline_fake
+// fn;;;punctuation_fake
+pub fn real_symbol() {}
+"#;
+        let result = chunk_source(source);
+        let symbols: BTreeSet<Vec<u8>> = result
+            .chunks
+            .iter()
+            .flat_map(|chunk| {
+                chunk
+                    .exact_terms
+                    .iter()
+                    .filter(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
+                    .map(|term| term.original_bytes().to_vec())
+            })
+            .collect();
+
+        assert!(symbols.contains(b"real_symbol".as_slice()));
+        for rejected in [
+            b"comment_fake".as_slice(),
+            b"string_fake".as_slice(),
+            b"newline_fake".as_slice(),
+            b"punctuation_fake".as_slice(),
+        ] {
+            assert!(!symbols.contains(rejected));
+        }
+    }
+
+    #[test]
+    fn extraction_authority_rejects_matching_occurrence_forgery() {
+        let source = "pub fn real_symbol() {\n    // comment_fake\n}\n";
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let (result, authority) = chunker()
+            .chunk_file_with_authority(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("parser-backed chunks");
+        let mut chunk = result
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolBody
+                    && chunk.sanitized_text.as_str().contains("comment_fake")
+            })
+            .expect("symbol body chunk");
+        authority
+            .admit(chunk.clone())
+            .expect("unchanged parser output is admitted");
+
+        let relative = chunk
+            .sanitized_text
+            .as_str()
+            .find("comment_fake")
+            .expect("forged name bytes");
+        let span = SourceSpan {
+            start_byte: chunk.anchor.source_span.start_byte + relative as u64,
+            end_byte: chunk.anchor.source_span.start_byte
+                + (relative + "comment_fake".len()) as u64,
+        };
+        chunk.exact_terms.push(
+            ExactTechnicalTermV1::untrusted_whole_symbol_candidate(
+                b"comment_fake".to_vec(),
+                span,
+                chunk
+                    .anchor
+                    .symbol_occurrence_id
+                    .clone()
+                    .expect("symbol occurrence"),
+            )
+            .expect("raw matching-occurrence candidate"),
+        );
+        chunk.exact_terms.sort_by_key(|term| {
+            (
+                term.span().start_byte,
+                term.span().end_byte,
+                term.kind(),
+                term.canonical_bytes().to_vec(),
+                term.original_bytes().to_vec(),
+            )
+        });
+        chunk
+            .validate()
+            .expect("raw structural validation cannot establish parser authority");
+        assert!(
+            authority.admit(chunk).is_err(),
+            "opaque authority must reject modified exact evidence"
+        );
     }
 
     #[test]

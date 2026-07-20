@@ -397,7 +397,11 @@ impl<'a> DiagnosticsStore<'a> {
         };
         chain.push(start);
         loop {
-            let last = chain.last().expect("chain is never empty");
+            let Some(last) = chain.last() else {
+                // Unreachable: `chain` is seeded before the loop and only
+                // grows; bail out with what we have rather than panic.
+                return Ok(chain);
+            };
             let DiagnosticRecordStateV1::Superseded {
                 successor_generation,
             } = &last.state

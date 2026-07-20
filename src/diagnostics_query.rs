@@ -561,9 +561,9 @@ impl<'a> DiagnosticsQuery<'a> {
                 cleared.push(prior.clone());
             }
         }
-        introduced.sort_by(|left, right| anchor_cmp(left, right));
+        introduced.sort_by(anchor_cmp);
         superseded.sort_by(|left, right| anchor_cmp(&left.successor, &right.successor));
-        cleared.sort_by(|left, right| anchor_cmp(left, right));
+        cleared.sort_by(anchor_cmp);
 
         let mut coverage = DiagnosticQueryCoverage::Complete;
         for lane_len in [introduced.len(), superseded.len(), cleared.len()] {

@@ -1,7 +1,36 @@
-use tracedecay_domain::{RetrievalError, RetrievalFailure, RetrieverKind, RetrieverOutcome};
+use tracedecay_domain::{
+    EphemeralSanitizedQueryViewV1, PublicRetrieverStatus, QueryMac, QueryNormalizationRevision,
+    RetrievalCursor, RetrievalCursorKeyId, RetrievalError, RetrievalFailure, RetrievalRequest,
+    RetrieverContinuation, RetrieverKind, RetrieverOutcome, SanitizerRevision, UtcMicros,
+};
 
 use super::{batch, candidate, composition_lanes, id, no_caps, profile, request};
-use crate::query::retrieval::fusion::{CompositionKernel, FusionStageInput};
+use crate::query::retrieval::fusion::{
+    CompositionKernel, FusionStageInput, RetrievalCursorKeyringV1,
+};
+
+const NOW: UtcMicros = UtcMicros(10);
+const CURSOR_TTL_MICROS: u64 = 100;
+
+fn query_view() -> EphemeralSanitizedQueryViewV1 {
+    EphemeralSanitizedQueryViewV1::sanitize(
+        "deterministic retrieval",
+        id::<SanitizerRevision>("query-sanitizer.v1"),
+        id::<QueryNormalizationRevision>("query-normalization.v1"),
+    )
+    .expect("bounded sanitized query view")
+}
+
+fn keyring(request: &RetrievalRequest, key_epoch: u64) -> RetrievalCursorKeyringV1 {
+    RetrievalCursorKeyringV1::new(
+        request.scope.privacy_domain.clone(),
+        id::<RetrievalCursorKeyId>(&format!("retrieval-key-{key_epoch}")),
+        key_epoch,
+        vec![7_u8; 32],
+        CURSOR_TTL_MICROS,
+    )
+    .expect("retrieval cursor keyring")
+}
 
 fn composed_with_graph_outcome(
     graph: RetrieverOutcome<tracedecay_domain::RetrieverBatch<&'static str>>,
@@ -43,7 +72,12 @@ fn composed_with_graph_outcome(
 fn overflow_cursor_resumes_the_frozen_candidate_set() {
     let (kernel, output) =
         composed_with_graph_outcome(RetrieverOutcome::Complete(batch(Vec::new(), "empty")));
-    let first = kernel.paginate(&request(), &output, 2, None).unwrap();
+    let request = request();
+    let query_view = query_view();
+    let keyring = keyring(&request, 7);
+    let first = kernel
+        .paginate_at(&request, &query_view, &keyring, &output, 2, None, NOW)
+        .unwrap();
 
     assert_eq!(
         first
@@ -57,7 +91,15 @@ fn overflow_cursor_resumes_the_frozen_candidate_set() {
     assert_eq!(cursor.next_ordinal, 2);
 
     let second = kernel
-        .paginate(&request(), &output, 2, Some(&cursor))
+        .paginate_at(
+            &request,
+            &query_view,
+            &keyring,
+            &output,
+            2,
+            Some(&cursor),
+            NOW,
+        )
         .unwrap();
     assert_eq!(second.ranked_candidates[0].final_ordinal, 2);
     assert!(second.cursor.is_none());
@@ -67,8 +109,11 @@ fn overflow_cursor_resumes_the_frozen_candidate_set() {
 fn cursor_rejects_a_differently_completed_candidate_set() {
     let (kernel, output) =
         composed_with_graph_outcome(RetrieverOutcome::Complete(batch(Vec::new(), "empty")));
+    let request = request();
+    let query_view = query_view();
+    let keyring = keyring(&request, 7);
     let cursor = kernel
-        .paginate(&request(), &output, 2, None)
+        .paginate_at(&request, &query_view, &keyring, &output, 2, None, NOW)
         .unwrap()
         .cursor
         .unwrap();
@@ -76,7 +121,15 @@ fn cursor_rejects_a_differently_completed_candidate_set() {
     let mut changed = output;
     changed.ranked_candidates.pop();
     assert_eq!(
-        kernel.paginate(&request(), &changed, 2, Some(&cursor)),
+        kernel.paginate_at(
+            &request,
+            &query_view,
+            &keyring,
+            &changed,
+            2,
+            Some(&cursor),
+            NOW,
+        ),
         Err(RetrievalError::CursorSetMismatch)
     );
 }
@@ -95,15 +148,286 @@ fn denied_and_unavailable_optional_lanes_have_identical_public_cursor_bytes() {
         denied.public_lane_statuses,
         unavailable.public_lane_statuses
     );
+    let request = request();
+    let query_view = query_view();
+    let keyring = keyring(&request, 7);
     let denied_cursor = kernel
-        .paginate(&request(), &denied, 2, None)
+        .paginate_at(&request, &query_view, &keyring, &denied, 2, None, NOW)
         .unwrap()
         .cursor
         .unwrap();
     let unavailable_cursor = kernel
-        .paginate(&request(), &unavailable, 2, None)
+        .paginate_at(&request, &query_view, &keyring, &unavailable, 2, None, NOW)
         .unwrap()
         .cursor
         .unwrap();
     assert_eq!(denied_cursor, unavailable_cursor);
+}
+
+#[test]
+fn cursor_query_identity_is_bound_to_the_privacy_domain_and_key_epoch() {
+    let (kernel, output) =
+        composed_with_graph_outcome(RetrieverOutcome::Complete(batch(Vec::new(), "empty")));
+    let request = request();
+    let query_view = query_view();
+    let current_key = keyring(&request, 7);
+    let cursor = kernel
+        .paginate_at(&request, &query_view, &current_key, &output, 2, None, NOW)
+        .expect("cursor is minted")
+        .cursor
+        .expect("overflow cursor");
+
+    assert_eq!(
+        cursor.query_digest.privacy_domain,
+        request.scope.privacy_domain
+    );
+    assert_eq!(cursor.query_digest.key_epoch, 7);
+    assert!(cursor.query_digest.mac.as_str().starts_with("hmac-sha256:"));
+
+    let rotated_key = keyring(&request, 8);
+    assert_ne!(
+        current_key
+            .digest_active_query(&request, &query_view)
+            .expect("current digest"),
+        rotated_key
+            .digest_active_query(&request, &query_view)
+            .expect("rotated digest")
+    );
+    assert_eq!(
+        kernel.paginate_at(
+            &request,
+            &query_view,
+            &rotated_key,
+            &output,
+            2,
+            Some(&cursor),
+            NOW,
+        ),
+        Err(RetrievalError::CursorKeyUnavailable)
+    );
+}
+
+fn resume(
+    kernel: &CompositionKernel,
+    request: &RetrievalRequest,
+    query_view: &EphemeralSanitizedQueryViewV1,
+    keyring: &RetrievalCursorKeyringV1,
+    output: &crate::query::retrieval::fusion::CompositionOutputV1,
+    cursor: &RetrievalCursor,
+    now: UtcMicros,
+) -> Result<crate::query::retrieval::fusion::CompositionPageV1, RetrievalError> {
+    kernel.paginate_at(request, query_view, keyring, output, 2, Some(cursor), now)
+}
+
+#[test]
+fn cursor_mac_authenticates_every_payload_field_before_binding() {
+    let (kernel, output) =
+        composed_with_graph_outcome(RetrieverOutcome::Complete(batch(Vec::new(), "empty")));
+    let request = request();
+    let query_view = query_view();
+    let mut keys = keyring(&request, 7);
+    let cursor = kernel
+        .paginate_at(&request, &query_view, &keys, &output, 2, None, NOW)
+        .unwrap()
+        .cursor
+        .unwrap();
+    keys.retain(id("retrieval-key-alias"), 7, vec![8_u8; 32])
+        .unwrap();
+    keys.retain(id("retrieval-key-7"), 8, vec![9_u8; 32])
+        .unwrap();
+
+    let assert_authentication_failure = |tampered: RetrievalCursor| {
+        assert_eq!(
+            resume(
+                &kernel,
+                &request,
+                &query_view,
+                &keys,
+                &output,
+                &tampered,
+                NOW,
+            ),
+            Err(RetrievalError::CursorAuthenticationFailed)
+        );
+    };
+
+    let mut tampered = cursor.clone();
+    tampered.key_id = id("retrieval-key-alias");
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.key_epoch = 8;
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.privacy_domain = id("privacy.other");
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.query_digest.mac = QueryMac::new(format!("hmac-sha256:{}", "1".repeat(64))).unwrap();
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.profile_id = id("profile.other");
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.snapshot_digest = id(format!("sha256:{}", "2".repeat(64)).as_str());
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.freshness_digest = id(format!("sha256:{}", "3".repeat(64)).as_str());
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.authorization_revision = id("authorization.other");
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.candidate_set_digest = id(format!("sha256:{}", "4".repeat(64)).as_str());
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered
+        .public_lane_statuses
+        .insert(RetrieverKind::Graph, PublicRetrieverStatus::Partial);
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.lane_checkpoints.push(RetrieverContinuation {
+        lane: RetrieverKind::Graph,
+        checkpoint_digest: id(format!("sha256:{}", "5".repeat(64)).as_str()),
+        exhausted: false,
+    });
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.ranking_revision = id("ranking.other");
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.next_ordinal += 1;
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.expiry = UtcMicros(tampered.expiry.0 + 1);
+    assert_authentication_failure(tampered);
+    let mut tampered = cursor.clone();
+    tampered.signature = QueryMac::new(format!("hmac-sha256:{}", "6".repeat(64))).unwrap();
+    assert_authentication_failure(tampered);
+}
+
+#[test]
+fn cursor_rotation_retains_old_keys_until_policy_revokes_them() {
+    let (kernel, output) =
+        composed_with_graph_outcome(RetrieverOutcome::Complete(batch(Vec::new(), "empty")));
+    let request = request();
+    let query_view = query_view();
+    let mut keys = keyring(&request, 7);
+    let old_cursor = kernel
+        .paginate_at(&request, &query_view, &keys, &output, 2, None, NOW)
+        .unwrap()
+        .cursor
+        .unwrap();
+
+    keys.rotate(id("retrieval-key-8"), 8, vec![8_u8; 32])
+        .unwrap();
+    assert!(
+        resume(
+            &kernel,
+            &request,
+            &query_view,
+            &keys,
+            &output,
+            &old_cursor,
+            NOW,
+        )
+        .is_ok()
+    );
+
+    keys.revoke(&old_cursor.key_id, old_cursor.key_epoch)
+        .unwrap();
+    assert_eq!(
+        resume(
+            &kernel,
+            &request,
+            &query_view,
+            &keys,
+            &output,
+            &old_cursor,
+            NOW,
+        ),
+        Err(RetrievalError::CursorKeyRevoked)
+    );
+}
+
+#[test]
+fn cursor_rejects_cross_domain_and_snapshot_replay_after_authentication() {
+    let (kernel, output) =
+        composed_with_graph_outcome(RetrieverOutcome::Complete(batch(Vec::new(), "empty")));
+    let request = request();
+    let query_view = query_view();
+    let keys = keyring(&request, 7);
+    let cursor = kernel
+        .paginate_at(&request, &query_view, &keys, &output, 2, None, NOW)
+        .unwrap()
+        .cursor
+        .unwrap();
+
+    let mut cross_domain = request.clone();
+    cross_domain.scope.privacy_domain = id("privacy.other");
+    assert_eq!(
+        resume(
+            &kernel,
+            &cross_domain,
+            &query_view,
+            &keys,
+            &output,
+            &cursor,
+            NOW,
+        ),
+        Err(RetrievalError::CursorSetMismatch)
+    );
+
+    let mut changed_snapshot = request.clone();
+    changed_snapshot.snapshot.captured_at = UtcMicros(8);
+    assert_eq!(
+        resume(
+            &kernel,
+            &changed_snapshot,
+            &query_view,
+            &keys,
+            &output,
+            &cursor,
+            NOW,
+        ),
+        Err(RetrievalError::CursorSetMismatch)
+    );
+}
+
+#[test]
+fn cursor_expiry_is_finite_and_exclusive_at_the_exact_boundary() {
+    let (kernel, output) =
+        composed_with_graph_outcome(RetrieverOutcome::Complete(batch(Vec::new(), "empty")));
+    let request = request();
+    let query_view = query_view();
+    let keys = keyring(&request, 7);
+    let cursor = kernel
+        .paginate_at(&request, &query_view, &keys, &output, 2, None, NOW)
+        .unwrap()
+        .cursor
+        .unwrap();
+
+    assert_eq!(cursor.expiry, UtcMicros(NOW.0 + CURSOR_TTL_MICROS as i64));
+    assert!(
+        resume(
+            &kernel,
+            &request,
+            &query_view,
+            &keys,
+            &output,
+            &cursor,
+            UtcMicros(cursor.expiry.0 - 1),
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        resume(
+            &kernel,
+            &request,
+            &query_view,
+            &keys,
+            &output,
+            &cursor,
+            cursor.expiry,
+        ),
+        Err(RetrievalError::CursorExpired)
+    );
 }

@@ -58,6 +58,7 @@ fn candidate(
         repository_id: None,
         session_or_thread_id: None,
         logical_copy_cluster_id: None,
+        logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
         retriever,
         retriever_revision: id("retriever.contract.v1"),
@@ -78,6 +79,7 @@ fn provenance(candidate: &CompactCandidate) -> OccurrenceProvenance {
         repository_id: candidate.repository_id.clone(),
         session_or_thread_id: candidate.session_or_thread_id.clone(),
         logical_copy_cluster_id: candidate.logical_copy_cluster_id.clone(),
+        logical_copy_evidence_anchor: candidate.logical_copy_evidence_anchor.clone(),
         evidence_role: candidate.evidence_role,
         freshness: candidate.freshness.clone(),
     }

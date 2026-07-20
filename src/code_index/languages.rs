@@ -221,13 +221,23 @@ impl StaticLanguageRegistry {
                 .expect("static language descriptors are canonical");
             descriptors.push(descriptor);
         }
-        Self::from_descriptors(descriptors)
+        Self::try_from_descriptors(descriptors)
+            .expect("compiled extraction descriptors must be unique")
     }
 
     /// Build a registry from explicit descriptors (test seams and pinned
-    /// custom registries). Descriptors are sorted into canonical
-    /// language-identity order and deduplicated by language identity.
-    pub fn from_descriptors(mut descriptors: Vec<LanguageDescriptorV1>) -> Self {
+    /// custom registries). Invalid duplicate lookup keys panic here to
+    /// preserve the infallible constructor; use [`Self::try_from_descriptors`]
+    /// to receive the typed domain rejection instead.
+    pub fn from_descriptors(descriptors: Vec<LanguageDescriptorV1>) -> Self {
+        Self::try_from_descriptors(descriptors)
+            .expect("language descriptors must have unique language, alias, and extension keys")
+    }
+
+    /// Try to build a registry from explicit canonical descriptors.
+    pub fn try_from_descriptors(
+        mut descriptors: Vec<LanguageDescriptorV1>,
+    ) -> Result<Self, DomainError> {
         descriptors.sort_by(|left, right| {
             left.language.as_str().cmp(right.language.as_str()).then(
                 left.descriptor_revision
@@ -235,7 +245,7 @@ impl StaticLanguageRegistry {
                     .cmp(right.descriptor_revision.as_str()),
             )
         });
-        descriptors.dedup_by(|left, right| left.language == right.language);
+        validate_descriptors(&descriptors)?;
 
         let mut by_language = HashMap::new();
         let mut by_extension = HashMap::new();
@@ -243,10 +253,10 @@ impl StaticLanguageRegistry {
         for (index, descriptor) in descriptors.iter().enumerate() {
             by_language.insert(descriptor.language.as_str().to_owned(), index);
             for extension in &descriptor.extensions {
-                by_extension.entry(extension.clone()).or_insert(index);
+                by_extension.insert(extension.clone(), index);
             }
             for alias in &descriptor.aliases {
-                by_alias.entry(alias.clone()).or_insert(index);
+                by_alias.insert(alias.to_lowercase(), index);
             }
         }
 
@@ -261,13 +271,13 @@ impl StaticLanguageRegistry {
         let revision = LanguageRegistryRevision::new(format!("registry.v1.{short}"))
             .expect("registry revision is canonical");
 
-        Self {
+        Ok(Self {
             revision,
             descriptors,
             by_language,
             by_extension,
             by_alias,
-        }
+        })
     }
 }
 
@@ -296,8 +306,7 @@ impl LanguageRegistry for StaticLanguageRegistry {
 
     fn descriptor_for_alias(&self, alias: &str) -> Option<&LanguageDescriptorV1> {
         self.by_alias
-            .get(alias)
-            .or_else(|| self.by_alias.get(&alias.to_lowercase()))
+            .get(&alias.to_lowercase())
             .map(|index| &self.descriptors[*index])
     }
 
@@ -311,13 +320,47 @@ impl LanguageRegistry for StaticLanguageRegistry {
     }
 }
 
-/// Validate a full descriptor set, surfacing the first domain error.
-#[allow(dead_code)]
+/// Validate a full descriptor set, including every cross-descriptor lookup
+/// key, before constructing maps that would otherwise silently overwrite.
 pub(crate) fn validate_descriptors(
     descriptors: &[LanguageDescriptorV1],
 ) -> Result<(), DomainError> {
+    let mut languages = BTreeSet::new();
     for descriptor in descriptors {
         descriptor.validate()?;
+        let normalized = descriptor.language.as_str().to_lowercase();
+        if normalized != descriptor.language.as_str() {
+            return Err(DomainError::NonCanonical {
+                field: "language registry language identity",
+            });
+        }
+        if !languages.insert(normalized) {
+            return Err(DomainError::DuplicateId {
+                field: "language registry language",
+            });
+        }
+    }
+
+    let mut aliases = BTreeSet::new();
+    let mut extensions = BTreeSet::new();
+    for descriptor in descriptors {
+        for alias in &descriptor.aliases {
+            let normalized = alias.to_lowercase();
+            if !aliases.insert(normalized.clone())
+                || (languages.contains(&normalized) && normalized != descriptor.language.as_str())
+            {
+                return Err(DomainError::DuplicateId {
+                    field: "language registry alias",
+                });
+            }
+        }
+        for extension in &descriptor.extensions {
+            if !extensions.insert(extension.clone()) {
+                return Err(DomainError::DuplicateId {
+                    field: "language registry extension",
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -414,13 +457,80 @@ mod tests {
     }
 
     #[test]
-    fn from_descriptors_sorts_and_dedupes() {
+    fn descriptor_set_rejects_duplicate_languages_aliases_and_extensions() {
+        let rust = StaticLanguageRegistry::new()
+            .descriptor(&language("rust"))
+            .expect("rust")
+            .clone();
+
+        assert!(
+            StaticLanguageRegistry::try_from_descriptors(vec![rust.clone(), rust.clone()]).is_err(),
+            "duplicate language identities cannot be silently deduplicated"
+        );
+
+        let mut duplicate_alias = rust.clone();
+        duplicate_alias.language = language("alternaterust");
+        duplicate_alias.aliases = vec!["RUST".to_owned()];
+        duplicate_alias.extensions = vec!["alternate".to_owned()];
+        duplicate_alias
+            .validate()
+            .expect("individually canonical descriptor");
+        assert!(
+            StaticLanguageRegistry::try_from_descriptors(vec![rust.clone(), duplicate_alias])
+                .is_err(),
+            "aliases must resolve to exactly one descriptor"
+        );
+
+        let mut duplicate_extension = rust.clone();
+        duplicate_extension.language = language("alternaterustextension");
+        duplicate_extension.aliases = vec!["alternaterustextension".to_owned()];
+        duplicate_extension.extensions = vec!["rs".to_owned()];
+        duplicate_extension
+            .validate()
+            .expect("individually canonical descriptor");
+        assert!(
+            StaticLanguageRegistry::try_from_descriptors(vec![rust, duplicate_extension]).is_err(),
+            "extensions must resolve to exactly one descriptor"
+        );
+    }
+
+    #[test]
+    fn descriptor_set_rejects_language_case_collisions_in_either_order() {
+        let rust = StaticLanguageRegistry::new()
+            .descriptor(&language("rust"))
+            .expect("rust")
+            .clone();
+        let mut uppercase = rust.clone();
+        uppercase.language = language("Rust");
+        uppercase.aliases = vec!["rust-uppercase".to_owned()];
+        uppercase.extensions = vec!["rust-uppercase".to_owned()];
+        uppercase
+            .validate()
+            .expect("mixed-case identity is individually well-formed");
+
+        assert!(
+            StaticLanguageRegistry::try_from_descriptors(vec![rust.clone(), uppercase.clone()])
+                .is_err()
+        );
+        assert!(
+            StaticLanguageRegistry::try_from_descriptors(vec![uppercase, rust]).is_err(),
+            "case-collision rejection must not depend on input order"
+        );
+    }
+
+    #[test]
+    fn from_descriptors_sorts_valid_descriptors() {
         let rust = StaticLanguageRegistry::new()
             .descriptor(&language("rust"))
             .expect("rust")
             .clone();
         let mut renamed = rust.clone();
         renamed.language = language("aaa-test-language");
+        renamed.aliases = vec!["aaa-test-language".to_owned()];
+        renamed.extensions = vec!["aaa".to_owned()];
+        renamed
+            .validate()
+            .expect("renamed descriptor remains canonical");
         let registry = StaticLanguageRegistry::from_descriptors(vec![rust, renamed]);
         let ids: Vec<&str> = registry
             .descriptors()

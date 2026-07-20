@@ -11,6 +11,7 @@
 //! those in `crate::retrieval`.
 
 use std::collections::BTreeSet;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -19,14 +20,16 @@ use crate::research::{DomainError, canonical_sha256};
 
 use super::identity::{
     ChunkerRevision, CodeGenerationId, CodeSearchChunkId, ContentDigest, FileOccurrenceId,
-    LanguageDescriptorRevision, PolicyRevisionId, SanitizerRevision, SourceSpan,
-    SymbolOccurrenceId,
+    LanguageDescriptorRevision, PolicyRevisionId, QueryNormalizationRevision, SanitizerRevision,
+    SourceSpan, SymbolOccurrenceId,
 };
 
 /// Maximum canonical bytes of one chunk's sanitized text (contract bound;
 /// oversized bodies split on deterministic structural boundaries or pinned
 /// fallback windows before reaching this limit).
 pub const MAX_CHUNK_TEXT_BYTES: usize = 64 * 1024;
+/// Maximum sanitized query bytes held in one request-local query view.
+pub const MAX_EPHEMERAL_QUERY_VIEW_BYTES: usize = 4 * 1024;
 
 const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
@@ -80,6 +83,76 @@ impl<'de> Deserialize<'de> for BoundedSanitizedText {
         D: serde::Deserializer<'de>,
     {
         Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Request-local sanitized query bytes used only while executing an
+/// authorized retrieval. This value intentionally has no serialization or
+/// cloning surface: durable state, telemetry, and cache keys carry only its
+/// privacy-bound MAC identity.
+#[derive(PartialEq, Eq)]
+pub struct EphemeralSanitizedQueryViewV1 {
+    text: String,
+    sanitizer_revision: SanitizerRevision,
+    normalization_revision: QueryNormalizationRevision,
+}
+
+impl fmt::Debug for EphemeralSanitizedQueryViewV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EphemeralSanitizedQueryViewV1")
+            .field(
+                "text",
+                &format_args!("<{} bytes redacted>", self.text.len()),
+            )
+            .field("sanitizer_revision", &self.sanitizer_revision)
+            .field("normalization_revision", &self.normalization_revision)
+            .finish()
+    }
+}
+
+impl EphemeralSanitizedQueryViewV1 {
+    pub fn sanitize(
+        raw_text: impl Into<String>,
+        sanitizer_revision: SanitizerRevision,
+        normalization_revision: QueryNormalizationRevision,
+    ) -> Result<Self, DomainError> {
+        let raw_text = raw_text.into();
+        let text = raw_text.trim().to_owned();
+        if text.is_empty() {
+            return Err(DomainError::Empty {
+                field: "ephemeral sanitized query view",
+            });
+        }
+        if raw_text.len() > MAX_EPHEMERAL_QUERY_VIEW_BYTES
+            || text.len() > MAX_EPHEMERAL_QUERY_VIEW_BYTES
+            || text.chars().any(char::is_control)
+        {
+            return Err(DomainError::UnsafeText {
+                field: "ephemeral sanitized query view",
+            });
+        }
+        Ok(Self {
+            text,
+            sanitizer_revision,
+            normalization_revision,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.text.as_bytes()
+    }
+
+    pub fn sanitizer_revision(&self) -> &SanitizerRevision {
+        &self.sanitizer_revision
+    }
+
+    pub fn normalization_revision(&self) -> &QueryNormalizationRevision {
+        &self.normalization_revision
     }
 }
 
@@ -185,17 +258,132 @@ pub enum ExactTechnicalTermKindV1 {
 
 /// One whole exact technical term extracted as evidence (Plan 25: extraction
 /// evidence only; Plan 05 applies Plan 15's protected lexical policy).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactTechnicalTermV1 {
-    pub kind: ExactTechnicalTermKindV1,
-    pub original_bytes: Vec<u8>,
-    pub canonical_bytes: Vec<u8>,
-    pub span: SourceSpan,
+    kind: ExactTechnicalTermKindV1,
+    original_bytes: Vec<u8>,
+    canonical_bytes: Vec<u8>,
+    span: SourceSpan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_occurrence_id: Option<SymbolOccurrenceId>,
 }
 
 impl ExactTechnicalTermV1 {
-    pub fn validate_within(&self, chunk_span: &SourceSpan) -> Result<(), DomainError> {
+    pub fn technical(
+        kind: ExactTechnicalTermKindV1,
+        original_bytes: Vec<u8>,
+        span: SourceSpan,
+    ) -> Result<Self, DomainError> {
+        if matches!(
+            kind,
+            ExactTechnicalTermKindV1::WholeSymbol
+                | ExactTechnicalTermKindV1::CompilerErrorText
+                | ExactTechnicalTermKindV1::RuntimeErrorText
+        ) {
+            return Err(DomainError::NonCanonical {
+                field: "contextual exact term authority",
+            });
+        }
+        validate_self_authenticating_technical_term(kind, &original_bytes)?;
+        Self::from_parts(kind, original_bytes, span, None)
+    }
+
+    /// Build an untrusted WholeSymbol candidate. This value cannot enter an
+    /// exact projection until code-index extraction authority re-admits its
+    /// containing chunk.
+    pub fn untrusted_whole_symbol_candidate(
+        original_bytes: Vec<u8>,
+        span: SourceSpan,
+        symbol_occurrence_id: SymbolOccurrenceId,
+    ) -> Result<Self, DomainError> {
+        symbol_occurrence_id.validate()?;
+        Self::from_parts(
+            ExactTechnicalTermKindV1::WholeSymbol,
+            original_bytes,
+            span,
+            Some(symbol_occurrence_id),
+        )
+    }
+
+    /// Build untrusted contextual error-text evidence recognized by the
+    /// extractor. Like WholeSymbol, projection requires extraction admission.
+    pub fn untrusted_contextual_text_candidate(
+        kind: ExactTechnicalTermKindV1,
+        original_bytes: Vec<u8>,
+        span: SourceSpan,
+    ) -> Result<Self, DomainError> {
+        if !matches!(
+            kind,
+            ExactTechnicalTermKindV1::CompilerErrorText
+                | ExactTechnicalTermKindV1::RuntimeErrorText
+        ) {
+            return Err(DomainError::NonCanonical {
+                field: "contextual exact term kind",
+            });
+        }
+        if original_bytes.iter().any(u8::is_ascii_control) {
+            return Err(DomainError::NonCanonical {
+                field: "contextual exact term bytes",
+            });
+        }
+        Self::from_parts(kind, original_bytes, span, None)
+    }
+
+    fn from_parts(
+        kind: ExactTechnicalTermKindV1,
+        original_bytes: Vec<u8>,
+        span: SourceSpan,
+        symbol_occurrence_id: Option<SymbolOccurrenceId>,
+    ) -> Result<Self, DomainError> {
+        let canonical_bytes = match kind {
+            ExactTechnicalTermKindV1::CliFlag
+            | ExactTechnicalTermKindV1::ConfigurationKey
+            | ExactTechnicalTermKindV1::ToolName
+            | ExactTechnicalTermKindV1::CommitIdentifier => original_bytes.to_ascii_lowercase(),
+            _ => original_bytes.clone(),
+        };
+        let term = Self {
+            kind,
+            original_bytes,
+            canonical_bytes,
+            span,
+            symbol_occurrence_id,
+        };
+        term.validate_shape()?;
+        Ok(term)
+    }
+
+    pub fn kind(&self) -> ExactTechnicalTermKindV1 {
+        self.kind
+    }
+
+    pub fn original_bytes(&self) -> &[u8] {
+        &self.original_bytes
+    }
+
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    pub fn span(&self) -> SourceSpan {
+        self.span
+    }
+
+    pub fn symbol_occurrence_id(&self) -> Option<&SymbolOccurrenceId> {
+        self.symbol_occurrence_id.as_ref()
+    }
+
+    pub fn requires_extraction_authority(&self) -> bool {
+        matches!(
+            self.kind,
+            ExactTechnicalTermKindV1::WholeSymbol
+                | ExactTechnicalTermKindV1::CompilerErrorText
+                | ExactTechnicalTermKindV1::RuntimeErrorText
+        )
+    }
+
+    fn validate_shape(&self) -> Result<(), DomainError> {
         self.span.validate()?;
         if self.span.is_empty() || self.original_bytes.is_empty() || self.canonical_bytes.is_empty()
         {
@@ -203,6 +391,53 @@ impl ExactTechnicalTermV1 {
                 field: "exact technical term",
             });
         }
+        match (self.kind, self.symbol_occurrence_id.as_ref()) {
+            (ExactTechnicalTermKindV1::WholeSymbol, Some(symbol_occurrence_id)) => {
+                symbol_occurrence_id.validate()?;
+            }
+            (ExactTechnicalTermKindV1::WholeSymbol, None) => {
+                return Err(DomainError::NonCanonical {
+                    field: "whole symbol exact term authority",
+                });
+            }
+            (_, Some(_)) => {
+                return Err(DomainError::NonCanonical {
+                    field: "non-symbol exact term authority",
+                });
+            }
+            (_, None) => {}
+        }
+        match self.kind {
+            ExactTechnicalTermKindV1::WholeSymbol => {}
+            ExactTechnicalTermKindV1::CompilerErrorText
+            | ExactTechnicalTermKindV1::RuntimeErrorText => {
+                if self.original_bytes.iter().any(u8::is_ascii_control) {
+                    return Err(DomainError::NonCanonical {
+                        field: "contextual exact term bytes",
+                    });
+                }
+            }
+            kind => validate_self_authenticating_technical_term(kind, &self.original_bytes)?,
+        }
+        let expected_canonical = match self.kind {
+            ExactTechnicalTermKindV1::CliFlag
+            | ExactTechnicalTermKindV1::ConfigurationKey
+            | ExactTechnicalTermKindV1::ToolName
+            | ExactTechnicalTermKindV1::CommitIdentifier => {
+                self.original_bytes.to_ascii_lowercase()
+            }
+            _ => self.original_bytes.clone(),
+        };
+        if self.canonical_bytes != expected_canonical {
+            return Err(DomainError::NonCanonical {
+                field: "exact technical term canonical bytes",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate_within(&self, chunk_span: &SourceSpan) -> Result<(), DomainError> {
+        self.validate_shape()?;
         if self.original_bytes.len() as u64 != self.span.len()
             || self.span.start_byte < chunk_span.start_byte
             || self.span.end_byte > chunk_span.end_byte
@@ -212,6 +447,134 @@ impl ExactTechnicalTermV1 {
             });
         }
         Ok(())
+    }
+}
+
+fn validate_self_authenticating_technical_term(
+    kind: ExactTechnicalTermKindV1,
+    bytes: &[u8],
+) -> Result<(), DomainError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| DomainError::NonCanonical {
+        field: "exact technical term UTF-8",
+    })?;
+    let is_ident = |segment: &str| {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            && segment
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+    };
+    let valid = match kind {
+        ExactTechnicalTermKindV1::QualifiedName => {
+            text.contains("::") && text.split("::").all(is_ident)
+        }
+        ExactTechnicalTermKindV1::Path => {
+            text.contains('/')
+                && text.split('/').all(|segment| {
+                    !segment.is_empty()
+                        && segment.chars().all(|character| {
+                            character.is_ascii_alphanumeric()
+                                || matches!(character, '_' | '-' | '.')
+                        })
+                })
+                && text
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|filename| filename.contains('.'))
+        }
+        ExactTechnicalTermKindV1::CompilerErrorCode => {
+            ["E", "TS", "CS"].into_iter().any(|prefix| {
+                text.strip_prefix(prefix).is_some_and(|digits| {
+                    digits.len() == 4 && digits.chars().all(|character| character.is_ascii_digit())
+                })
+            })
+        }
+        ExactTechnicalTermKindV1::RuntimeErrorCode => {
+            text.strip_prefix("ERR_").is_some_and(|suffix| {
+                !suffix.is_empty()
+                    && suffix.chars().all(|character| {
+                        character.is_ascii_uppercase()
+                            || character.is_ascii_digit()
+                            || character == '_'
+                    })
+            })
+        }
+        ExactTechnicalTermKindV1::CliFlag => text.strip_prefix("--").is_some_and(|flag| {
+            !flag.is_empty()
+                && !flag.ends_with('-')
+                && flag
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_alphabetic())
+                && flag.chars().all(|character| {
+                    character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+                })
+        }),
+        ExactTechnicalTermKindV1::ToolName => matches!(
+            text.to_ascii_lowercase().as_str(),
+            "cargo" | "rustc" | "tracedecay" | "pytest" | "kubectl" | "fastembed" | "ast-grep"
+        ),
+        ExactTechnicalTermKindV1::ConfigurationKey => {
+            text.split('.').count() >= 3
+                && text.split('.').all(|segment| {
+                    !segment.is_empty()
+                        && segment.chars().all(|character| {
+                            character.is_ascii_lowercase()
+                                || character.is_ascii_digit()
+                                || character == '_'
+                        })
+                })
+        }
+        ExactTechnicalTermKindV1::CommitIdentifier => {
+            text.strip_prefix("commit:").is_some_and(|identifier| {
+                (7..=40).contains(&identifier.len())
+                    && identifier
+                        .chars()
+                        .all(|character| character.is_ascii_hexdigit())
+            })
+        }
+        ExactTechnicalTermKindV1::WholeSymbol
+        | ExactTechnicalTermKindV1::CompilerErrorText
+        | ExactTechnicalTermKindV1::RuntimeErrorText => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(DomainError::NonCanonical {
+            field: "exact technical term kind",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ExactTechnicalTermV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            kind: ExactTechnicalTermKindV1,
+            original_bytes: Vec<u8>,
+            canonical_bytes: Vec<u8>,
+            span: SourceSpan,
+            #[serde(default)]
+            symbol_occurrence_id: Option<SymbolOccurrenceId>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let term = Self {
+            kind: wire.kind,
+            original_bytes: wire.original_bytes,
+            canonical_bytes: wire.canonical_bytes,
+            span: wire.span,
+            symbol_occurrence_id: wire.symbol_occurrence_id,
+        };
+        term.validate_shape().map_err(serde::de::Error::custom)?;
+        Ok(term)
     }
 }
 
@@ -235,7 +598,7 @@ pub enum SensitivityLevelV1 {
 }
 
 /// One deterministic, generation-bound code-search chunk.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeSearchChunkV1 {
     pub id: CodeSearchChunkId,
@@ -250,6 +613,44 @@ pub struct CodeSearchChunkV1 {
     /// Language-profiled subtokens, in deterministic source order.
     pub subtokens: Vec<String>,
     pub sanitized_text: BoundedSanitizedText,
+}
+
+impl<'de> Deserialize<'de> for CodeSearchChunkV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            id: CodeSearchChunkId,
+            anchor: CodeSearchChunkAnchorV1,
+            content_digest: ContentDigest,
+            language_descriptor_revision: LanguageDescriptorRevision,
+            chunker_revision: ChunkerRevision,
+            sanitizer_revision: SanitizerRevision,
+            sensitivity: SensitivityDecision,
+            exact_terms: Vec<ExactTechnicalTermV1>,
+            subtokens: Vec<String>,
+            sanitized_text: BoundedSanitizedText,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let chunk = Self {
+            id: wire.id,
+            anchor: wire.anchor,
+            content_digest: wire.content_digest,
+            language_descriptor_revision: wire.language_descriptor_revision,
+            chunker_revision: wire.chunker_revision,
+            sanitizer_revision: wire.sanitizer_revision,
+            sensitivity: wire.sensitivity,
+            exact_terms: wire.exact_terms,
+            subtokens: wire.subtokens,
+            sanitized_text: wire.sanitized_text,
+        };
+        chunk.validate().map_err(serde::de::Error::custom)?;
+        Ok(chunk)
+    }
 }
 
 impl CodeSearchChunkV1 {
@@ -273,6 +674,36 @@ impl CodeSearchChunkV1 {
         }
         for term in &self.exact_terms {
             term.validate_within(&self.anchor.source_span)?;
+            if term.kind() == ExactTechnicalTermKindV1::WholeSymbol
+                && term.symbol_occurrence_id() != self.anchor.symbol_occurrence_id.as_ref()
+            {
+                return Err(DomainError::NonCanonical {
+                    field: "whole symbol chunk authority",
+                });
+            }
+            let start = term
+                .span()
+                .start_byte
+                .checked_sub(self.anchor.source_span.start_byte)
+                .and_then(|offset| usize::try_from(offset).ok())
+                .ok_or(DomainError::NonCanonical {
+                    field: "exact technical term source bytes",
+                })?;
+            let end = term
+                .span()
+                .end_byte
+                .checked_sub(self.anchor.source_span.start_byte)
+                .and_then(|offset| usize::try_from(offset).ok())
+                .ok_or(DomainError::NonCanonical {
+                    field: "exact technical term source bytes",
+                })?;
+            if self.sanitized_text.as_str().as_bytes().get(start..end)
+                != Some(term.original_bytes())
+            {
+                return Err(DomainError::NonCanonical {
+                    field: "exact technical term source bytes",
+                });
+            }
         }
         if self.exact_terms.windows(2).any(|terms| {
             (
@@ -476,6 +907,28 @@ pub enum EmbeddingPrecisionV1 {
     Int8,
 }
 
+/// Immutable identity of one fully published semantic vector generation.
+///
+/// This identity is shared by projection stores and semantic retrieval
+/// adapters; neither layer may define a lookalike generation key.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct VectorGenerationIdV1(ManifestDigest);
+
+impl VectorGenerationIdV1 {
+    pub fn new(digest: ManifestDigest) -> Self {
+        Self(digest)
+    }
+
+    pub fn as_digest(&self) -> &ManifestDigest {
+        &self.0
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.0.validate()
+    }
+}
+
 /// Complete identity of one embedding projection. Every vector-affecting
 /// input is pinned here; its canonical digest becomes the profile digest in
 /// Plan 25's generic [`ProjectionKeyV1`].
@@ -501,6 +954,15 @@ pub struct EmbeddingProjectionKeyV1 {
     pub chunker_revision: ChunkerRevision,
     pub privacy_domain: PrivacyDomainId,
     pub privacy_key_epoch: u64,
+}
+
+/// Validated projection/privacy authority shared by vector production and
+/// bounded runtime session identity. Its fields are private so adapters cannot
+/// reconstruct a compatible-looking identity from unconstrained strings.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AdmittedEmbeddingProjectionKeyV1 {
+    embedding_key: EmbeddingProjectionKeyV1,
+    projection_key: ProjectionKeyV1,
 }
 
 impl EmbeddingProjectionKeyV1 {
@@ -538,17 +1000,42 @@ impl EmbeddingProjectionKeyV1 {
         Ok(())
     }
 
+    pub fn admit(&self) -> Result<AdmittedEmbeddingProjectionKeyV1, DomainError> {
+        Ok(AdmittedEmbeddingProjectionKeyV1 {
+            embedding_key: self.clone(),
+            projection_key: ProjectionKeyV1 {
+                kind: ProjectionKindV1::Embedding,
+                schema_revision: EMBEDDING_PROJECTION_SCHEMA_V1.to_string(),
+                profile_digest: self.canonical_digest()?,
+            },
+        })
+    }
+
     pub fn canonical_digest(&self) -> Result<ManifestDigest, DomainError> {
         self.validate()?;
         canonical_sha256(&(EMBEDDING_PROJECTION_KEY_DIGEST_DOMAIN, self))
     }
 
     pub fn projection_key(&self) -> Result<ProjectionKeyV1, DomainError> {
-        Ok(ProjectionKeyV1 {
-            kind: ProjectionKindV1::Embedding,
-            schema_revision: EMBEDDING_PROJECTION_SCHEMA_V1.to_string(),
-            profile_digest: self.canonical_digest()?,
-        })
+        Ok(self.admit()?.projection_key)
+    }
+}
+
+impl AdmittedEmbeddingProjectionKeyV1 {
+    pub fn embedding_key(&self) -> &EmbeddingProjectionKeyV1 {
+        &self.embedding_key
+    }
+
+    pub fn projection_key(&self) -> &ProjectionKeyV1 {
+        &self.projection_key
+    }
+
+    pub fn privacy_domain(&self) -> &PrivacyDomainId {
+        &self.embedding_key.privacy_domain
+    }
+
+    pub fn privacy_key_epoch(&self) -> u64 {
+        self.embedding_key.privacy_key_epoch
     }
 }
 
@@ -783,6 +1270,27 @@ mod tests {
         format!("sha256:{}", byte.to_string().repeat(64))
     }
 
+    #[test]
+    fn ephemeral_query_view_is_bounded_and_redacts_its_text() {
+        let view = EphemeralSanitizedQueryViewV1::sanitize(
+            "private query text",
+            id::<SanitizerRevision>("sanitizer.query.v1"),
+            id::<QueryNormalizationRevision>("normalization.query.v1"),
+        )
+        .expect("bounded query view");
+
+        assert_eq!(view.as_bytes(), b"private query text");
+        assert!(!format!("{view:?}").contains("private query text"));
+        assert!(
+            EphemeralSanitizedQueryViewV1::sanitize(
+                "x".repeat(MAX_EPHEMERAL_QUERY_VIEW_BYTES + 1),
+                id::<SanitizerRevision>("sanitizer.query.v1"),
+                id::<QueryNormalizationRevision>("normalization.query.v1"),
+            )
+            .is_err()
+        );
+    }
+
     fn change(chunk_id: &str, prior: Option<char>, current: Option<char>) -> ChangedCodeChunkV1 {
         ChangedCodeChunkV1 {
             chunk_id: id(chunk_id),
@@ -880,6 +1388,7 @@ mod tests {
                 start_byte: 12,
                 end_byte: 26,
             },
+            symbol_occurrence_id: None,
         };
         term.validate_within(&SourceSpan {
             start_byte: 10,
@@ -905,6 +1414,52 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn public_technical_constructor_rejects_wrong_kind_and_contextual_terms() {
+        let span = |value: &[u8]| SourceSpan {
+            start_byte: 0,
+            end_byte: value.len() as u64,
+        };
+        for (kind, value) in [
+            (ExactTechnicalTermKindV1::QualifiedName, b"plain".as_slice()),
+            (ExactTechnicalTermKindV1::Path, b"not-a-path".as_slice()),
+            (
+                ExactTechnicalTermKindV1::CompilerErrorCode,
+                b"A1234".as_slice(),
+            ),
+            (
+                ExactTechnicalTermKindV1::RuntimeErrorCode,
+                b"E_NOT_A_RUNTIME_CODE".as_slice(),
+            ),
+            (ExactTechnicalTermKindV1::CliFlag, b"--UPPER".as_slice()),
+            (
+                ExactTechnicalTermKindV1::ToolName,
+                b"unknown-tool".as_slice(),
+            ),
+            (
+                ExactTechnicalTermKindV1::ConfigurationKey,
+                b"two.parts".as_slice(),
+            ),
+            (
+                ExactTechnicalTermKindV1::CommitIdentifier,
+                b"deadbeef".as_slice(),
+            ),
+            (
+                ExactTechnicalTermKindV1::CompilerErrorText,
+                b"arbitrary prose".as_slice(),
+            ),
+            (
+                ExactTechnicalTermKindV1::RuntimeErrorText,
+                b"arbitrary prose".as_slice(),
+            ),
+        ] {
+            assert!(
+                ExactTechnicalTermV1::technical(kind, value.to_vec(), span(value)).is_err(),
+                "{kind:?} accepted wrong-kind bytes"
+            );
+        }
     }
 
     #[test]
@@ -940,6 +1495,7 @@ mod tests {
                         start_byte: 10,
                         end_byte: 15,
                     },
+                    symbol_occurrence_id: Some(id("symbol.fixture")),
                 },
                 ExactTechnicalTermV1 {
                     kind: ExactTechnicalTermKindV1::WholeSymbol,
@@ -949,6 +1505,7 @@ mod tests {
                         start_byte: 0,
                         end_byte: 5,
                     },
+                    symbol_occurrence_id: Some(id("symbol.fixture")),
                 },
             ],
             subtokens: vec!["later".to_owned(), "early".to_owned()],
@@ -960,6 +1517,71 @@ mod tests {
         chunk
             .validate()
             .expect("source-ordered exact terms validate");
+        let decoded: CodeSearchChunkV1 =
+            serde_json::from_slice(&serde_json::to_vec(&chunk).unwrap()).unwrap();
+        assert_eq!(decoded, chunk);
+
+        chunk.exact_terms[0].original_bytes = b"wrong".to_vec();
+        chunk.exact_terms[0].canonical_bytes = b"wrong".to_vec();
+        assert!(
+            chunk.validate().is_err(),
+            "a term cannot claim bytes that differ from its sanitized source span"
+        );
+
+        chunk.exact_terms[0].original_bytes = b"early".to_vec();
+        chunk.exact_terms[0].canonical_bytes = b"wrong".to_vec();
+        assert!(
+            chunk.validate().is_err(),
+            "a term cannot claim a canonical form that its type does not derive"
+        );
+    }
+
+    #[test]
+    fn forged_serialized_whole_symbol_term_is_rejected() {
+        let chunk = CodeSearchChunkV1 {
+            id: id("chunk.forged"),
+            anchor: CodeSearchChunkAnchorV1 {
+                generation_id: id("generation.fixture"),
+                file_occurrence_id: id("file.fixture"),
+                symbol_occurrence_id: Some(id("symbol.real")),
+                parent_chunk_id: None,
+                source_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 22,
+                },
+                grain: CodeSearchChunkGrainV1::SymbolSignature,
+                ordinal: 0,
+            },
+            content_digest: id(&digest('a')),
+            language_descriptor_revision: id("descriptor.v1"),
+            chunker_revision: id("chunker.v1"),
+            sanitizer_revision: id("sanitizer.v1"),
+            sensitivity: SensitivityDecision {
+                level: SensitivityLevelV1::Internal,
+                policy_revision: id("policy.v1"),
+            },
+            exact_terms: Vec::new(),
+            subtokens: vec!["comment".to_owned(), "fake".to_owned()],
+            sanitized_text: BoundedSanitizedText::new("// fn comment_fake() {}").unwrap(),
+        };
+        let mut wire = serde_json::to_value(chunk).unwrap();
+        wire["exact_terms"] = serde_json::json!([{
+            "kind": "whole_symbol",
+            "original_bytes": [99, 111, 109, 109, 101, 110, 116, 95, 102, 97, 107, 101],
+            "canonical_bytes": [99, 111, 109, 109, 101, 110, 116, 95, 102, 97, 107, 101],
+            "span": { "start_byte": 6, "end_byte": 18 }
+        }]);
+
+        assert!(
+            serde_json::from_value::<CodeSearchChunkV1>(wire.clone()).is_err(),
+            "serialized input cannot forge parser-owned WholeSymbol evidence"
+        );
+
+        wire["exact_terms"][0]["symbol_occurrence_id"] = serde_json::json!("symbol.forged");
+        assert!(
+            serde_json::from_value::<CodeSearchChunkV1>(wire).is_err(),
+            "serialized symbol evidence must match the chunk occurrence"
+        );
     }
 
     #[test]

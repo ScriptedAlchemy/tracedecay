@@ -12,9 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CodeGenerationId, CompactCandidate, ComponentRevision, CursorPayloadDigest, FixedPointScore,
-    RetrievalBudget, RetrievalError, RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch,
-    RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId,
+    CodeGenerationId, CompactCandidate, ComponentRevision, CursorPayloadDigest,
+    EphemeralSanitizedQueryViewV1, FixedPointScore, RetrievalBudget, RetrievalError,
+    RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch, RetrieverContinuation,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId,
 };
 
 use super::ports::{
@@ -59,10 +60,10 @@ pub struct LexicalFieldFilterV1 {
 
 /// Typed lexical-lane request (Plan 05: exact identifier, phrase, token,
 /// field, and bounded fuzzy requests).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LexicalLaneRequest {
+#[derive(Debug, PartialEq, Eq)]
+pub struct LexicalLaneRequest<'a> {
     pub base: RetrievalRequest,
+    pub query_view: &'a EphemeralSanitizedQueryViewV1,
     pub generation: CodeGenerationId,
     pub whole_terms: Vec<String>,
     pub subtokens: Vec<String>,
@@ -99,11 +100,11 @@ pub trait LexicalLaneRetriever {
     /// Retrieve the committed lexical candidate prefix for `request`.
     fn retrieve_lexical(
         &self,
-        request: &LexicalLaneRequest,
+        request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError>;
 }
 
-impl LexicalLaneRequest {
+impl LexicalLaneRequest<'_> {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
         self.base
             .budget
@@ -161,7 +162,7 @@ impl LexicalLaneRequest {
 }
 
 impl LexicalLaneEvidence {
-    pub fn validate(&self, request: &LexicalLaneRequest) -> Result<(), RetrievalPortError> {
+    pub fn validate(&self, request: &LexicalLaneRequest<'_>) -> Result<(), RetrievalPortError> {
         request.validate()?;
         if self.binding.occurrence.generation != request.generation {
             return Err(RetrievalPortError::GenerationMismatch);
@@ -244,7 +245,7 @@ where
     /// a checkpoint digest.
     fn enforce_batch(
         &self,
-        request: &LexicalLaneRequest,
+        request: &LexicalLaneRequest<'_>,
         batch: &RetrieverBatch<LexicalLaneEvidence>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
         batch
@@ -357,7 +358,7 @@ where
 {
     fn retrieve_lexical(
         &self,
-        request: &LexicalLaneRequest,
+        request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
         let outcome = match self.postings.read_lexical_postings(request) {
@@ -385,26 +386,26 @@ where
     }
 }
 
-impl<P> Retriever<LexicalLaneRequest, LexicalLaneEvidence> for LexicalLane<P>
+impl<'a, P> Retriever<LexicalLaneRequest<'a>, LexicalLaneEvidence> for LexicalLane<P>
 where
     P: LexicalPostingReadPort,
 {
     fn retrieve(
         &self,
-        request: &LexicalLaneRequest,
+        request: &LexicalLaneRequest<'a>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalError> {
         self.retrieve_lexical(request)
             .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
     }
 }
 
-impl<P> CompactCandidateLane<LexicalLaneRequest, LexicalLaneEvidence> for LexicalLane<P>
+impl<'a, P> CompactCandidateLane<LexicalLaneRequest<'a>, LexicalLaneEvidence> for LexicalLane<P>
 where
     P: LexicalPostingReadPort,
 {
     fn candidates(
         &self,
-        request: &LexicalLaneRequest,
+        request: &LexicalLaneRequest<'a>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         self.retrieve_lexical(request)
     }

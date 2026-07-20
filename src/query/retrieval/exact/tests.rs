@@ -8,10 +8,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use tracedecay_domain::{
-    CompactCandidate, EvidenceRole, ExactAdmissionProof, ExactAdmissionRuleRevision,
-    ExactAdmissionValidator, ExactFieldV1, FixedPointScore, FreshnessCompatibilityV1, PrincipalId,
-    RetrievalBudget, RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    Retriever, RetrieverBatch, RetrieverKind, RetrieverOutcome, SingleRootScopeV1, SourceFreshness,
+    CompactCandidate, EphemeralSanitizedQueryViewV1, EvidenceRole, ExactAdmissionProof,
+    ExactAdmissionRuleRevision, ExactAdmissionValidator, ExactFieldV1, FixedPointScore,
+    FreshnessCompatibilityV1, PrincipalId, QueryNormalizationRevision, RetrievalBudget,
+    RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch,
+    RetrieverKind, RetrieverOutcome, SanitizerRevision, SingleRootScopeV1, SourceFreshness,
     TemporalModeV1, UtcMicros, VectorWatermark,
 };
 
@@ -49,9 +50,8 @@ fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {
     }
 }
 
-fn base_request(query: &str, max_candidates_per_lane: u32) -> RetrievalRequest {
+fn base_request(max_candidates_per_lane: u32) -> RetrievalRequest {
     RetrievalRequest {
-        query: query.to_owned(),
         principal: id::<PrincipalId>("principal.fixture"),
         scope: RetrievalScope {
             privacy_domain: id("privacy.fixture"),
@@ -158,8 +158,12 @@ impl ExactAdmissionValidator for FixtureAuthority {
 }
 
 impl ExactAdmissionAuthority for FixtureAuthority {
-    fn parse_literals(&self, request: &RetrievalRequest) -> Vec<ExactLiteralV1> {
-        parse_query_literals(request.query.as_str())
+    fn parse_literals(
+        &self,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        _request: &RetrievalRequest,
+    ) -> Vec<ExactLiteralV1> {
+        parse_query_literals(query_view.as_str())
     }
 }
 
@@ -167,11 +171,20 @@ fn exact_request(
     authority: &FixtureAuthority,
     query: &str,
     max_candidates: u32,
-) -> ExactLaneRequest {
-    let base = base_request(query, max_candidates);
+) -> ExactLaneRequest<'static> {
+    let base = base_request(max_candidates);
+    let query_view = Box::leak(Box::new(
+        EphemeralSanitizedQueryViewV1::sanitize(
+            query,
+            id::<SanitizerRevision>("query-sanitizer.v1"),
+            id::<QueryNormalizationRevision>("query-normalization.v1"),
+        )
+        .expect("query sanitizes"),
+    ));
     ExactLaneRequest {
-        literals: authority.parse_literals(&base),
+        literals: authority.parse_literals(query_view, &base),
         base,
+        query_view,
         generation: id("generation.1"),
         budget: budget(max_candidates),
     }
@@ -181,7 +194,7 @@ fn exact_request(
 /// central authority for `request.literals[literal_index]`.
 fn exact_pair(
     authority: &FixtureAuthority,
-    request: &ExactLaneRequest,
+    request: &ExactLaneRequest<'_>,
     occurrence: &str,
     literal_index: usize,
 ) -> (CompactCandidate, ExactLaneEvidence) {
@@ -198,6 +211,7 @@ fn exact_pair(
         repository_id: None,
         session_or_thread_id: None,
         logical_copy_cluster_id: None,
+        logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
         retriever: RetrieverKind::ExactLiteral,
         retriever_revision: id("retriever.exact.v1"),
@@ -276,7 +290,7 @@ impl FakeExactPort {
 impl ExactTermPostingReadPort for FakeExactPort {
     fn read_exact_postings(
         &self,
-        _request: &ExactLaneRequest,
+        _request: &ExactLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
         match &self.reply {
             PortReply::Complete(value) => Ok(RetrieverOutcome::Complete(value.clone())),
@@ -455,7 +469,7 @@ fn exact_lane_rejects_matches_outside_the_request_literals() {
 /// ordering is observable.
 fn with_extra_literal(
     pair: (CompactCandidate, ExactLaneEvidence),
-    request: &ExactLaneRequest,
+    request: &ExactLaneRequest<'_>,
     literal_index: usize,
 ) -> (CompactCandidate, ExactLaneEvidence) {
     let (candidate, mut evidence) = pair;

@@ -9,10 +9,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use tracedecay_domain::{
-    CompactCandidate, EvidenceRole, ExactAdmissionProof, ExactAdmissionRuleRevision, ExactFieldV1,
-    FixedPointScore, FreshnessCompatibilityV1, PrincipalId, RetrievalBudget, RetrievalError,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch, RetrieverKind,
-    RetrieverOutcome, SingleRootScopeV1, SourceFreshness, TemporalModeV1, UtcMicros,
+    CompactCandidate, EphemeralSanitizedQueryViewV1, EvidenceRole, ExactAdmissionProof,
+    ExactAdmissionRuleRevision, ExactFieldV1, FixedPointScore, FreshnessCompatibilityV1,
+    PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalError, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch, RetrieverKind, RetrieverOutcome,
+    SanitizerRevision, SingleRootScopeV1, SourceFreshness, TemporalModeV1, UtcMicros,
     VectorWatermark,
 };
 
@@ -50,9 +51,8 @@ fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {
     }
 }
 
-fn base_request(query: &str, max_candidates_per_lane: u32) -> RetrievalRequest {
+fn base_request(max_candidates_per_lane: u32) -> RetrievalRequest {
     RetrievalRequest {
-        query: query.to_owned(),
         principal: id::<PrincipalId>("principal.fixture"),
         scope: RetrievalScope {
             privacy_domain: id("privacy.fixture"),
@@ -88,9 +88,18 @@ fn freshness() -> SourceFreshness {
     }
 }
 
-fn lexical_request(max_candidates: u32) -> LexicalLaneRequest {
+fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
+    let query_view = Box::leak(Box::new(
+        EphemeralSanitizedQueryViewV1::sanitize(
+            "reserve stock",
+            id::<SanitizerRevision>("query-sanitizer.v1"),
+            id::<QueryNormalizationRevision>("query-normalization.v1"),
+        )
+        .expect("query sanitizes"),
+    ));
     LexicalLaneRequest {
-        base: base_request("reserve stock", max_candidates),
+        base: base_request(max_candidates),
+        query_view,
         generation: id("generation.1"),
         whole_terms: vec!["reserve".to_owned(), "stock".to_owned()],
         subtokens: vec!["res".to_owned()],
@@ -106,7 +115,7 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest {
 /// Build one lexical candidate/evidence pair with per-field fixed-point
 /// micro scores supplied by the (fake) posting port.
 fn lexical_pair(
-    request: &LexicalLaneRequest,
+    request: &LexicalLaneRequest<'_>,
     occurrence: &str,
     field_scores: &[(LexicalFieldV1, u64)],
     matched_whole_terms: &[&str],
@@ -120,6 +129,7 @@ fn lexical_pair(
         repository_id: None,
         session_or_thread_id: None,
         logical_copy_cluster_id: None,
+        logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
         retriever: RetrieverKind::Lexical,
         retriever_revision: id("retriever.lexical.v1"),
@@ -209,7 +219,7 @@ impl FakeLexicalPort {
 impl LexicalPostingReadPort for FakeLexicalPort {
     fn read_lexical_postings(
         &self,
-        _request: &LexicalLaneRequest,
+        _request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         match &self.reply {
             PortReply::Complete(value) => Ok(RetrieverOutcome::Complete(value.clone())),
@@ -236,7 +246,7 @@ fn result_order(batch: &RetrieverBatch<LexicalLaneEvidence>, expected: &[&str]) 
     assert_eq!(actual, expected);
 }
 
-fn three_pairs(request: &LexicalLaneRequest) -> Vec<(CompactCandidate, LexicalLaneEvidence)> {
+fn three_pairs(request: &LexicalLaneRequest<'_>) -> Vec<(CompactCandidate, LexicalLaneEvidence)> {
     vec![
         lexical_pair(
             request,

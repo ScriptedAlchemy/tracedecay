@@ -35,6 +35,11 @@ pub const LINEAGE_EVIDENCE_SEPARATOR: &str = "tracedecay.code-lineage-evidence.v
 pub const ABSTAIN_AMBIGUOUS_CONTENT_MATCH: &str =
     "multiple content-identical prior candidates without a unique qualified-name match";
 
+/// Abstention reason: a byte-identical body has no matching qualified name or
+/// file identity, so it cannot prove continuity on its own.
+pub const ABSTAIN_CONTENT_ONLY_MATCH: &str =
+    "content-identical prior candidate lacks structural continuity";
+
 /// Abstention reason: several prior symbols occupy the same qualified
 /// structure group (file identity, qualified name, kind) with matching group
 /// sizes, so no unique ancestor is identifiable.
@@ -216,8 +221,10 @@ impl SymbolLineageResolver {
             }
         }
 
-        // 2. Content digest: byte-identical bodies across different identity
-        //    tuples classify a move or a rename.
+        // 2. Content digest plus structural continuity: byte-identical bodies
+        //    must also retain either an exact qualified name (move) or exact
+        //    file identity (rename), with the same symbol kind. Content alone
+        //    never proves lineage.
         let content_candidates: Vec<usize> = by_content
             .get(symbol.content_digest.as_str())
             .map(|indices| {
@@ -230,61 +237,70 @@ impl SymbolLineageResolver {
             .unwrap_or_default();
         match content_candidates.len() {
             0 => {}
-            1 => {
-                let index = content_candidates[0];
-                consumed[index] = true;
-                let ancestor = &prior.symbols[index];
-                let kind = if ancestor.qualified_name == symbol.qualified_name {
-                    LineageKindV1::Moved
-                } else {
-                    LineageKindV1::Renamed
-                };
-                return self.candidate(
-                    prior,
-                    current,
-                    symbol,
-                    ancestor,
-                    kind,
-                    LineageMethodV1::ContentDigestMatch,
-                    LineageConfidenceKindV1::Exact,
-                    vec![],
-                    None,
-                );
-            }
             count => {
                 let same_name: Vec<usize> = content_candidates
                     .iter()
                     .copied()
-                    .filter(|index| prior.symbols[*index].qualified_name == symbol.qualified_name)
+                    .filter(|index| {
+                        let ancestor = &prior.symbols[*index];
+                        ancestor.kind == symbol.kind
+                            && ancestor.qualified_name == symbol.qualified_name
+                    })
                     .collect();
-                if same_name.len() == 1 {
-                    let index = same_name[0];
-                    consumed[index] = true;
+                let same_file: Vec<usize> = content_candidates
+                    .iter()
+                    .copied()
+                    .filter(|index| {
+                        let ancestor = &prior.symbols[*index];
+                        ancestor.kind == symbol.kind
+                            && ancestor.file_identity == symbol.file_identity
+                    })
+                    .collect();
+                let selected = if same_name.len() == 1 {
+                    Some((same_name[0], LineageKindV1::Moved))
+                } else if same_name.is_empty() && same_file.len() == 1 {
+                    Some((same_file[0], LineageKindV1::Renamed))
+                } else {
+                    None
+                };
+                if let Some((index, kind)) = selected {
+                    let confidence = if count == 1 {
+                        LineageConfidenceKindV1::Exact
+                    } else {
+                        LineageConfidenceKindV1::Structural
+                    };
                     let alternatives: Vec<SymbolOccurrenceId> = content_candidates
                         .iter()
                         .copied()
                         .filter(|other| *other != index)
                         .map(|other| prior.symbols[other].occurrence.clone())
                         .collect();
+                    consumed[index] = true;
                     let ancestor = &prior.symbols[index];
                     return self.candidate(
                         prior,
                         current,
                         symbol,
                         ancestor,
-                        LineageKindV1::Moved,
+                        kind,
                         LineageMethodV1::ContentDigestMatch,
-                        LineageConfidenceKindV1::Structural,
+                        confidence,
                         alternatives,
                         None,
                     );
                 }
+                let has_structural_continuity =
+                    same_name.iter().chain(same_file.iter()).next().is_some();
                 return self.abstain(
                     prior,
                     current,
                     symbol,
                     &content_candidates,
-                    ABSTAIN_AMBIGUOUS_CONTENT_MATCH,
+                    if has_structural_continuity {
+                        ABSTAIN_AMBIGUOUS_CONTENT_MATCH
+                    } else {
+                        ABSTAIN_CONTENT_ONLY_MATCH
+                    },
                     count,
                 );
             }
@@ -607,6 +623,39 @@ mod tests {
     }
 
     #[test]
+    fn content_only_match_without_structural_continuity_abstains() {
+        let prior = index(
+            generation(1),
+            vec![record(
+                "sym.p1",
+                'a',
+                "crate::unrelated_prior",
+                "function",
+                'f',
+                '0',
+            )],
+        );
+        let current = index(
+            generation(2),
+            vec![record(
+                "sym.c1",
+                'b',
+                "crate::unrelated_current",
+                "function",
+                'e',
+                '0',
+            )],
+        );
+
+        let candidates = resolver().resolve(&prior, &current).expect("resolution");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].method, LineageMethodV1::DeclaredAbstention);
+        assert_eq!(candidates[0].confidence, LineageConfidenceKindV1::Abstained);
+        assert!(candidates[0].evidence.prior_digest.is_none());
+    }
+
+    #[test]
     fn ambiguous_content_match_abstains_with_every_alternative() {
         let prior = index(
             generation(1),
@@ -848,10 +897,10 @@ mod tests {
         assert_eq!(claimed.len(), claims.len());
         // The second twin cannot claim the consumed prior and must abstain.
         assert!(
-            candidates
-                .iter()
-                .any(|candidate| candidate.current_occurrence.as_str() == "sym.c2"
-                    && candidate.abstention.is_some()),
+            candidates.iter().any(
+                |candidate| candidate.current_occurrence.as_str() == "sym.c2"
+                    && candidate.abstention.is_some()
+            ),
             "the unclaimable twin must produce a typed abstention"
         );
     }

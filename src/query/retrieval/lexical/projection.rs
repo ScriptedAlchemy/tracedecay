@@ -11,6 +11,7 @@ use tracedecay_domain::{
 use super::{
     LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1,
 };
+use crate::code_index::chunks::ExtractionAdmittedCodeSearchChunkV1;
 use crate::query::retrieval::exact::{
     ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
 };
@@ -96,7 +97,7 @@ impl ProjectedChunkV1 {
                 .collect(),
         );
         for term in &chunk.exact_terms {
-            let Ok(canonical) = std::str::from_utf8(&term.canonical_bytes) else {
+            let Ok(canonical) = std::str::from_utf8(term.canonical_bytes()) else {
                 continue;
             };
             let canonical = normalize_lexical(canonical);
@@ -104,7 +105,7 @@ impl ProjectedChunkV1 {
                 .entry(LexicalFieldV1::ExactTerm)
                 .or_default()
                 .push(canonical.clone());
-            match term.kind {
+            match term.kind() {
                 ExactTechnicalTermKindV1::WholeSymbol
                     if matches!(
                         chunk.anchor.grain,
@@ -157,6 +158,28 @@ impl CodeLexicalProjectionAdapterV1 {
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
     ) -> Result<Self, RetrievalPortError> {
+        Self::new_inner(metadata, chunks, false)
+    }
+
+    pub fn new_admitted(
+        metadata: CodeLexicalProjectionMetadataV1,
+        chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
+    ) -> Result<Self, RetrievalPortError> {
+        Self::new_inner(
+            metadata,
+            chunks
+                .into_iter()
+                .map(ExtractionAdmittedCodeSearchChunkV1::into_inner)
+                .collect(),
+            true,
+        )
+    }
+
+    fn new_inner(
+        metadata: CodeLexicalProjectionMetadataV1,
+        chunks: Vec<CodeSearchChunkV1>,
+        extraction_admitted: bool,
+    ) -> Result<Self, RetrievalPortError> {
         metadata.validate()?;
         let mut seen = BTreeSet::new();
         let mut rows = Vec::with_capacity(chunks.len());
@@ -164,6 +187,16 @@ impl CodeLexicalProjectionAdapterV1 {
             chunk
                 .validate()
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            if !extraction_admitted
+                && chunk
+                    .exact_terms
+                    .iter()
+                    .any(|term| term.requires_extraction_authority())
+            {
+                return Err(RetrievalPortError::Contract(
+                    "raw exact terms require parser-backed extraction admission".to_owned(),
+                ));
+            }
             if chunk.anchor.generation_id != metadata.generation {
                 return Err(RetrievalPortError::GenerationMismatch);
             }
@@ -202,7 +235,7 @@ impl CodeLexicalProjectionAdapterV1 {
 
     fn lexical_batch(
         &self,
-        request: &LexicalLaneRequest,
+        request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
         let fuzzy = self.fuzzy_expansions(request);
         let mut pairs = Vec::new();
@@ -256,7 +289,7 @@ impl CodeLexicalProjectionAdapterV1 {
         })
     }
 
-    fn fuzzy_expansions(&self, request: &LexicalLaneRequest) -> FuzzyExpansionsV1 {
+    fn fuzzy_expansions(&self, request: &LexicalLaneRequest<'_>) -> FuzzyExpansionsV1 {
         if request.fuzzy_budget == 0 {
             return FuzzyExpansionsV1::default();
         }
@@ -297,7 +330,7 @@ impl CodeLexicalProjectionAdapterV1 {
     fn score_row(
         &self,
         row: &ProjectedChunkV1,
-        request: &LexicalLaneRequest,
+        request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
     ) -> LexicalRowScoreV1 {
         let mut field_scores: BTreeMap<LexicalFieldV1, u64> = BTreeMap::new();
@@ -369,7 +402,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 / 1_000;
             add_score(&mut field_scores, field, score);
         }
-        let normalized_query = normalize_lexical(request.base.query.trim_matches('"'));
+        let normalized_query = normalize_lexical(request.query_view.as_str().trim_matches('"'));
         let echo_penalty_applied =
             !normalized_query.is_empty() && normalized_query == row.normalized_text.trim();
         if echo_penalty_applied {
@@ -459,6 +492,7 @@ impl CodeLexicalProjectionAdapterV1 {
             repository_id: self.metadata.repository_id.clone(),
             session_or_thread_id: None,
             logical_copy_cluster_id: None,
+            logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
             retriever,
             retriever_revision,
@@ -495,7 +529,7 @@ impl CodeLexicalProjectionAdapterV1 {
 impl LexicalPostingReadPort for CodeLexicalProjectionAdapterV1 {
     fn read_lexical_postings(
         &self,
-        request: &LexicalLaneRequest,
+        request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         self.validate_generation(&request.generation)?;
         if let Some(outcome) = self.stale_outcome() {
@@ -624,11 +658,11 @@ fn exact_matches(
             );
         }
         for term in &row.chunk.exact_terms {
-            if exact_field_for_kind(term.kind) == literal.field
-                && term.canonical_bytes == literal.canonical_bytes
+            if exact_field_for_kind(term.kind()) == literal.field
+                && term.canonical_bytes() == literal.canonical_bytes.as_slice()
             {
                 matched = true;
-                matched_kinds.insert(term.kind);
+                matched_kinds.insert(term.kind());
             }
         }
         if matched {
@@ -660,10 +694,10 @@ fn collect_term_kinds(
     kinds: &mut BTreeSet<ExactTechnicalTermKindV1>,
 ) {
     for term in &row.chunk.exact_terms {
-        if std::str::from_utf8(&term.canonical_bytes)
+        if std::str::from_utf8(term.canonical_bytes())
             .is_ok_and(|value| normalize_lexical(value) == normalized_term)
         {
-            kinds.insert(term.kind);
+            kinds.insert(term.kind());
         }
     }
 }

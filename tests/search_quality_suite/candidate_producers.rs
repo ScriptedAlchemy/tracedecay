@@ -1,6 +1,12 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use tracedecay::code_index::chunks::{
+    DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1, content_digest,
+};
+use tracedecay::code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
+use tracedecay::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
+use tracedecay::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay::query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
     ExactLaneRetriever,
@@ -13,12 +19,15 @@ use tracedecay::query::retrieval::lexical::{
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComponentRevision, ContentDigest,
-    ExactAdmissionRuleRevision, ExactAdmissionValidator, ExactFieldV1, ExactTechnicalTermKindV1,
-    ExactTechnicalTermV1, FileOccurrenceId, FreshnessCompatibilityV1, LanguageDescriptorRevision,
-    PolicyRevisionId, PrincipalId, RepositoryId, RetrievalBudget, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverOutcome, ScoreDomainId, SensitivityDecision, SensitivityLevelV1,
-    SingleRootScopeV1, SourceFreshness, SourceInstanceKey, SourceNamespace, SourceSpan,
-    SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark,
+    EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactAdmissionValidator,
+    ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileOccurrenceId,
+    FreshnessCompatibilityV1, LanguageDescriptorRevision, PolicyRevisionId, PrincipalId,
+    QueryNormalizationRevision, RepositoryId, RetrievalBudget, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SensitivityDecision,
+    SensitivityLevelV1, SingleRootScopeV1, SnapshotFileDispositionV1, SourceFreshness,
+    SourceInstanceKey, SourceNamespace, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
+    ValidatedCodeFileV1, VectorWatermark,
 };
 
 pub(crate) fn id<T>(value: &str) -> T
@@ -47,9 +56,8 @@ pub(crate) fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {
     }
 }
 
-pub(crate) fn base_request(query: &str, max_candidates_per_lane: u32) -> RetrievalRequest {
+pub(crate) fn base_request(_query: &str, max_candidates_per_lane: u32) -> RetrievalRequest {
     RetrievalRequest {
-        query: query.to_owned(),
         principal: id::<PrincipalId>("principal.fixture"),
         scope: RetrievalScope {
             privacy_domain: id("privacy.fixture"),
@@ -69,6 +77,15 @@ pub(crate) fn base_request(query: &str, max_candidates_per_lane: u32) -> Retriev
         profile_id: id("profile.fixture.v1"),
         budget: budget(max_candidates_per_lane),
     }
+}
+
+pub(crate) fn query_view(query: &str) -> EphemeralSanitizedQueryViewV1 {
+    EphemeralSanitizedQueryViewV1::sanitize(
+        query,
+        id::<SanitizerRevision>("query-sanitizer.v1"),
+        id::<QueryNormalizationRevision>("query-normalization.v1"),
+    )
+    .expect("query sanitizes")
 }
 
 pub(crate) fn freshness(compatibility: FreshnessCompatibilityV1) -> SourceFreshness {
@@ -99,16 +116,6 @@ pub(crate) fn projection_metadata(
     }
 }
 
-fn canonical_term(kind: ExactTechnicalTermKindV1, text: &str) -> Vec<u8> {
-    match kind {
-        ExactTechnicalTermKindV1::CliFlag
-        | ExactTechnicalTermKindV1::ConfigurationKey
-        | ExactTechnicalTermKindV1::ToolName => text.to_ascii_lowercase().into_bytes(),
-        ExactTechnicalTermKindV1::CommitIdentifier => text.to_ascii_lowercase().into_bytes(),
-        _ => text.as_bytes().to_vec(),
-    }
-}
-
 pub(crate) fn chunk(
     generation: &CodeGenerationId,
     ordinal: u32,
@@ -117,39 +124,6 @@ pub(crate) fn chunk(
     terms: &[(ExactTechnicalTermKindV1, &str)],
     subtokens: &[&str],
 ) -> CodeSearchChunkV1 {
-    let mut exact_terms: Vec<ExactTechnicalTermV1> = terms
-        .iter()
-        .map(|(kind, term)| {
-            let start = text
-                .find(term)
-                .unwrap_or_else(|| panic!("term {term:?} is present in {text:?}"));
-            ExactTechnicalTermV1 {
-                kind: *kind,
-                original_bytes: term.as_bytes().to_vec(),
-                canonical_bytes: canonical_term(*kind, term),
-                span: SourceSpan {
-                    start_byte: start as u64,
-                    end_byte: (start + term.len()) as u64,
-                },
-            }
-        })
-        .collect();
-    exact_terms.sort_by(|left, right| {
-        (
-            left.span.start_byte,
-            left.span.end_byte,
-            left.kind,
-            &left.canonical_bytes,
-            &left.original_bytes,
-        )
-            .cmp(&(
-                right.span.start_byte,
-                right.span.end_byte,
-                right.kind,
-                &right.canonical_bytes,
-                &right.original_bytes,
-            ))
-    });
     let symbol = matches!(
         grain,
         CodeSearchChunkGrainV1::SymbolSignature
@@ -157,6 +131,54 @@ pub(crate) fn chunk(
             | CodeSearchChunkGrainV1::SymbolMember
     )
     .then(|| id::<SymbolOccurrenceId>(&format!("symbol.{ordinal}")));
+    let mut exact_terms: Vec<ExactTechnicalTermV1> = terms
+        .iter()
+        .map(|(kind, term)| {
+            let start = text
+                .find(term)
+                .unwrap_or_else(|| panic!("term {term:?} is present in {text:?}"));
+            let span = SourceSpan {
+                start_byte: start as u64,
+                end_byte: (start + term.len()) as u64,
+            };
+            if *kind == ExactTechnicalTermKindV1::WholeSymbol {
+                ExactTechnicalTermV1::untrusted_whole_symbol_candidate(
+                    term.as_bytes().to_vec(),
+                    span,
+                    symbol.clone().expect("symbol grain"),
+                )
+            } else if matches!(
+                kind,
+                ExactTechnicalTermKindV1::CompilerErrorText
+                    | ExactTechnicalTermKindV1::RuntimeErrorText
+            ) {
+                ExactTechnicalTermV1::untrusted_contextual_text_candidate(
+                    *kind,
+                    term.as_bytes().to_vec(),
+                    span,
+                )
+            } else {
+                ExactTechnicalTermV1::technical(*kind, term.as_bytes().to_vec(), span)
+            }
+            .expect("valid exact-term fixture")
+        })
+        .collect();
+    exact_terms.sort_by(|left, right| {
+        (
+            left.span().start_byte,
+            left.span().end_byte,
+            left.kind(),
+            left.canonical_bytes(),
+            left.original_bytes(),
+        )
+            .cmp(&(
+                right.span().start_byte,
+                right.span().end_byte,
+                right.kind(),
+                right.canonical_bytes(),
+                right.original_bytes(),
+            ))
+    });
     CodeSearchChunkV1 {
         id: id::<CodeSearchChunkId>(&format!("chunk.{ordinal}")),
         anchor: CodeSearchChunkAnchorV1 {
@@ -187,6 +209,80 @@ pub(crate) fn chunk(
     }
 }
 
+fn admitted_rust_chunk(
+    generation: &CodeGenerationId,
+    ordinal: u32,
+    source: &str,
+    grain: CodeSearchChunkGrainV1,
+    symbol_name: &str,
+) -> ExtractionAdmittedCodeSearchChunkV1 {
+    let registry = StaticLanguageRegistry::new();
+    let descriptor = registry
+        .descriptor(&id("rust"))
+        .expect("rust descriptor")
+        .clone();
+    let sanitizer_revision = id::<SanitizerRevision>("sanitizer.v1");
+    let file = SanitizedCodeFileV1 {
+        file_occurrence_id: id(&format!("file.admitted.{ordinal}")),
+        logical_path: format!("src/admitted_{ordinal}.rs"),
+        language: Some(id("rust")),
+        content_digest: content_digest(source.as_bytes()),
+        disposition: SnapshotFileDispositionV1::Present,
+    };
+    let intake =
+        SanitizedCodeIntake::new(registry, sanitizer_revision.clone(), UtcMicros(1_000_000));
+    let snapshot = intake
+        .admit(SanitizedCodeSnapshotV1 {
+            repository: id("repo.fixture"),
+            worktree: None,
+            reference: None,
+            source_revision: None,
+            sanitizer_revision: sanitizer_revision.clone(),
+            sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.fixture")],
+            content_identity: content_digest(source.as_bytes()),
+            captured_at: UtcMicros(1_000_000),
+            files: vec![file.clone()],
+        })
+        .expect("snapshot admission");
+    let file = intake
+        .bind_file(
+            &snapshot,
+            ValidatedCodeFileV1 {
+                generation_id: generation.clone(),
+                file,
+                snapshot_digest: snapshot.snapshot().intake_digest.clone(),
+                sanitized_bytes: source.as_bytes().to_vec(),
+            },
+        )
+        .expect("file admission");
+    let batch = TreeSitterExtractor::new()
+        .extract(&file, &descriptor, &NeverCancelled)
+        .expect("extract rust fixture");
+    let chunker = DeterministicCodeChunker::new(
+        generation.clone(),
+        id("repo.fixture"),
+        sanitizer_revision,
+        id("policy.fixture.v1"),
+        id("chunker.v1"),
+        tracedecay::extraction::LanguageRegistry::new(),
+    );
+    let (chunks, authority) = chunker
+        .chunk_file_with_authority(&file, &batch, &descriptor, &NeverCancelled)
+        .expect("chunk with exact authority");
+    let chunk = chunks
+        .chunks
+        .into_iter()
+        .find(|chunk| {
+            chunk.anchor.grain == grain
+                && chunk.exact_terms.iter().any(|term| {
+                    term.kind() == ExactTechnicalTermKindV1::WholeSymbol
+                        && term.original_bytes() == symbol_name.as_bytes()
+                })
+        })
+        .expect("requested parser-minted symbol chunk");
+    authority.admit(chunk).expect("exact extraction admission")
+}
+
 pub(crate) fn lexical_request(
     query: &str,
     whole_terms: &[&str],
@@ -194,9 +290,11 @@ pub(crate) fn lexical_request(
     phrases: &[&str],
     fuzzy_budget: u32,
     max_candidates: u32,
-) -> LexicalLaneRequest {
+) -> LexicalLaneRequest<'static> {
+    let query_view = Box::leak(Box::new(query_view(query)));
     LexicalLaneRequest {
         base: base_request(query, max_candidates),
+        query_view,
         generation: id("generation.1"),
         whole_terms: whole_terms.iter().map(|term| (*term).to_owned()).collect(),
         subtokens: subtokens.iter().map(|term| (*term).to_owned()).collect(),
@@ -217,15 +315,47 @@ pub(crate) fn complete<T: fmt::Debug>(outcome: RetrieverOutcome<T>) -> T {
 }
 
 #[test]
+fn matching_symbol_occurrence_does_not_admit_raw_or_json_exact_terms() {
+    let generation = id::<CodeGenerationId>("generation.1");
+    let raw = chunk(
+        &generation,
+        1,
+        CodeSearchChunkGrainV1::SymbolSignature,
+        "fn forged_symbol",
+        &[(ExactTechnicalTermKindV1::WholeSymbol, "forged_symbol")],
+        &["forged", "symbol"],
+    );
+    assert_eq!(
+        raw.exact_terms[0].symbol_occurrence_id(),
+        raw.anchor.symbol_occurrence_id.as_ref()
+    );
+    let metadata = projection_metadata(&generation, FreshnessCompatibilityV1::Current);
+    assert!(
+        CodeLexicalProjectionAdapterV1::new(metadata.clone(), vec![raw.clone()]).is_err(),
+        "public raw-parts construction cannot admit WholeSymbol evidence"
+    );
+
+    let decoded: CodeSearchChunkV1 =
+        serde_json::from_slice(&serde_json::to_vec(&raw).unwrap()).unwrap();
+    assert_eq!(
+        decoded.exact_terms[0].symbol_occurrence_id(),
+        decoded.anchor.symbol_occurrence_id.as_ref()
+    );
+    assert!(
+        CodeLexicalProjectionAdapterV1::new(metadata, vec![decoded]).is_err(),
+        "JSON chunks remain untrusted even when occurrence ids match"
+    );
+}
+
+#[test]
 fn central_exact_authority_classifies_every_protected_term() {
     let authority =
         CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1"));
-    let request = base_request(
-        r#"reserve_stock std::collections::HashMap src/main.rs "connection refused" error:"socket closed" E0308 --release cargo tracedecay.data.dir deadbee"#,
-        16,
-    );
+    let query = r#"reserve_stock std::collections::HashMap src/main.rs "connection refused" error:"socket closed" E0308 --release cargo tracedecay.data.dir deadbee"#;
+    let request = base_request(query, 16);
+    let query_view = query_view(query);
 
-    let literals = authority.parse_literals(&request);
+    let literals = authority.parse_literals(&query_view, &request);
     let fields: BTreeSet<ExactFieldV1> = literals.iter().map(|literal| literal.field).collect();
 
     assert_eq!(
@@ -264,23 +394,18 @@ fn central_exact_authority_classifies_every_protected_term() {
 #[test]
 fn exact_projection_emits_only_authority_minted_proofs() {
     let generation = id::<CodeGenerationId>("generation.1");
-    let text = "reserve_stock std::collections::HashMap src/main.rs connection refused E0308 --release cargo tracedecay.data.dir deadbee";
+    let text = "std::collections::HashMap src/main.rs E0308 --release cargo tracedecay.data.dir commit:deadbee";
     let source = chunk(
         &generation,
         1,
         CodeSearchChunkGrainV1::SymbolBody,
         text,
         &[
-            (ExactTechnicalTermKindV1::WholeSymbol, "reserve_stock"),
             (
                 ExactTechnicalTermKindV1::QualifiedName,
                 "std::collections::HashMap",
             ),
             (ExactTechnicalTermKindV1::Path, "src/main.rs"),
-            (
-                ExactTechnicalTermKindV1::RuntimeErrorText,
-                "connection refused",
-            ),
             (ExactTechnicalTermKindV1::CompilerErrorCode, "E0308"),
             (ExactTechnicalTermKindV1::CliFlag, "--release"),
             (ExactTechnicalTermKindV1::ToolName, "cargo"),
@@ -288,7 +413,7 @@ fn exact_projection_emits_only_authority_minted_proofs() {
                 ExactTechnicalTermKindV1::ConfigurationKey,
                 "tracedecay.data.dir",
             ),
-            (ExactTechnicalTermKindV1::CommitIdentifier, "deadbee"),
+            (ExactTechnicalTermKindV1::CommitIdentifier, "commit:deadbee"),
         ],
         &["reserve", "stock"],
     );
@@ -299,13 +424,13 @@ fn exact_projection_emits_only_authority_minted_proofs() {
         vec![source],
     )
     .expect("projection builds");
-    let base = base_request(
-        r#"reserve_stock std::collections::HashMap src/main.rs "connection refused" E0308 --release cargo tracedecay.data.dir deadbee"#,
-        16,
-    );
+    let query = r#"std::collections::HashMap src/main.rs E0308 --release cargo tracedecay.data.dir commit:deadbee"#;
+    let base = base_request(query, 16);
+    let query_view = query_view(query);
     let request = ExactLaneRequest {
-        literals: authority.parse_literals(&base),
+        literals: authority.parse_literals(&query_view, &base),
         base,
+        query_view: &query_view,
         generation,
         budget: budget(16),
     };
@@ -329,31 +454,29 @@ fn exact_projection_emits_only_authority_minted_proofs() {
         .validate_for_request(&request.base)
         .expect("proof remains request-bound");
     let evidence = &batch.evidence_by_occurrence[&candidate.source_occurrence_id];
-    assert!(evidence.matched_literals.len() >= 9);
+    assert!(evidence.matched_literals.len() >= 6);
 }
 
 #[test]
 fn fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct() {
     let generation = id::<CodeGenerationId>("generation.1");
     let chunks = vec![
-        chunk(
+        admitted_rust_chunk(
             &generation,
             1,
+            "pub fn reserve_stock() {}\n",
             CodeSearchChunkGrainV1::SymbolSignature,
-            "fn reserve_stock",
-            &[(ExactTechnicalTermKindV1::WholeSymbol, "reserve_stock")],
-            &["reserve", "stock"],
+            "reserve_stock",
         ),
-        chunk(
+        admitted_rust_chunk(
             &generation,
             2,
+            "pub fn reserve() { let stock_inventory = 1; }\n",
             CodeSearchChunkGrainV1::SymbolBody,
-            "reserve stock inventory",
-            &[],
-            &["reserve", "stock", "inventory"],
+            "reserve",
         ),
     ];
-    let projection = CodeLexicalProjectionAdapterV1::new(
+    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         chunks,
     )
@@ -410,24 +533,22 @@ fn fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct() {
 fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
     let generation = id::<CodeGenerationId>("generation.1");
     let chunks = vec![
-        chunk(
+        admitted_rust_chunk(
             &generation,
             1,
+            "pub fn reserve() { // reserve stock inventory\n}\n",
             CodeSearchChunkGrainV1::SymbolBody,
-            "reserve stock inventory",
-            &[(ExactTechnicalTermKindV1::WholeSymbol, "reserve")],
-            &["reserve", "stock", "inventory"],
+            "reserve",
         ),
-        chunk(
+        admitted_rust_chunk(
             &generation,
             2,
+            "pub fn reserve_stock() {}\n",
             CodeSearchChunkGrainV1::SymbolSignature,
-            "fn reserve_stock",
-            &[(ExactTechnicalTermKindV1::WholeSymbol, "reserve_stock")],
-            &["reserve", "stock"],
+            "reserve_stock",
         ),
     ];
-    let projection = CodeLexicalProjectionAdapterV1::new(
+    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         chunks,
     )
@@ -487,19 +608,18 @@ fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
 #[test]
 fn lexical_projection_reports_freshness_coverage_and_page_cutoff() {
     let generation = id::<CodeGenerationId>("generation.1");
-    let chunks: Vec<CodeSearchChunkV1> = (1..=3)
+    let chunks: Vec<ExtractionAdmittedCodeSearchChunkV1> = (1..=3)
         .map(|ordinal| {
-            chunk(
+            admitted_rust_chunk(
                 &generation,
                 ordinal,
+                "pub fn target() {}\n",
                 CodeSearchChunkGrainV1::SymbolSignature,
-                "fn target",
-                &[(ExactTechnicalTermKindV1::WholeSymbol, "target")],
-                &["target"],
+                "target",
             )
         })
         .collect();
-    let current = CodeLexicalProjectionAdapterV1::new(
+    let current = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         chunks.clone(),
     )
@@ -518,7 +638,7 @@ fn lexical_projection_reports_freshness_coverage_and_page_cutoff() {
     assert_eq!(page.coverage.capped, 1);
     assert!(!page.continuation.expect("continuation").exhausted);
 
-    let stale = CodeLexicalProjectionAdapterV1::new(
+    let stale = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Stale),
         chunks,
     )

@@ -62,7 +62,7 @@ fn extraction_to_chunks_is_deterministic_and_covers_all_grains() {
         chunk
             .exact_terms
             .iter()
-            .any(|term| term.kind == ExactTechnicalTermKindV1::WholeSymbol)
+            .any(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
     }));
 }
 
@@ -101,7 +101,15 @@ fn partial_extraction_never_chunks_unsupported_tail_bytes() {
 
 #[test]
 fn exact_term_kinds_cover_the_frozen_plan25_contract() {
-    let source = "// compiler error: mismatched types\n// runtime error: module not found\n// cargo E0308 ERR_MODULE_NOT_FOUND deadbeef\npub fn alpha() {}\n";
+    let source = "// compiler error: mismatched types\n\
+                  // runtime error: module not found\n\
+                  // cargo E0308 ERR_MODULE_NOT_FOUND commit:deadbeef\n\
+                  // fn comment_fake() {}\n\
+                  const TEXT: &str = \"fn string_fake() {}\";\n\
+                  // fn\n\
+                  // newline_fake\n\
+                  // fn;;;punctuation_fake\n\
+                  pub fn alpha() {}\n";
     let file = validated_rust_file(source.as_bytes());
     let descriptor = rust_descriptor();
     let batch = TreeSitterExtractor::new()
@@ -120,7 +128,7 @@ fn exact_term_kinds_cover_the_frozen_plan25_contract() {
     let kinds: BTreeSet<_> = result
         .chunks
         .iter()
-        .flat_map(|chunk| chunk.exact_terms.iter().map(|term| term.kind))
+        .flat_map(|chunk| chunk.exact_terms.iter().map(|term| term.kind()))
         .collect();
 
     for kind in [
@@ -133,6 +141,27 @@ fn exact_term_kinds_cover_the_frozen_plan25_contract() {
         ExactTechnicalTermKindV1::CommitIdentifier,
     ] {
         assert!(kinds.contains(&kind), "missing exact-term kind {kind:?}");
+    }
+
+    let symbols: BTreeSet<Vec<u8>> = result
+        .chunks
+        .iter()
+        .flat_map(|chunk| {
+            chunk
+                .exact_terms
+                .iter()
+                .filter(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
+                .map(|term| term.original_bytes().to_vec())
+        })
+        .collect();
+    assert!(symbols.contains(b"alpha".as_slice()));
+    for rejected in [
+        b"comment_fake".as_slice(),
+        b"string_fake".as_slice(),
+        b"newline_fake".as_slice(),
+        b"punctuation_fake".as_slice(),
+    ] {
+        assert!(!symbols.contains(rejected));
     }
 }
 
@@ -284,8 +313,9 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
         .collect();
     let privacy_domain = id::<PrivacyDomainId>("privacy.fixture");
     let mut generation = CodeGenerationManifestV1 {
-        generation_id: id("generation.fixture"),
+        generation_id: id("generation.v1.aaaaaaaa.00000001"),
         snapshot_digest: digest('a'),
+        invalidation_digest: digest('d'),
         registry_revision: registry.registry_revision(),
         grammar_revisions,
         extractor_revisions,
@@ -300,6 +330,9 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
             planner: id::<ComponentVersion>("planner.v1"),
         },
     };
+    generation.invalidation_digest = generation
+        .expected_legacy_invalidation_digest()
+        .expect("legacy invalidation digest computes");
     generation.seal.expected_digest =
         expected_seal_digest(&generation).expect("seal digest computes");
 
@@ -336,6 +369,9 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
 
     let mut mixed_registry = generation.clone();
     mixed_registry.registry_revision = id("registry.other.v1");
+    mixed_registry.invalidation_digest = mixed_registry
+        .expected_legacy_invalidation_digest()
+        .expect("mixed invalidation digest computes");
     mixed_registry.seal.expected_digest =
         expected_seal_digest(&mixed_registry).expect("mixed manifest still seals");
     assert_eq!(

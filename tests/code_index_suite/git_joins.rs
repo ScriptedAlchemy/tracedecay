@@ -1,8 +1,8 @@
 use tracedecay::code_index::generations::GenerationPlanner;
 use tracedecay::code_index::git_join::{
-    GenerationGitFileJoinStateV1, GenerationGitFileOnlyReasonV1, GenerationGitJoinCoverageV1,
-    GenerationGitJoinErrorV1, GenerationGitJoinV1, GenerationGitWatermarkV1,
-    GitFileContentIdentityV1,
+    GenerationGitEvidenceScopeV1, GenerationGitFileJoinStateV1, GenerationGitFileOnlyReasonV1,
+    GenerationGitJoinCoverageV1, GenerationGitJoinErrorV1, GenerationGitJoinV1,
+    GenerationGitWatermarkV1, GitFileContentIdentityV1,
 };
 use tracedecay::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_domain::{
@@ -72,15 +72,26 @@ fn generation(
     (validated, manifest)
 }
 
-fn watermark(snapshot: &ValidatedCodeSnapshotV1) -> GenerationGitWatermarkV1 {
-    GenerationGitWatermarkV1 {
+fn watermark(snapshot: &ValidatedCodeSnapshotV1, diff: &GitDiffV1) -> GenerationGitWatermarkV1 {
+    let mut watermark = GenerationGitWatermarkV1 {
         repository: snapshot.snapshot.repository.clone(),
-        worktree: snapshot.snapshot.worktree.clone(),
         source_revision: snapshot.snapshot.source_revision.clone(),
         snapshot_content_identity: snapshot.snapshot.content_identity.clone(),
+        scope: GenerationGitEvidenceScopeV1 {
+            worktree: snapshot.snapshot.worktree.clone(),
+            index_tree: Some(oid('e')),
+            tree: Some(oid('f')),
+            reference: snapshot.snapshot.reference.clone(),
+            options_digest: manifest_digest('8'),
+        },
+        diff_scope: diff.scope.clone(),
         git_snapshot_digest: manifest_digest('9'),
         captured_at: UtcMicros(11),
-    }
+    };
+    watermark.git_snapshot_digest = watermark
+        .recompute_evidence_digest(diff)
+        .expect("canonical Git evidence digest");
+    watermark
 }
 
 fn hunk(byte: char) -> GitHunkV1 {
@@ -142,7 +153,7 @@ fn working_staged_and_range_diffs_join_only_at_exact_watermarks() {
             &manifest,
             &snapshot,
             &diff,
-            &watermark(&snapshot),
+            &watermark(&snapshot, &diff),
             &contents,
         )
         .expect("exact Git/code generation join");
@@ -158,6 +169,92 @@ fn working_staged_and_range_diffs_join_only_at_exact_watermarks() {
             GenerationGitFileJoinStateV1::Exact
         );
     }
+}
+
+#[test]
+fn git_snapshot_digest_binds_both_hunk_sides() {
+    let (snapshot, manifest) = generation(vec![file(
+        "file.live",
+        "src/live.rs",
+        'a',
+        SnapshotFileDispositionV1::Present,
+    )]);
+    let diff = GitDiffV1 {
+        repository: id("repository.fixture"),
+        scope: GitDiffScopeV1::WorkingTree,
+        files: vec![text_diff("src/live.rs", None, GitChangeKindV1::Modified)],
+        coverage: GitCoverageV1::complete(),
+    };
+    let contents = vec![GitFileContentIdentityV1 {
+        path: "src/live.rs".to_owned(),
+        content_digest: content('a'),
+    }];
+    let evidence = watermark(&snapshot, &diff);
+
+    let mut old_side_drift = diff.clone();
+    old_side_drift.files[0].hunks[0].old_start = 2;
+    let mut new_side_drift = diff;
+    new_side_drift.files[0].hunks[0].new_start = 2;
+
+    for tampered in [old_side_drift, new_side_drift] {
+        assert_eq!(
+            GenerationGitJoinV1::join(&manifest, &snapshot, &tampered, &evidence, &contents),
+            Err(GenerationGitJoinErrorV1::StaleGitEvidence)
+        );
+    }
+}
+
+#[test]
+fn git_snapshot_digest_binds_worktree_index_tree_ref_and_options() {
+    let (snapshot, manifest) = generation(vec![file(
+        "file.live",
+        "src/live.rs",
+        'a',
+        SnapshotFileDispositionV1::Present,
+    )]);
+    let diff = GitDiffV1 {
+        repository: id("repository.fixture"),
+        scope: GitDiffScopeV1::WorkingTree,
+        files: vec![text_diff("src/live.rs", None, GitChangeKindV1::Modified)],
+        coverage: GitCoverageV1::complete(),
+    };
+    let contents = vec![GitFileContentIdentityV1 {
+        path: "src/live.rs".to_owned(),
+        content_digest: content('a'),
+    }];
+    let evidence = watermark(&snapshot, &diff);
+
+    let mut worktree_drift = evidence.clone();
+    worktree_drift.scope.worktree = Some(id("worktree.other"));
+    let mut index_drift = evidence.clone();
+    index_drift.scope.index_tree = Some(oid('a'));
+    let mut tree_drift = evidence.clone();
+    tree_drift.scope.tree = Some(oid('b'));
+    let mut ref_drift = evidence.clone();
+    ref_drift.scope.reference = Some(id("ref.other"));
+    let mut options_drift = evidence;
+    options_drift.scope.options_digest = manifest_digest('7');
+
+    assert_eq!(
+        GenerationGitJoinV1::join(&manifest, &snapshot, &diff, &worktree_drift, &contents),
+        Err(GenerationGitJoinErrorV1::WorktreeMismatch)
+    );
+    assert_eq!(
+        GenerationGitJoinV1::join(&manifest, &snapshot, &diff, &index_drift, &contents),
+        Err(GenerationGitJoinErrorV1::StaleGitEvidence)
+    );
+    assert_eq!(
+        GenerationGitJoinV1::join(&manifest, &snapshot, &diff, &tree_drift, &contents),
+        Err(GenerationGitJoinErrorV1::StaleGitEvidence)
+    );
+    assert_eq!(
+        GenerationGitJoinV1::join(&manifest, &snapshot, &diff, &ref_drift, &contents),
+        Err(GenerationGitJoinErrorV1::ReferenceMismatch)
+    );
+    assert_eq!(
+        GenerationGitJoinV1::join(&manifest, &snapshot, &diff, &options_drift, &contents),
+        Err(GenerationGitJoinErrorV1::StaleGitEvidence)
+    );
 }
 
 #[test]
@@ -233,7 +330,7 @@ fn rename_deletion_and_binary_evidence_preserve_native_git_typing() {
         &manifest,
         &snapshot,
         &diff,
-        &watermark(&snapshot),
+        &watermark(&snapshot, &diff),
         &contents,
     )
     .expect("typed non-text cases remain joinable");
@@ -280,7 +377,7 @@ fn stale_generation_or_content_watermarks_never_join() {
             &manifest,
             &snapshot,
             &diff,
-            &watermark(&snapshot),
+            &watermark(&snapshot, &diff),
             &contents,
         ),
         Err(GenerationGitJoinErrorV1::StaleGenerationWatermark)
@@ -292,7 +389,7 @@ fn stale_generation_or_content_watermarks_never_join() {
         'a',
         SnapshotFileDispositionV1::Present,
     )]);
-    let mut stale = watermark(&snapshot);
+    let mut stale = watermark(&snapshot, &diff);
     stale.snapshot_content_identity = content('e');
     assert_eq!(
         GenerationGitJoinV1::join(&manifest, &snapshot, &diff, &stale, &contents),

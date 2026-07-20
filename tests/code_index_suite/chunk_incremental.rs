@@ -1,14 +1,20 @@
 use std::fmt::Debug;
 
 use tracedecay::code_index::chunks::{CodeFileChunksV1, content_digest};
-use tracedecay::code_index::incremental::{
-    ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment,
+use tracedecay::code_index::generations::{
+    FileExtractionActionV1, FileExtractionPlanV1, GenerationIncrementPlanV1,
 };
+use tracedecay::code_index::incremental::{
+    ChunkIncrementErrorV1, GenerationChunkManifestV1, materialize_generation_increment,
+    plan_chunk_increment,
+};
+use tracedecay::code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, CodeSearchDocumentV1,
-    CodeSearchEligibilityV1, FileOccurrenceId, LanguageDescriptorRevision, PolicyRevisionId,
-    SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolOccurrenceId,
+    CodeSearchEligibilityV1, FileIdentityDigest, FileOccurrenceId, LanguageDescriptorRevision,
+    LineageKindV1, ManifestDigest, PolicyRevisionId, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
 };
 
 fn id<T>(value: &str) -> T
@@ -165,6 +171,136 @@ fn noop_generation_reuses_every_chunk_and_schedules_zero_projection_work() {
         change.prior_digest.is_some() && change.prior_digest == change.current_digest
     }));
     changes.validate().expect("changes validate");
+}
+
+#[test]
+fn carried_chunks_rematerialize_generation_local_occurrence_ids() {
+    let prior_generation = generation(1);
+    let current_generation = generation(2);
+    let prior_file = baseline_file(&prior_generation, "file.a.1", "src/lib.rs");
+    let current_file = prior_file
+        .rematerialize_for_generation(
+            current_generation.clone(),
+            id::<FileOccurrenceId>("file.a.2"),
+        )
+        .expect("rematerialized carried file");
+
+    assert_eq!(current_file.document.generation_id, current_generation);
+    assert_eq!(
+        current_file.document.file_occurrence_id.as_str(),
+        "file.a.2"
+    );
+    assert_eq!(current_file.chunks.len(), prior_file.chunks.len());
+    for (prior_chunk, current_chunk) in prior_file.chunks.iter().zip(&current_file.chunks) {
+        assert_eq!(current_chunk.id, prior_chunk.id);
+        assert_eq!(current_chunk.content_digest, prior_chunk.content_digest);
+        assert_eq!(
+            current_chunk.anchor.generation_id,
+            current_file.document.generation_id
+        );
+        assert_eq!(
+            current_chunk.anchor.file_occurrence_id,
+            current_file.document.file_occurrence_id
+        );
+        match (
+            &prior_chunk.anchor.symbol_occurrence_id,
+            &current_chunk.anchor.symbol_occurrence_id,
+        ) {
+            (Some(prior), Some(current)) => assert_ne!(prior, current),
+            (None, None) => {}
+            other => panic!("symbol occurrence shape changed during carry-forward: {other:?}"),
+        }
+    }
+    current_file
+        .validate()
+        .expect("rematerialized file validates");
+
+    let prior = manifest(&prior_generation, vec![prior_file]);
+    let current = manifest(&current_generation, vec![current_file]);
+    let changes = plan_chunk_increment(Some(&prior), &current).expect("reuse plan");
+
+    assert!(changes.added_or_changed.is_empty());
+    assert!(changes.deleted.is_empty());
+    assert_eq!(changes.reused.len(), current.chunks().len());
+}
+
+#[test]
+fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuity() {
+    let prior_generation = generation(1);
+    let current_generation = generation(2);
+    let prior_file = baseline_file(&prior_generation, "file.a.1", "src/lib.rs");
+    let prior_symbols = prior_file
+        .chunks
+        .iter()
+        .filter_map(|chunk| {
+            chunk
+                .anchor
+                .symbol_occurrence_id
+                .as_ref()
+                .map(|occurrence| LineageSymbolRecordV1 {
+                    occurrence: occurrence.clone(),
+                    identity: id::<SymbolIdentityDigest>(&format!(
+                        "sha256:{}",
+                        if chunk.sanitized_text.as_str().contains("alpha") {
+                            "a".repeat(64)
+                        } else {
+                            "b".repeat(64)
+                        }
+                    )),
+                    qualified_name: if chunk.sanitized_text.as_str().contains("alpha") {
+                        "crate::alpha"
+                    } else {
+                        "crate::beta"
+                    }
+                    .to_owned(),
+                    kind: "function".to_owned(),
+                    file_identity: id::<FileIdentityDigest>(&format!("sha256:{}", "f".repeat(64))),
+                    content_digest: chunk.content_digest.clone(),
+                })
+        })
+        .collect();
+    let prior_symbols =
+        GenerationSymbolIndexV1::new(prior_generation.clone(), prior_symbols).expect("prior index");
+    let plan = GenerationIncrementPlanV1 {
+        prior_generation: prior_generation.clone(),
+        rebuild_triggers: vec![],
+        invalidation_digest: id::<ManifestDigest>(&format!("sha256:{}", "d".repeat(64))),
+        files: vec![FileExtractionPlanV1 {
+            logical_path: "src/lib.rs".to_owned(),
+            action: FileExtractionActionV1::CarryForward {
+                file_occurrence_id: id("file.a.2"),
+                prior_file_occurrence_id: id("file.a.1"),
+                content_digest: prior_file.document.content_digest.clone(),
+            },
+        }],
+        capture_changed_files: vec![],
+        carried_forward: 1,
+        reextract: 0,
+        deleted: 0,
+    };
+
+    let materialized = materialize_generation_increment(
+        &plan,
+        current_generation.clone(),
+        &[prior_file],
+        vec![],
+        &prior_symbols,
+        vec![],
+    )
+    .expect("carry-forward materializes");
+
+    assert_eq!(materialized.chunks.generation_id(), &current_generation);
+    assert_eq!(materialized.symbols.generation_id, current_generation);
+    assert_eq!(materialized.lineage.len(), 2);
+    assert!(
+        materialized
+            .lineage
+            .iter()
+            .all(|candidate| candidate.kind == LineageKindV1::Unchanged)
+    );
+    for candidate in &materialized.lineage {
+        assert_ne!(candidate.prior_occurrence, candidate.current_occurrence);
+    }
 }
 
 #[test]

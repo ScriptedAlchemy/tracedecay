@@ -1,8 +1,9 @@
 use tracedecay::code_index::generations::GenerationPlanner;
 use tracedecay::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay::code_index::test_attribution::{
-    GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinV1,
-    TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1, TestAttributionWatermarkV1,
+    GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinErrorV1,
+    GenerationTestJoinV1, TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
+    TestAttributionWatermarkV1,
 };
 use tracedecay_domain::{
     CodeGenerationManifestV1, ContentDigest, GenerationTestAttributionV1, ManifestDigest,
@@ -67,8 +68,10 @@ fn watermark(
     snapshot: &ValidatedCodeSnapshotV1,
     manifest: &CodeGenerationManifestV1,
     coverage: TestAttributionJoinInputCoverageV1,
+    attributions: &[GenerationTestAttributionV1],
+    occurrences: &[TestAttributionOccurrenceV1],
 ) -> TestAttributionWatermarkV1 {
-    TestAttributionWatermarkV1 {
+    let mut watermark = TestAttributionWatermarkV1 {
         generation_id: manifest.generation_id.clone(),
         snapshot_digest: manifest.snapshot_digest.clone(),
         content_identity: snapshot.snapshot.content_identity.clone(),
@@ -76,7 +79,11 @@ fn watermark(
         attribution_revision: id("test-map.v1"),
         evidence_digest: manifest_digest('9'),
         coverage,
-    }
+    };
+    watermark.evidence_digest = watermark
+        .recompute_evidence_digest(attributions, occurrences)
+        .expect("canonical attribution evidence digest");
+    watermark
 }
 
 fn occurrences() -> Vec<TestAttributionOccurrenceV1> {
@@ -111,18 +118,22 @@ fn attribution(
 #[test]
 fn exact_occurrence_content_binds_current_attribution() {
     let (snapshot, manifest) = generation();
+    let attributions = vec![attribution(
+        &manifest,
+        TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+    )];
+    let occurrence_evidence = occurrences();
     let joined = GenerationTestJoinV1::join(
         &manifest,
         &snapshot,
-        &[attribution(
-            &manifest,
-            TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
-        )],
-        &occurrences(),
+        &attributions,
+        &occurrence_evidence,
         &watermark(
             &snapshot,
             &manifest,
             TestAttributionJoinInputCoverageV1::Complete,
+            &attributions,
+            &occurrence_evidence,
         ),
     )
     .expect("exact test attribution join");
@@ -161,16 +172,19 @@ fn every_declared_attribution_evidence_class_stays_typed() {
         .copied()
         .map(|class| attribution(&manifest, class))
         .collect();
+    let occurrence_evidence = occurrences();
 
     let joined = GenerationTestJoinV1::join(
         &manifest,
         &snapshot,
         &attributions,
-        &occurrences(),
+        &occurrence_evidence,
         &watermark(
             &snapshot,
             &manifest,
             TestAttributionJoinInputCoverageV1::Complete,
+            &attributions,
+            &occurrence_evidence,
         ),
     )
     .expect("all evidence classes remain representable");
@@ -202,6 +216,71 @@ fn every_declared_attribution_evidence_class_stays_typed() {
 }
 
 #[test]
+fn tampered_evidence_digest_never_binds_attribution_as_current() {
+    let (snapshot, manifest) = generation();
+    let attributions = vec![attribution(
+        &manifest,
+        TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+    )];
+    let occurrence_evidence = occurrences();
+    let mut evidence = watermark(
+        &snapshot,
+        &manifest,
+        TestAttributionJoinInputCoverageV1::Complete,
+        &attributions,
+        &occurrence_evidence,
+    );
+    evidence.evidence_digest = manifest_digest('8');
+
+    assert_eq!(
+        GenerationTestJoinV1::join(
+            &manifest,
+            &snapshot,
+            &attributions,
+            &occurrence_evidence,
+            &evidence,
+        ),
+        Err(GenerationTestJoinErrorV1::StaleAttributionWatermark)
+    );
+}
+
+#[test]
+fn attribution_evidence_digest_is_canonical_across_input_order() {
+    let (snapshot, manifest) = generation();
+    let attributions = vec![
+        attribution(
+            &manifest,
+            TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+        ),
+        attribution(
+            &manifest,
+            TestAttributionEvidenceClassV1::ConservativeDependencyCandidates,
+        ),
+    ];
+    let occurrences = occurrences();
+    let watermark = watermark(
+        &snapshot,
+        &manifest,
+        TestAttributionJoinInputCoverageV1::Complete,
+        &attributions,
+        &occurrences,
+    );
+    let mut reversed_attributions = attributions.clone();
+    reversed_attributions.reverse();
+    let mut reversed_occurrences = occurrences.clone();
+    reversed_occurrences.reverse();
+
+    assert_eq!(
+        watermark
+            .recompute_evidence_digest(&attributions, &occurrences)
+            .expect("canonical digest"),
+        watermark
+            .recompute_evidence_digest(&reversed_attributions, &reversed_occurrences)
+            .expect("canonical digest")
+    );
+}
+
+#[test]
 fn generation_source_and_content_drift_are_typed_partial_not_current() {
     let (snapshot, manifest) = generation();
     let mut stale_generation = attribution(
@@ -220,11 +299,12 @@ fn generation_source_and_content_drift_are_typed_partial_not_current() {
     );
     let mut occurrence_evidence = occurrences();
     occurrence_evidence[0].content_digest = content('c');
+    let attributions = vec![stale_generation, stale_source, current];
 
     let joined = GenerationTestJoinV1::join(
         &manifest,
         &snapshot,
-        &[stale_generation, stale_source, current],
+        &attributions,
         &occurrence_evidence,
         &watermark(
             &snapshot,
@@ -232,6 +312,8 @@ fn generation_source_and_content_drift_are_typed_partial_not_current() {
             TestAttributionJoinInputCoverageV1::Partial {
                 reason: "coverage collector truncated".to_owned(),
             },
+            &attributions,
+            &occurrence_evidence,
         ),
     )
     .expect("drift remains typed evidence");
