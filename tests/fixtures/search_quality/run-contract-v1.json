@@ -1,8 +1,8 @@
 {
   "artifact_files": [
     {
-      "byte_len": 18717,
-      "digest": "sha256:00dec5af9054f472e3902c484a0cb9e0869fbf98e9ab3de6dd002377b542ebb9",
+      "byte_len": 19325,
+      "digest": "sha256:755b128735144fd097ccf5603c960bfdc5254d07427a59df44aae97cd6391b99",
       "path": "queries-v1.jsonl"
     },
     {
@@ -11,8 +11,8 @@
       "path": "judgments-development-v1.jsonl"
     },
     {
-      "byte_len": 2094,
-      "digest": "sha256:416168d8e8178f83cc99918ad823ce450f027db90a84226835906978fb58fa86",
+      "byte_len": 2813,
+      "digest": "sha256:4fbe72f416d3b85811043f568ff49894a0b2e6590c466c96e92947908c01ecca",
       "path": "snapshots-v1.jsonl"
     },
     {
@@ -36,13 +36,13 @@
       "path": "authorization-canaries-v1.jsonl"
     },
     {
-      "byte_len": 1003,
-      "digest": "sha256:96003373b2421816a922e2b74932020d5eeae98455be7556bf9a3ff1a71a1222",
+      "byte_len": 1367,
+      "digest": "sha256:2420559d80eb765162d1d31dae766a6d0b69db6bb77840c8753d3274a2f005fe",
       "path": "exact-admission-oracles-v1.jsonl"
     },
     {
-      "byte_len": 1633,
-      "digest": "sha256:3cdbf748bd31509c523f16b3041ad33e7b481ff5970938a0a54b8055a75e2243",
+      "byte_len": 1937,
+      "digest": "sha256:5fe42318ff59a51145db3461282bdb10503d9abea1a894a0e0cf65e5329522cd",
       "path": "contamination-partitions-v1.json"
     }
   ],
@@ -63,7 +63,7 @@
     "owner-search-quality-lead"
   ],
   "development_label_file_digest": "sha256:2f091bd88586fb558b94773c997f77a97a4afd31c6569474d943126b76295276",
-  "digest": "sha256:bb0c5281ead36f99e0bf97b8ace70ae1743939639e883c814d57f2963175c749",
+  "digest": "sha256:96defd526a42c7858ba690f4fdbf6d6508305a961788f396393cb49c3f4d84b4",
   "execution_order": [
     "q-dev-001",
     "q-dev-002",
@@ -88,7 +88,7 @@
     "q-dev-021",
     "q-dev-022"
   ],
-  "fixture_manifest_digest": "sha256:3ed1e38d41625e0bbe113ff894756b119044c0dc15a11e1706a76b22219fcbc1",
+  "fixture_manifest_digest": "sha256:98b21aad688421f4a261aa46034e251e09ec52f45ac81605f7bf1382c4628677",
   "holdout_seal_digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de",
   "locked_outcomes_accessed": false,
   "measurement_tools": [
@@ -109,5 +109,5 @@
     "not_applicable_contract_only"
   ],
   "tokenizer_revision": "fixture-byte-tokenizer-v1",
-  "workload_file_digest": "sha256:00dec5af9054f472e3902c484a0cb9e0869fbf98e9ab3de6dd002377b542ebb9"
+  "workload_file_digest": "sha256:755b128735144fd097ccf5603c960bfdc5254d07427a59df44aae97cd6391b99"
 }

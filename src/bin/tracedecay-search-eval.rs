@@ -12,7 +12,7 @@ use tracedecay::search_eval::{
     CompareOptions, SealHoldoutOptions, compare, seal_holdout_labels, validate_fixture_root,
 };
 use tracedecay_domain::{
-    DecisionOwnerId, EvalOutcomeV1, FixtureContentDigest, HoldoutLabelAuthorityV1,
+    DecisionOwnerId, EvalOutcomeV1, EvidenceIndexV1, FixtureContentDigest, HoldoutLabelAuthorityV1,
     HoldoutRevealCapabilityV1, HoldoutSealV1, RunManifestV1,
 };
 
@@ -32,6 +32,16 @@ enum Command {
     Validate {
         #[arg(long, default_value = "tests/fixtures/search_quality")]
         fixtures: PathBuf,
+    },
+    /// Compute the canonical digest for a run manifest draft.
+    RehashRun {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Compute the canonical digest for an evidence-index draft.
+    RehashEvidence {
+        #[arg(long)]
+        input: PathBuf,
     },
     /// Compare one frozen run and emit one immutable terminal outcome.
     Compare {
@@ -168,6 +178,22 @@ fn main() -> ExitCode {
                 ExitCode::from(2),
             ),
         },
+        Command::RehashRun { input } => emit_operation(
+            "rehash_run",
+            (|| {
+                let run: RunManifestV1 = read_json_file(&input)?;
+                let digest = run.compute_digest().map_err(|error| error.to_string())?;
+                serde_json::to_value(digest).map_err(|error| error.to_string())
+            })(),
+        ),
+        Command::RehashEvidence { input } => emit_operation(
+            "rehash_evidence",
+            (|| {
+                let index: EvidenceIndexV1 = read_json_file(&input)?;
+                let digest = index.compute_digest().map_err(|error| error.to_string())?;
+                serde_json::to_value(digest).map_err(|error| error.to_string())
+            })(),
+        ),
         Command::Compare {
             fixtures,
             run_manifest,

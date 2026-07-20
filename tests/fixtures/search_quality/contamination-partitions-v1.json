@@ -33,6 +33,13 @@
       "query_ids": ["q-hold-004", "q-hold-006", "q-hold-008"],
       "repository_family_clusters": ["tracedecay-domain/root"],
       "rationale": "Sealed root-domain query identities; no labels or outcomes are present in Git."
+    },
+    {
+      "group_id": "cg-hold-cargo-slot",
+      "partition": "sealed_holdout",
+      "query_ids": ["q-hold-009"],
+      "repository_family_clusters": ["cargo-slot/root"],
+      "rationale": "Sealed cross-project exact-symbol fixture; only an authorized sanitized symbol contract is retained."
     }
   ]
 }

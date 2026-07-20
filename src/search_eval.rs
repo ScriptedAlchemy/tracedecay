@@ -857,7 +857,12 @@ fn validate_run_bindings(
     fixtures: &ValidatedFixtures,
 ) -> Result<(), SearchEvalError> {
     run.validate_against_workload(&fixtures.bundle.workload)?;
-    run.verify_digest()?;
+    let computed = run.compute_digest()?;
+    if run.digest != computed {
+        return Err(SearchEvalError::InvalidRun(format!(
+            "run manifest digest must be {computed}"
+        )));
+    }
     validate_run_bindings_raw(
         run,
         &fixtures.bundle.manifest,

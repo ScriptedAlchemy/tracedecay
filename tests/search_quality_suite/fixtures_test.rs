@@ -12,7 +12,7 @@ use crate::holdout::{self, HoldoutRevealGate, HoldoutSealStatus};
 #[test]
 fn manifest_loads_and_validates() {
     let manifest = fixtures::load_manifest();
-    assert_eq!(manifest.corpus.len(), 9, "corpus snapshot count");
+    assert_eq!(manifest.corpus.len(), 10, "corpus snapshot count");
     let partitions: BTreeSet<_> = manifest
         .partitions
         .iter()
@@ -22,7 +22,7 @@ fn manifest_loads_and_validates() {
         partitions,
         BTreeSet::from([
             (EvalPartitionV1::Development, 22),
-            (EvalPartitionV1::SealedHoldout, 8),
+            (EvalPartitionV1::SealedHoldout, 9),
         ]),
         "frozen partition spec"
     );
@@ -45,7 +45,7 @@ fn workload_loads_with_stable_digest_and_declared_groups() {
         "workload digest is deterministic across loads"
     );
     assert_eq!(first.development_queries().count(), 22);
-    assert_eq!(first.sealed_holdout_queries().count(), 8);
+    assert_eq!(first.sealed_holdout_queries().count(), 9);
     fixtures::validate_workload_against_manifest(&first, &manifest)
         .expect("workload declares only manifest groups and corpus documents");
 }

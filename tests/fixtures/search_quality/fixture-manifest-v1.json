@@ -2,8 +2,8 @@
   "adjudication_policy": "These checked-in development labels are single-authored contract fixtures and are not promotion authority. Any locked-quality run requires separately sealed, independently double-labeled, adjudicated labels and an audited reveal receipt.",
   "artifact_files": [
     {
-      "byte_len": 18717,
-      "digest": "sha256:00dec5af9054f472e3902c484a0cb9e0869fbf98e9ab3de6dd002377b542ebb9",
+      "byte_len": 19325,
+      "digest": "sha256:755b128735144fd097ccf5603c960bfdc5254d07427a59df44aae97cd6391b99",
       "path": "queries-v1.jsonl"
     },
     {
@@ -12,8 +12,8 @@
       "path": "judgments-development-v1.jsonl"
     },
     {
-      "byte_len": 2094,
-      "digest": "sha256:416168d8e8178f83cc99918ad823ce450f027db90a84226835906978fb58fa86",
+      "byte_len": 2813,
+      "digest": "sha256:4fbe72f416d3b85811043f568ff49894a0b2e6590c466c96e92947908c01ecca",
       "path": "snapshots-v1.jsonl"
     },
     {
@@ -37,13 +37,13 @@
       "path": "authorization-canaries-v1.jsonl"
     },
     {
-      "byte_len": 1003,
-      "digest": "sha256:96003373b2421816a922e2b74932020d5eeae98455be7556bf9a3ff1a71a1222",
+      "byte_len": 1367,
+      "digest": "sha256:2420559d80eb765162d1d31dae766a6d0b69db6bb77840c8753d3274a2f005fe",
       "path": "exact-admission-oracles-v1.jsonl"
     },
     {
-      "byte_len": 1633,
-      "digest": "sha256:3cdbf748bd31509c523f16b3041ad33e7b481ff5970938a0a54b8055a75e2243",
+      "byte_len": 1937,
+      "digest": "sha256:5fe42318ff59a51145db3461282bdb10503d9abea1a894a0e0cf65e5329522cd",
       "path": "contamination-partitions-v1.json"
     }
   ],
@@ -54,7 +54,8 @@
     "cg-dev-domain-research",
     "cg-dev-domain-root",
     "cg-hold-domain-research",
-    "cg-hold-domain-root"
+    "cg-hold-domain-root",
+    "cg-hold-cargo-slot"
   ],
   "corpus": [
     {
@@ -165,6 +166,18 @@
       ],
       "snapshot_path": "corpus/crates/tracedecay-domain/src/session.rs",
       "source_repository_path": "crates/tracedecay-domain/src/session.rs"
+    },
+    {
+      "byte_len": 182,
+      "content_digest": "sha256:21fbdbca75a12068a2e44e4c7468c6a9caa5dd31a0c3f7d4c5e1a9f325c95bd0",
+      "document_id": "doc-cargo-slot-main",
+      "language": "rust",
+      "privacy_domain_class": "project_fixture_public",
+      "scope_ids": [
+        "scope-cargo-slot"
+      ],
+      "snapshot_path": "corpus/cargo-slot/src/main.rs",
+      "source_repository_path": "src/main.rs"
     }
   ],
   "decision_owners": [
@@ -228,7 +241,7 @@
     },
     {
       "partition": "sealed_holdout",
-      "query_count": 8
+      "query_count": 9
     }
   ],
   "revision": 1,
