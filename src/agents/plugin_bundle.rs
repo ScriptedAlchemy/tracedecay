@@ -306,7 +306,10 @@ pub fn codex_files() -> Vec<(&'static str, &'static str)> {
 /// shared sources ship verbatim) + every skill file. Kimi ships no
 /// agents/rules/hooks in v1.
 pub fn kimi_files() -> Vec<(&'static str, &'static str)> {
-    compose(&[KIMI_MANIFEST_FILES, CLAUDE_COMMAND_FILES], all_skill_files())
+    compose(
+        &[KIMI_MANIFEST_FILES, CLAUDE_COMMAND_FILES],
+        all_skill_files(),
+    )
 }
 
 #[cfg(test)]
@@ -471,7 +474,9 @@ mod tests {
         // Every embedded skill file deploys under its shared skills/ path.
         for skill in GENERATED_SKILL_FILES {
             assert!(
-                files.iter().any(|(relative, _)| *relative == skill.relative),
+                files
+                    .iter()
+                    .any(|(relative, _)| *relative == skill.relative),
                 "kimi deploy set is missing {}",
                 skill.relative
             );
