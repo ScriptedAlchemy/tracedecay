@@ -947,6 +947,19 @@ pub enum MigrateAction {
         #[arg(long)]
         json: bool,
     },
+    /// Repair session-temporal state in profile store manifests.
+    #[command(name = "repair-sessions")]
+    RepairSessions {
+        /// Profile root containing projects/<project_id>/store_manifest.json files.
+        #[arg(long = "profile-root")]
+        profile_root: String,
+        /// Apply repairs. Omit for a read-only inventory.
+        #[arg(long)]
+        apply: bool,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove stale registry rows for projects whose canonical roots no longer exist.
     #[command(name = "registry-gc")]
     RegistryGc {

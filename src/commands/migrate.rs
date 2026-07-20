@@ -506,6 +506,84 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 );
             }
         }
+        MigrateAction::RepairSessions {
+            profile_root,
+            apply,
+            json,
+        } => {
+            let profile_root = PathBuf::from(profile_root);
+            let report = tracedecay::migrate::registry::scan_profile_store_manifests(
+                &profile_root,
+                tracedecay::tracedecay::current_timestamp(),
+            );
+            let stores = report
+                .plans
+                .iter()
+                .filter(|plan| {
+                    plan.status
+                        == tracedecay::migrate::registry::RegistryReconstructionStatus::Eligible
+                })
+                .filter_map(|plan| {
+                    plan.artifacts
+                        .iter()
+                        .find(|artifact| artifact.artifact_kind == "sessions_db")
+                        .map(|artifact| {
+                            (
+                                plan.project.project_id.clone(),
+                                profile_root.join(&artifact.relpath),
+                            )
+                        })
+                })
+                .filter(|(_, path)| path.is_file())
+                .collect::<Vec<_>>();
+            if !apply {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "apply": false,
+                            "candidate_count": stores.len(),
+                            "project_ids": stores.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "session repair: {} profile store candidate(s); rerun with --apply under exclusive maintenance",
+                        stores.len()
+                    );
+                }
+                return Ok(());
+            }
+            let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+                &profile_root,
+                "session temporal repair",
+            )?;
+            let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+                &lifecycle_lease,
+                &profile_root,
+                "session temporal repair",
+            )?;
+            let mut repaired = Vec::new();
+            for (project_id, path) in stores {
+                tracedecay::global_db::repair_session_temporal_store(&path).await?;
+                repaired.push(project_id);
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "apply": true,
+                        "repaired_count": repaired.len(),
+                        "project_ids": repaired,
+                    }))?
+                );
+            } else {
+                println!(
+                    "session repair applied to {} profile store(s)",
+                    repaired.len()
+                );
+            }
+        }
         MigrateAction::RegistryGc {
             prefix,
             apply,

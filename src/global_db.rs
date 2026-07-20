@@ -19,7 +19,7 @@ use serde_json::Value as JsonValue;
 
 pub use tracedecay_store::ParseOffset;
 
-use crate::db::DatabaseAuthority;
+use crate::db::{Database, DatabaseAuthority};
 use crate::errors::TraceDecayError;
 use crate::sessions::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
@@ -358,6 +358,15 @@ pub struct GlobalDbInner {
     db: LibsqlDatabase,
     _authority: DatabaseAuthority,
     _slot: Option<GlobalDbSlot>,
+}
+
+/// Offline maintenance entry point for repairing session-temporal schema state
+/// before a full [`GlobalDb`] invariant open. Callers must hold the profile's
+/// exclusive maintenance lease and database scope.
+pub async fn repair_session_temporal_store(db_path: &Path) -> crate::errors::Result<()> {
+    let authority = DatabaseAuthority::for_runtime(db_path, "repair session temporal store")?;
+    let (db, _) = Database::open(db_path, &authority).await?;
+    session_temporal::ensure_session_temporal_schema(db.conn()).await
 }
 
 pub(crate) struct GlobalDbWriterConnection<'a> {
