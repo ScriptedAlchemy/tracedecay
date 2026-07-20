@@ -3630,3 +3630,41 @@ async fn search_code_projects_matches_any_whitespace_term() {
         "remote credential text must not be searchable: {remote_matches:?}"
     );
 }
+
+#[tokio::test]
+async fn reopen_removes_only_unstarted_refresh_reservations() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO session_refresh_operations (
+                session_id, operation_id, request_digest, target_frontier_json,
+                state, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 'running', 100, 100)",
+            libsql::params![
+                "session.orphan",
+                "operation.orphan",
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "{\"observed_through\":1,\"committed_through\":0}"
+            ],
+        )
+        .await
+        .unwrap();
+    drop(db);
+
+    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT COUNT(*) FROM session_refresh_operations
+             WHERE session_id = 'session.orphan'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+}

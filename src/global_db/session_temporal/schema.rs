@@ -967,6 +967,9 @@ pub(in crate::global_db) async fn ensure_session_temporal_schema(
     }
 
     let rebuild_fts = version.is_none() || temporal_fts_is_missing(conn).await?;
+    if version.is_some() {
+        remove_unstarted_refresh_reservations(conn).await?;
+    }
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -985,6 +988,37 @@ pub(in crate::global_db) async fn ensure_session_temporal_schema(
             applied_at = excluded.applied_at
          WHERE session_temporal_schema_migrations.version < excluded.version",
         params![MIGRATION_NAME, SESSION_TEMPORAL_SCHEMA_VERSION],
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    Ok(())
+}
+
+async fn remove_unstarted_refresh_reservations(conn: &Connection) -> crate::errors::Result<()> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS session_refresh_operations_delete_guard_v1;
+         DELETE FROM session_refresh_operations
+         WHERE state = 'running'
+           AND NOT EXISTS (
+               SELECT 1 FROM session_refresh_bindings
+               WHERE session_refresh_bindings.session_id = session_refresh_operations.session_id
+                 AND session_refresh_bindings.operation_id = session_refresh_operations.operation_id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM session_refresh_progress
+               WHERE session_refresh_progress.session_id = session_refresh_operations.session_id
+                 AND session_refresh_progress.operation_id = session_refresh_operations.operation_id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM session_refresh_batch_bindings
+               WHERE session_refresh_batch_bindings.session_id = session_refresh_operations.session_id
+                 AND session_refresh_batch_bindings.operation_id = session_refresh_operations.operation_id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM session_refresh_receipts
+               WHERE session_refresh_receipts.session_id = session_refresh_operations.session_id
+                 AND session_refresh_receipts.operation_id = session_refresh_operations.operation_id
+           );",
     )
     .await
     .map_err(|error| global_db_operation_error(OPERATION, error))?;
