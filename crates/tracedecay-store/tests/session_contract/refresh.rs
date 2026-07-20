@@ -1,3 +1,6 @@
+// Contract-test adapters keep the trait's `impl Future` signature shape
+// explicit; the bodies are the async implementation.
+#![allow(clippy::manual_async_fn)]
 use super::common::*;
 use super::*;
 
@@ -78,7 +81,7 @@ fn terminal_refresh_requests_expose_adapter_fields_without_receipt_conversion() 
         operation_id.clone(),
         session_id.clone(),
         complete_frontier,
-        expected_coverage.clone(),
+        expected_coverage,
     )
     .unwrap();
     assert_eq!(completion.operation_id(), &operation_id);
@@ -90,7 +93,7 @@ fn terminal_refresh_requests_expose_adapter_fields_without_receipt_conversion() 
         operation_id.clone(),
         session_id.clone(),
         partial_frontier,
-        expected_coverage.clone(),
+        expected_coverage,
         "source_unavailable",
     )
     .unwrap();
@@ -104,7 +107,7 @@ fn terminal_refresh_requests_expose_adapter_fields_without_receipt_conversion() 
         operation_id.clone(),
         session_id.clone(),
         partial_frontier,
-        expected_coverage.clone(),
+        expected_coverage,
     );
     assert_eq!(cancellation.operation_id(), &operation_id);
     assert_eq!(cancellation.session_id(), &session_id);
