@@ -1,13 +1,16 @@
 use std::collections::BTreeSet;
 
 use tracedecay_domain::configuration::{
-    AccessRuleId, AuthorityRef, CapabilityResolutionContextV1, CredentialKindV1,
-    CredentialReferenceId, CredentialReferenceMetadataV1, RuleEffect, ScopeAccessRule,
-    ScopeAccessSubjectV1, ScopeSourceBinding, SourceBindingId, SourceKindV1, UserProfileId,
-    WorktreePlacementModeV1, resolve_restrictive_capabilities, safe_work_topology_policy_v1,
+    AccessRuleId, AuthorityRef, CapabilityResolutionContextV1, ConfigurationGrantId,
+    ConfigurationGrantReceiptId, ConfigurationMutationEffectV1,
+    ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
+    ConfigurationMutationSinkV1, ConfigurationRevisionId, CredentialKindV1, CredentialReferenceId,
+    CredentialReferenceMetadataV1, RuleEffect, ScopeAccessRule, ScopeAccessSubjectV1,
+    ScopeSourceBinding, SourceBindingId, SourceKindV1, UserProfileId, WorktreePlacementModeV1,
+    resolve_restrictive_capabilities, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::{
-    ActorId, CapabilityId, LocatorDigest, ManifestDigest, ProjectId, UtcMicros,
+    AccessPolicyDigest, ActorId, CapabilityId, LocatorDigest, ManifestDigest, ProjectId, UtcMicros,
 };
 
 fn id<T>(value: &str) -> T
@@ -130,4 +133,83 @@ fn credential_metadata_has_no_plaintext_value_surface() {
     assert!(encoded.get("plaintext").is_none());
     assert!(encoded.get("secret").is_none());
     assert!(encoded.get("reference_digest").is_some());
+}
+
+fn mutation_receipt() -> ConfigurationMutationGrantReceiptV1 {
+    ConfigurationMutationGrantReceiptV1::issue(
+        id::<ConfigurationGrantReceiptId>("configuration.grant-receipt.fixture"),
+        id::<ConfigurationGrantId>("configuration.grant.fixture"),
+        id::<ActorId>("actor.fixture"),
+        ConfigurationMutationOperationV1::DirectMutation,
+        digest('d'),
+        id::<ConfigurationRevisionId>("configuration.revision.fixture"),
+        7,
+        AccessPolicyDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
+        ConfigurationMutationSinkV1::ConfigurationStore,
+        ConfigurationMutationEffectV1::CommitConfigurationRevision,
+        UtcMicros(10),
+        UtcMicros(20),
+    )
+    .unwrap()
+}
+
+#[test]
+fn mutation_receipt_rejects_expiry_and_binding_replay() {
+    let receipt = mutation_receipt();
+    assert!(
+        receipt
+            .validate_for(
+                &receipt.actor_id,
+                ConfigurationMutationOperationV1::DirectMutation,
+                &receipt.scope_digest,
+                &receipt.expected_configuration_revision,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                UtcMicros(19),
+            )
+            .is_ok()
+    );
+    assert!(
+        receipt
+            .validate_for(
+                &receipt.actor_id,
+                ConfigurationMutationOperationV1::CredentialWrite,
+                &receipt.scope_digest,
+                &receipt.expected_configuration_revision,
+                ConfigurationMutationSinkV1::CredentialStore,
+                ConfigurationMutationEffectV1::WriteCredentialReference,
+                UtcMicros(19),
+            )
+            .is_err()
+    );
+    assert!(
+        receipt
+            .validate_for(
+                &receipt.actor_id,
+                ConfigurationMutationOperationV1::DirectMutation,
+                &receipt.scope_digest,
+                &receipt.expected_configuration_revision,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                UtcMicros(20),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn mutation_receipt_rejects_tampered_policy_or_scope() {
+    let receipt = mutation_receipt();
+    let mut tampered = serde_json::to_value(&receipt).unwrap();
+    tampered["policy_epoch"] = serde_json::json!(8);
+    assert!(
+        serde_json::from_value::<ConfigurationMutationGrantReceiptV1>(tampered)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+
+    let mut tampered = receipt;
+    tampered.scope_digest = digest('f');
+    assert!(tampered.validate().is_err());
 }

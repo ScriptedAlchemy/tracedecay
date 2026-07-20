@@ -17,6 +17,12 @@ struct CargoMetadata {
 struct CargoPackage {
     id: String,
     name: String,
+    dependencies: Vec<CargoDependency>,
+}
+
+#[derive(Deserialize)]
+struct CargoDependency {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -98,7 +104,12 @@ fn non_indexing_packages_exclude_grammars_structural_search_and_root_indexer() {
         "tree-sitter-language",
     ]);
 
-    for package in ["tracedecay-domain", "tracedecay-store"] {
+    for package in [
+        "tracedecay-application",
+        "tracedecay-domain",
+        "tracedecay-policy",
+        "tracedecay-store",
+    ] {
         let closure = dependency_closure(&metadata, package);
         let violations = closure
             .iter()
@@ -114,4 +125,25 @@ fn non_indexing_packages_exclude_grammars_structural_search_and_root_indexer() {
             violations.join(", ")
         );
     }
+}
+
+#[test]
+fn policy_package_has_only_pure_value_dependencies() {
+    let metadata = cargo_metadata();
+    let policy = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == "tracedecay-policy")
+        .expect("workspace policy package");
+    let actual = policy
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected = BTreeSet::from(["serde", "serde_json", "tracedecay-domain"]);
+
+    assert_eq!(
+        actual, expected,
+        "policy must not depend on I/O, stores, transports, models, or configuration resolution"
+    );
 }

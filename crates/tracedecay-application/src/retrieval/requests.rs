@@ -1,0 +1,192 @@
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::{
+    EphemeralSanitizedQueryViewV1, FileOccurrenceId, Pr9FallbackSubpayload, RetrievalAnchorId,
+    SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1,
+};
+
+use crate::error::ApplicationContractError;
+use crate::result::OpaqueCursor;
+
+pub const MAX_APPLICATION_PAGE_SIZE: u32 = 1_000;
+
+/// Bounded opaque page request. Resume authorization occurs before an adapter
+/// decodes or hydrates the cursor.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PageRequest {
+    pub page_size: u32,
+    pub cursor: Option<OpaqueCursor>,
+}
+
+impl PageRequest {
+    pub fn first(page_size: u32) -> Result<Self, ApplicationContractError> {
+        Self::new(page_size, None)
+    }
+
+    pub fn new(
+        page_size: u32,
+        cursor: Option<OpaqueCursor>,
+    ) -> Result<Self, ApplicationContractError> {
+        if page_size == 0 || page_size > MAX_APPLICATION_PAGE_SIZE {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "retrieval page size",
+            });
+        }
+        Ok(Self { page_size, cursor })
+    }
+}
+
+/// Bounded output projection chosen by a concrete use case.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultProjection {
+    Summary,
+    Evidence,
+    ReferencesOnly,
+}
+
+/// Stable semantic ordering; adapters may not replace it with transport order.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalOrder {
+    Relevance,
+    SourcePosition,
+    TemporalDescending,
+    StableIdentity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetrievalRequestMeta {
+    pub temporal: TemporalModeV1,
+    pub page: PageRequest,
+    pub projection: ResultProjection,
+    pub order: RetrievalOrder,
+}
+
+impl RetrievalRequestMeta {
+    pub fn current(page: PageRequest, projection: ResultProjection, order: RetrievalOrder) -> Self {
+        Self {
+            temporal: TemporalModeV1::Current,
+            page,
+            projection,
+            order,
+        }
+    }
+}
+
+/// Concrete PR9-backed symbol retrieval request. Its query view is
+/// receipt/sanitization-bound and intentionally non-serializable.
+#[derive(Debug)]
+pub struct SymbolSearchRequest {
+    pub query: EphemeralSanitizedQueryViewV1,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl SymbolSearchRequest {
+    pub fn new(
+        query: EphemeralSanitizedQueryViewV1,
+        page: PageRequest,
+        projection: ResultProjection,
+        order: RetrievalOrder,
+    ) -> Result<Self, ApplicationContractError> {
+        Ok(Self {
+            query,
+            meta: RetrievalRequestMeta::current(page, projection, order),
+        })
+    }
+}
+
+/// The application-facing PR9 fallback boundary. The exact/lexical/graph
+/// subpayload is preserved byte-for-byte by the owning PR9 lane.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolSearchResult {
+    pub pr9_fallback: Pr9FallbackSubpayload,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceLinesRequest {
+    pub file: FileOccurrenceId,
+    pub span: SourceSpan,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceReference {
+    pub anchor: RetrievalAnchorId,
+    pub span: SourceSpan,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceLinesResult {
+    pub references: Vec<SourceReference>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphCallersRequest {
+    pub symbol: SymbolOccurrenceId,
+    pub maximum_depth: u32,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphCallersResult {
+    pub callers: Vec<SymbolOccurrenceId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AffectedTestsRequest {
+    pub symbol: SymbolOccurrenceId,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AffectedTestsResult {
+    pub tests: Vec<SymbolOccurrenceId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLookupRequest {
+    pub session_id: SessionId,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLookupResult {
+    pub anchors: Vec<RetrievalAnchorId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorExpandRequest {
+    pub anchor: RetrievalAnchorId,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorExpandResult {
+    pub anchors: Vec<RetrievalAnchorId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HealthReadRequest {
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HealthReadResult {
+    pub status: String,
+}

@@ -4384,7 +4384,9 @@ dependencies = [
  "tokio",
  "toml",
  "tower",
+ "tracedecay-application",
  "tracedecay-domain",
+ "tracedecay-policy",
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",
@@ -4401,6 +4403,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-application"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracedecay-domain",
+ "tracedecay-policy",
+ "tracedecay-tool-catalog",
+]
+
+[[package]]
 name = "tracedecay-domain"
 version = "0.1.0"
 dependencies = [
@@ -4408,6 +4422,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tracedecay-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracedecay-domain",
 ]
 
 [[package]]

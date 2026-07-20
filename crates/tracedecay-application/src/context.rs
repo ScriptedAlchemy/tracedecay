@@ -1,0 +1,381 @@
+use std::collections::BTreeSet;
+use std::fmt;
+
+use serde::{Deserialize, Deserializer, Serialize};
+use tracedecay_domain::{
+    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
+    canonical_sha256,
+};
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+use crate::error::ApplicationContractError;
+
+const RESOLVED_SCOPE_DIGEST_DOMAIN: &str = "tracedecay.application.scope.v1";
+
+macro_rules! application_id {
+    ($($name:ident => $field:literal),+ $(,)?) => {$(
+        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, ApplicationContractError> {
+                let value = value.into();
+                validate_identifier(&value, $field)?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = ApplicationContractError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    )+};
+}
+
+application_id!(
+    RequestId => "request id",
+    CapabilityGrantId => "capability grant id",
+    CancellationTokenId => "cancellation token id",
+);
+
+fn validate_identifier(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || value.chars().any(char::is_control)
+    {
+        return Err(ApplicationContractError::InvalidIdentifier { field });
+    }
+    Ok(())
+}
+
+/// The resolved PR11 scope is one exact project/repository/worktree root.
+///
+/// Paths, CWDs, labels, and mutable branch spellings are deliberately absent.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedScope {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub reference: Option<RefId>,
+    pub scope_digest: ManifestDigest,
+}
+
+impl ResolvedScope {
+    pub fn new(
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+        worktree_id: WorktreeId,
+        reference: Option<RefId>,
+    ) -> Result<Self, ApplicationContractError> {
+        project_id.validate()?;
+        repository_id.validate()?;
+        worktree_id.validate()?;
+        if let Some(reference) = &reference {
+            reference.validate()?;
+        }
+        let mut scope = Self {
+            project_id,
+            repository_id,
+            worktree_id,
+            reference,
+            scope_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))?,
+        };
+        scope.scope_digest = scope.compute_digest()?;
+        Ok(scope)
+    }
+
+    pub fn compute_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
+        Ok(canonical_sha256(&(
+            RESOLVED_SCOPE_DIGEST_DOMAIN,
+            &self.project_id,
+            &self.repository_id,
+            &self.worktree_id,
+            &self.reference,
+        ))?)
+    }
+
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.project_id.validate()?;
+        self.repository_id.validate()?;
+        self.worktree_id.validate()?;
+        if let Some(reference) = &self.reference {
+            reference.validate()?;
+        }
+        self.scope_digest.validate()?;
+        if self.scope_digest != self.compute_digest()? {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "resolved scope digest",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Disclosure ceiling carried by an immutable grant and revalidated at sinks.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum DisclosureClass {
+    Metadata,
+    Evidence,
+    Sensitive,
+}
+
+/// Immutable, pre-resolved grant input. The application may narrow or reject
+/// it, but cannot issue, renew, or widen it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityGrantSnapshot {
+    pub grant_id: CapabilityGrantId,
+    pub revision: u64,
+    pub digest: ManifestDigest,
+    pub issuer: ActorId,
+    pub issued_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub scope: ResolvedScope,
+    pub allowed_capabilities: BTreeSet<CapabilityId>,
+    pub allowed_use_cases: BTreeSet<UseCaseId>,
+    pub disclosure: DisclosureClass,
+}
+
+impl CapabilityGrantSnapshot {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        grant_id: CapabilityGrantId,
+        revision: u64,
+        digest: ManifestDigest,
+        issuer: ActorId,
+        issued_at: UtcMicros,
+        expires_at: UtcMicros,
+        scope: ResolvedScope,
+        allowed_capabilities: BTreeSet<CapabilityId>,
+        allowed_use_cases: BTreeSet<UseCaseId>,
+        disclosure: DisclosureClass,
+    ) -> Result<Self, ApplicationContractError> {
+        let grant = Self {
+            grant_id,
+            revision,
+            digest,
+            issuer,
+            issued_at,
+            expires_at,
+            scope,
+            allowed_capabilities,
+            allowed_use_cases,
+            disclosure,
+        };
+        grant.validate()?;
+        Ok(grant)
+    }
+
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        if self.revision == 0 {
+            return Err(ApplicationContractError::ZeroValue {
+                field: "capability grant revision",
+            });
+        }
+        self.digest.validate()?;
+        self.issuer.validate()?;
+        self.scope.validate()?;
+        if self.expires_at <= self.issued_at {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "capability grant validity",
+            });
+        }
+        if self.allowed_capabilities.is_empty() || self.allowed_use_cases.is_empty() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "capability grant operation set",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn is_expired_at(&self, observed_at: UtcMicros) -> bool {
+        observed_at >= self.expires_at
+    }
+}
+
+/// One immutable deadline supplied by the caller or upstream admission layer.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Deadline {
+    pub expires_at: UtcMicros,
+}
+
+impl Deadline {
+    pub fn new(expires_at: UtcMicros) -> Result<Self, ApplicationContractError> {
+        Ok(Self { expires_at })
+    }
+
+    pub fn is_elapsed_at(&self, observed_at: UtcMicros) -> bool {
+        observed_at >= self.expires_at
+    }
+}
+
+/// Immutable cancellation observation. Runtime cancellation execution belongs
+/// to the caller or owning runtime, never to this application crate.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum CancellationState {
+    Active,
+    Cancelled { requested_at: UtcMicros },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CancellationContext {
+    pub token_id: CancellationTokenId,
+    pub state: CancellationState,
+}
+
+impl CancellationContext {
+    pub fn active(token_id: impl Into<String>) -> Result<Self, ApplicationContractError> {
+        Ok(Self {
+            token_id: CancellationTokenId::new(token_id)?,
+            state: CancellationState::Active,
+        })
+    }
+
+    pub fn cancelled(
+        token_id: impl Into<String>,
+        requested_at: UtcMicros,
+    ) -> Result<Self, ApplicationContractError> {
+        Ok(Self {
+            token_id: CancellationTokenId::new(token_id)?,
+            state: CancellationState::Cancelled { requested_at },
+        })
+    }
+
+    pub const fn is_cancelled(&self) -> bool {
+        matches!(self.state, CancellationState::Cancelled { .. })
+    }
+}
+
+/// Admission state observed at a caller-supplied time. No wall clock is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestAdmission {
+    Admitted,
+    Cancelled,
+    TimedOut,
+}
+
+/// Transport-neutral request context required by every application use case.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestContext {
+    actor: ActorId,
+    scope: ResolvedScope,
+    grant: CapabilityGrantSnapshot,
+    request_id: RequestId,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+}
+
+impl RequestContext {
+    pub fn new(
+        actor: ActorId,
+        scope: ResolvedScope,
+        grant: CapabilityGrantSnapshot,
+        request_id: RequestId,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Result<Self, ApplicationContractError> {
+        let context = Self {
+            actor,
+            scope,
+            grant,
+            request_id,
+            deadline,
+            cancellation,
+        };
+        context.validate()?;
+        Ok(context)
+    }
+
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.actor.validate()?;
+        self.scope.validate()?;
+        self.grant.validate()?;
+        if self.scope != self.grant.scope {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "request context grant scope",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn actor(&self) -> &ActorId {
+        &self.actor
+    }
+
+    pub fn scope(&self) -> &ResolvedScope {
+        &self.scope
+    }
+
+    pub fn grant(&self) -> &CapabilityGrantSnapshot {
+        &self.grant
+    }
+
+    pub fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+
+    pub fn deadline(&self) -> &Deadline {
+        &self.deadline
+    }
+
+    pub fn cancellation(&self) -> &CancellationContext {
+        &self.cancellation
+    }
+
+    pub fn with_deadline(mut self, deadline: Deadline) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
+    pub fn with_cancellation(mut self, cancellation: CancellationContext) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    pub fn admission_at(&self, observed_at: UtcMicros) -> RequestAdmission {
+        if self.cancellation.is_cancelled() {
+            RequestAdmission::Cancelled
+        } else if self.deadline.is_elapsed_at(observed_at) || self.grant.is_expired_at(observed_at)
+        {
+            RequestAdmission::TimedOut
+        } else {
+            RequestAdmission::Admitted
+        }
+    }
+
+    pub fn allows(&self, capability_id: &CapabilityId, use_case_id: &UseCaseId) -> bool {
+        self.grant.scope == self.scope
+            && self.grant.allowed_capabilities.contains(capability_id)
+            && self.grant.allowed_use_cases.contains(use_case_id)
+    }
+}

@@ -24,24 +24,48 @@ const QUERY_ALLOWED_PACKAGES: &[&str] = &[
     "sha2",
     "thiserror",
     "tracedecay-domain",
+    "tracedecay-policy",
     "tracedecay-store",
     "tracedecay-tool-catalog",
     "zeroize",
 ];
 const PR8_WORKSPACE_MANIFESTS: &[&str] = &[
     "Cargo.toml",
+    "crates/tracedecay-application/Cargo.toml",
     "crates/tracedecay-domain/Cargo.toml",
+    "crates/tracedecay-policy/Cargo.toml",
     "crates/tracedecay-store/Cargo.toml",
     "crates/tracedecay-tool-catalog/Cargo.toml",
 ];
 const PR8_TARGET_SNAPSHOT: &[&str] = &[
+    "tracedecay-application|tracedecay_application|lib|crates/tracedecay-application/src/lib.rs",
+    "tracedecay-application|authorization_non_disclosure|test|crates/tracedecay-application/tests/authorization_non_disclosure.rs",
+    "tracedecay-application|authorization_recheck|test|crates/tracedecay-application/tests/authorization_recheck.rs",
+    "tracedecay-application|catalog_contributions|test|crates/tracedecay-application/tests/catalog_contributions.rs",
+    "tracedecay-application|deadline_cancellation|test|crates/tracedecay-application/tests/deadline_cancellation.rs",
+    "tracedecay-application|diagnostic_provider_identity|test|crates/tracedecay-application/tests/diagnostic_provider_identity.rs",
+    "tracedecay-application|effect_receipts|test|crates/tracedecay-application/tests/effect_receipts.rs",
+    "tracedecay-application|evidence_contract|test|crates/tracedecay-application/tests/evidence_contract.rs",
+    "tracedecay-application|feedback_cycle|test|crates/tracedecay-application/tests/feedback_cycle.rs",
+    "tracedecay-application|planner_boundary|test|crates/tracedecay-application/tests/planner_boundary.rs",
+    "tracedecay-application|retrieval_primitives|test|crates/tracedecay-application/tests/retrieval_primitives.rs",
+    "tracedecay-application|stream_contract|test|crates/tracedecay-application/tests/stream_contract.rs",
     "tracedecay-domain|tracedecay_domain|lib|crates/tracedecay-domain/src/lib.rs",
     "tracedecay-domain|code_search_contract|test|crates/tracedecay-domain/tests/code_search_contract.rs",
+    "tracedecay-domain|configuration_contract|test|crates/tracedecay-domain/tests/configuration_contract.rs",
+    "tracedecay-domain|feedback_contract|test|crates/tracedecay-domain/tests/feedback_contract.rs",
+    "tracedecay-domain|git_index_transaction_contract|test|crates/tracedecay-domain/tests/git_index_transaction_contract.rs",
     "tracedecay-domain|integration_catalog_contract|test|crates/tracedecay-domain/tests/integration_catalog_contract.rs",
     "tracedecay-domain|observation_contract|test|crates/tracedecay-domain/tests/observation_contract.rs",
+    "tracedecay-domain|repository_state_contract|test|crates/tracedecay-domain/tests/repository_state_contract.rs",
     "tracedecay-domain|search_eval_acceptance_contract|test|crates/tracedecay-domain/tests/search_eval_acceptance_contract.rs",
     "tracedecay-domain|session_contract|test|crates/tracedecay-domain/tests/session_contract.rs",
+    "tracedecay-policy|tracedecay_policy|lib|crates/tracedecay-policy/src/lib.rs",
+    "tracedecay-policy|routing_admission|test|crates/tracedecay-policy/tests/routing_admission.rs",
+    "tracedecay-policy|sink_recheck|test|crates/tracedecay-policy/tests/sink_recheck.rs",
+    "tracedecay-policy|source_authorization|test|crates/tracedecay-policy/tests/source_authorization.rs",
     "tracedecay-store|tracedecay_store|lib|crates/tracedecay-store/src/lib.rs",
+    "tracedecay-store|configuration_contract|test|crates/tracedecay-store/tests/configuration_contract.rs",
     "tracedecay-store|diagnostics_contract|test|crates/tracedecay-store/tests/diagnostics_contract.rs",
     "tracedecay-store|session_contract|test|crates/tracedecay-store/tests/session_contract.rs",
     "tracedecay-tool-catalog|tracedecay_tool_catalog|lib|crates/tracedecay-tool-catalog/src/lib.rs",
@@ -56,6 +80,7 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay|agent_suite|test|tests/agent_suite/main.rs",
     "tracedecay|architecture_boundaries|test|tests/architecture_boundaries/main.rs",
     "tracedecay|automation_runner_test|test|tests/automation_runner_test/main.rs",
+    "tracedecay|catalog_composition_contract|test|tests/catalog_composition_contract.rs",
     "tracedecay|code_index_chunks|bench|benches/code_index_chunks.rs",
     "tracedecay|code_index_suite|test|tests/code_index_suite/main.rs",
     "tracedecay|core_cli_suite|test|tests/core_cli_suite/main.rs",
@@ -327,7 +352,9 @@ fn parse_cargo_source_layout(
 fn expected_pr8_package_name(manifest_path: &Path) -> Option<&'static str> {
     match manifest_path.to_str() {
         Some("Cargo.toml") => Some("tracedecay"),
+        Some("crates/tracedecay-application/Cargo.toml") => Some("tracedecay-application"),
         Some("crates/tracedecay-domain/Cargo.toml") => Some("tracedecay-domain"),
+        Some("crates/tracedecay-policy/Cargo.toml") => Some("tracedecay-policy"),
         Some("crates/tracedecay-store/Cargo.toml") => Some("tracedecay-store"),
         Some("crates/tracedecay-tool-catalog/Cargo.toml") => Some("tracedecay-tool-catalog"),
         _ => None,
@@ -477,7 +504,7 @@ fn git_tracked_rust_sources(
     repository: &Path,
     source_roots: &BTreeSet<PathBuf>,
 ) -> Result<BTreeSet<PathBuf>, String> {
-    let tracked = git_tracked_paths(repository)?;
+    let tracked = tracked_paths_with_required_manifests(repository)?;
     // Validate the live worktree rather than assuming the index and filesystem
     // are identical. During a normal unstaged module move, `git ls-files`
     // still names the deleted source while the replacement module is
@@ -589,7 +616,7 @@ pub(crate) struct PhysicalManifestLayout {
 pub(crate) fn physical_manifest_layout(
     repository: &Path,
 ) -> Result<PhysicalManifestLayout, String> {
-    let tracked = git_tracked_paths(repository)?;
+    let tracked = tracked_paths_with_required_manifests(repository)?;
     let live_tracked: Vec<_> = tracked
         .into_iter()
         .filter(|path| fs::symlink_metadata(repository.join(path)).is_ok())
@@ -622,6 +649,17 @@ pub(crate) fn git_tracked_paths(repository: &Path) -> Result<Vec<PathBuf>, Strin
                 .map_err(|error| format!("git-tracked path is not UTF-8: {error}"))
         })
         .collect::<Result<Vec<_>, _>>()
+}
+
+fn tracked_paths_with_required_manifests(repository: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = git_tracked_paths(repository)?;
+    for required in PR8_WORKSPACE_MANIFESTS {
+        let required = PathBuf::from(required);
+        if repository.join(&required).is_file() && !paths.contains(&required) {
+            paths.push(required);
+        }
+    }
+    Ok(paths)
 }
 
 pub(crate) fn inspect_physical_manifest_paths(
@@ -905,7 +943,10 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
     let temporary = tempfile::tempdir().expect("create metadata fixture");
     let repository = temporary.path();
     let root_id = "path+file:///workspace#root@0.1.0";
+    let application_id =
+        "path+file:///workspace/crates/tracedecay-application#tracedecay-application@0.1.0";
     let domain_id = "path+file:///workspace/crates/domain#domain@0.1.0";
+    let policy_id = "path+file:///workspace/crates/tracedecay-policy#tracedecay-policy@0.1.0";
     let store_id = "path+file:///workspace/crates/store#store@0.1.0";
     let catalog_id = "path+file:///workspace/crates/tool-catalog#tool-catalog@0.1.0";
     let metadata = serde_json::json!({
@@ -921,12 +962,28 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
                 ]
             },
             {
+                "id": application_id,
+                "name": "tracedecay-application",
+                "manifest_path": repository.join("crates/tracedecay-application/Cargo.toml"),
+                "targets": [
+                    { "src_path": repository.join("crates/tracedecay-application/src/lib.rs") }
+                ]
+            },
+            {
                 "id": domain_id,
                 "name": "tracedecay-domain",
                 "manifest_path": repository.join("crates/tracedecay-domain/Cargo.toml"),
                 "targets": [
                     { "src_path": repository.join("crates/tracedecay-domain/src/lib.rs") },
                     { "src_path": repository.join("crates/tracedecay-domain/tests/boundary.rs") }
+                ]
+            },
+            {
+                "id": policy_id,
+                "name": "tracedecay-policy",
+                "manifest_path": repository.join("crates/tracedecay-policy/Cargo.toml"),
+                "targets": [
+                    { "src_path": repository.join("crates/tracedecay-policy/src/lib.rs") }
                 ]
             },
             {
@@ -951,7 +1008,14 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
                 "targets": [{ "src_path": "/outside/registry/serde/src/lib.rs" }]
             }
         ],
-        "workspace_members": [root_id, domain_id, store_id, catalog_id]
+        "workspace_members": [
+            root_id,
+            application_id,
+            domain_id,
+            policy_id,
+            store_id,
+            catalog_id
+        ]
     });
 
     let layout = parse_cargo_source_layout(
@@ -964,8 +1028,10 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
         layout.target_roots,
         [
             PathBuf::from("build.rs"),
+            PathBuf::from("crates/tracedecay-application/src/lib.rs"),
             PathBuf::from("crates/tracedecay-domain/src/lib.rs"),
             PathBuf::from("crates/tracedecay-domain/tests/boundary.rs"),
+            PathBuf::from("crates/tracedecay-policy/src/lib.rs"),
             PathBuf::from("crates/tracedecay-store/src/lib.rs"),
             PathBuf::from("crates/tracedecay-tool-catalog/src/lib.rs"),
             PathBuf::from("src/lib.rs"),
@@ -979,7 +1045,9 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
         [
             PathBuf::from("benches"),
             PathBuf::from("build.rs"),
+            PathBuf::from("crates/tracedecay-application"),
             PathBuf::from("crates/tracedecay-domain"),
+            PathBuf::from("crates/tracedecay-policy"),
             PathBuf::from("crates/tracedecay-store"),
             PathBuf::from("crates/tracedecay-tool-catalog"),
             PathBuf::from("examples"),

@@ -220,6 +220,7 @@ CREATE TABLE IF NOT EXISTS configuration_migration_quarantine (
 CREATE TABLE IF NOT EXISTS configuration_migration_receipts (
     receipt_name TEXT NOT NULL,
     source_snapshot_digest TEXT NOT NULL,
+    initial_revision_id TEXT NOT NULL,
     initial_snapshot_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     PRIMARY KEY(receipt_name, source_snapshot_digest)
@@ -252,6 +253,12 @@ BEGIN SELECT RAISE(ABORT, 'configuration revisions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_revisions_immutable_delete
 BEFORE DELETE ON configuration_revisions
 BEGIN SELECT RAISE(ABORT, 'configuration revisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_entries_immutable_update
+BEFORE UPDATE ON configuration_entries
+BEGIN SELECT RAISE(ABORT, 'configuration entries are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_entries_immutable_delete
+BEFORE DELETE ON configuration_entries
+BEGIN SELECT RAISE(ABORT, 'configuration entries are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_topology_policy_immutable_update
 BEFORE UPDATE ON configuration_topology_policies
 BEGIN SELECT RAISE(ABORT, 'configuration topology policies are immutable'); END;
@@ -270,6 +277,18 @@ BEGIN SELECT RAISE(ABORT, 'configuration topology protected refs are immutable')
 CREATE TRIGGER IF NOT EXISTS configuration_topology_protected_refs_immutable_delete
 BEFORE DELETE ON configuration_topology_protected_refs
 BEGIN SELECT RAISE(ABORT, 'configuration topology protected refs are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_source_bindings_immutable_update
+BEFORE UPDATE ON configuration_source_bindings
+BEGIN SELECT RAISE(ABORT, 'configuration source bindings are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_source_bindings_immutable_delete
+BEFORE DELETE ON configuration_source_bindings
+BEGIN SELECT RAISE(ABORT, 'configuration source bindings are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_access_rules_immutable_update
+BEFORE UPDATE ON configuration_access_rules
+BEGIN SELECT RAISE(ABORT, 'configuration access rules are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_access_rules_immutable_delete
+BEFORE DELETE ON configuration_access_rules
+BEGIN SELECT RAISE(ABORT, 'configuration access rules are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_change_plans_immutable_update
 BEFORE UPDATE ON configuration_change_plans
 BEGIN SELECT RAISE(ABORT, 'configuration change plans are immutable'); END;
@@ -282,6 +301,12 @@ BEGIN SELECT RAISE(ABORT, 'configuration change operations are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_change_plan_operations_immutable_delete
 BEFORE DELETE ON configuration_change_plan_operations
 BEGIN SELECT RAISE(ABORT, 'configuration change operations are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_change_plan_events_immutable_update
+BEFORE UPDATE ON configuration_change_plan_events
+BEGIN SELECT RAISE(ABORT, 'configuration change plan events are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_change_plan_events_immutable_delete
+BEFORE DELETE ON configuration_change_plan_events
+BEGIN SELECT RAISE(ABORT, 'configuration change plan events are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_mutation_receipts_immutable_update
 BEFORE UPDATE ON configuration_mutation_receipts
 BEGIN SELECT RAISE(ABORT, 'configuration mutation receipts are immutable'); END;
@@ -294,6 +319,24 @@ BEGIN SELECT RAISE(ABORT, 'configuration audit events are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_audit_events_immutable_delete
 BEFORE DELETE ON configuration_audit_events
 BEGIN SELECT RAISE(ABORT, 'configuration audit events are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_migration_quarantine_immutable_update
+BEFORE UPDATE ON configuration_migration_quarantine
+BEGIN SELECT RAISE(ABORT, 'configuration migration quarantine is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_migration_quarantine_immutable_delete
+BEFORE DELETE ON configuration_migration_quarantine
+BEGIN SELECT RAISE(ABORT, 'configuration migration quarantine is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_migration_receipts_immutable_update
+BEFORE UPDATE ON configuration_migration_receipts
+BEGIN SELECT RAISE(ABORT, 'configuration migration receipts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_migration_receipts_immutable_delete
+BEFORE DELETE ON configuration_migration_receipts
+BEGIN SELECT RAISE(ABORT, 'configuration migration receipts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_credential_references_immutable_update
+BEFORE UPDATE ON configuration_credential_references
+BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_credential_references_immutable_delete
+BEFORE DELETE ON configuration_credential_references
+BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
 ";
 
 pub async fn ensure_configuration_schema(
@@ -301,4 +344,127 @@ pub async fn ensure_configuration_schema(
 ) -> Result<(), ConfigurationSchemaError> {
     connection.execute_batch(CONFIGURATION_SCHEMA_SQL).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn connection() -> (tempfile::TempDir, libsql::Connection) {
+        let directory = tempfile::tempdir().unwrap();
+        let database = libsql::Builder::new_local(directory.path().join("configuration.db"))
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .await
+            .unwrap();
+        ensure_configuration_schema(&connection).await.unwrap();
+        (directory, connection)
+    }
+
+    #[tokio::test]
+    async fn every_revision_owned_and_append_only_table_rejects_update_and_delete() {
+        let (_directory, connection) = connection().await;
+        connection
+            .execute_batch(
+                "INSERT INTO configuration_revisions VALUES
+                    ('revision.1', NULL, 'snapshot.1', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                     'actor.1', 'migration', 1);
+                 INSERT INTO configuration_entries VALUES
+                    ('revision.1', 'analyzer.settings.v1', 'project', 'project.1', 1, '{}');
+                 INSERT INTO configuration_topology_policies VALUES
+                    ('revision.1', 1, 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                     'existing_worktree_only', 'disabled', 0, 'require_clean', 'independent_review',
+                     1, 300, 'forbid_force_and_rebase', 'reject', 'disabled', 'critical_only', X'00');
+                 INSERT INTO configuration_topology_roots VALUES
+                    ('revision.1', 0, 'root.1',
+                     'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                     'sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 1);
+                 INSERT INTO configuration_topology_protected_refs VALUES
+                    ('revision.1', 0, 'native_default_branch',
+                     'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff', 'reject');
+                 INSERT INTO configuration_source_bindings VALUES
+                    ('revision.1', 'binding.1', 'cursor',
+                     'sha256:1111111111111111111111111111111111111111111111111111111111111111',
+                     'project', 'project.1', NULL,
+                     'sha256:2222222222222222222222222222222222222222222222222222222222222222');
+                 INSERT INTO configuration_access_rules VALUES
+                    ('revision.1', 'rule.1', 'actor', 'actor.1', 'actor', 'actor.1',
+                     'read', 'cursor', 'project', 'project.1', NULL, 'capability.read', 'deny', NULL);
+                 INSERT INTO configuration_change_plans VALUES
+                    ('plan.1', 'actor.1', 'revision.1',
+                     'sha256:3333333333333333333333333333333333333333333333333333333333333333',
+                     'sha256:4444444444444444444444444444444444444444444444444444444444444444',
+                     NULL,
+                     'sha256:5555555555555555555555555555555555555555555555555555555555555555',
+                     1, 10, 1);
+                 INSERT INTO configuration_change_plan_operations VALUES
+                    ('plan.1', 0, 1, X'00',
+                     'sha256:3333333333333333333333333333333333333333333333333333333333333333');
+                 INSERT INTO configuration_change_plan_events VALUES
+                    ('plan.1', 0, 'dry_run_created', NULL, 1);
+                 INSERT INTO configuration_mutation_receipts VALUES
+                    ('receipt.1', 'plan.1', 'actor.1', 'idempotency.1', 'revision.1', 'revision.1',
+                     'sha256:3333333333333333333333333333333333333333333333333333333333333333',
+                     'sha256:5555555555555555555555555555555555555555555555555555555555555555',
+                     'active',
+                     'sha256:6666666666666666666666666666666666666666666666666666666666666666', 1);
+                 INSERT INTO configuration_audit_events VALUES
+                    ('audit.1', 'actor.1', NULL, 'migration', 'revision.1', 'revision.1', NULL,
+                     'sha256:7777777777777777777777777777777777777777777777777777777777777777',
+                     NULL, NULL, NULL, 1);
+                 INSERT INTO configuration_migration_quarantine VALUES
+                    ('config_json',
+                     'sha256:8888888888888888888888888888888888888888888888888888888888888888',
+                     'unknown_key',
+                     'sha256:9999999999999999999999999999999999999999999999999999999999999999', 1);
+                 INSERT INTO configuration_migration_receipts VALUES
+                    ('configuration-control-plane-v1',
+                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab',
+                     'revision.1', 'snapshot.1', 1);
+                 INSERT INTO configuration_credential_references VALUES
+                    ('credential.1', 'api_token',
+                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac', 1, 0);",
+            )
+            .await
+            .unwrap();
+
+        let tables = [
+            "configuration_revisions",
+            "configuration_entries",
+            "configuration_topology_policies",
+            "configuration_topology_roots",
+            "configuration_topology_protected_refs",
+            "configuration_source_bindings",
+            "configuration_access_rules",
+            "configuration_change_plans",
+            "configuration_change_plan_operations",
+            "configuration_change_plan_events",
+            "configuration_mutation_receipts",
+            "configuration_audit_events",
+            "configuration_migration_quarantine",
+            "configuration_migration_receipts",
+            "configuration_credential_references",
+        ];
+        for table in tables {
+            assert!(
+                connection
+                    .execute(&format!("UPDATE {table} SET rowid = rowid"), ())
+                    .await
+                    .is_err(),
+                "{table} accepted an update"
+            );
+            assert!(
+                connection
+                    .execute(&format!("DELETE FROM {table}"), ())
+                    .await
+                    .is_err(),
+                "{table} accepted a delete"
+            );
+        }
+    }
 }

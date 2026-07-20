@@ -5,6 +5,7 @@
 //! guesses source bindings from CWD, host configuration, or registry adjacency.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 
 use thiserror::Error;
 use tracedecay_domain::canonical_sha256;
@@ -136,6 +137,7 @@ pub struct ConfigurationMigrationQuarantineEntryV1 {
 pub struct ConfigurationMigrationReceiptV1 {
     pub receipt_name: &'static str,
     pub source_snapshot_digest: ManifestDigest,
+    pub initial_revision_id: ConfigurationRevisionId,
     pub initial_snapshot_id: ConfigurationSnapshotId,
     pub created_at: UtcMicros,
 }
@@ -147,14 +149,16 @@ pub trait ConfigurationMigrationStore {
         &self,
         receipt_name: &'static str,
         source_snapshot_digest: &ManifestDigest,
-    ) -> Result<Option<ConfigurationMigrationReceiptV1>, ConfigurationMigrationError>;
+    ) -> impl Future<
+        Output = Result<Option<ConfigurationMigrationReceiptV1>, ConfigurationMigrationError>,
+    > + Send;
 
     fn commit_initial_migration(
         &self,
         receipt: &ConfigurationMigrationReceiptV1,
         resolution: &ConfigurationResolutionV1,
         quarantine: &[ConfigurationMigrationQuarantineEntryV1],
-    ) -> Result<(), ConfigurationMigrationError>;
+    ) -> impl Future<Output = Result<(), ConfigurationMigrationError>> + Send;
 }
 
 #[derive(Clone, Debug)]
@@ -183,7 +187,7 @@ pub enum ConfigurationMigrationError {
 /// Source bindings and access rules are quarantined rather than inferred; their
 /// registry defaults remain empty. A topology import must be complete and meet
 /// the protected-ref/history-rewrite floor, otherwise the safe default remains.
-pub fn migrate_legacy_configuration<Store>(
+pub async fn migrate_legacy_configuration<Store>(
     registry: &ConfigurationRegistry,
     input: &ReadonlyLegacyConfigurationInputV1,
     store: &Store,
@@ -194,10 +198,13 @@ where
 {
     input.validate()?;
     let source_snapshot_digest = input.snapshot_digest()?;
-    if let Some(receipt) = store.receipt(
-        CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME,
-        &source_snapshot_digest,
-    )? {
+    if let Some(receipt) = store
+        .receipt(
+            CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME,
+            &source_snapshot_digest,
+        )
+        .await?
+    {
         return Ok(ConfigurationMigrationOutcomeV1::AlreadyApplied(receipt));
     }
 
@@ -308,10 +315,13 @@ where
     let receipt = ConfigurationMigrationReceiptV1 {
         receipt_name: CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME,
         source_snapshot_digest,
+        initial_revision_id: input.target_revision_id.clone(),
         initial_snapshot_id: resolution.snapshot.snapshot_id.clone(),
         created_at: now,
     };
-    store.commit_initial_migration(&receipt, &resolution, &quarantine)?;
+    store
+        .commit_initial_migration(&receipt, &resolution, &quarantine)
+        .await?;
     Ok(ConfigurationMigrationOutcomeV1::Applied {
         receipt,
         imported_keys,
@@ -352,7 +362,7 @@ fn quarantine_entry(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     use super::*;
     use tracedecay_domain::configuration::{
@@ -363,8 +373,8 @@ mod tests {
 
     #[derive(Default)]
     struct Store {
-        receipt: RefCell<Option<ConfigurationMigrationReceiptV1>>,
-        quarantined: RefCell<Vec<ConfigurationMigrationQuarantineEntryV1>>,
+        receipt: Mutex<Option<ConfigurationMigrationReceiptV1>>,
+        quarantined: Mutex<Vec<ConfigurationMigrationQuarantineEntryV1>>,
     }
 
     impl ConfigurationMigrationStore for Store {
@@ -372,8 +382,10 @@ mod tests {
             &self,
             _receipt_name: &'static str,
             _source_snapshot_digest: &ManifestDigest,
-        ) -> Result<Option<ConfigurationMigrationReceiptV1>, ConfigurationMigrationError> {
-            Ok(self.receipt.borrow().clone())
+        ) -> impl Future<
+            Output = Result<Option<ConfigurationMigrationReceiptV1>, ConfigurationMigrationError>,
+        > + Send {
+            async move { Ok(self.receipt.lock().unwrap().clone()) }
         }
 
         fn commit_initial_migration(
@@ -381,10 +393,15 @@ mod tests {
             receipt: &ConfigurationMigrationReceiptV1,
             _resolution: &ConfigurationResolutionV1,
             quarantine: &[ConfigurationMigrationQuarantineEntryV1],
-        ) -> Result<(), ConfigurationMigrationError> {
-            *self.receipt.borrow_mut() = Some(receipt.clone());
-            self.quarantined.borrow_mut().extend_from_slice(quarantine);
-            Ok(())
+        ) -> impl Future<Output = Result<(), ConfigurationMigrationError>> + Send {
+            async move {
+                *self.receipt.lock().unwrap() = Some(receipt.clone());
+                self.quarantined
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(quarantine);
+                Ok(())
+            }
         }
     }
 
@@ -400,8 +417,8 @@ mod tests {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
     }
 
-    #[test]
-    fn legacy_source_bindings_are_quarantined_instead_of_becoming_authority() {
+    #[tokio::test]
+    async fn legacy_source_bindings_are_quarantined_instead_of_becoming_authority() {
         let input = ReadonlyLegacyConfigurationInputV1 {
             source_kind: LegacyConfigurationSourceKindV1::ConfigJson,
             target_layer: ConfigurationLayerIdV1::Project {
@@ -430,16 +447,31 @@ mod tests {
             &store,
             UtcMicros(1),
         )
+        .await
         .unwrap();
 
         assert!(matches!(
             outcome,
             ConfigurationMigrationOutcomeV1::Applied { .. }
         ));
-        assert_eq!(store.quarantined.borrow().len(), 1);
+        assert_eq!(store.quarantined.lock().unwrap().len(), 1);
         assert_eq!(
-            store.quarantined.borrow()[0].reason,
+            store.quarantined.lock().unwrap()[0].reason,
             ConfigurationMigrationQuarantineReasonV1::PathDerivedAuthority
         );
+
+        let replay = migrate_legacy_configuration(
+            &ConfigurationRegistry::core().unwrap(),
+            &input,
+            &store,
+            UtcMicros(2),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            replay,
+            ConfigurationMigrationOutcomeV1::AlreadyApplied(_)
+        ));
+        assert_eq!(store.quarantined.lock().unwrap().len(), 1);
     }
 }

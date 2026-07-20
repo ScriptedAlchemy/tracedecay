@@ -6,9 +6,10 @@ use std::fmt;
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
-    ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1,
-    CredentialKindV1, CredentialReferenceId, ProtectedChange, RedactedConfigurationChangeV1,
-    RestartRequirementV1, RollbackModeV1, SettingKey, SettingSensitivityV1,
+    ConfigurationMutationGrantReceiptV1, ConfigurationReceiptId, ConfigurationRevisionId,
+    ConfigurationSnapshotId, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
+    ProtectedChange, RedactedConfigurationChangeV1, RestartRequirementV1, RollbackModeV1,
+    SettingKey, SettingSensitivityV1,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros};
 
@@ -22,6 +23,28 @@ impl AuthorizedActor {
         self.actor_id
             .validate()
             .map_err(ConfigurationError::validation)
+    }
+}
+
+/// Mutation authority is never inferred from an actor identifier. It is a
+/// current policy/grant receipt whose complete binding is rechecked by the
+/// authorization port immediately before each durable effect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigurationMutationAuthority {
+    pub receipt: ConfigurationMutationGrantReceiptV1,
+}
+
+impl ConfigurationMutationAuthority {
+    pub fn actor(&self) -> AuthorizedActor {
+        AuthorizedActor {
+            actor_id: self.receipt.actor_id.clone(),
+        }
+    }
+
+    pub fn validate_integrity(&self) -> Result<(), ConfigurationError> {
+        self.receipt
+            .validate()
+            .map_err(|_| ConfigurationError::MutationAuthorityRejected)
     }
 }
 
@@ -183,6 +206,8 @@ pub enum ConfigurationError {
     ProjectlessProfileRequired,
     #[error("configuration idempotency key conflicts with prior input")]
     IdempotencyConflict,
+    #[error("configuration mutation authority is stale, expired, or tampered")]
+    MutationAuthorityRejected,
     #[error("configuration validation failed: {0}")]
     Validation(String),
     #[error("configuration authority is unavailable")]

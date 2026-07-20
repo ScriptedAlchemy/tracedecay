@@ -1,15 +1,16 @@
 //! Narrow ports consumed by configuration operations.
 
 use tracedecay_domain::configuration::{
-    ConfigurationSnapshotV1, CredentialReferenceMetadataV1, ProtectedApplyRequest, ProtectedChange,
-    ProtectedChangePlan,
+    ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationSnapshotV1,
+    CredentialReferenceMetadataV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
 };
 use tracedecay_domain::{AccessPolicyDigest, ManifestDigest, UtcMicros};
 
 use super::types::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
-    ConfigurationError, ConfigurationMutationReceipt, ConfigurationRollbackRequest,
-    DirectConfigurationMutation, WriteOnlyCredentialMutation,
+    ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
+    ConfigurationRollbackRequest, DirectConfigurationMutation, WriteOnlyCredentialMutation,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +48,28 @@ pub trait ConfigurationClock {
     fn now(&self) -> UtcMicros;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentConfigurationMutationAuthorizationV1 {
+    pub scope_digest: ManifestDigest,
+    pub policy_epoch: u64,
+    pub policy_digest: AccessPolicyDigest,
+}
+
+/// Current policy/grant recheck. Implementations consume the immutable policy
+/// decision/grant state; the configuration layer cannot mint or refresh a
+/// receipt and cannot infer authority from transport origin.
+pub trait ConfigurationMutationAuthorizationPort {
+    fn recheck(
+        &self,
+        receipt: &ConfigurationMutationGrantReceiptV1,
+        operation: ConfigurationMutationOperationV1,
+        expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
+        sink: ConfigurationMutationSinkV1,
+        effect: ConfigurationMutationEffectV1,
+        now: UtcMicros,
+    ) -> Result<CurrentConfigurationMutationAuthorizationV1, ConfigurationError>;
+}
+
 /// Transactional persistence boundary. Each `commit_*` method must atomically
 /// commit the new revision, receipt, audit event, and plan terminal state.
 pub trait ConfigurationControlStore {
@@ -61,14 +84,14 @@ pub trait ConfigurationControlStore {
 
     fn commit_direct(
         &self,
-        actor: &AuthorizedActor,
+        authority: &ConfigurationMutationAuthority,
         mutation: &DirectConfigurationMutation,
         expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
     ) -> Result<ConfigurationMutationReceipt, ConfigurationError>;
 
     fn commit_protected(
         &self,
-        actor: &AuthorizedActor,
+        authority: &ConfigurationMutationAuthority,
         request: &ProtectedApplyRequest,
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
@@ -76,13 +99,13 @@ pub trait ConfigurationControlStore {
 
     fn dry_run_rollback(
         &self,
-        actor: &AuthorizedActor,
+        authority: &ConfigurationMutationAuthority,
         rollback: &ConfigurationRollbackRequest,
     ) -> Result<ProtectedChangePlan, ConfigurationError>;
 
     fn apply_rollback(
         &self,
-        actor: &AuthorizedActor,
+        authority: &ConfigurationMutationAuthority,
         request: &ProtectedApplyRequest,
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
@@ -105,7 +128,7 @@ pub trait ConfigurationControlStore {
 pub trait CredentialWritePort {
     fn write_reference(
         &self,
-        actor: &AuthorizedActor,
+        authority: &ConfigurationMutationAuthority,
         write: &WriteOnlyCredentialMutation,
         expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
     ) -> Result<CredentialReferenceMetadataV1, ConfigurationError>;

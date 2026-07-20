@@ -88,11 +88,177 @@ configuration_string_id!(
     ConfigurationReceiptId => "configuration receipt id",
     ConfigurationAuditEventId => "configuration audit event id",
     ConfigurationIdempotencyKey => "configuration idempotency key",
+    ConfigurationGrantReceiptId => "configuration grant receipt id",
+    ConfigurationGrantId => "configuration grant id",
     CredentialReferenceId => "credential reference id",
     AnalyzerExecutableId => "analyzer executable id",
     AnalyzerLanguageId => "analyzer language id",
     AnalyzerEnvironmentVariable => "analyzer environment variable",
 );
+
+const CONFIGURATION_GRANT_RECEIPT_DIGEST_DOMAIN: &str = "tracedecay.configuration.grant-receipt.v1";
+
+/// Closed mutation operations that a policy/grant receipt may authorize.
+/// Read operations deliberately use separate discovery/read authorization.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationMutationOperationV1 {
+    DirectMutation,
+    CredentialWrite,
+    ProtectedDryRun,
+    ProtectedApply,
+    RollbackDryRun,
+    RollbackApply,
+}
+
+/// Sink at which the configuration effect will be admitted. A receipt for one
+/// sink cannot be replayed at another.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationMutationSinkV1 {
+    ConfigurationStore,
+    CredentialStore,
+    ConfigurationAudit,
+}
+
+/// Exact effect class admitted by policy. This prevents a read or preview
+/// receipt from authorizing a durable configuration or credential write.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationMutationEffectV1 {
+    AppendAuditOnly,
+    CreateProtectedChangePlan,
+    CommitConfigurationRevision,
+    WriteCredentialReference,
+}
+
+/// Immutable current-policy/grant receipt minted by the policy/application
+/// authorization boundary. Configuration operations verify its canonical
+/// digest locally and ask the policy port to recheck current grant, policy,
+/// scope, revision, sink, and effect state immediately before mutation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationMutationGrantReceiptV1 {
+    pub receipt_id: ConfigurationGrantReceiptId,
+    pub grant_id: ConfigurationGrantId,
+    pub actor_id: ActorId,
+    pub operation: ConfigurationMutationOperationV1,
+    pub scope_digest: ManifestDigest,
+    pub expected_configuration_revision: ConfigurationRevisionId,
+    pub policy_epoch: u64,
+    pub policy_digest: AccessPolicyDigest,
+    pub sink: ConfigurationMutationSinkV1,
+    pub effect: ConfigurationMutationEffectV1,
+    pub issued_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub receipt_digest: ManifestDigest,
+}
+
+impl ConfigurationMutationGrantReceiptV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue(
+        receipt_id: ConfigurationGrantReceiptId,
+        grant_id: ConfigurationGrantId,
+        actor_id: ActorId,
+        operation: ConfigurationMutationOperationV1,
+        scope_digest: ManifestDigest,
+        expected_configuration_revision: ConfigurationRevisionId,
+        policy_epoch: u64,
+        policy_digest: AccessPolicyDigest,
+        sink: ConfigurationMutationSinkV1,
+        effect: ConfigurationMutationEffectV1,
+        issued_at: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
+        let mut receipt = Self {
+            receipt_id,
+            grant_id,
+            actor_id,
+            operation,
+            scope_digest,
+            expected_configuration_revision,
+            policy_epoch,
+            policy_digest,
+            sink,
+            effect,
+            issued_at,
+            expires_at,
+            receipt_digest: canonical_sha256(&("pending",))?,
+        };
+        receipt.validate_fields()?;
+        receipt.receipt_digest = receipt.compute_digest()?;
+        Ok(receipt)
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.validate_fields()?;
+        if self.receipt_digest != self.compute_digest()? {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_for(
+        &self,
+        actor_id: &ActorId,
+        operation: ConfigurationMutationOperationV1,
+        scope_digest: &ManifestDigest,
+        expected_revision: &ConfigurationRevisionId,
+        sink: ConfigurationMutationSinkV1,
+        effect: ConfigurationMutationEffectV1,
+        now: UtcMicros,
+    ) -> Result<(), DomainError> {
+        self.validate()?;
+        if &self.actor_id != actor_id
+            || self.operation != operation
+            || &self.scope_digest != scope_digest
+            || &self.expected_configuration_revision != expected_revision
+            || self.sink != sink
+            || self.effect != effect
+            || now < self.issued_at
+            || now >= self.expires_at
+        {
+            return Err(DomainError::SnapshotMismatch {
+                field: "configuration mutation grant receipt",
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_fields(&self) -> Result<(), DomainError> {
+        self.receipt_id.validate()?;
+        self.grant_id.validate()?;
+        self.actor_id.validate()?;
+        self.scope_digest.validate()?;
+        self.expected_configuration_revision.validate()?;
+        self.policy_digest.validate()?;
+        if self.policy_epoch == 0 || self.expires_at <= self.issued_at {
+            return Err(DomainError::NonCanonical {
+                field: "configuration mutation grant receipt lifetime",
+            });
+        }
+        Ok(())
+    }
+
+    fn compute_digest(&self) -> Result<ManifestDigest, DomainError> {
+        canonical_sha256(&(
+            CONFIGURATION_GRANT_RECEIPT_DIGEST_DOMAIN,
+            &self.receipt_id,
+            &self.grant_id,
+            &self.actor_id,
+            self.operation,
+            &self.scope_digest,
+            &self.expected_configuration_revision,
+            self.policy_epoch,
+            &self.policy_digest,
+            self.sink,
+            self.effect,
+            self.issued_at,
+            self.expires_at,
+        ))
+    }
+}
 
 fn validate_canonical_label(value: &str, field: &'static str) -> Result<(), DomainError> {
     if value.is_empty() {

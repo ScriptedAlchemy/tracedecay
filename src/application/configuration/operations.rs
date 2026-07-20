@@ -1,9 +1,10 @@
 //! Application orchestration for revisioned configuration operations.
 
 use tracedecay_domain::configuration::{
-    ACCESS_RULES_SETTING_KEY, ChangePlanId, ConfigurationRevisionId, ConfigurationValueV1,
-    ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan, SOURCE_BINDINGS_SETTING_KEY,
-    SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ACCESS_RULES_SETTING_KEY, ChangePlanId, ConfigurationMutationEffectV1,
+    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
+    ConfigurationValueV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
+    SOURCE_BINDINGS_SETTING_KEY, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
@@ -13,13 +14,14 @@ use crate::config::scope_control::{
 };
 
 use super::ports::{
-    ConfigurationClock, ConfigurationControlStore, CredentialWritePort, ScopeResolutionPort,
-    ScopeRevalidationEvidenceV1,
+    ConfigurationClock, ConfigurationControlStore, ConfigurationMutationAuthorizationPort,
+    CredentialWritePort, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
 use super::types::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
-    ConfigurationError, ConfigurationMutationReceipt, ConfigurationRollbackRequest,
-    DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
+    ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
+    ConfigurationRollbackRequest, DirectConfigurationMutation, ResolvedSetting, SettingSummary,
+    WriteOnlyCredentialMutation,
 };
 
 /// One transport-neutral control-plane contract. CLI, MCP, HTTP, dashboard,
@@ -41,14 +43,14 @@ pub trait ConfigurationControlPlane {
 
     fn mutate_direct(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         mutation: DirectConfigurationMutation,
         expected_revision: ConfigurationRevisionId,
     ) -> Result<ConfigurationMutationReceipt, ConfigurationError>;
 
     fn write_credential(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         write: WriteOnlyCredentialMutation,
         expected_revision: ConfigurationRevisionId,
     ) -> Result<tracedecay_domain::configuration::CredentialReferenceMetadataV1, ConfigurationError>;
@@ -60,26 +62,26 @@ pub trait ConfigurationControlPlane {
 
     fn dry_run_protected_change(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         change: ProtectedChange,
         expected_revision: ConfigurationRevisionId,
     ) -> Result<ProtectedChangePlan, ConfigurationError>;
 
     fn apply_protected_change(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         request: ProtectedApplyRequest,
     ) -> Result<ConfigurationMutationReceipt, ConfigurationError>;
 
     fn dry_run_rollback(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         rollback: ConfigurationRollbackRequest,
     ) -> Result<ProtectedChangePlan, ConfigurationError>;
 
     fn apply_rollback(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         request: ProtectedApplyRequest,
     ) -> Result<ConfigurationMutationReceipt, ConfigurationError>;
 
@@ -90,22 +92,25 @@ pub trait ConfigurationControlPlane {
     ) -> Result<ConfigurationAuditPage, ConfigurationError>;
 }
 
-pub struct ConfigurationControlPlaneOperations<'a, Store, Scopes, Credentials, Clock> {
+pub struct ConfigurationControlPlaneOperations<'a, Store, Scopes, Credentials, Authorization, Clock>
+{
     registry: &'a ConfigurationRegistry,
     store: &'a Store,
     scopes: &'a Scopes,
     credentials: &'a Credentials,
+    authorization: &'a Authorization,
     clock: &'a Clock,
 }
 
-impl<'a, Store, Scopes, Credentials, Clock>
-    ConfigurationControlPlaneOperations<'a, Store, Scopes, Credentials, Clock>
+impl<'a, Store, Scopes, Credentials, Authorization, Clock>
+    ConfigurationControlPlaneOperations<'a, Store, Scopes, Credentials, Authorization, Clock>
 {
     pub fn new(
         registry: &'a ConfigurationRegistry,
         store: &'a Store,
         scopes: &'a Scopes,
         credentials: &'a Credentials,
+        authorization: &'a Authorization,
         clock: &'a Clock,
     ) -> Self {
         Self {
@@ -113,17 +118,19 @@ impl<'a, Store, Scopes, Credentials, Clock>
             store,
             scopes,
             credentials,
+            authorization,
             clock,
         }
     }
 }
 
-impl<Store, Scopes, Credentials, Clock> ConfigurationControlPlane
-    for ConfigurationControlPlaneOperations<'_, Store, Scopes, Credentials, Clock>
+impl<Store, Scopes, Credentials, Authorization, Clock> ConfigurationControlPlane
+    for ConfigurationControlPlaneOperations<'_, Store, Scopes, Credentials, Authorization, Clock>
 where
     Store: ConfigurationControlStore,
     Scopes: ScopeResolutionPort,
     Credentials: CredentialWritePort,
+    Authorization: ConfigurationMutationAuthorizationPort,
     Clock: ConfigurationClock,
 {
     fn list(&self, actor: AuthorizedActor) -> Result<Vec<SettingSummary>, ConfigurationError> {
@@ -184,11 +191,10 @@ where
 
     fn mutate_direct(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         mutation: DirectConfigurationMutation,
         expected_revision: ConfigurationRevisionId,
     ) -> Result<ConfigurationMutationReceipt, ConfigurationError> {
-        actor.validate()?;
         expected_revision
             .validate()
             .map_err(ConfigurationError::validation)?;
@@ -197,18 +203,24 @@ where
         if current.revision_id != expected_revision {
             return Err(ConfigurationError::RevisionConflict);
         }
+        self.authorize_mutation(
+            &authority,
+            ConfigurationMutationOperationV1::DirectMutation,
+            &expected_revision,
+            ConfigurationMutationSinkV1::ConfigurationStore,
+            ConfigurationMutationEffectV1::CommitConfigurationRevision,
+        )?;
         self.store
-            .commit_direct(&actor, &mutation, &expected_revision)
+            .commit_direct(&authority, &mutation, &expected_revision)
     }
 
     fn write_credential(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         write: WriteOnlyCredentialMutation,
         expected_revision: ConfigurationRevisionId,
     ) -> Result<tracedecay_domain::configuration::CredentialReferenceMetadataV1, ConfigurationError>
     {
-        actor.validate()?;
         expected_revision
             .validate()
             .map_err(ConfigurationError::validation)?;
@@ -216,8 +228,15 @@ where
         if current.revision_id != expected_revision {
             return Err(ConfigurationError::RevisionConflict);
         }
+        self.authorize_mutation(
+            &authority,
+            ConfigurationMutationOperationV1::CredentialWrite,
+            &expected_revision,
+            ConfigurationMutationSinkV1::CredentialStore,
+            ConfigurationMutationEffectV1::WriteCredentialReference,
+        )?;
         self.credentials
-            .write_reference(&actor, &write, &expected_revision)
+            .write_reference(&authority, &write, &expected_revision)
     }
 
     fn observed_state(
@@ -230,11 +249,10 @@ where
 
     fn dry_run_protected_change(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         change: ProtectedChange,
         expected_revision: ConfigurationRevisionId,
     ) -> Result<ProtectedChangePlan, ConfigurationError> {
-        actor.validate()?;
         expected_revision
             .validate()
             .map_err(ConfigurationError::validation)?;
@@ -243,7 +261,16 @@ where
         if current.revision_id != expected_revision {
             return Err(ConfigurationError::RevisionConflict);
         }
+        let current_authorization = self.authorize_mutation(
+            &authority,
+            ConfigurationMutationOperationV1::ProtectedDryRun,
+            &expected_revision,
+            ConfigurationMutationSinkV1::ConfigurationStore,
+            ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+        )?;
+        let actor = authority.actor();
         let evidence = self.scopes.resolve_protected_change(&actor, &change)?;
+        validate_authorization_evidence(&current_authorization, &evidence)?;
         let now = self.clock.now();
         let operation_digest = change
             .compute_digest()
@@ -278,41 +305,50 @@ where
 
     fn apply_protected_change(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         request: ProtectedApplyRequest,
     ) -> Result<ConfigurationMutationReceipt, ConfigurationError> {
-        actor.validate()?;
         let plan = self
             .store
             .load_plan(&request.plan_id)?
             .ok_or(ConfigurationError::PlanStale)?;
-        self.apply_plan(&actor, &request, &plan, false)
+        self.apply_plan(&authority, &request, &plan, false)
     }
 
     fn dry_run_rollback(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         rollback: ConfigurationRollbackRequest,
     ) -> Result<ProtectedChangePlan, ConfigurationError> {
-        actor.validate()?;
         rollback
             .target_revision_id
             .validate()
             .map_err(ConfigurationError::validation)?;
-        self.store.dry_run_rollback(&actor, &rollback)
+        let expected_revision = authority.receipt.expected_configuration_revision.clone();
+        let current = self.store.current()?;
+        if current.revision_id != expected_revision {
+            return Err(ConfigurationError::RevisionConflict);
+        }
+        self.authorize_mutation(
+            &authority,
+            ConfigurationMutationOperationV1::RollbackDryRun,
+            &expected_revision,
+            ConfigurationMutationSinkV1::ConfigurationStore,
+            ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+        )?;
+        self.store.dry_run_rollback(&authority, &rollback)
     }
 
     fn apply_rollback(
         &self,
-        actor: AuthorizedActor,
+        authority: ConfigurationMutationAuthority,
         request: ProtectedApplyRequest,
     ) -> Result<ConfigurationMutationReceipt, ConfigurationError> {
-        actor.validate()?;
         let plan = self
             .store
             .load_plan(&request.plan_id)?
             .ok_or(ConfigurationError::PlanStale)?;
-        self.apply_plan(&actor, &request, &plan, true)
+        self.apply_plan(&authority, &request, &plan, true)
     }
 
     fn audit(
@@ -330,17 +366,18 @@ where
     }
 }
 
-impl<Store, Scopes, Credentials, Clock>
-    ConfigurationControlPlaneOperations<'_, Store, Scopes, Credentials, Clock>
+impl<Store, Scopes, Credentials, Authorization, Clock>
+    ConfigurationControlPlaneOperations<'_, Store, Scopes, Credentials, Authorization, Clock>
 where
     Store: ConfigurationControlStore,
     Scopes: ScopeResolutionPort,
     Credentials: CredentialWritePort,
+    Authorization: ConfigurationMutationAuthorizationPort,
     Clock: ConfigurationClock,
 {
     fn apply_plan(
         &self,
-        actor: &AuthorizedActor,
+        authority: &ConfigurationMutationAuthority,
         request: &ProtectedApplyRequest,
         plan: &ProtectedChangePlan,
         rollback: bool,
@@ -354,13 +391,70 @@ where
         if current.revision_id != plan.base_revision_id {
             return Err(ConfigurationError::PlanStale);
         }
-        let evidence = self.scopes.revalidate_plan(actor, plan)?;
-        validate_frozen_evidence(plan, &evidence)?;
-        if rollback {
-            self.store.apply_rollback(actor, request, plan, &evidence)
+        let operation = if rollback {
+            ConfigurationMutationOperationV1::RollbackApply
         } else {
-            self.store.commit_protected(actor, request, plan, &evidence)
+            ConfigurationMutationOperationV1::ProtectedApply
+        };
+        let current_authorization = self.authorize_mutation(
+            authority,
+            operation,
+            &plan.base_revision_id,
+            ConfigurationMutationSinkV1::ConfigurationStore,
+            ConfigurationMutationEffectV1::CommitConfigurationRevision,
+        )?;
+        let actor = authority.actor();
+        if request.actor_id != actor.actor_id {
+            return Err(ConfigurationError::MutationAuthorityRejected);
         }
+        let evidence = self.scopes.revalidate_plan(&actor, plan)?;
+        validate_frozen_evidence(plan, &evidence)?;
+        validate_authorization_evidence(&current_authorization, &evidence)?;
+        if rollback {
+            self.store
+                .apply_rollback(authority, request, plan, &evidence)
+        } else {
+            self.store
+                .commit_protected(authority, request, plan, &evidence)
+        }
+    }
+
+    fn authorize_mutation(
+        &self,
+        authority: &ConfigurationMutationAuthority,
+        operation: ConfigurationMutationOperationV1,
+        expected_revision: &ConfigurationRevisionId,
+        sink: ConfigurationMutationSinkV1,
+        effect: ConfigurationMutationEffectV1,
+    ) -> Result<super::ports::CurrentConfigurationMutationAuthorizationV1, ConfigurationError> {
+        authority.validate_integrity()?;
+        let now = self.clock.now();
+        let current = self.authorization.recheck(
+            &authority.receipt,
+            operation,
+            expected_revision,
+            sink,
+            effect,
+            now,
+        )?;
+        authority
+            .receipt
+            .validate_for(
+                &authority.receipt.actor_id,
+                operation,
+                &current.scope_digest,
+                expected_revision,
+                sink,
+                effect,
+                now,
+            )
+            .map_err(|_| ConfigurationError::MutationAuthorityRejected)?;
+        if authority.receipt.policy_epoch != current.policy_epoch
+            || authority.receipt.policy_digest != current.policy_digest
+        {
+            return Err(ConfigurationError::MutationAuthorityRejected);
+        }
+        Ok(current)
     }
 }
 
@@ -424,6 +518,19 @@ fn validate_frozen_evidence(
     Ok(())
 }
 
+fn validate_authorization_evidence(
+    authorization: &super::ports::CurrentConfigurationMutationAuthorizationV1,
+    evidence: &ScopeRevalidationEvidenceV1,
+) -> Result<(), ConfigurationError> {
+    if authorization.scope_digest != evidence.resolved_scope_digest
+        || authorization.policy_epoch != evidence.policy_epoch
+        || authorization.policy_digest != evidence.authorization_policy_digest
+    {
+        return Err(ConfigurationError::MutationAuthorityRejected);
+    }
+    Ok(())
+}
+
 fn derive_plan_id(
     actor: &AuthorizedActor,
     base_revision_id: &ConfigurationRevisionId,
@@ -455,6 +562,15 @@ mod tests {
     use super::*;
     use crate::config::registry::ConfigurationRegistry;
     use tracedecay_domain::configuration::{AnalyzerSettingsV1, ConfigurationValueV1, SettingKey};
+    use tracedecay_domain::{AccessPolicyDigest, ManifestDigest};
+
+    fn digest(byte: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    fn policy_digest(byte: char) -> AccessPolicyDigest {
+        AccessPolicyDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
 
     #[test]
     fn direct_mutation_rejects_protected_control_settings() {
@@ -480,5 +596,30 @@ mod tests {
             },
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn current_authorization_must_match_scope_and_policy_evidence() {
+        let authorization = super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+            scope_digest: digest('a'),
+            policy_epoch: 7,
+            policy_digest: policy_digest('b'),
+        };
+        let evidence = ScopeRevalidationEvidenceV1 {
+            resolved_scope_digest: digest('a'),
+            membership_digest: None,
+            authorization_policy_digest: policy_digest('b'),
+            policy_epoch: 7,
+        };
+        assert!(validate_authorization_evidence(&authorization, &evidence).is_ok());
+
+        let stale = ScopeRevalidationEvidenceV1 {
+            policy_epoch: 8,
+            ..evidence
+        };
+        assert_eq!(
+            validate_authorization_evidence(&authorization, &stale),
+            Err(ConfigurationError::MutationAuthorityRejected)
+        );
     }
 }

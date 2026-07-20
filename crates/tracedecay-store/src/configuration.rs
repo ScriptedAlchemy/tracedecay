@@ -3,6 +3,8 @@
 //! Concrete SQLite mechanics live in the root adapter. This crate keeps
 //! storage ports typed, append-only, and free of transport/daemon concerns.
 
+use std::future::Future;
+
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ConfigurationAuditEvent, ConfigurationIdempotencyKey, ConfigurationReceiptId,
@@ -122,28 +124,33 @@ impl ConfigurationCommitV1 {
 
 /// Append-only configuration persistence contract.
 pub trait ConfigurationRevisionStore {
-    fn current_revision(&self) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1>;
+    fn current_revision(
+        &self,
+    ) -> impl Future<Output = ConfigurationStoreResult<ConfigurationRevisionRecordV1>> + Send;
 
     fn read_revision(
         &self,
         revision_id: &ConfigurationRevisionId,
-    ) -> ConfigurationStoreResult<Option<ConfigurationRevisionRecordV1>>;
+    ) -> impl Future<Output = ConfigurationStoreResult<Option<ConfigurationRevisionRecordV1>>> + Send;
 
-    fn save_change_plan(&self, plan: &ProtectedChangePlan) -> ConfigurationStoreResult<()>;
+    fn save_change_plan(
+        &self,
+        plan: &ProtectedChangePlan,
+    ) -> impl Future<Output = ConfigurationStoreResult<()>> + Send;
 
     fn read_change_plan(
         &self,
         plan_id: &tracedecay_domain::configuration::ChangePlanId,
-    ) -> ConfigurationStoreResult<Option<ProtectedChangePlan>>;
+    ) -> impl Future<Output = ConfigurationStoreResult<Option<ProtectedChangePlan>>> + Send;
 
     fn commit(
         &self,
         commit: ConfigurationCommitV1,
-    ) -> ConfigurationStoreResult<ConfigurationMutationReceiptV1>;
+    ) -> impl Future<Output = ConfigurationStoreResult<ConfigurationMutationReceiptV1>> + Send;
 
     fn audit(
         &self,
         after: Option<&tracedecay_domain::configuration::ConfigurationAuditEventId>,
         limit: usize,
-    ) -> ConfigurationStoreResult<Vec<ConfigurationAuditEvent>>;
+    ) -> impl Future<Output = ConfigurationStoreResult<Vec<ConfigurationAuditEvent>>> + Send;
 }
