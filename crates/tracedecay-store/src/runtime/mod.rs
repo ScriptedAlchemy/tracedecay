@@ -3,6 +3,11 @@
 //! These types describe identity, admission, consistency, operations, effects,
 //! errors, and telemetry. They deliberately contain no physical paths,
 //! database-driver values, executors, or connection-opening behavior.
+//!
+//! Canonical domain identities are re-exported instead of copied. Types whose
+//! names begin with `Store` or `Runtime` carry storage-only invariants or
+//! ownership. Application-layer IDs cross this lower-level dependency boundary
+//! through validated lossless representations, never aliases.
 
 mod consistency;
 mod error;

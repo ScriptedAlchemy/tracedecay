@@ -18,6 +18,10 @@ pub struct StoreRuntimeRegistryPublicationV1 {
 }
 
 /// Bounded lease protecting one published runtime from eviction or replacement.
+///
+/// Its interval is runtime resource ownership, not an application request
+/// `Deadline`; caller deadline and cancellation-token identity remain owned by
+/// the application layer.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "RuntimeLeaseWireV1")]
 #[serde(deny_unknown_fields)]
@@ -395,6 +399,9 @@ impl TryFrom<RuntimeTransactionScopeWireV1> for RuntimeTransactionScopeV1 {
 }
 
 /// Opaque admission permit bound to one operation and one transaction scope.
+///
+/// Permit expiry bounds runtime admission after the application has admitted a
+/// request. It is not a second caller deadline authority.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "RuntimeOperationPermitWireV1")]
 #[serde(deny_unknown_fields)]

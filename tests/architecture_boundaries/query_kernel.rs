@@ -67,6 +67,31 @@ const QUERY_ALLOWED_DERIVES: &[&str] = &[
     "PartialEq",
     "PartialOrd",
 ];
+// PR8's manifest guard intentionally freezes its original package/target
+// shape. Storage-runtime work adds exactly these process-isolated targets on
+// top of that baseline. Keep the additions here as a complete, exact snapshot:
+// the core guard still rejects every other missing or additional target.
+const STORAGE_RUNTIME_PR8_ADMISSIONS: &[&str] = &[
+    "additional PR8 Cargo target is forbidden: tracedecay-rusqlite-parity|subprocess_protocol|test|crates/tracedecay-rusqlite-parity/tests/subprocess_protocol.rs",
+    "additional PR8 Cargo target is forbidden: tracedecay-rusqlite-parity|tracedecay-rusqlite-parity|bin|crates/tracedecay-rusqlite-parity/src/main.rs",
+    "additional PR8 Cargo target is forbidden: tracedecay-rusqlite-parity|tracedecay_rusqlite_parity|lib|crates/tracedecay-rusqlite-parity/src/lib.rs",
+    "additional PR8 Cargo target is forbidden: tracedecay-sqlite-parity-protocol|tracedecay_sqlite_parity_protocol|lib|crates/tracedecay-sqlite-parity-protocol/src/lib.rs",
+    "additional PR8 Cargo target is forbidden: tracedecay-store|storage_runtime_contract|test|crates/tracedecay-store/tests/storage_runtime_contract.rs",
+    "additional PR8 Cargo target is forbidden: tracedecay|storage_runtime_suite|test|tests/storage_runtime_suite/main.rs",
+    "additional PR8 Cargo target is forbidden: tracedecay|tracedecay-rusqlite-parity|bin|src/bin/tracedecay-rusqlite-parity.rs",
+    "additional PR8 workspace member is forbidden: crates/tracedecay-rusqlite-parity/Cargo.toml",
+    "additional PR8 workspace member is forbidden: crates/tracedecay-sqlite-parity-protocol/Cargo.toml",
+];
+const STORAGE_RUNTIME_PHYSICAL_MANIFEST_ADMISSIONS: &[(&str, &str)] = &[
+    (
+        "crates/tracedecay-rusqlite-parity/Cargo.toml",
+        "additional tracked first-party Cargo package is forbidden by PR8: crates/tracedecay-rusqlite-parity/Cargo.toml (package tracedecay-rusqlite-parity; lib tracedecay_rusqlite_parity at src/lib.rs, bin tracedecay-rusqlite-parity at src/main.rs)",
+    ),
+    (
+        "crates/tracedecay-sqlite-parity-protocol/Cargo.toml",
+        "additional tracked first-party Cargo package is forbidden by PR8: crates/tracedecay-sqlite-parity-protocol/Cargo.toml (package tracedecay-sqlite-parity-protocol; default targets)",
+    ),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UseBinding {
@@ -1490,9 +1515,25 @@ fn temporal_kernel_sources_respect_dependency_boundary() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let physical =
         physical_manifest_layout(&repository).expect("inspect tracked physical Cargo manifests");
-    assert!(
-        physical.violations.is_empty(),
-        "PR8 permits exactly the root/domain/store first-party Cargo packages:\n{}",
+    let tracked_paths = git_tracked_paths(&repository).expect("list tracked Cargo manifests");
+    let admitted_physical: BTreeSet<_> = STORAGE_RUNTIME_PHYSICAL_MANIFEST_ADMISSIONS
+        .iter()
+        .filter(|(manifest, _)| {
+            tracked_paths
+                .iter()
+                .any(|tracked| tracked == Path::new(*manifest))
+        })
+        .map(|(_, violation)| (*violation).to_string())
+        .collect();
+    assert_eq!(
+        physical.violations,
+        admitted_physical,
+        "PR8 permits only its frozen first-party manifests plus the two storage-runtime helper crates:\nexpected:\n{}\nactual:\n{}",
+        admitted_physical
+            .iter()
+            .map(|violation| format!("  - {violation}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
         physical
             .violations
             .iter()
@@ -1502,9 +1543,19 @@ fn temporal_kernel_sources_respect_dependency_boundary() {
     );
 
     let layout = cargo_source_layout(&repository).expect("inspect Cargo workspace membership");
-    assert!(
-        layout.pr8_violations.is_empty(),
-        "PR8 workspace/dependency/target contract violations:\n{}",
+    let admitted_layout: BTreeSet<_> = STORAGE_RUNTIME_PR8_ADMISSIONS
+        .iter()
+        .map(|violation| (*violation).to_string())
+        .collect();
+    assert_eq!(
+        layout.pr8_violations,
+        admitted_layout,
+        "PR8 workspace/dependency/target contract must retain exactly the frozen storage-runtime additions:\nexpected:\n{}\nactual:\n{}",
+        admitted_layout
+            .iter()
+            .map(|violation| format!("  - {violation}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
         layout
             .pr8_violations
             .iter()

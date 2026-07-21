@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
 use super::{
-    AuthorityEpochV1, CommitSequenceV1, DurabilityClassV1, OperationPriorityV1, StoreIncarnationV1,
-    StoreShardIdV1,
+    CommitSequenceV1, DurabilityClassV1, OperationPriorityV1, StoreAuthorityEpochV1,
+    StoreIncarnationV1, StoreShardIdV1,
 };
 
 /// Queue accounting suitable for open-loop overload reporting.
@@ -25,7 +25,7 @@ pub struct AdmissionTelemetryV1 {
 pub struct CommitTelemetryV1 {
     pub shard_id: StoreShardIdV1,
     pub incarnation: StoreIncarnationV1,
-    pub authority_epoch: AuthorityEpochV1,
+    pub authority_epoch: StoreAuthorityEpochV1,
     pub commit_sequence: CommitSequenceV1,
     pub priority: OperationPriorityV1,
     pub durability: DurabilityClassV1,
@@ -48,7 +48,7 @@ pub enum ReaderLaneV1 {
 pub struct ReaderTelemetryV1 {
     pub shard_id: StoreShardIdV1,
     pub incarnation: StoreIncarnationV1,
-    pub authority_epoch: AuthorityEpochV1,
+    pub authority_epoch: StoreAuthorityEpochV1,
     pub general_active: u16,
     pub general_idle: u16,
     pub general_waiters: u32,
@@ -83,7 +83,7 @@ pub enum WalPressureV1 {
 pub struct MaintenanceTelemetryV1 {
     pub shard_id: StoreShardIdV1,
     pub incarnation: StoreIncarnationV1,
-    pub authority_epoch: AuthorityEpochV1,
+    pub authority_epoch: StoreAuthorityEpochV1,
     pub state: RuntimeMaintenanceStateV1,
     pub wal_bytes: u64,
     pub wal_pressure: WalPressureV1,

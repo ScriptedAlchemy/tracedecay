@@ -1,8 +1,8 @@
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
-use tracedecay_domain::{
-    BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, WorktreeId,
+pub use tracedecay_domain::{
+    AuthorityEpoch, BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, WorktreeId,
 };
 
 use super::StorageRuntimeContractErrorV1;
@@ -44,6 +44,20 @@ macro_rules! canonical_id {
             }
         }
 
+        impl TryFrom<&str> for $name {
+            type Error = StorageRuntimeContractErrorV1;
+
+            fn try_from(value: &str) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
         impl fmt::Display for $name {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str(&self.0)
@@ -52,6 +66,8 @@ macro_rules! canonical_id {
     };
 }
 
+// A retained database snapshot is not an evaluation, configuration, or Git
+// repository-state snapshot, so it intentionally does not reuse those domain IDs.
 canonical_id!(StoreSnapshotIdV1, "store snapshot id");
 canonical_id!(SnapshotLeaseIdV1, "snapshot lease id");
 canonical_id!(StoreOperationIdV1, "store operation id");
@@ -65,8 +81,13 @@ canonical_id!(
 );
 canonical_id!(RuntimeOperationPermitIdV1, "runtime operation permit id");
 canonical_id!(RuntimeTransactionIdV1, "runtime transaction id");
-canonical_id!(EffectIdV1, "effect id");
-canonical_id!(EffectOrderingKeyV1, "effect ordering key");
+// Application-layer effect and idempotency identities cannot be imported here:
+// `tracedecay-store` deliberately depends only on `tracedecay-domain`. These
+// names make the storage ownership explicit, while the checked string
+// conversions above provide the lossless adapter boundary.
+canonical_id!(StoreEffectIdV1, "store effect id");
+canonical_id!(StoreEffectOrderingKeyV1, "store effect ordering key");
+canonical_id!(StoreIdempotencyKeyV1, "store idempotency key");
 
 pub(super) fn validate_canonical_id(
     value: &str,
@@ -147,6 +168,9 @@ impl StoreShardScopeV1 {
 }
 
 /// Canonical logical shard identity, independent of aliases and physical locators.
+///
+/// Its profile, project, repository, and worktree components are the domain
+/// types re-exported by this module; the store does not mint parallel IDs.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct StoreShardIdV1 {
@@ -245,12 +269,16 @@ impl From<StoreIncarnationV1> for u64 {
     }
 }
 
-/// Monotonic fencing token for the active writer authority.
+/// Non-zero storage-runtime projection of the canonical writer authority epoch.
+///
+/// [`AuthorityEpoch`] is the domain authority and permits zero as an
+/// uninitialized/default value. An active storage binding cannot. Conversion
+/// into this type therefore validates, while conversion back is lossless.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(try_from = "u64", into = "u64")]
-pub struct AuthorityEpochV1(u64);
+pub struct StoreAuthorityEpochV1(u64);
 
-impl AuthorityEpochV1 {
+impl StoreAuthorityEpochV1 {
     pub fn new(value: u64) -> Result<Self, StorageRuntimeContractErrorV1> {
         if value == 0 {
             return Err(StorageRuntimeContractErrorV1::Zero {
@@ -265,7 +293,7 @@ impl AuthorityEpochV1 {
     }
 }
 
-impl TryFrom<u64> for AuthorityEpochV1 {
+impl TryFrom<u64> for StoreAuthorityEpochV1 {
     type Error = StorageRuntimeContractErrorV1;
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
@@ -273,9 +301,23 @@ impl TryFrom<u64> for AuthorityEpochV1 {
     }
 }
 
-impl From<AuthorityEpochV1> for u64 {
-    fn from(value: AuthorityEpochV1) -> Self {
+impl From<StoreAuthorityEpochV1> for u64 {
+    fn from(value: StoreAuthorityEpochV1) -> Self {
         value.0
+    }
+}
+
+impl TryFrom<AuthorityEpoch> for StoreAuthorityEpochV1 {
+    type Error = StorageRuntimeContractErrorV1;
+
+    fn try_from(value: AuthorityEpoch) -> Result<Self, Self::Error> {
+        Self::new(value.0)
+    }
+}
+
+impl From<StoreAuthorityEpochV1> for AuthorityEpoch {
+    fn from(value: StoreAuthorityEpochV1) -> Self {
+        Self(value.0)
     }
 }
 
@@ -285,14 +327,14 @@ impl From<AuthorityEpochV1> for u64 {
 pub struct StoreRuntimeBindingV1 {
     pub shard_id: StoreShardIdV1,
     pub incarnation: StoreIncarnationV1,
-    pub authority_epoch: AuthorityEpochV1,
+    pub authority_epoch: StoreAuthorityEpochV1,
 }
 
 impl StoreRuntimeBindingV1 {
     pub fn new(
         shard_id: StoreShardIdV1,
         incarnation: StoreIncarnationV1,
-        authority_epoch: AuthorityEpochV1,
+        authority_epoch: StoreAuthorityEpochV1,
     ) -> Self {
         Self {
             shard_id,

@@ -2,17 +2,22 @@ use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::UtcMicros;
 
 use super::{
-    AuthorityEpochV1, CommandDigestV1, EffectIdV1, EffectOrderingKeyV1, ShardWatermarkV1,
-    StorageRuntimeContractErrorV1,
+    CommandDigestV1, ShardWatermarkV1, StorageRuntimeContractErrorV1, StoreAuthorityEpochV1,
+    StoreEffectIdV1, StoreEffectOrderingKeyV1,
 };
 
-/// Identity and fences that make one cross-shard effect replay-safe.
+/// Storage-owned identity and fences that make one cross-shard effect replay-safe.
+///
+/// `StoreEffectIdV1` is the persisted representation of an application effect
+/// identity. The store crate cannot import the application crate without
+/// reversing dependency direction, so adapters use its validated string
+/// conversion rather than treating this as a second application authority.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EffectIdentityV1 {
-    pub effect_id: EffectIdV1,
+    pub effect_id: StoreEffectIdV1,
     pub command_digest: CommandDigestV1,
-    pub ordering_key: EffectOrderingKeyV1,
+    pub ordering_key: StoreEffectOrderingKeyV1,
     pub source_watermark: ShardWatermarkV1,
     pub target_watermark: ShardWatermarkV1,
 }
@@ -20,9 +25,9 @@ pub struct EffectIdentityV1 {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EffectIdentityWireV1 {
-    effect_id: EffectIdV1,
+    effect_id: StoreEffectIdV1,
     command_digest: CommandDigestV1,
-    ordering_key: EffectOrderingKeyV1,
+    ordering_key: StoreEffectOrderingKeyV1,
     source_watermark: ShardWatermarkV1,
     target_watermark: ShardWatermarkV1,
 }
@@ -39,8 +44,8 @@ impl EffectIdentityV1 {
 
     pub fn enforce_epochs(
         &self,
-        source: AuthorityEpochV1,
-        target: AuthorityEpochV1,
+        source: StoreAuthorityEpochV1,
+        target: StoreAuthorityEpochV1,
     ) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.source_watermark.authority_epoch != source {
             return Err(StorageRuntimeContractErrorV1::EffectEpochMismatch { side: "source" });
@@ -157,7 +162,9 @@ pub enum InboxEffectDispositionV1 {
     Replayed,
 }
 
-/// Target receipt persisted atomically with an effect and keyed by effect identity.
+/// Target receipt persisted atomically with an effect and keyed by its storage
+/// effect identity and fenced target commit position. It deliberately does not
+/// mint a receipt ID parallel to domain-specific receipt authorities.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TransactionalInboxReceiptV1 {

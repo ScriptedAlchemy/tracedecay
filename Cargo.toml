@@ -3,6 +3,8 @@ members = [
     "crates/tracedecay-application",
     "crates/tracedecay-domain",
     "crates/tracedecay-policy",
+    "crates/tracedecay-rusqlite-parity",
+    "crates/tracedecay-sqlite-parity-protocol",
     "crates/tracedecay-store",
     "crates/tracedecay-tool-catalog",
 ]
@@ -115,6 +117,10 @@ lang-quint = ["dep:tracedecay-large-treesitters"]
 lang-toml = ["dep:tracedecay-large-treesitters"]
 lang-lean = ["dep:tracedecay-large-treesitters"]
 test-transport = []
+# Builds the root-package helper shim for integration tests. The rusqlite
+# dependency is used only by that bin target; normal root targets never import
+# it and are link-checked separately.
+rusqlite-parity-helper = ["dep:tracedecay-rusqlite-parity"]
 
 [lib]
 name = "tracedecay"
@@ -122,6 +128,16 @@ name = "tracedecay"
 [[bin]]
 name = "tracedecay"
 path = "src/main.rs"
+
+# Cargo exposes this target to same-package integration tests through
+# CARGO_BIN_EXE_tracedecay-rusqlite-parity when the feature is enabled. The
+# binary is a process boundary; it is not linked into the normal CLI or lib.
+[[bin]]
+name = "tracedecay-rusqlite-parity"
+path = "src/bin/tracedecay-rusqlite-parity.rs"
+required-features = ["rusqlite-parity-helper"]
+test = false
+bench = false
 
 [dependencies]
 axum = "0.8"
@@ -138,6 +154,8 @@ ast-grep-core = "0.44"
 tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0" }
 tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
+tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", version = "0.1.0", optional = true }
+tracedecay-sqlite-parity-protocol = { path = "crates/tracedecay-sqlite-parity-protocol", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracedecay_domain::UtcMicros;
 
 use super::{
-    AuthorityEpochV1, SnapshotLeaseIdV1, StorageRuntimeContractErrorV1, StoreIncarnationV1,
+    SnapshotLeaseIdV1, StorageRuntimeContractErrorV1, StoreAuthorityEpochV1, StoreIncarnationV1,
     StoreShardIdV1, StoreSnapshotIdV1,
 };
 
@@ -15,13 +15,18 @@ use super::{
 #[serde(transparent)]
 pub struct CommitSequenceV1(pub u64);
 
-/// Complete, fenced read position for one logical shard.
+/// Complete storage commit position for one canonical logical shard history.
+///
+/// This is intentionally distinct from `tracedecay_domain::ShardWatermark`,
+/// whose sequence is an outbox frontier and does not carry an incarnation or
+/// writer fence. Converting between them would be lossy, so no alias or `From`
+/// implementation is provided.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ShardWatermarkV1 {
     pub shard_id: StoreShardIdV1,
     pub incarnation: StoreIncarnationV1,
-    pub authority_epoch: AuthorityEpochV1,
+    pub authority_epoch: StoreAuthorityEpochV1,
     pub commit_sequence: CommitSequenceV1,
 }
 
@@ -37,8 +42,9 @@ impl ShardWatermarkV1 {
     }
 }
 
-/// Immutable cross-shard target. It is a canonical vector, not a distributed
-/// transaction. Its JSON representation is a sorted array of watermarks rather
+/// Immutable cross-store target. It is a canonical storage commit vector, not
+/// `tracedecay_domain::VectorWatermark` and not a distributed transaction. Its
+/// JSON representation is a sorted array of fully fenced watermarks rather
 /// than a JSON map keyed by a structured shard identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenWatermarkVectorV1(BTreeMap<StoreShardIdV1, ShardWatermarkV1>);

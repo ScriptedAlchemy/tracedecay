@@ -1,10 +1,16 @@
 use std::fmt::Debug;
+use std::future::Future;
+use std::pin::pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use tracedecay_domain::{
-    BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros, WorktreeId,
+    AuthorityEpoch, BrainId, CodeGenerationId, LocatorDigest, ProjectId, RepositoryId,
+    UserProfileId, UtcMicros, WorktreeId,
 };
 use tracedecay_store::*;
 
@@ -24,8 +30,8 @@ fn locator_digest(byte: char) -> LocatorDigest {
     LocatorDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
 }
 
-fn epoch(value: u64) -> AuthorityEpochV1 {
-    AuthorityEpochV1::new(value).unwrap()
+fn epoch(value: u64) -> StoreAuthorityEpochV1 {
+    StoreAuthorityEpochV1::new(value).unwrap()
 }
 
 fn incarnation(value: u64) -> StoreIncarnationV1 {
@@ -94,13 +100,76 @@ fn metadata(shard_id: StoreShardIdV1, durability: DurabilityClassV1) -> StoreOpe
         incarnation: incarnation(1),
         authority_epoch: epoch(7),
         idempotency: IdempotencyIdentityV1 {
-            key: IdempotencyKeyV1::new("command.fixture").unwrap(),
+            key: StoreIdempotencyKeyV1::new("command.fixture").unwrap(),
             command_digest: digest('c'),
         },
         durability,
         priority: OperationPriorityV1::Foreground,
-        estimated_bytes: 128,
+        admission_bytes: 128,
         admitted_at: UtcMicros(1),
+    }
+}
+
+fn control() -> RuntimeRequestControlV1 {
+    RuntimeRequestControlV1 {
+        requested_at: UtcMicros(1),
+        deadline: RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new("deadline.fixture").unwrap(),
+        },
+        cancellation: RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new("cancellation.fixture").unwrap(),
+            generation: 1,
+        },
+    }
+}
+
+fn transaction_scope(metadata: &StoreOperationMetadataV1) -> RuntimeTransactionScopeV1 {
+    RuntimeTransactionScopeV1 {
+        transaction_id: RuntimeTransactionIdV1::new("transaction.submit").unwrap(),
+        compatibility: RuntimeBatchCompatibilityV1::from_operation(metadata).unwrap(),
+        opened_at: metadata.admitted_at,
+    }
+}
+
+fn outbox_payload() -> RepositoryWritePayloadV1 {
+    RepositoryWritePayloadV1::EnqueueOutbox(Box::new(TransactionalOutboxEntryV1 {
+        identity: effect_identity(),
+        effect: RepositoryEffectV1::PublishObservation,
+        state: OutboxEffectStateV1::Pending,
+        acknowledgement: None,
+        enqueued_at: UtcMicros(1),
+        updated_at: UtcMicros(1),
+    }))
+}
+
+fn submit_request(metadata: StoreOperationMetadataV1) -> RuntimeSubmitRequestV1 {
+    let scope = transaction_scope(&metadata);
+    RuntimeSubmitRequestV1::new(
+        RepositoryOperationEnvelopeV1 {
+            metadata,
+            payload: outbox_payload(),
+        },
+        scope,
+        control(),
+    )
+    .unwrap()
+}
+
+struct NoopWake;
+
+impl Wake for NoopWake {
+    fn wake(self: Arc<Self>) {}
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    let mut future = pin!(future);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        std::thread::yield_now();
     }
 }
 
@@ -145,10 +214,56 @@ fn canonical_identity_is_independent_of_locators_and_alias_labels() {
 }
 
 #[test]
+fn canonical_domain_identities_are_reused_and_storage_projections_round_trip() {
+    fn accepts_domain_project(_: ProjectId) {}
+    fn accepts_domain_profile(_: UserProfileId) {}
+    fn accepts_domain_repository(_: RepositoryId) {}
+    fn accepts_domain_worktree(_: WorktreeId) {}
+
+    let project: tracedecay_store::ProjectId = id("project.canonical");
+    let profile: tracedecay_store::UserProfileId = id("profile.canonical");
+    let repository: tracedecay_store::RepositoryId = id("repository.canonical");
+    let worktree: tracedecay_store::WorktreeId = id("worktree.canonical");
+    accepts_domain_project(project);
+    accepts_domain_profile(profile);
+    accepts_domain_repository(repository);
+    accepts_domain_worktree(worktree);
+
+    let canonical_epoch = AuthorityEpoch(9);
+    let store_epoch = StoreAuthorityEpochV1::try_from(canonical_epoch).unwrap();
+    assert_eq!(AuthorityEpoch::from(store_epoch), canonical_epoch);
+    assert!(StoreAuthorityEpochV1::try_from(AuthorityEpoch(0)).is_err());
+
+    let effect = StoreEffectIdV1::try_from("effect.canonical").unwrap();
+    let effect_wire = String::from(effect.clone());
+    assert_eq!(StoreEffectIdV1::try_from(effect_wire).unwrap(), effect);
+
+    let idempotency = StoreIdempotencyKeyV1::try_from("idempotency.canonical").unwrap();
+    let idempotency_wire = String::from(idempotency.clone());
+    assert_eq!(
+        StoreIdempotencyKeyV1::try_from(idempotency_wire).unwrap(),
+        idempotency
+    );
+
+    assert_ne!(
+        std::any::TypeId::of::<StoreSnapshotIdV1>(),
+        std::any::TypeId::of::<tracedecay_domain::SnapshotId>()
+    );
+    assert_ne!(
+        std::any::TypeId::of::<ShardWatermarkV1>(),
+        std::any::TypeId::of::<tracedecay_domain::ShardWatermark>()
+    );
+    assert_ne!(
+        std::any::TypeId::of::<FrozenWatermarkVectorV1>(),
+        std::any::TypeId::of::<tracedecay_domain::VectorWatermark>()
+    );
+}
+
+#[test]
 fn identity_and_budget_validation_fail_closed() {
     assert!(StoreIncarnationV1::new(0).is_err());
-    assert!(AuthorityEpochV1::new(0).is_err());
-    assert!(IdempotencyKeyV1::new(" idempotency.fixture").is_err());
+    assert!(StoreAuthorityEpochV1::new(0).is_err());
+    assert!(StoreIdempotencyKeyV1::new(" idempotency.fixture").is_err());
     assert!(CommandDigestV1::new("sha256:ABC").is_err());
     assert!(serde_json::from_str::<StoreSnapshotIdV1>("\" bad\"").is_err());
     assert!(FrozenWatermarkVectorV1::new([]).is_err());
@@ -181,7 +296,7 @@ fn identity_and_budget_validation_fail_closed() {
 #[test]
 fn identical_idempotency_replays_and_changed_commands_conflict() {
     let committed = IdempotencyIdentityV1 {
-        key: IdempotencyKeyV1::new("command.fixture").unwrap(),
+        key: StoreIdempotencyKeyV1::new("command.fixture").unwrap(),
         command_digest: digest('a'),
     };
     let same = committed.clone();
@@ -190,7 +305,7 @@ fn identical_idempotency_replays_and_changed_commands_conflict() {
         command_digest: digest('b'),
     };
     let different_key = IdempotencyIdentityV1 {
-        key: IdempotencyKeyV1::new("command.other").unwrap(),
+        key: StoreIdempotencyKeyV1::new("command.other").unwrap(),
         command_digest: committed.command_digest.clone(),
     };
 
@@ -356,13 +471,19 @@ fn selected_admission_and_maintenance_defaults_are_exact_and_valid() {
 fn operation_envelopes_enforce_scope_and_per_operation_durability() {
     let valid = RepositoryOperationEnvelopeV1 {
         metadata: metadata(project_shard("project.one"), DurabilityClassV1::Full),
-        operation: RepositoryOperationV1::Project(ProjectOperationV1::CommitFacts),
+        payload: RepositoryWritePayloadV1::Diagnostics(Box::new(
+            SanitizedCleanDiagnosticSnapshotV1::new(
+                id::<CodeGenerationId>("generation.fixture"),
+                vec![],
+            )
+            .unwrap(),
+        )),
     };
     valid.validate().unwrap();
 
     let invalid_scope = RepositoryOperationEnvelopeV1 {
-        metadata: valid.metadata.clone(),
-        operation: RepositoryOperationV1::Code(CodeOperationV1::IndexRepository),
+        metadata: metadata(code_worktree_shard("project.one"), DurabilityClassV1::Full),
+        payload: valid.payload.clone(),
     };
     assert!(matches!(
         invalid_scope.validate(),
@@ -370,44 +491,55 @@ fn operation_envelopes_enforce_scope_and_per_operation_durability() {
     ));
 
     let wrong_durability = RepositoryOperationEnvelopeV1 {
-        metadata: metadata(code_worktree_shard("project.one"), DurabilityClassV1::Full),
-        operation: RepositoryOperationV1::Code(CodeOperationV1::IndexRepository),
+        metadata: metadata(
+            project_shard("project.one"),
+            DurabilityClassV1::RebuildableProjection,
+        ),
+        payload: valid.payload.clone(),
     };
     assert!(matches!(
         wrong_durability.validate(),
         Err(StorageRuntimeContractErrorV1::DurabilityMismatch { .. })
     ));
 
-    let valid_projection = RepositoryOperationEnvelopeV1 {
-        metadata: metadata(
-            code_worktree_shard("project.one"),
-            DurabilityClassV1::RebuildableProjection,
-        ),
-        operation: RepositoryOperationV1::Code(CodeOperationV1::PublishProjection),
-    };
-    valid_projection.validate().unwrap();
-
     let immutable_snapshot = RepositoryOperationEnvelopeV1 {
-        metadata: metadata(
-            code_snapshot_shard("project.one"),
-            DurabilityClassV1::RebuildableProjection,
-        ),
-        operation: RepositoryOperationV1::Code(CodeOperationV1::PublishProjection),
+        metadata: metadata(code_snapshot_shard("project.one"), DurabilityClassV1::Full),
+        payload: outbox_payload(),
     };
     assert!(matches!(
         immutable_snapshot.validate(),
         Err(StorageRuntimeContractErrorV1::ImmutableShard { .. })
     ));
-    round_trip(&valid);
+
+    let invalid_payload = RepositoryOperationEnvelopeV1 {
+        metadata: metadata(project_shard("project.one"), DurabilityClassV1::Full),
+        payload: RepositoryWritePayloadV1::EnqueueOutbox(Box::new(TransactionalOutboxEntryV1 {
+            identity: effect_identity(),
+            effect: RepositoryEffectV1::PublishObservation,
+            state: OutboxEffectStateV1::Acknowledged,
+            acknowledgement: None,
+            enqueued_at: UtcMicros(1),
+            updated_at: UtcMicros(2),
+        })),
+    };
+    assert!(matches!(
+        invalid_payload.validate(),
+        Err(StorageRuntimeContractErrorV1::AcknowledgementReceiptRequired)
+    ));
+    let invalid_scope = transaction_scope(&invalid_payload.metadata);
+    assert!(matches!(
+        RuntimeSubmitRequestV1::new(invalid_payload, invalid_scope, control()),
+        Err(StorageRuntimeContractErrorV1::AcknowledgementReceiptRequired)
+    ));
 }
 
 fn effect_identity() -> EffectIdentityV1 {
     let source = project_shard("project.one");
     let target = session_shard("project.one");
     EffectIdentityV1 {
-        effect_id: EffectIdV1::new("effect.fixture").unwrap(),
+        effect_id: StoreEffectIdV1::new("effect.fixture").unwrap(),
         command_digest: digest('d'),
-        ordering_key: EffectOrderingKeyV1::new("project.one.observations").unwrap(),
+        ordering_key: StoreEffectOrderingKeyV1::new("project.one.observations").unwrap(),
         source_watermark: watermark(source, 30),
         target_watermark: watermark(target, 40),
     }
@@ -520,166 +652,497 @@ fn outbox_identity_and_acknowledgements_bind_target_history() {
     round_trip(&receipt);
 }
 
-struct CommitPort;
+struct Probe {
+    identity: RuntimeCancellationIdentityV1,
+    deadline: RuntimeDeadlineV1,
+    interruption: AtomicU8,
+}
 
-impl StorageRuntimeSubmitPort for CommitPort {
-    fn dispatch_submit(
-        &self,
+impl Probe {
+    fn new(control: &RuntimeRequestControlV1, interruption: Option<RuntimeInterruptionV1>) -> Self {
+        Self {
+            identity: control.cancellation.clone(),
+            deadline: control.deadline.clone(),
+            interruption: AtomicU8::new(match interruption {
+                None => 0,
+                Some(RuntimeInterruptionV1::Cancelled) => 1,
+                Some(RuntimeInterruptionV1::DeadlineExceeded) => 2,
+            }),
+        }
+    }
+}
+
+impl RuntimeRequestProbeV1 for Probe {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        &self.identity
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        &self.deadline
+    }
+
+    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+        match self.interruption.load(Ordering::SeqCst) {
+            0 => None,
+            1 => Some(RuntimeInterruptionV1::Cancelled),
+            2 => Some(RuntimeInterruptionV1::DeadlineExceeded),
+            _ => unreachable!("test probe has a closed interruption state"),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SubmitMode {
+    Commit,
+    InvalidReceipt,
+}
+
+struct FakeSubmitPort {
+    mode: SubmitMode,
+    calls: AtomicUsize,
+}
+
+impl StorageRuntimeSubmitPort for FakeSubmitPort {
+    fn dispatch_submit<'a>(
+        &'a self,
         request: RuntimeSubmitRequestV1,
-    ) -> StorageRuntimePortResultV1<RuntimeSubmitOutcomeV1> {
-        Ok(RuntimeSubmitOutcomeV1::Committed {
-            receipt: commit_receipt(&request.envelope().metadata),
+        _probe: &'a dyn RuntimeRequestProbeV1,
+    ) -> StorageRuntimePortFutureV1<'a, RuntimeSubmitOutcomeV1> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            let mut receipt = commit_receipt(&request.envelope().metadata);
+            if matches!(self.mode, SubmitMode::InvalidReceipt) {
+                receipt.incarnation = incarnation(2);
+            }
+            Ok(RuntimeSubmitOutcomeV1::Committed { receipt })
         })
     }
 }
 
-struct InvalidCommitPort;
-
-impl StorageRuntimeSubmitPort for InvalidCommitPort {
-    fn dispatch_submit(
-        &self,
-        request: RuntimeSubmitRequestV1,
-    ) -> StorageRuntimePortResultV1<RuntimeSubmitOutcomeV1> {
-        let mut receipt = commit_receipt(&request.envelope().metadata);
-        receipt.incarnation = incarnation(2);
-        Ok(RuntimeSubmitOutcomeV1::Committed { receipt })
-    }
+struct FakeReadPort {
+    calls: AtomicUsize,
 }
 
-struct WatermarkPort;
-
-impl StorageRuntimeReadPort for WatermarkPort {
-    fn dispatch_read(
-        &self,
+impl StorageRuntimeReadPort for FakeReadPort {
+    fn dispatch_read<'a>(
+        &'a self,
         request: RuntimeReadRequestV1,
-    ) -> StorageRuntimePortResultV1<RuntimeReadOutcomeV1> {
-        Ok(RuntimeReadOutcomeV1::CurrentWatermark {
-            watermark: ShardWatermarkV1 {
+        _probe: &'a dyn RuntimeRequestProbeV1,
+    ) -> StorageRuntimePortFutureV1<'a, RuntimeReadOutcomeV1> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            let observed = ShardWatermarkV1 {
                 shard_id: request.binding().shard_id.clone(),
                 incarnation: request.binding().incarnation,
                 authority_epoch: request.binding().authority_epoch,
                 commit_sequence: CommitSequenceV1(9),
-            },
+            };
+            RuntimeReadOutcomeV1::new(
+                Some(RuntimeReadResultV1::CurrentWatermark {
+                    watermark: observed.clone(),
+                }),
+                RuntimeReadCoverageV1::Latest {
+                    observed: Some(observed),
+                },
+            )
+            .map_err(StorageRuntimePortErrorV1::InvalidResponse)
         })
     }
 }
 
+fn read_request(
+    binding: StoreRuntimeBindingV1,
+    consistency: ConsistencyModeV1,
+    operation: RuntimeReadOperationV1,
+) -> RuntimeReadRequestV1 {
+    RuntimeReadRequestV1::new(
+        binding,
+        consistency,
+        operation,
+        OperationPriorityV1::Foreground,
+        64,
+        control(),
+    )
+    .unwrap()
+}
+
 #[test]
-fn typed_runtime_ports_validate_requests_outcomes_and_receipt_binding() {
-    let envelope = RepositoryOperationEnvelopeV1 {
-        metadata: metadata(project_shard("project.one"), DurabilityClassV1::Full),
-        operation: RepositoryOperationV1::Project(ProjectOperationV1::CommitFacts),
+fn async_runtime_ports_use_caller_owned_monotonic_interruption_decisions() {
+    let request = submit_request(metadata(
+        project_shard("project.one"),
+        DurabilityClassV1::Full,
+    ));
+    let probe = Probe::new(request.control(), None);
+    let commit_port = FakeSubmitPort {
+        mode: SubmitMode::Commit,
+        calls: AtomicUsize::new(0),
     };
-    let request = RuntimeSubmitRequestV1::new(envelope).unwrap();
+    let object_safe_port: &dyn StorageRuntimeSubmitPort = &commit_port;
     assert!(matches!(
-        CommitPort.submit(request.clone()).unwrap(),
+        block_on(object_safe_port.submit(request.clone(), &probe)).unwrap(),
         RuntimeSubmitOutcomeV1::Committed { .. }
     ));
+
+    let invalid_port = FakeSubmitPort {
+        mode: SubmitMode::InvalidReceipt,
+        calls: AtomicUsize::new(0),
+    };
     assert!(matches!(
-        InvalidCommitPort.submit(request),
+        block_on(invalid_port.submit(request.clone(), &probe)),
         Err(StorageRuntimePortErrorV1::InvalidResponse(
             StorageRuntimeContractErrorV1::IncarnationMismatch { .. }
         ))
     ));
+
+    let deadline_port = FakeSubmitPort {
+        mode: SubmitMode::Commit,
+        calls: AtomicUsize::new(0),
+    };
+    let expired = Probe::new(
+        request.control(),
+        Some(RuntimeInterruptionV1::DeadlineExceeded),
+    );
+    assert!(matches!(
+        block_on(deadline_port.submit(request.clone(), &expired)).unwrap(),
+        RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit { .. }
+    ));
+    assert_eq!(deadline_port.calls.load(Ordering::SeqCst), 0);
+
+    let cancellation_port = FakeSubmitPort {
+        mode: SubmitMode::Commit,
+        calls: AtomicUsize::new(0),
+    };
+    let cancelled = Probe::new(request.control(), Some(RuntimeInterruptionV1::Cancelled));
+    assert!(matches!(
+        block_on(cancellation_port.submit(request.clone(), &cancelled)).unwrap(),
+        RuntimeSubmitOutcomeV1::CancelledBeforeCommit {
+            stage: RuntimeCancellationStageV1::BeforeAdmission,
+            ..
+        }
+    ));
+    assert_eq!(cancellation_port.calls.load(Ordering::SeqCst), 0);
+
+    let mismatched_probe = Probe {
+        identity: RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new("cancellation.other").unwrap(),
+            generation: 1,
+        },
+        deadline: request.control().deadline.clone(),
+        interruption: AtomicU8::new(0),
+    };
+    assert!(matches!(
+        block_on(cancellation_port.submit(request.clone(), &mismatched_probe)),
+        Err(StorageRuntimePortErrorV1::InvalidRequest(
+            StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                field: "runtime cancellation probe identity"
+            }
+        ))
+    ));
+    assert_eq!(cancellation_port.calls.load(Ordering::SeqCst), 0);
+
+    let mismatched_deadline = Probe {
+        identity: request.control().cancellation.clone(),
+        deadline: RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new("deadline.other").unwrap(),
+        },
+        interruption: AtomicU8::new(0),
+    };
+    assert!(matches!(
+        block_on(cancellation_port.submit(request.clone(), &mismatched_deadline)),
+        Err(StorageRuntimePortErrorV1::InvalidRequest(
+            StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                field: "runtime deadline probe identity"
+            }
+        ))
+    ));
+    assert_eq!(cancellation_port.calls.load(Ordering::SeqCst), 0);
 
     let original = metadata(project_shard("project.one"), DurabilityClassV1::Full);
     let retry = StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new("operation.retry").unwrap(),
         ..original.clone()
     };
-    let replay_request = RuntimeSubmitRequestV1::new(RepositoryOperationEnvelopeV1 {
-        metadata: retry,
-        operation: RepositoryOperationV1::Project(ProjectOperationV1::CommitFacts),
-    })
-    .unwrap();
-    RuntimeSubmitOutcomeV1::Replayed {
+    RuntimeSubmitOutcomeV1::ExactReplay {
         receipt: commit_receipt(&original),
     }
-    .validate_for(&replay_request)
+    .validate_for(&submit_request(retry))
     .unwrap();
 
-    let read_request = RuntimeReadRequestV1::new(
+    let mut existing = original.clone();
+    existing.idempotency.command_digest = digest('e');
+    RuntimeSubmitOutcomeV1::IdempotencyConflict {
+        existing_receipt: commit_receipt(&existing),
+    }
+    .validate_for(&submit_request(original.clone()))
+    .unwrap();
+
+    RuntimeSubmitOutcomeV1::CommittedAfterCancellation {
+        receipt: commit_receipt(&original),
+        cancellation: request.control().cancellation.clone(),
+    }
+    .validate_for(&request)
+    .unwrap();
+
+    assert!(matches!(
+        RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::DeadlineExceeded,
+        }
+        .validate_for(&request),
+        Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+            field: "submit decision channel"
+        })
+    ));
+}
+
+#[test]
+fn typed_async_reads_report_latest_exact_partial_stale_and_unavailable_coverage() {
+    let latest = read_request(
         binding(project_shard("project.one")),
         ConsistencyModeV1::LatestAvailable,
         RuntimeReadOperationV1::CurrentWatermark,
-    )
-    .unwrap();
+    );
+    let probe = Probe::new(latest.control(), None);
+    let read_port = FakeReadPort {
+        calls: AtomicUsize::new(0),
+    };
+    let object_safe_port: &dyn StorageRuntimeReadPort = &read_port;
     assert!(matches!(
-        WatermarkPort.read(read_request).unwrap(),
-        RuntimeReadOutcomeV1::CurrentWatermark { .. }
+        block_on(object_safe_port.read(latest, &probe))
+            .unwrap()
+            .coverage(),
+        RuntimeReadCoverageV1::Latest { .. }
     ));
 
-    let at_least = RuntimeReadRequestV1::new(
+    for (interruption, reason) in [
+        (
+            RuntimeInterruptionV1::Cancelled,
+            UnavailableReasonV1::Cancelled,
+        ),
+        (
+            RuntimeInterruptionV1::DeadlineExceeded,
+            UnavailableReasonV1::DeadlineExceeded,
+        ),
+    ] {
+        let request = read_request(
+            binding(project_shard("project.one")),
+            ConsistencyModeV1::LatestAvailable,
+            RuntimeReadOperationV1::CurrentWatermark,
+        );
+        let probe = Probe::new(request.control(), Some(interruption));
+        let outcome = block_on(object_safe_port.read(request, &probe)).unwrap();
+        assert!(matches!(
+            outcome.coverage(),
+            RuntimeReadCoverageV1::Unavailable {
+                coverage: None,
+                reason: actual,
+            } if *actual == reason
+        ));
+    }
+    assert_eq!(read_port.calls.load(Ordering::SeqCst), 1);
+
+    let at_least = read_request(
         binding(project_shard("project.one")),
         ConsistencyModeV1::AtLeast {
             commit_sequence: CommitSequenceV1(10),
         },
         RuntimeReadOperationV1::CurrentWatermark,
+    );
+    let stale = single_shard_required_coverage_v1(
+        at_least.binding(),
+        CommitSequenceV1(10),
+        [watermark(project_shard("project.one"), 9)],
     )
     .unwrap();
-    assert!(matches!(
-        WatermarkPort.read(at_least),
-        Err(StorageRuntimePortErrorV1::InvalidResponse(
-            StorageRuntimeContractErrorV1::ReceiptBindingMismatch { .. }
-        ))
-    ));
+    RuntimeReadOutcomeV1::new(None, RuntimeReadCoverageV1::Stale { coverage: stale })
+        .unwrap()
+        .validate_for(&at_least)
+        .unwrap();
 
-    let exact = RuntimeReadRequestV1::new(
+    let exact_watermark = watermark(project_shard("project.one"), 8);
+    let exact = read_request(
         binding(project_shard("project.one")),
         ConsistencyModeV1::ExactSnapshot {
             lease: Box::new(SnapshotLeaseV1 {
                 lease_id: SnapshotLeaseIdV1::new("snapshot.exact").unwrap(),
                 snapshot_id: StoreSnapshotIdV1::new("snapshot.exact").unwrap(),
-                watermark: watermark(project_shard("project.one"), 8),
+                watermark: exact_watermark.clone(),
                 acquired_at: UtcMicros(1),
                 expires_at: UtcMicros(10),
             }),
         },
         RuntimeReadOperationV1::CurrentWatermark,
-    )
-    .unwrap();
-    assert!(matches!(
-        WatermarkPort.read(exact),
-        Err(StorageRuntimePortErrorV1::InvalidResponse(
-            StorageRuntimeContractErrorV1::ReceiptBindingMismatch { .. }
-        ))
-    ));
-
-    let exact_lease = SnapshotLeaseV1 {
-        lease_id: SnapshotLeaseIdV1::new("snapshot.lookup").unwrap(),
-        snapshot_id: StoreSnapshotIdV1::new("snapshot.lookup").unwrap(),
-        watermark: watermark(project_shard("project.one"), 8),
-        acquired_at: UtcMicros(1),
-        expires_at: UtcMicros(10),
-    };
-    let exact_lookup = RuntimeReadRequestV1::new(
-        binding(project_shard("project.one")),
-        ConsistencyModeV1::ExactSnapshot {
-            lease: Box::new(exact_lease.clone()),
-        },
-        RuntimeReadOperationV1::SnapshotLease {
-            lease_id: exact_lease.lease_id,
-        },
-    )
-    .unwrap();
-    assert!(
-        RuntimeReadOutcomeV1::SnapshotLease { lease: None }
-            .validate_for(&exact_lookup)
-            .is_err()
     );
+    let exact_coverage = single_shard_required_coverage_v1(
+        exact.binding(),
+        CommitSequenceV1(8),
+        [exact_watermark.clone()],
+    )
+    .unwrap();
+    RuntimeReadOutcomeV1::new(
+        Some(RuntimeReadResultV1::CurrentWatermark {
+            watermark: exact_watermark,
+        }),
+        RuntimeReadCoverageV1::Complete {
+            coverage: exact_coverage,
+        },
+    )
+    .unwrap()
+    .validate_for(&exact)
+    .unwrap();
 
-    let mut existing = metadata(project_shard("project.one"), DurabilityClassV1::Full);
-    existing.idempotency.command_digest = digest('e');
-    let conflict_request = RuntimeSubmitRequestV1::new(RepositoryOperationEnvelopeV1 {
-        metadata: metadata(project_shard("project.one"), DurabilityClassV1::Full),
-        operation: RepositoryOperationV1::Project(ProjectOperationV1::CommitFacts),
-    })
+    let required = FrozenWatermarkVectorV1::new([
+        watermark(project_shard("project.one"), 10),
+        watermark(session_shard("project.one"), 20),
+    ])
     .unwrap();
-    RuntimeSubmitOutcomeV1::Conflict {
-        existing_receipt: commit_receipt(&existing),
+    let frozen = read_request(
+        binding(project_shard("project.one")),
+        ConsistencyModeV1::FrozenWatermarkVector {
+            vector: required.clone(),
+        },
+        RuntimeReadOperationV1::FrozenCoverage,
+    );
+    let partial = FrozenWatermarkCoverageV1::new(
+        required.clone(),
+        [
+            watermark(project_shard("project.one"), 10),
+            watermark(session_shard("project.one"), 19),
+        ],
+    )
+    .unwrap();
+    RuntimeReadOutcomeV1::new(
+        Some(RuntimeReadResultV1::FrozenCoverage {
+            coverage: partial.clone(),
+        }),
+        RuntimeReadCoverageV1::Partial { coverage: partial },
+    )
+    .unwrap()
+    .validate_for(&frozen)
+    .unwrap();
+
+    let unavailable = FrozenWatermarkCoverageV1::new(required, []).unwrap();
+    RuntimeReadOutcomeV1::new(
+        None,
+        RuntimeReadCoverageV1::Unavailable {
+            coverage: Some(unavailable),
+            reason: UnavailableReasonV1::MissingAuthority,
+        },
+    )
+    .unwrap()
+    .validate_for(&frozen)
+    .unwrap();
+}
+
+fn graph_node(id: &str, name: &str) -> GraphNodeV1 {
+    GraphNodeV1 {
+        id: id.to_owned(),
+        kind: "function".to_owned(),
+        name: name.to_owned(),
+        qualified_name: format!("fixture::{name}"),
+        file_path: "src/fixture.rs".to_owned(),
+        start_line: 1,
+        attrs_start_line: 1,
+        end_line: 2,
+        start_column: 0,
+        end_column: 1,
+        signature: Some(format!("fn {name}()")),
+        docstring: None,
+        visibility: "public".to_owned(),
+        is_async: false,
+        branches: 0,
+        loops: 0,
+        returns: 0,
+        max_nesting: 0,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        updated_at: 1,
+        parent_id: None,
     }
-    .validate_for(&conflict_request)
+}
+
+#[test]
+fn graph_read_contracts_preserve_backend_order_and_legacy_query_inputs() {
+    let binding = binding(code_worktree_shard("project.one"));
+    let search = read_request(
+        binding.clone(),
+        ConsistencyModeV1::LatestAvailable,
+        RuntimeReadOperationV1::GraphSearch {
+            query: "fixture".to_owned(),
+            limit: 2,
+        },
+    );
+    let observed = watermark(binding.shard_id.clone(), 9);
+    let ordered = RuntimeReadOutcomeV1::new(
+        Some(RuntimeReadResultV1::GraphSearch {
+            results: vec![
+                GraphSearchResultV1 {
+                    node: graph_node("node.a", "alpha"),
+                    score: GraphSearchScoreV1::new(2.0).unwrap(),
+                },
+                GraphSearchResultV1 {
+                    node: graph_node("node.b", "beta"),
+                    score: GraphSearchScoreV1::new(1.0).unwrap(),
+                },
+            ],
+        }),
+        RuntimeReadCoverageV1::Latest { observed: None },
+    )
     .unwrap();
+    ordered.validate_for(&search).unwrap();
+    round_trip(&ordered);
+
+    let unordered = RuntimeReadOutcomeV1::new(
+        Some(RuntimeReadResultV1::GraphSearch {
+            results: vec![
+                GraphSearchResultV1 {
+                    node: graph_node("node.b", "beta"),
+                    score: GraphSearchScoreV1::new(1.0).unwrap(),
+                },
+                GraphSearchResultV1 {
+                    node: graph_node("node.a", "alpha"),
+                    score: GraphSearchScoreV1::new(2.0).unwrap(),
+                },
+            ],
+        }),
+        RuntimeReadCoverageV1::Latest {
+            observed: Some(observed),
+        },
+    )
+    .unwrap();
+    unordered.validate_for(&search).unwrap();
+
+    for query in [" fixture ", "fixture\nterm"] {
+        RuntimeReadRequestV1::new(
+            binding.clone(),
+            ConsistencyModeV1::LatestAvailable,
+            RuntimeReadOperationV1::GraphSearch {
+                query: query.to_owned(),
+                limit: 2,
+            },
+            OperationPriorityV1::Foreground,
+            64,
+            control(),
+        )
+        .expect("legacy graph search accepts whitespace and control characters");
+    }
+
+    assert!(GraphSearchScoreV1::new(f64::NAN).is_err());
+    assert!(
+        RuntimeReadRequestV1::new(
+            binding,
+            ConsistencyModeV1::LatestAvailable,
+            RuntimeReadOperationV1::GraphSearch {
+                query: "fixture".to_owned(),
+                limit: RuntimeReadOperationV1::MAX_GRAPH_SEARCH_RESULTS + 1,
+            },
+            OperationPriorityV1::Foreground,
+            64,
+            control(),
+        )
+        .is_err()
+    );
+    round_trip(&UnavailableReasonV1::UnsupportedOperation);
 }
 
 #[test]
@@ -788,9 +1251,8 @@ fn public_wire_dtos_round_trip_without_driver_values() {
         vector: FrozenWatermarkVectorV1::new([watermark(project_shard("project.one"), 12)])
             .unwrap(),
     };
-    let runtime_error = StorageRuntimeErrorV1::Fenced {
-        expected: epoch(8),
-        actual: epoch(7),
+    let runtime_error = StorageRuntimeErrorV1::Infrastructure {
+        operation: "fixture read".to_owned(),
     };
     let admission = AdmissionConfigV1::default();
     let telemetry = MaintenanceTelemetryV1 {
@@ -841,18 +1303,13 @@ fn public_wire_dtos_round_trip_without_driver_values() {
 
 #[test]
 fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatches() {
-    let valid = RepositoryOperationEnvelopeV1 {
-        metadata: metadata(project_shard("project.one"), DurabilityClassV1::Full),
-        operation: RepositoryOperationV1::Project(ProjectOperationV1::CommitFacts),
-    };
-    let mut wrong_durability = serde_json::to_value(&valid).unwrap();
-    wrong_durability["metadata"]["durability"] = json!("rebuildable_projection");
-    assert!(serde_json::from_value::<RepositoryOperationEnvelopeV1>(wrong_durability).is_err());
+    let mut invalid_control = serde_json::to_value(control()).unwrap();
+    invalid_control["cancellation"]["generation"] = json!(0);
+    assert!(serde_json::from_value::<RuntimeRequestControlV1>(invalid_control).is_err());
 
-    let request = RuntimeSubmitRequestV1::new(valid).unwrap();
-    let mut request_scope = serde_json::to_value(&request).unwrap();
-    request_scope["metadata"]["shard_id"]["scope"]["kind"] = json!("code");
-    assert!(serde_json::from_value::<RuntimeSubmitRequestV1>(request_scope).is_err());
+    let mut wall_clock_deadline = serde_json::to_value(control()).unwrap();
+    wall_clock_deadline["deadline"]["expires_at"] = json!(100);
+    assert!(serde_json::from_value::<RuntimeRequestControlV1>(wall_clock_deadline).is_err());
 
     let identity = effect_identity();
     let receipt = TransactionalInboxReceiptV1 {
@@ -868,15 +1325,14 @@ fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatc
     wrong_receipt["target_commit_watermark"]["authority_epoch"] = json!(8);
     assert!(serde_json::from_value::<TransactionalInboxReceiptV1>(wrong_receipt).is_err());
 
-    let frozen_request = RuntimeReadRequestV1::new(
+    let frozen_request = read_request(
         binding(project_shard("project.one")),
         ConsistencyModeV1::FrozenWatermarkVector {
             vector: FrozenWatermarkVectorV1::new([watermark(project_shard("project.one"), 1)])
                 .unwrap(),
         },
         RuntimeReadOperationV1::FrozenCoverage,
-    )
-    .unwrap();
+    );
     let mut wrong_frozen_request = serde_json::to_value(&frozen_request).unwrap();
     wrong_frozen_request["binding"]["authority_epoch"] = json!(8);
     assert!(serde_json::from_value::<RuntimeReadRequestV1>(wrong_frozen_request).is_err());
@@ -905,13 +1361,6 @@ fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatc
 
 #[test]
 fn runtime_contract_source_has_no_concrete_driver_or_async_runtime_dependency() {
-    assert!(
-        serde_json::from_value::<RepositoryOperationV1>(json!({
-            "family": "sql",
-            "operation": "select"
-        }))
-        .is_err()
-    );
     let runtime_dir = format!("{}/src/runtime", env!("CARGO_MANIFEST_DIR"));
     for entry in std::fs::read_dir(runtime_dir).unwrap() {
         let path = entry.unwrap().path();
@@ -919,7 +1368,16 @@ fn runtime_contract_source_has_no_concrete_driver_or_async_runtime_dependency() 
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
-        for forbidden in ["rusqlite", "libsql", "tokio::", "std::path::", "PathBuf"] {
+        for forbidden in [
+            "rusqlite",
+            "libsql",
+            "tokio::",
+            "std::path::",
+            "PathBuf",
+            "serde_json::Value",
+            "Sql(",
+            "Query(String",
+        ] {
             assert!(
                 !source.contains(forbidden),
                 "{} imports forbidden runtime detail {forbidden}",

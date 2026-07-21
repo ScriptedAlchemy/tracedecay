@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{
-    AuthorityEpochV1, CommitSequenceV1, DurabilityClassV1, StoreIncarnationV1, StoreShardIdV1,
-};
+use super::{DurabilityClassV1, StoreIncarnationV1};
 
 /// Validation failures for pure runtime contract DTOs.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -57,6 +55,8 @@ pub enum StorageRuntimeContractErrorV1 {
     },
     #[error("idempotency key was replayed with a different command digest")]
     IdempotencyConflict,
+    #[error("repository payload for {payload} failed its owning store contract")]
+    InvalidRepositoryPayload { payload: &'static str },
     #[error("{field} does not bind to the request or effect identity")]
     ReceiptBindingMismatch { field: &'static str },
     #[error("{field} is not a valid lease interval")]
@@ -112,6 +112,9 @@ pub enum UnavailableReasonV1 {
     WrongIncarnation,
     WrongAuthorityEpoch,
     MissingAuthority,
+    UnsupportedOperation,
+    Cancelled,
+    DeadlineExceeded,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,9 +125,14 @@ pub enum CorruptionClassV1 {
     IntegrityUnknown,
 }
 
+/// Storage-runtime cancellation observation stage.
+///
+/// This is not the application `CancellationStage`: queue, commit, consistency,
+/// and reader waits are runtime-owned points, while cancellation token identity
+/// and caller deadlines remain application-owned and are not duplicated here.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum CancellationStageV1 {
+pub enum RuntimeCancellationStageV1 {
     BeforeAdmission,
     Queued,
     BeforeCommit,
@@ -133,33 +141,17 @@ pub enum CancellationStageV1 {
 }
 
 /// Stable, driver-neutral failures exposed by runtime ports.
+///
+/// Expected admission, interruption, fencing, consistency, and unsupported
+/// decisions belong in submit outcomes or read coverage. This error channel is
+/// reserved for infrastructure failure and detected corruption.
 #[derive(Clone, Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StorageRuntimeErrorV1 {
-    #[error("storage admission saturated for {scope:?}")]
-    Saturated {
-        shard_id: Option<StoreShardIdV1>,
-        scope: SaturationScopeV1,
-        retry_after_ms: u64,
-    },
-    #[error("storage is busy; retry after {retry_after_ms} ms")]
-    Busy { retry_after_ms: u64 },
-    #[error("writer authority is fenced: expected {expected:?}, actual {actual:?}")]
-    Fenced {
-        expected: AuthorityEpochV1,
-        actual: AuthorityEpochV1,
-    },
-    #[error("storage watermark is stale: required {required:?}, observed {observed:?}")]
-    Stale {
-        required: CommitSequenceV1,
-        observed: CommitSequenceV1,
-    },
-    #[error("storage is unavailable: {reason:?}")]
-    Unavailable { reason: UnavailableReasonV1 },
+    #[error("storage infrastructure failed during {operation}")]
+    Infrastructure { operation: String },
     #[error("storage corruption detected: {class:?}")]
     Corrupt { class: CorruptionClassV1 },
-    #[error("storage operation cancelled at {stage:?}")]
-    Cancelled { stage: CancellationStageV1 },
 }
 
 pub type StorageRuntimeResultV1<T> = Result<T, StorageRuntimeErrorV1>;

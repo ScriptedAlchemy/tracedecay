@@ -86,6 +86,7 @@ mod profile_host_admission_replay;
 mod scheduler;
 mod service;
 pub(crate) mod session_temporal_refresh_scheduler;
+pub(crate) mod store_runtime;
 pub(crate) mod transport;
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,

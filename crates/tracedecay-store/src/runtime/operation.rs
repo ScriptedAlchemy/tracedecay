@@ -1,12 +1,20 @@
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracedecay_domain::UtcMicros;
+
+use crate::{
+    ConfigurationCommitV1, FactWriteBatch, GitIndexTransactionRecordV1, ObservationWrite,
+    OutboxAcknowledgementReceiptV1, SanitizedCleanDiagnosticSnapshotV1,
+    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1,
+    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+};
 
 use super::identity::validate_canonical_id;
 use super::{
-    AuthorityEpochV1, CodeShardScopeV1, CommitSequenceV1, StorageRuntimeContractErrorV1,
-    StoreClientIdV1, StoreIncarnationV1, StoreOperationIdV1, StoreShardIdV1, StoreShardScopeV1,
+    CodeShardScopeV1, CommitSequenceV1, StorageRuntimeContractErrorV1, StoreAuthorityEpochV1,
+    StoreClientIdV1, StoreIdempotencyKeyV1, StoreIncarnationV1, StoreOperationIdV1, StoreShardIdV1,
+    StoreShardScopeV1,
 };
 
 pub const DEFAULT_PER_SHARD_QUEUE_OPERATIONS: u32 = 2_048;
@@ -428,33 +436,6 @@ fn validate_batch_ceiling(
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
-pub struct IdempotencyKeyV1(String);
-
-impl IdempotencyKeyV1 {
-    pub const MAX_BYTES: usize = 512;
-
-    pub fn new(value: impl Into<String>) -> Result<Self, StorageRuntimeContractErrorV1> {
-        let value = value.into();
-        validate_canonical_id(&value, "idempotency key", Self::MAX_BYTES)?;
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for IdempotencyKeyV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
 pub struct CommandDigestV1(String);
 
 impl CommandDigestV1 {
@@ -488,11 +469,16 @@ impl<'de> Deserialize<'de> for CommandDigestV1 {
     }
 }
 
-/// Stable command identity used to distinguish replay from conflict.
+/// Storage-owned projection used to distinguish replay from conflict.
+///
+/// The key is not the observation-domain `IdempotencyKeyV1`, whose semantics
+/// and derivation are observation-specific. Application idempotency keys cross
+/// this dependency boundary through `StoreIdempotencyKeyV1`'s validated,
+/// lossless string conversion.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct IdempotencyIdentityV1 {
-    pub key: IdempotencyKeyV1,
+    pub key: StoreIdempotencyKeyV1,
     pub command_digest: CommandDigestV1,
 }
 
@@ -508,6 +494,272 @@ impl IdempotencyIdentityV1 {
     }
 }
 
+macro_rules! request_control_id {
+    ($name:ident, $field:literal) => {
+        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub const MAX_BYTES: usize = 512;
+
+            pub fn new(value: impl Into<String>) -> Result<Self, StorageRuntimeContractErrorV1> {
+                let value = value.into();
+                validate_canonical_id(&value, $field, Self::MAX_BYTES)?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+request_control_id!(RuntimeDeadlineIdV1, "runtime deadline id");
+request_control_id!(RuntimeCancellationIdV1, "runtime cancellation id");
+
+/// Application-owned deadline identity propagated unchanged for correlation.
+///
+/// Expiry is deliberately not represented as wall-clock time here. The caller
+/// owns the monotonic deadline budget and exposes only its current decision
+/// through `RuntimeRequestProbeV1`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDeadlineV1 {
+    pub deadline_id: RuntimeDeadlineIdV1,
+}
+
+/// Stable cancellation-token identity. A generation prevents a reset or reused
+/// token from cancelling work admitted under an earlier generation.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCancellationIdentityV1 {
+    pub cancellation_id: RuntimeCancellationIdV1,
+    pub generation: u64,
+}
+
+impl RuntimeCancellationIdentityV1 {
+    pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
+        if self.generation == 0 {
+            return Err(StorageRuntimeContractErrorV1::Zero {
+                field: "runtime cancellation generation",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeCancellationIdentityV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            cancellation_id: RuntimeCancellationIdV1,
+            generation: u64,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let identity = Self {
+            cancellation_id: wire.cancellation_id,
+            generation: wire.generation,
+        };
+        identity.validate().map_err(serde::de::Error::custom)?;
+        Ok(identity)
+    }
+}
+
+/// Caller-owned interruption identities. Runtime adapters observe the current
+/// monotonic decision through the probe passed to the async port; they do not
+/// create a second deadline, clock, or cancellation authority.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeRequestControlV1 {
+    pub requested_at: UtcMicros,
+    pub deadline: RuntimeDeadlineV1,
+    pub cancellation: RuntimeCancellationIdentityV1,
+}
+
+impl RuntimeRequestControlV1 {
+    pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
+        self.cancellation.validate()
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeRequestControlV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            requested_at: UtcMicros,
+            deadline: RuntimeDeadlineV1,
+            cancellation: RuntimeCancellationIdentityV1,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let control = Self {
+            requested_at: wire.requested_at,
+            deadline: wire.deadline,
+            cancellation: wire.cancellation,
+        };
+        control.validate().map_err(serde::de::Error::custom)?;
+        Ok(control)
+    }
+}
+
+/// Driver-neutral projection of one node returned by the code-graph store.
+///
+/// Kind and visibility remain validated canonical labels so adding a language
+/// extractor does not require the storage contract crate to copy the graph
+/// implementation's enums.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphNodeV1 {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub file_path: String,
+    pub start_line: u32,
+    pub attrs_start_line: u32,
+    pub end_line: u32,
+    pub start_column: u32,
+    pub end_column: u32,
+    pub signature: Option<String>,
+    pub docstring: Option<String>,
+    pub visibility: String,
+    pub is_async: bool,
+    pub branches: u32,
+    pub loops: u32,
+    pub returns: u32,
+    pub max_nesting: u32,
+    pub unsafe_blocks: u32,
+    pub unchecked_calls: u32,
+    pub assertions: u32,
+    pub updated_at: u64,
+    pub parent_id: Option<String>,
+}
+
+impl GraphNodeV1 {
+    pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+
+    pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
+        validate_canonical_id(&self.id, "graph node id", 4_096)?;
+        validate_canonical_id(&self.kind, "graph node kind", 128)?;
+        validate_canonical_id(&self.name, "graph node name", 16_384)?;
+        validate_canonical_id(&self.file_path, "graph node file path", 65_536)?;
+        validate_canonical_id(&self.visibility, "graph node visibility", 128)?;
+        if let Some(parent_id) = &self.parent_id {
+            validate_canonical_id(parent_id, "graph parent node id", 4_096)?;
+        }
+        for (field, value) in [
+            ("graph qualified name", Some(self.qualified_name.as_str())),
+            ("graph node signature", self.signature.as_deref()),
+            ("graph node docstring", self.docstring.as_deref()),
+        ] {
+            if let Some(value) = value
+                && value.len() > Self::MAX_TEXT_BYTES
+            {
+                return Err(StorageRuntimeContractErrorV1::TooLong {
+                    field,
+                    actual: value.len(),
+                    max: Self::MAX_TEXT_BYTES,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Aggregate code-graph statistics with deterministically ordered dimensions.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphStatsV1 {
+    pub node_count: u64,
+    pub edge_count: u64,
+    pub file_count: u64,
+    pub nodes_by_kind: std::collections::BTreeMap<String, u64>,
+    pub edges_by_kind: std::collections::BTreeMap<String, u64>,
+    pub db_size_bytes: u64,
+    pub last_updated: u64,
+    pub total_source_bytes: u64,
+    pub files_by_language: std::collections::BTreeMap<String, u64>,
+    pub last_sync_at: u64,
+    pub last_full_sync_at: u64,
+    pub last_sync_duration_ms: u64,
+}
+
+/// Finite graph-search relevance score.
+///
+/// The constructor and deserializer reject NaN and infinities, which makes the
+/// otherwise floating-point value a sound `Eq` member of runtime responses.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct GraphSearchScoreV1(f64);
+
+impl GraphSearchScoreV1 {
+    pub fn new(value: f64) -> Result<Self, StorageRuntimeContractErrorV1> {
+        if !value.is_finite() {
+            return Err(StorageRuntimeContractErrorV1::NonCanonical {
+                field: "graph search score",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Eq for GraphSearchScoreV1 {}
+
+impl Serialize for GraphSearchScoreV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_f64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for GraphSearchScoreV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(f64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphSearchResultV1 {
+    pub node: GraphNodeV1,
+    pub score: GraphSearchScoreV1,
+}
+
+impl GraphSearchResultV1 {
+    pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
+        self.node.validate()?;
+        GraphSearchScoreV1::new(self.score.get()).map(|_| ())
+    }
+}
+
 /// Metadata common to every admitted repository operation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -516,169 +768,142 @@ pub struct StoreOperationMetadataV1 {
     pub client_id: StoreClientIdV1,
     pub shard_id: StoreShardIdV1,
     pub incarnation: StoreIncarnationV1,
-    pub authority_epoch: AuthorityEpochV1,
+    pub authority_epoch: StoreAuthorityEpochV1,
     pub idempotency: IdempotencyIdentityV1,
     pub durability: DurabilityClassV1,
     pub priority: OperationPriorityV1,
-    pub estimated_bytes: u64,
+    /// Exact bytes charged against admission. Adapters may reject an
+    /// under-estimate but must never silently admit uncharged payload bytes.
+    pub admission_bytes: u64,
     pub admitted_at: UtcMicros,
 }
 
 impl StoreOperationMetadataV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        if self.estimated_bytes == 0 {
+        if self.admission_bytes == 0 {
             return Err(StorageRuntimeContractErrorV1::Zero {
-                field: "operation estimated bytes",
+                field: "operation admission bytes",
             });
         }
         Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "family",
-    content = "operation",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum RepositoryOperationV1 {
-    Profile(ProfileOperationV1),
-    Project(ProjectOperationV1),
-    Sessions(SessionOperationV1),
-    Code(CodeOperationV1),
-    Effects(EffectOperationV1),
+/// Closed, repository-specific write payloads admitted by the runtime.
+///
+/// Every variant wraps a DTO validated by its owning store contract. There is
+/// intentionally no query string, untyped JSON value, byte blob, or generic
+/// command variant. Adding a repository operation therefore requires adding a
+/// typed store projection first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RepositoryWritePayloadV1 {
+    Configuration(Box<ConfigurationCommitV1>),
+    Fact(Box<FactWriteBatch>),
+    Observation(Box<ObservationWrite>),
+    Diagnostics(Box<SanitizedCleanDiagnosticSnapshotV1>),
+    SessionProjection(Box<SessionTemporalProjectionBatchV1>),
+    SessionSummary(Box<SessionSummaryPublicationRequestV1>),
+    GitIndexTransaction(Box<GitIndexTransactionRecordV1>),
+    EnqueueOutbox(Box<TransactionalOutboxEntryV1>),
+    ApplyInbox(Box<TransactionalInboxReceiptV1>),
+    AcknowledgeOutbox(Box<OutboxAcknowledgementReceiptV1>),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProfileOperationV1 {
-    CommitConfiguration,
-    RecordUserActivity,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectOperationV1 {
-    CommitFacts,
-    CommitObservations,
-    PublishDiagnostics,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionOperationV1 {
-    PersistTranscript,
-    PersistTemporalProjection,
-    PublishSummary,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CodeOperationV1 {
-    IndexRepository,
-    PublishProjection,
-    RecordGitIndexTransaction,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum EffectOperationV1 {
-    EnqueueOutbox,
-    ApplyInbox,
-    AcknowledgeOutbox,
-}
-
-impl RepositoryOperationV1 {
-    pub fn name(self) -> &'static str {
+impl RepositoryWritePayloadV1 {
+    pub fn name(&self) -> &'static str {
         match self {
-            Self::Profile(ProfileOperationV1::CommitConfiguration) => "commit configuration",
-            Self::Profile(ProfileOperationV1::RecordUserActivity) => "record user activity",
-            Self::Project(ProjectOperationV1::CommitFacts) => "commit facts",
-            Self::Project(ProjectOperationV1::CommitObservations) => "commit observations",
-            Self::Project(ProjectOperationV1::PublishDiagnostics) => "publish diagnostics",
-            Self::Sessions(SessionOperationV1::PersistTranscript) => "persist transcript",
-            Self::Sessions(SessionOperationV1::PersistTemporalProjection) => {
-                "persist temporal projection"
-            }
-            Self::Sessions(SessionOperationV1::PublishSummary) => "publish summary",
-            Self::Code(CodeOperationV1::IndexRepository) => "index repository",
-            Self::Code(CodeOperationV1::PublishProjection) => "publish code projection",
-            Self::Code(CodeOperationV1::RecordGitIndexTransaction) => {
-                "record git index transaction"
-            }
-            Self::Effects(EffectOperationV1::EnqueueOutbox) => "enqueue outbox effect",
-            Self::Effects(EffectOperationV1::ApplyInbox) => "apply inbox effect",
-            Self::Effects(EffectOperationV1::AcknowledgeOutbox) => "acknowledge outbox effect",
+            Self::Configuration(_) => "commit configuration",
+            Self::Fact(_) => "commit fact lineage",
+            Self::Observation(_) => "commit observation",
+            Self::Diagnostics(_) => "publish diagnostics",
+            Self::SessionProjection(_) => "persist temporal projection",
+            Self::SessionSummary(_) => "publish summary",
+            Self::GitIndexTransaction(_) => "record git index transaction",
+            Self::EnqueueOutbox(_) => "enqueue outbox effect",
+            Self::ApplyInbox(_) => "apply inbox effect",
+            Self::AcknowledgeOutbox(_) => "acknowledge outbox effect",
         }
     }
 
-    pub fn required_durability(self) -> DurabilityClassV1 {
+    pub fn required_durability(&self) -> DurabilityClassV1 {
+        DurabilityClassV1::Full
+    }
+
+    fn family_name(&self) -> &'static str {
         match self {
-            Self::Code(CodeOperationV1::IndexRepository | CodeOperationV1::PublishProjection) => {
-                DurabilityClassV1::RebuildableProjection
+            Self::Configuration(_) => "profile",
+            Self::Fact(_) | Self::Observation(_) | Self::Diagnostics(_) => "project",
+            Self::SessionProjection(_) | Self::SessionSummary(_) => "sessions",
+            Self::GitIndexTransaction(_) => "code",
+            Self::EnqueueOutbox(_) | Self::ApplyInbox(_) | Self::AcknowledgeOutbox(_) => "effects",
+        }
+    }
+
+    fn matches_scope(&self, scope: &StoreShardScopeV1) -> bool {
+        match self {
+            Self::Configuration(_) => matches!(scope, StoreShardScopeV1::Profile),
+            Self::Fact(_) | Self::Observation(_) | Self::Diagnostics(_) => {
+                matches!(scope, StoreShardScopeV1::Project { .. })
             }
-            Self::Profile(_)
-            | Self::Project(_)
-            | Self::Sessions(_)
-            | Self::Code(CodeOperationV1::RecordGitIndexTransaction)
-            | Self::Effects(_) => DurabilityClassV1::Full,
-        }
-    }
-
-    fn family_name(self) -> &'static str {
-        match self {
-            Self::Profile(_) => "profile",
-            Self::Project(_) => "project",
-            Self::Sessions(_) => "sessions",
-            Self::Code(_) => "code",
-            Self::Effects(_) => "effects",
-        }
-    }
-
-    fn matches_scope(self, scope: &StoreShardScopeV1) -> bool {
-        match self {
-            Self::Profile(_) => matches!(scope, StoreShardScopeV1::Profile),
-            Self::Project(_) => matches!(scope, StoreShardScopeV1::Project { .. }),
-            Self::Sessions(_) => matches!(scope, StoreShardScopeV1::ProjectSessions { .. }),
-            Self::Code(_) => matches!(
+            Self::SessionProjection(_) | Self::SessionSummary(_) => {
+                matches!(scope, StoreShardScopeV1::ProjectSessions { .. })
+            }
+            Self::GitIndexTransaction(_) => matches!(
                 scope,
                 StoreShardScopeV1::Code {
                     scope: CodeShardScopeV1::Worktree { .. },
                     ..
                 }
             ),
-            Self::Effects(_) => scope.is_mutable(),
+            Self::EnqueueOutbox(_) | Self::ApplyInbox(_) | Self::AcknowledgeOutbox(_) => {
+                scope.is_mutable()
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
+        match self {
+            Self::Configuration(commit) => commit.validate().map_err(|_| {
+                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                    payload: self.name(),
+                }
+            }),
+            Self::GitIndexTransaction(record) => record.validate().map_err(|_| {
+                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                    payload: self.name(),
+                }
+            }),
+            Self::EnqueueOutbox(entry) => entry.validate(),
+            Self::ApplyInbox(receipt) => receipt.validate(),
+            Self::AcknowledgeOutbox(receipt) => receipt.validate(),
+            Self::Fact(_)
+            | Self::Observation(_)
+            | Self::Diagnostics(_)
+            | Self::SessionProjection(_)
+            | Self::SessionSummary(_) => Ok(()),
         }
     }
 }
 
-/// Closed repository operation envelope. There is intentionally no SQL variant.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// Closed repository operation envelope carrying an executable typed payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepositoryOperationEnvelopeV1 {
     pub metadata: StoreOperationMetadataV1,
-    pub operation: RepositoryOperationV1,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RepositoryOperationEnvelopeWireV1 {
-    metadata: StoreOperationMetadataV1,
-    operation: RepositoryOperationV1,
+    pub payload: RepositoryWritePayloadV1,
 }
 
 impl RepositoryOperationEnvelopeV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.metadata.validate()?;
+        self.payload.validate()?;
         if !self.metadata.shard_id.is_mutable() {
             return Err(StorageRuntimeContractErrorV1::ImmutableShard {
-                operation: self.operation.name(),
+                operation: self.payload.name(),
             });
         }
-        if !self.operation.matches_scope(&self.metadata.shard_id.scope) {
+        if !self.payload.matches_scope(&self.metadata.shard_id.scope) {
             return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                operation: self.operation.family_name(),
+                operation: self.payload.family_name(),
                 shard_family: match self.metadata.shard_id.scope {
                     StoreShardScopeV1::Profile => "profile",
                     StoreShardScopeV1::Project { .. } => "project",
@@ -687,10 +912,10 @@ impl RepositoryOperationEnvelopeV1 {
                 },
             });
         }
-        let required = self.operation.required_durability();
+        let required = self.payload.required_durability();
         if self.metadata.durability != required {
             return Err(StorageRuntimeContractErrorV1::DurabilityMismatch {
-                operation: self.operation.name(),
+                operation: self.payload.name(),
                 required,
                 actual: self.metadata.durability,
             });
@@ -699,21 +924,11 @@ impl RepositoryOperationEnvelopeV1 {
     }
 }
 
-impl<'de> Deserialize<'de> for RepositoryOperationEnvelopeV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = RepositoryOperationEnvelopeWireV1::deserialize(deserializer)?;
-        let envelope = Self {
-            metadata: wire.metadata,
-            operation: wire.operation,
-        };
-        envelope.validate().map_err(serde::de::Error::custom)?;
-        Ok(envelope)
-    }
-}
-
+/// Durable storage commit evidence.
+///
+/// It has no parallel free-standing receipt ID: its canonical identity is the
+/// operation/idempotency pair plus the fenced shard commit position. Domain
+/// receipt IDs remain owned by their specific domain operations.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StoreCommitReceiptV1 {
@@ -721,7 +936,7 @@ pub struct StoreCommitReceiptV1 {
     pub idempotency: IdempotencyIdentityV1,
     pub shard_id: StoreShardIdV1,
     pub incarnation: StoreIncarnationV1,
-    pub authority_epoch: AuthorityEpochV1,
+    pub authority_epoch: StoreAuthorityEpochV1,
     pub commit_sequence: CommitSequenceV1,
     pub committed_at: UtcMicros,
 }
@@ -733,7 +948,7 @@ struct StoreCommitReceiptWireV1 {
     idempotency: IdempotencyIdentityV1,
     shard_id: StoreShardIdV1,
     incarnation: StoreIncarnationV1,
-    authority_epoch: AuthorityEpochV1,
+    authority_epoch: StoreAuthorityEpochV1,
     commit_sequence: CommitSequenceV1,
     committed_at: UtcMicros,
 }
