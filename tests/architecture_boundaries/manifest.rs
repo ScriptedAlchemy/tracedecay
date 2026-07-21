@@ -34,6 +34,8 @@ const PR8_WORKSPACE_MANIFESTS: &[&str] = &[
     "crates/tracedecay-application/Cargo.toml",
     "crates/tracedecay-domain/Cargo.toml",
     "crates/tracedecay-policy/Cargo.toml",
+    "crates/tracedecay-rusqlite-parity/Cargo.toml",
+    "crates/tracedecay-sqlite-parity-protocol/Cargo.toml",
     "crates/tracedecay-store/Cargo.toml",
     "crates/tracedecay-tool-catalog/Cargo.toml",
 ];
@@ -64,6 +66,10 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-policy|routing_admission|test|crates/tracedecay-policy/tests/routing_admission.rs",
     "tracedecay-policy|sink_recheck|test|crates/tracedecay-policy/tests/sink_recheck.rs",
     "tracedecay-policy|source_authorization|test|crates/tracedecay-policy/tests/source_authorization.rs",
+    "tracedecay-rusqlite-parity|tracedecay_rusqlite_parity|lib|crates/tracedecay-rusqlite-parity/src/lib.rs",
+    "tracedecay-rusqlite-parity|tracedecay-rusqlite-parity|bin|crates/tracedecay-rusqlite-parity/src/main.rs",
+    "tracedecay-rusqlite-parity|subprocess_protocol|test|crates/tracedecay-rusqlite-parity/tests/subprocess_protocol.rs",
+    "tracedecay-sqlite-parity-protocol|tracedecay_sqlite_parity_protocol|lib|crates/tracedecay-sqlite-parity-protocol/src/lib.rs",
     "tracedecay-store|tracedecay_store|lib|crates/tracedecay-store/src/lib.rs",
     "tracedecay-store|configuration_contract|test|crates/tracedecay-store/tests/configuration_contract.rs",
     "tracedecay-store|diagnostics_contract|test|crates/tracedecay-store/tests/diagnostics_contract.rs",
@@ -124,6 +130,41 @@ const PR8_ROOT_PACKAGE_ALIASES: &[(&str, &str)] = &[
         "tokensave-large-treesitters",
     ),
 ];
+struct StorageParityRole {
+    manifest: &'static str,
+    package: &'static str,
+    description: &'static str,
+    dependencies: &'static [(&'static str, Option<&'static str>)],
+}
+
+const STORAGE_PARITY_ROLES: &[StorageParityRole] = &[
+    StorageParityRole {
+        manifest: "crates/tracedecay-sqlite-parity-protocol/Cargo.toml",
+        package: "tracedecay-sqlite-parity-protocol",
+        description: "driver-free SQLite parity protocol",
+        dependencies: &[
+            ("hex", None),
+            ("serde", None),
+            ("serde_json", None),
+            ("sha2", None),
+            ("tempfile", Some("dev")),
+        ],
+    },
+    StorageParityRole {
+        manifest: "crates/tracedecay-rusqlite-parity/Cargo.toml",
+        package: "tracedecay-rusqlite-parity",
+        description: "process-isolated rusqlite parity probe",
+        dependencies: &[
+            ("hex", None),
+            ("rusqlite", None),
+            ("serde_json", None),
+            ("sha2", None),
+            ("tracedecay-sqlite-parity-protocol", None),
+            ("url", None),
+            ("tempfile", Some("dev")),
+        ],
+    },
+];
 
 // This is a sample project indexed by context-evaluation tests. Its Rust files
 // are deliberately source input, not modules or targets of the tracedecay crate.
@@ -173,6 +214,7 @@ struct CargoPackage {
 struct CargoDependency {
     name: String,
     rename: Option<String>,
+    kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -350,6 +392,9 @@ fn parse_cargo_source_layout(
 }
 
 fn expected_pr8_package_name(manifest_path: &Path) -> Option<&'static str> {
+    if let Some(role) = storage_parity_role(manifest_path) {
+        return Some(role.package);
+    }
     match manifest_path.to_str() {
         Some("Cargo.toml") => Some("tracedecay"),
         Some("crates/tracedecay-application/Cargo.toml") => Some("tracedecay-application"),
@@ -397,6 +442,17 @@ fn validate_contract_package_dependencies(
     dependencies: &[CargoDependency],
     violations: &mut BTreeSet<String>,
 ) {
+    if let Some(role) = storage_parity_role(manifest_path) {
+        validate_exact_role_dependencies(
+            manifest_path,
+            dependencies,
+            role.description,
+            role.dependencies,
+            violations,
+        );
+        return;
+    }
+
     for dependency in dependencies {
         let alias = dependency.rename.as_deref().unwrap_or(&dependency.name);
         let normalized_alias = normalize_identifier(alias);
@@ -410,6 +466,56 @@ fn validate_contract_package_dependencies(
         if !package_allowed || !alias_matches_package {
             violations.insert(format!(
                 "{} contract dependency {alias} -> {} is outside the pure query package allowlist",
+                manifest_path.display(),
+                dependency.name
+            ));
+        }
+    }
+}
+
+fn storage_parity_role(manifest_path: &Path) -> Option<&'static StorageParityRole> {
+    STORAGE_PARITY_ROLES
+        .iter()
+        .find(|role| manifest_path == Path::new(role.manifest))
+}
+
+fn validate_exact_role_dependencies(
+    manifest_path: &Path,
+    dependencies: &[CargoDependency],
+    role: &str,
+    expected_dependencies: &[(&str, Option<&str>)],
+    violations: &mut BTreeSet<String>,
+) {
+    let actual: BTreeSet<_> = dependencies
+        .iter()
+        .map(|dependency| {
+            format!(
+                "{}|{}",
+                dependency.name,
+                dependency.kind.as_deref().unwrap_or("normal")
+            )
+        })
+        .collect();
+    let expected: BTreeSet<_> = expected_dependencies
+        .iter()
+        .map(|(name, kind)| format!("{name}|{}", kind.unwrap_or("normal")))
+        .collect();
+    for missing in expected.difference(&actual) {
+        violations.insert(format!(
+            "{} {role} dependency is missing: {missing}",
+            manifest_path.display()
+        ));
+    }
+    for extra in actual.difference(&expected) {
+        violations.insert(format!(
+            "{} {role} dependency is forbidden: {extra}",
+            manifest_path.display()
+        ));
+    }
+    for dependency in dependencies {
+        if let Some(rename) = &dependency.rename {
+            violations.insert(format!(
+                "{} {role} must not rename dependency {rename} -> {}",
                 manifest_path.display(),
                 dependency.name
             ));
@@ -947,6 +1053,9 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
         "path+file:///workspace/crates/tracedecay-application#tracedecay-application@0.1.0";
     let domain_id = "path+file:///workspace/crates/domain#domain@0.1.0";
     let policy_id = "path+file:///workspace/crates/tracedecay-policy#tracedecay-policy@0.1.0";
+    let rusqlite_parity_id =
+        "path+file:///workspace/crates/tracedecay-rusqlite-parity#tracedecay-rusqlite-parity@0.1.0";
+    let sqlite_parity_protocol_id = "path+file:///workspace/crates/tracedecay-sqlite-parity-protocol#tracedecay-sqlite-parity-protocol@0.1.0";
     let store_id = "path+file:///workspace/crates/store#store@0.1.0";
     let catalog_id = "path+file:///workspace/crates/tool-catalog#tool-catalog@0.1.0";
     let metadata = serde_json::json!({
@@ -987,6 +1096,56 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
                 ]
             },
             {
+                "id": rusqlite_parity_id,
+                "name": "tracedecay-rusqlite-parity",
+                "manifest_path": repository.join("crates/tracedecay-rusqlite-parity/Cargo.toml"),
+                "dependencies": [
+                    { "name": "hex" },
+                    { "name": "rusqlite" },
+                    { "name": "serde_json" },
+                    { "name": "sha2" },
+                    { "name": "tracedecay-sqlite-parity-protocol" },
+                    { "name": "url" },
+                    { "name": "tempfile", "kind": "dev" }
+                ],
+                "targets": [
+                    {
+                        "kind": ["lib"],
+                        "name": "tracedecay_rusqlite_parity",
+                        "src_path": repository.join("crates/tracedecay-rusqlite-parity/src/lib.rs")
+                    },
+                    {
+                        "kind": ["bin"],
+                        "name": "tracedecay-rusqlite-parity",
+                        "src_path": repository.join("crates/tracedecay-rusqlite-parity/src/main.rs")
+                    },
+                    {
+                        "kind": ["test"],
+                        "name": "subprocess_protocol",
+                        "src_path": repository.join("crates/tracedecay-rusqlite-parity/tests/subprocess_protocol.rs")
+                    }
+                ]
+            },
+            {
+                "id": sqlite_parity_protocol_id,
+                "name": "tracedecay-sqlite-parity-protocol",
+                "manifest_path": repository.join("crates/tracedecay-sqlite-parity-protocol/Cargo.toml"),
+                "dependencies": [
+                    { "name": "hex" },
+                    { "name": "serde" },
+                    { "name": "serde_json" },
+                    { "name": "sha2" },
+                    { "name": "tempfile", "kind": "dev" }
+                ],
+                "targets": [
+                    {
+                        "kind": ["lib"],
+                        "name": "tracedecay_sqlite_parity_protocol",
+                        "src_path": repository.join("crates/tracedecay-sqlite-parity-protocol/src/lib.rs")
+                    }
+                ]
+            },
+            {
                 "id": store_id,
                 "name": "tracedecay-store",
                 "manifest_path": repository.join("crates/tracedecay-store/Cargo.toml"),
@@ -1013,6 +1172,8 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
             application_id,
             domain_id,
             policy_id,
+            rusqlite_parity_id,
+            sqlite_parity_protocol_id,
             store_id,
             catalog_id
         ]
@@ -1032,6 +1193,10 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
             PathBuf::from("crates/tracedecay-domain/src/lib.rs"),
             PathBuf::from("crates/tracedecay-domain/tests/boundary.rs"),
             PathBuf::from("crates/tracedecay-policy/src/lib.rs"),
+            PathBuf::from("crates/tracedecay-rusqlite-parity/src/lib.rs"),
+            PathBuf::from("crates/tracedecay-rusqlite-parity/src/main.rs"),
+            PathBuf::from("crates/tracedecay-rusqlite-parity/tests/subprocess_protocol.rs"),
+            PathBuf::from("crates/tracedecay-sqlite-parity-protocol/src/lib.rs"),
             PathBuf::from("crates/tracedecay-store/src/lib.rs"),
             PathBuf::from("crates/tracedecay-tool-catalog/src/lib.rs"),
             PathBuf::from("src/lib.rs"),
@@ -1048,6 +1213,8 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
             PathBuf::from("crates/tracedecay-application"),
             PathBuf::from("crates/tracedecay-domain"),
             PathBuf::from("crates/tracedecay-policy"),
+            PathBuf::from("crates/tracedecay-rusqlite-parity"),
+            PathBuf::from("crates/tracedecay-sqlite-parity-protocol"),
             PathBuf::from("crates/tracedecay-store"),
             PathBuf::from("crates/tracedecay-tool-catalog"),
             PathBuf::from("examples"),
@@ -1060,6 +1227,19 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
     assert_eq!(
         layout.workspace_manifests,
         PR8_WORKSPACE_MANIFESTS.iter().map(PathBuf::from).collect()
+    );
+    assert!(
+        !layout.pr8_violations.iter().any(|violation| {
+            STORAGE_PARITY_ROLES.iter().any(|role| {
+                violation.contains(role.description)
+                    || violation
+                        .contains(&format!("{} must declare PR8 package name", role.manifest))
+                    || (violation.contains("PR8 Cargo target")
+                        && violation.contains(&format!(": {}|", role.package)))
+            })
+        }),
+        "exact storage parity manifests, targets, and roles must be admitted: {:?}",
+        layout.pr8_violations
     );
 }
 
@@ -1154,6 +1334,87 @@ fn metadata_contract_rejects_package_aliases_extra_members_and_query_targets() {
                 .iter()
                 .any(|violation| violation.contains(expected)),
             "metadata contract missed {expected}: {:?}",
+            layout.pr8_violations
+        );
+    }
+}
+
+#[test]
+fn storage_parity_manifest_roles_require_exact_dependencies_and_paths() {
+    let temporary = tempfile::tempdir().expect("create storage parity metadata fixture");
+    let repository = temporary.path();
+    let protocol_id = "path+file:///workspace/crates/tracedecay-sqlite-parity-protocol#tracedecay-sqlite-parity-protocol@0.1.0";
+    let parity_id =
+        "path+file:///workspace/crates/tracedecay-rusqlite-parity#tracedecay-rusqlite-parity@0.1.0";
+    let lookalike_id = "path+file:///workspace/crates/tracedecay-rusqlite-parity-shadow#tracedecay-rusqlite-parity-shadow@0.1.0";
+    let metadata = serde_json::json!({
+        "packages": [
+            {
+                "id": protocol_id,
+                "name": "tracedecay-sqlite-parity-protocol",
+                "manifest_path": repository.join("crates/tracedecay-sqlite-parity-protocol/Cargo.toml"),
+                "dependencies": [
+                    { "name": "rusqlite" },
+                    { "name": "tempfile" }
+                ],
+                "targets": [
+                    {
+                        "kind": ["lib"],
+                        "name": "tracedecay_sqlite_parity_protocol",
+                        "src_path": repository.join("crates/tracedecay-sqlite-parity-protocol/src/lib.rs")
+                    },
+                    {
+                        "kind": ["lib"],
+                        "name": "tracedecay_sqlite_parity_protocol_shadow",
+                        "src_path": repository.join("crates/tracedecay-sqlite-parity-protocol/src/shadow.rs")
+                    }
+                ]
+            },
+            {
+                "id": parity_id,
+                "name": "tracedecay-rusqlite-parity",
+                "manifest_path": repository.join("crates/tracedecay-rusqlite-parity/Cargo.toml"),
+                "dependencies": [{
+                    "name": "tracedecay-sqlite-parity-protocol",
+                    "rename": "wire"
+                }],
+                "targets": []
+            },
+            {
+                "id": lookalike_id,
+                "name": "tracedecay-rusqlite-parity-shadow",
+                "manifest_path": repository.join("crates/tracedecay-rusqlite-parity-shadow/Cargo.toml"),
+                "targets": [{
+                    "kind": ["bin"],
+                    "name": "tracedecay-rusqlite-parity-shadow",
+                    "src_path": repository.join("crates/tracedecay-rusqlite-parity-shadow/src/main.rs")
+                }]
+            }
+        ],
+        "workspace_members": [protocol_id, parity_id, lookalike_id]
+    });
+    let layout = parse_cargo_source_layout(
+        repository,
+        &serde_json::to_vec(&metadata).expect("serialize metadata fixture"),
+    )
+    .expect("parse metadata fixture");
+
+    for expected in [
+        "driver-free SQLite parity protocol dependency is forbidden: rusqlite|normal",
+        "driver-free SQLite parity protocol dependency is missing: hex|normal",
+        "driver-free SQLite parity protocol dependency is forbidden: tempfile|normal",
+        "driver-free SQLite parity protocol dependency is missing: tempfile|dev",
+        "process-isolated rusqlite parity probe must not rename dependency wire -> tracedecay-sqlite-parity-protocol",
+        "additional PR8 workspace member is forbidden: crates/tracedecay-rusqlite-parity-shadow/Cargo.toml",
+        "additional PR8 Cargo target is forbidden: tracedecay-sqlite-parity-protocol|tracedecay_sqlite_parity_protocol_shadow|lib|crates/tracedecay-sqlite-parity-protocol/src/shadow.rs",
+        "additional PR8 Cargo target is forbidden: tracedecay-rusqlite-parity-shadow|tracedecay-rusqlite-parity-shadow|bin|crates/tracedecay-rusqlite-parity-shadow/src/main.rs",
+    ] {
+        assert!(
+            layout
+                .pr8_violations
+                .iter()
+                .any(|violation| violation.contains(expected)),
+            "storage parity manifest contract missed {expected}: {:?}",
             layout.pr8_violations
         );
     }
