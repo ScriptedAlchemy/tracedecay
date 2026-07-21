@@ -1,7 +1,10 @@
 //! Non-disclosing problem helpers shared by CLI presenters.
 
-pub use tracedecay::daemon_client::concealed_not_found_or_not_authorized;
 use tracedecay_application::{ApplicationProblem, ApplicationProblemKind};
+
+pub fn concealed_not_found_or_not_authorized() -> ApplicationProblem {
+    tracedecay::daemon_client::concealed_not_found_or_not_authorized()
+}
 
 /// Stable semantic exit class. Numeric process-code policy is selected by the
 /// CLI entry point; it must not collapse these application states.

@@ -430,5 +430,10 @@ mod tests {
             session.publication(uri).unwrap().delivery,
             PublicationDelivery::Produced
         );
+
+        session.shutdown().unwrap();
+        session.exit().unwrap();
+        assert_eq!(session.lifecycle(), SessionLifecycle::Exited);
+        assert!(session.publication(uri).is_none());
     }
 }

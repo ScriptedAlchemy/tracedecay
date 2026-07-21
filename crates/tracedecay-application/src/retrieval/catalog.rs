@@ -27,6 +27,8 @@ pub fn application_catalog_contributions()
     Ok(vec![
         symbol_search_contribution()?,
         crate::git::git_index_catalog_contribution()?,
+        crate::git::git_surface_catalog_contribution()?,
+        crate::feedback::feedback_surface_catalog_contribution()?,
     ])
 }
 

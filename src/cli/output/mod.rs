@@ -6,5 +6,3 @@
 pub mod json;
 pub mod markdown;
 pub mod problem;
-
-pub use tracedecay::daemon_client::{canonical_cursor, canonical_problem_kind};

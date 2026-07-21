@@ -214,5 +214,7 @@ pub fn application_handler_descriptors()
 -> Result<ApplicationHandlerDescriptors, ApplicationContractError> {
     let mut descriptors = vec![crate::retrieval::catalog::symbol_search_handler_descriptor()?];
     descriptors.extend(crate::git::git_index_handler_descriptors()?);
+    descriptors.extend(crate::git::git_surface_handler_descriptors()?);
+    descriptors.extend(crate::feedback::feedback_surface_handler_descriptors()?);
     ApplicationHandlerDescriptors::new(descriptors)
 }

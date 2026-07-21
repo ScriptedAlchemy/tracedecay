@@ -334,6 +334,47 @@ impl ProximityContributionV1 {
             });
         }
 
+        if !concealed {
+            let address = self.address.as_ref().expect("validated above");
+            let has_relation = |kind| self.relation_paths.iter().any(|path| path.kind == kind);
+            let exact_shape = match self.warning_class {
+                ProximityWarningClassV1::SameFile => true,
+                ProximityWarningClassV1::OverlappingRange => address.span.is_some(),
+                ProximityWarningClassV1::SameSymbol => address.symbol.is_some(),
+                ProximityWarningClassV1::SamePackage => {
+                    has_relation(ProximityRelationPathKindV1::PackageMembership)
+                }
+                ProximityWarningClassV1::SameCrate => {
+                    has_relation(ProximityRelationPathKindV1::CrateMembership)
+                }
+                ProximityWarningClassV1::Neighborhood => {
+                    has_relation(ProximityRelationPathKindV1::NeighborhoodMembership)
+                }
+                ProximityWarningClassV1::SharedCaller => {
+                    has_relation(ProximityRelationPathKindV1::DirectCaller)
+                        || has_relation(ProximityRelationPathKindV1::TransitiveCaller)
+                }
+                ProximityWarningClassV1::SharedDependency => {
+                    has_relation(ProximityRelationPathKindV1::DirectDependency)
+                        || has_relation(ProximityRelationPathKindV1::TransitiveDependency)
+                }
+                ProximityWarningClassV1::SharedTest => {
+                    has_relation(ProximityRelationPathKindV1::AffectedTest)
+                }
+                ProximityWarningClassV1::IncompatibleBranchWorktree => {
+                    self.risk_inputs.as_ref().is_some_and(|inputs| {
+                        inputs.branch_worktree_incompatibility
+                            != ProximityBranchWorktreeIncompatibilityV1::Compatible
+                    })
+                }
+            };
+            if !exact_shape {
+                return Err(DomainError::NonCanonical {
+                    field: "proximity warning evidence shape",
+                });
+            }
+        }
+
         if let (ProximityTierV1::Configured, Some(threshold), Some(raw_risk)) = (
             self.tier,
             self.threshold_value_basis_points,

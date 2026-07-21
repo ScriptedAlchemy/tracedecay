@@ -318,6 +318,23 @@ mod tests {
     }
 
     #[test]
+    fn document_merge_drops_cross_document_and_invalid_ranges() {
+        let mut cross_document = diagnostic(DiagnosticSource::Upstream, "other");
+        cross_document.uri = "file:///root/b.rs".into();
+        let mut invalid_range = diagnostic(DiagnosticSource::TraceDecay, "invalid");
+        invalid_range.range.start.character = 2;
+        invalid_range.range.end.character = 1;
+        let merged = DiagnosticMerge::for_document(
+            "file:///root/a.rs",
+            vec![cross_document],
+            vec![invalid_range],
+        );
+
+        assert!(merged.items.is_empty());
+        assert_eq!(merged.omitted_count, 2);
+    }
+
+    #[test]
     fn utf16_positions_round_trip_across_astral_unicode_and_lines() {
         let text = "a🦀b\nλz";
         let position = LspPosition {
