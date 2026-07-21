@@ -4,10 +4,10 @@
 
 PR6 established one host-neutral integration manifest, native observation
 adapters for Claude Code, Codex, Cursor, Hermes, and Kiro, explicit
-Cline-family capability evidence, and daemon host admission. PR13 turns that
-foundation into installable, repairable host integrations that deliver the
-working feedback journey. It does not add a second catalog or a generic
-connector framework.
+Cline-family capability evidence, and daemon host admission. PR13 adds the
+verified Kimi Code and OpenCode capabilities and turns that foundation into
+installable, repairable host integrations that deliver the working feedback
+journey. It does not add a second catalog or a generic connector framework.
 
 ## PR13 user outcome
 
@@ -44,6 +44,12 @@ interruption.
    - Claude Code uses one configured-language TraceDecay LSP plugin plus
      hook/MCP/CLI fallbacks;
    - Cursor desktop uses its native diagnostics adapter and hooks/MCP/CLI;
+   - Kimi Code uses its documented manifest-scoped or global `PostToolUse` and
+     `Stop` hooks, MCP, and installed skills/commands;
+   - OpenCode uses its documented local JS/TS plugin events (`file.edited`,
+     `tool.execute.after`, `session.idle`/`session.status`, and LSP events),
+     custom LSP configuration, MCP, custom agents/skills, commands (prompt
+     templates), and instruction/rules content;
    - Cursor cloud, Codex, Hermes, and Kiro use hooks, MCP, or CLI where native
      support exists and otherwise return a typed unavailable result; and
    - each admitted Cline-family host uses an explicitly packaged hook, MCP, or
@@ -91,6 +97,21 @@ credential scopes fail before network access.
 - Package Cursor desktop native diagnostics without starting a duplicate
   analyzer for the same language. Publish TraceDecay-only findings through the
   native adapter.
+- Package Kimi Code's documented plugin manifest and global-hook forms without
+  conflating their ownership or scope. Register only `PostToolUse` and `Stop`
+  for PR13 feedback, install MCP and skills/commands through their native
+  mechanisms, and preserve unrelated global hooks and plugin state.
+- Package an OpenCode local JS/TS plugin for `file.edited`,
+  `tool.execute.after`, `session.idle`/`session.status`, and LSP events, plus
+  its native MCP, custom agents/skills, commands (prompt templates), and
+  instruction/rules content. Agent-referenced prompt files are packaged within
+  the owning agent component, and `AGENTS.md` remains instruction/rules
+  content; neither creates a standalone prompt component. Its custom
+  TraceDecay LSP configuration must detect an existing analyzer for each
+  language. It either retains that analyzer and runs TraceDecay-only
+  projection, or explicitly selects the daemon-managed analyzer through the
+  lifecycle operation; it never starts both or silently disables another
+  analyzer.
 - Package a Cline-family route only for host/version combinations with
   checked-in native event and registration evidence. Keep all other
   Cline-family variants discoverable as typed unavailable with the exact
@@ -102,6 +123,13 @@ credential scopes fail before network access.
 - Provide callable install, update, repair, backup/restore, and uninstall
   operations with dry run, explicit confirmation, idempotency, receipts, and
   rollback.
+- Treat Kimi Code plugin/global registrations and OpenCode plugin, LSP, MCP,
+  agent, skill, command, and instruction/rules artifacts as lifecycle-owned
+  components. Agent-referenced prompt files follow the agent component;
+  command prompt templates follow the command component; and `AGENTS.md`
+  follows instruction/rules ownership. Dry run, repair, and rollback preserve
+  all unrelated host configuration and restore the exact prior analyzer
+  selection.
 - Preserve the self-service `configure -> dry-run -> sign -> apply` flow over
   Plan 20's protected configuration mutation. Apply verifies actor, base
   revision, scope, authorization/policy epoch, effective configuration
@@ -178,6 +206,12 @@ the host observation replay spool.
   projection, local expansion, explicit feedback receipt, hook fanout, LSP or
   native-diagnostics fanout, and CLI fallback. Missing native capability is
   never inferred from prompt text or emulated from another host.
+- Report Kimi Code manifest/global hook scope, `PostToolUse`, `Stop`, MCP, and
+  skills/commands independently. Report OpenCode local-plugin edit/tool/
+  session/LSP events, custom-LSP analyzer ownership, MCP, custom agents
+  (including their referenced prompt files), skills, commands (prompt
+  templates), and instruction/rules content independently; one healthy
+  surface never conceals another surface's conflict or unavailable state.
 - Emit host registration, version-skew, endpoint, hook-delivery, and protocol
   conformance evidence for PR14 Doctor consumption. PR13 owns the actual
   repair mechanics; PR14 owns diagnosis and orchestration.
@@ -196,9 +230,10 @@ the host observation replay spool.
   store, or host-local workflow authority.
 - This removes only generic future scaffolding and planning inventories. It
   does not remove a supported component, host command/tool/skill/agent/hook,
-  delivery capability, refresh/query mode, receipt/failure/quarantine
-  behavior, lifecycle operation, configuration flow, rollback, compatibility
-  obligation, or safety semantic.
+  agent-owned referenced prompt file, instruction/rules content, LSP
+  configuration, delivery capability, refresh/query mode, receipt/failure/
+  quarantine behavior, lifecycle operation, configuration flow, rollback,
+  compatibility obligation, or safety semantic.
 
 ## Direct acceptance
 
@@ -206,25 +241,40 @@ the host observation replay spool.
   stop boundary produces the same authorized Plan 09 feedback where
   capabilities overlap.
 - Claude Code registers the single configured-language LSP route; Cursor
-  desktop uses native diagnostics; Cursor cloud, Codex, Hermes, and Kiro prove
-  hook/MCP/CLI delivery or an exact unavailable result without claiming LSP.
+  desktop uses native diagnostics; Kimi Code proves manifest and global
+  `PostToolUse`/`Stop`, MCP, and skills/commands; OpenCode proves its local
+  JS/TS `file.edited`, `tool.execute.after`, `session.idle`/`session.status`
+  and LSP event paths, custom LSP, MCP, custom agents/skills, commands (prompt
+  templates), and instruction/rules content; Cursor cloud, Codex, Hermes, and
+  Kiro prove hook/MCP/CLI delivery or an exact unavailable result without
+  claiming LSP.
+- OpenCode conformance starts the TraceDecay custom LSP with an existing
+  language analyzer present and proves exactly one analyzer owns that language
+  before, during, and after install, repair, rollback, and uninstall while
+  TraceDecay findings still project.
 - Core-only and each optional companion install, update, repair, and uninstall
   independently. Interrupted and repeated operations converge; invalid
   signatures, protocol skew, ownership conflicts, and partial installs fail
   before unsafe mutation and roll back only TraceDecay-owned state.
 - Dogfood the official TraceDecay install, upgrade, repair, and uninstall
   operations—not hand edits or test-only installers—against every supported
-  host on Linux and Windows and on macOS wherever that host exists. Verify
-  native registration, real feedback delivery, receipt identity, unrelated
-  configuration preservation, and clean ownership-aware removal.
-- For every supported host independently, inject a competing-extension claim,
-  interruption before and after the lifecycle commit point, and a partial
-  component failure. Prove rollback restores the exact prior host state,
-  leaves other hosts/components running, and can be repeated after restart.
-- Exercise the direct feedback rollback switch host by host after the V2 path
-  is live, prove delivery returns to the prior supported route without
-  duplicate findings or lost accepted events, then re-enable V2 from the
-  retained receipt/configuration identity.
+  host, explicitly including Kimi Code and OpenCode, on Linux and Windows and
+  on macOS wherever that host exists. Verify native registration, real feedback
+  delivery, receipt identity, unrelated configuration preservation, and clean
+  ownership-aware removal.
+- For every supported host independently, including Kimi Code and OpenCode,
+  inject a competing-extension claim, interruption before and after the
+  lifecycle commit point, and a partial component failure. Prove rollback
+  restores the exact prior hook, plugin, LSP, MCP, skill, agent, command,
+  instruction/rules, and analyzer state. Command prompt templates restore
+  through the command component and referenced prompt files through their
+  owning agent component; other hosts/components remain running, and rollback
+  remains repeatable after restart.
+- Exercise the direct feedback rollback switch host by host, explicitly
+  including Kimi Code and OpenCode, after the V2 path is live; prove delivery
+  returns to the prior supported route without duplicate findings or lost
+  accepted events, then re-enable V2 from the retained receipt/configuration
+  identity.
 - Every Cline-family fixture proves either one real packaged hook/MCP/CLI route
   end to end or an evidence-backed typed unavailable result for the exact
   host/version; family resemblance alone never satisfies acceptance.
@@ -246,9 +296,10 @@ the host observation replay spool.
   and protocol capability remain typed and do not trigger silent fallback.
 - The official lifecycle dogfood, cross-platform host runs,
   competing-extension/interruption/host-by-host rollback, feedback rollback
-  switch, Cline-family route/unavailable proof, and feedback integration tests
-  together are the aggregate PR13 gate; exact file inventories, giant fixture
-  matrices, and placeholder benchmarks are not deliverables.
+  switch, Kimi Code and OpenCode conformance, OpenCode duplicate-analyzer
+  prevention, Cline-family route/unavailable proof, and feedback integration
+  tests together are the aggregate PR13 gate; exact file inventories, giant
+  fixture matrices, and placeholder benchmarks are not deliverables.
 
 ## Later callable extensions
 

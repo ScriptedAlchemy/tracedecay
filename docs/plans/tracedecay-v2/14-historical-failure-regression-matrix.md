@@ -168,9 +168,11 @@ acceptance, effect success, or an independent outcome.
 - **PR13:** synchronous hooks stay bounded and return only receipt/already-ready
   guidance; model/GitHub/feedback work is asynchronous. Saved-content feedback,
   CI localization, read-only GitHub lifecycle, proximity, host capability,
-  Cline-family route/unavailable evidence, cross-platform official lifecycle
-  dogfood, competing-extension/interruption/host rollback, and the feedback
-  rollback switch retain privacy, no-write, restart, and truthful coverage.
+  Kimi Code manifest/global `PostToolUse`/`Stop`, OpenCode local-plugin edit/
+  tool/session/LSP events, Cline-family route/unavailable evidence,
+  cross-platform official lifecycle dogfood, competing-extension/interruption/
+  host rollback, and the feedback rollback switch retain privacy, no-write,
+  restart, truthful coverage, and all previously supported host features.
 - **PR14:** the direct Doctor/dashboard journey above retains canonical state,
   evidence, accessibility, renderer, observability, configuration, and legal
   remediation behavior without a second kernel.
@@ -207,8 +209,14 @@ acceptance, effect success, or an independent outcome.
 - LSP/gateway tests cover malformed/interleaved frames, notification/response
   confusion, stale generations, conflicting overlays, cancellation races,
   analyzer restart exhaustion and disagreement, competing extensions,
-  graph-only/analyzer-only coverage, negotiated context-extension envelopes and
-  expansion handles, version-monotone clear/republish, and no edit authority.
+  graph-only/analyzer-only coverage, OpenCode custom-LSP registration without
+  duplicate analyzers, negotiated context-extension envelopes and expansion
+  handles, version-monotone clear/republish, and no edit authority.
+- PR13 host conformance and lifecycle tests exercise Kimi Code and OpenCode
+  alongside every previously supported host on each supported platform,
+  including install/update/repair/uninstall, real edit and stop feedback,
+  competing registration, interruption, ownership-preserving rollback, and
+  the direct feedback rollback switch.
 - Plan 37 tests keep one-shot termination, GitHub item lifecycle, GitHub ingress
   outcome, semantic-provider state, CI provenance, proximity threshold,
   privacy, expansion, multi-root fanout, and remote fencing as separate typed

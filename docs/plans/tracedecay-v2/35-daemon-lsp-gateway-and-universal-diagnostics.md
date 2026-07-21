@@ -9,9 +9,10 @@ navigation/semantic methods, managed diagnostics, and the owned versioned
 TraceDecay LSP context extension. Those accepted capabilities remain intact.
 
 PR13 makes that gateway a real host-feedback surface: Claude Code packaging
-and protocol conformance, Cursor desktop native diagnostics, duplicate-analyzer
-handling, Plan 37 finding projection, and one-root worktree feedback. Plan 27
-owns installation and repair; this plan owns protocol and provider behavior.
+and protocol conformance, OpenCode custom LSP configuration and conformance,
+Cursor desktop native diagnostics, duplicate-analyzer handling, Plan 37
+finding projection, and one-root worktree feedback. Plan 27 owns installation
+and repair; this plan owns protocol and provider behavior.
 
 ## PR13 user outcome
 
@@ -19,9 +20,12 @@ A user editing in an LSP-capable host receives current analyzer and TraceDecay
 diagnostics, semantic navigation, post-edit impact, read-only GitHub review
 findings, CI localization, and proximity cues through one daemon gateway.
 Cursor desktop receives the equivalent TraceDecay-only findings through its
-native diagnostics adapter. Hosts without a conforming editor protocol retain
-the same application behavior through hooks, MCP, and CLI and report automatic
-editor diagnostics as unavailable rather than emulating LSP.
+native diagnostics adapter. OpenCode receives them through its documented
+custom LSP configuration and local JS/TS LSP events while retaining exactly
+one analyzer per language. Kimi Code and other hosts without a conforming
+editor protocol retain the same application behavior through hooks, MCP, and
+CLI and report automatic editor diagnostics as unavailable rather than
+emulating LSP.
 
 ## End-to-end production journeys
 
@@ -143,14 +147,28 @@ review, CI, proximity, or evidence data.
 - Add conforming LSP hosts only after the same protocol gate. Do not lower the
   contract to accommodate a weaker host.
 
+### Ship OpenCode custom LSP
+
+- Register the packaged bridge through OpenCode's documented custom LSP
+  configuration and consume its local JS/TS plugin LSP events for lifecycle
+  evidence; MCP and plugin feedback remain independent Plan 27 surfaces.
+- Detect OpenCode's existing analyzer selection per language before launch.
+  When that analyzer remains selected, configure the broker for
+  TraceDecay-only graph/advisory projection without launching an upstream
+  analyzer. Selecting the daemon-managed analyzer requires explicit lifecycle
+  confirmation and suppresses the overlapping host analyzer; never run both.
+- Prove initialization, document lifecycle, navigation, diagnostics,
+  cancellation, shutdown, reconnect, conflict detection, repair, and rollback
+  through the same gateway contract as Claude Code.
+
 ### Ship Cursor native diagnostics
 
 - Reuse or ingest Cursor desktop's native analyzer evidence with provenance
   instead of running a duplicate TraceDecay-managed analyzer for that
   language.
 - Publish TraceDecay-only findings through the native diagnostics adapter.
-  Cursor cloud and Codex remain hook/MCP/CLI paths unless a real conforming
-  editor protocol becomes available.
+  Cursor cloud, Codex, and Kimi Code remain hook/MCP/CLI paths unless a real
+  conforming editor protocol becomes available.
 
 ### Project the complete PR13 feedback result
 
@@ -225,6 +243,10 @@ review, CI, proximity, or evidence data.
 - A real Claude Code session registers the one TraceDecay plugin for its
   configured languages and receives analyzer navigation plus current upstream
   and TraceDecay diagnostics through the daemon gateway.
+- A real OpenCode install registers the TraceDecay custom LSP and local JS/TS
+  plugin LSP events, receives the same authorized gateway projections, and
+  proves exactly one analyzer runs for each configured language with a
+  pre-existing analyzer, after repair, across rollback, and after uninstall.
 - Representative Rust, Python, and TypeScript workspaces match direct upstream
   results for every retained semantic/navigation method, with deterministic
   graph augmentation where current evidence permits it.
@@ -248,9 +270,10 @@ review, CI, proximity, or evidence data.
 - Real PR13 GitHub, CI, proximity, post-edit impact, affected-symbol, conflict,
   and stale-epoch findings project and clear correctly; full evidence remains
   available only through authorized expansion.
-- Cursor desktop native diagnostics and every hook/MCP/CLI fallback expose the
-  same application semantics where capabilities overlap. Unsupported automatic
-  diagnostics are explicitly unavailable.
+- Cursor desktop native diagnostics, OpenCode custom LSP, Kimi Code
+  hook/MCP/CLI, and every other fallback expose the same application semantics
+  where capabilities overlap. Unsupported automatic diagnostics are explicitly
+  unavailable.
 - Security and restart checks prove no bridge/client opens a writable store,
   no hidden peer/root is enumerated, no dirty overlay reaches a durable or
   remote sink, and no LSP action mutates source or external systems.

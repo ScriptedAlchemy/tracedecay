@@ -3,10 +3,11 @@
 ## Status and existing foundation
 
 PR6 captured the supported Claude Code, Codex, Cursor, Hermes, and Kiro event
-semantics. PR13 replaces the remaining compatibility planners with thin,
-bounded adapters that signal one daemon-owned feedback path. Hooks are
-transport adapters; they do not own product state, synchronization, Git,
-feedback policy, or peer coordination.
+semantics. PR13 adds the verified Kimi Code and OpenCode event capabilities
+and replaces the remaining compatibility planners with thin, bounded adapters
+that signal one daemon-owned feedback path. Hooks are transport adapters; they
+do not own product state, synchronization, Git, feedback policy, or peer
+coordination.
 
 ## PR13 user outcome
 
@@ -95,6 +96,15 @@ Host capability remains versioned and evidence-backed:
 - Kiro supplies its proved session/workspace/prompt boundaries. Tool, edit, or
   test events remain unavailable until a checked-in native event proves their
   exact ordering and response contract.
+- Kimi Code's documented plugin contract supplies manifest-scoped or global
+  `PostToolUse` and `Stop` hooks. `PostToolUse` may emit typed edit/test
+  identity only when the native payload or owning receipt proves it; `Stop`
+  supplies the native stop boundary.
+- OpenCode's documented local JS/TS plugin event API supplies `file.edited`,
+  `tool.execute.after`, `session.idle`/`session.status`, and LSP events.
+  Saved-edit, post-tool, and stop/quiescence signals retain their native event
+  identity and ordering rather than being inferred from prompts or terminal
+  text.
 
 Ref, commit, worktree epoch, and conflict truth is daemon-derived when the host
 does not expose a typed native record. No adapter parses shell text to
@@ -169,7 +179,10 @@ state; it never contains the result of work started by that hook.
 
 - A real saved edit and a real stop boundary on every supported host reach the
   daemon and can render the same bounded feedback result where that host
-  supports active delivery.
+  supports active delivery. Kimi Code exercises manifest and global
+  `PostToolUse`/`Stop` registration, and OpenCode exercises `file.edited`,
+  `tool.execute.after`, `session.idle`/`session.status`, and LSP event delivery
+  through a real local JS/TS plugin.
 - Timing tests prove the synchronous response returns only a receipt or
   already-ready guidance within the host deadline while delayed model,
   GitHub/CI, Context Scout, and feedback work completes asynchronously and is

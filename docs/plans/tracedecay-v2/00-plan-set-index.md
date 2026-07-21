@@ -156,29 +156,38 @@ and synchronously return only a receipt or already-ready guidance. Context
 Scout, model work, feedback refresh, and GitHub/CI/proximity acquisition run
 asynchronously; the branch-aware feedback cycle resolves generation-bound
 evidence, and one semantic result is projected through Claude Code LSP,
-Cursor desktop native diagnostics without duplicate analyzers, or the
-supported hook/MCP/CLI capability path for Cursor cloud, Codex, Hermes, Kiro,
-Cline-family, and other admitted hosts. PR13 adds producer contributions to
-the PR12 feedback readers without changing their transport.
+Cursor desktop native diagnostics without duplicate analyzers, OpenCode's
+custom LSP configuration without starting a second analyzer for the same
+language, or the supported hook/MCP/CLI capability path for Cursor cloud,
+Codex, Hermes, Kiro, Kimi Code, OpenCode, Cline-family, and other admitted
+hosts. PR13 adds producer contributions to the PR12 feedback readers without
+changing their transport.
 
 **Implementation and deletion.**
 
 - Ship asynchronous suggestions, host capability detection, install/upgrade/
-  repair, and stock-host conformance as part of this callable path.
+  repair, and stock-host conformance as part of this callable path, including
+  Kimi Code manifest/global `PostToolUse` and `Stop` hooks plus MCP and
+  skills/commands, and OpenCode local JS/TS plugin events, custom LSP
+  configuration, MCP, custom agents/skills, and commands (prompt templates).
 - Keep GitHub review access read-only: never post, update, resolve, reply to,
   dismiss, or fabricate review content.
 - Remove provider-local feedback logic and duplicate diagnostic/suggestion
   routes once each host delegates to the production cycle.
 
 **Direct acceptance.** Exercise real edit/stop events in each supported host,
-refresh real checked-in CI/review provider fixtures, verify exact evidence and
-proximity tiers, and prove bounded backpressure, restart, privacy, duplicate
-analyzer avoidance, and truthful provider-unavailable behavior, including an
-explicit Cline-family route or evidence-backed typed unavailable result.
-Dogfood the official install/upgrade/repair/uninstall flow on Linux and
-Windows and on macOS wherever the host exists; prove competing-extension,
-interrupted-lifecycle, and host-by-host rollback plus the direct feedback
-rollback switch. Run the relevant aggregate host-conformance gate.
+including Kimi Code `PostToolUse`/`Stop` and OpenCode `file.edited`,
+`tool.execute.after`, `session.idle`/`session.status`, and LSP event paths;
+refresh real checked-in CI/review provider fixtures; verify exact evidence and
+proximity tiers; and prove bounded backpressure, restart, privacy, OpenCode
+custom-LSP duplicate-analyzer avoidance, and truthful provider-unavailable
+behavior,
+including an explicit Cline-family route or evidence-backed typed unavailable
+result. Dogfood the official install/upgrade/repair/uninstall flow for Kimi
+Code and OpenCode alongside every supported host on Linux and Windows and on
+macOS wherever the host exists; prove competing-extension,
+interrupted-lifecycle, host-by-host rollback, and the direct feedback rollback
+switch. Run the relevant aggregate host-conformance gate.
 
 **Not in this PR.** Dashboard investigation belongs to PR14; multi-root scope to
 PR15; remote delivery to PR16; workflow composition to PR17.
