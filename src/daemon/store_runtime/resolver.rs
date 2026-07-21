@@ -1,0 +1,1219 @@
+//! Pre-open, identity-first resolution of local daemon store locators.
+//!
+//! A [`StoreRuntimeKey`] has already selected the logical shard before this
+//! module is called. Paths in this module are therefore only evidence for the
+//! physical locator: they never mint, select, or alter a shard identity. In
+//! particular, this resolver does not consult the current directory, branch
+//! display names, remote URLs, or arbitrary project labels.
+//!
+//! Resolution deliberately stops before database ownership begins. It may read
+//! the lightweight project enrollment marker and inspect filesystem metadata,
+//! but it never creates an artifact, opens a database, reads database bytes,
+//! migrates, repairs, or otherwise touches a live store.
+
+#![allow(dead_code)] // S3 lands before daemon construction wires the local resolver.
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
+
+use sha2::{Digest, Sha256};
+use tracedecay_store::{
+    BrainId, LocatorDigest, ProjectId, StoreShardIdV1, StoreShardScopeV1, UserProfileId,
+    VerifiedStoreLocatorV1,
+};
+
+use super::registry::{
+    ResolvedStoreLocator, StoreRuntimeKey, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
+    StoreRuntimeResolver,
+};
+use crate::storage;
+
+const PROFILE_DATABASE_FILENAME: &str = "global.db";
+const LOCATOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.store-runtime.local-locator.v1\0";
+
+/// Explicit local authority for one typed profile.
+///
+/// `profile_root` is a locator supplied by the daemon's profile authority. It
+/// is not an identity source: resolution rejects it unless both typed IDs match
+/// the requested shard before looking at the filesystem.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalProfileStoreAuthorityV1 {
+    brain_id: BrainId,
+    profile_id: UserProfileId,
+    profile_root: PathBuf,
+}
+
+impl LocalProfileStoreAuthorityV1 {
+    pub(crate) fn new(brain_id: BrainId, profile_id: UserProfileId, profile_root: PathBuf) -> Self {
+        Self {
+            brain_id,
+            profile_id,
+            profile_root,
+        }
+    }
+
+    pub(crate) fn brain_id(&self) -> &BrainId {
+        &self.brain_id
+    }
+
+    pub(crate) fn profile_id(&self) -> &UserProfileId {
+        &self.profile_id
+    }
+
+    pub(crate) fn profile_root(&self) -> &Path {
+        &self.profile_root
+    }
+}
+
+/// A trusted, typed project enrollment authority and its observed aliases.
+///
+/// The roots are only places where the resolver may verify the project's
+/// enrollment marker. The typed `project_id` selects this record first; an
+/// alias never selects a record or changes the requested shard identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalProjectEnrollmentAuthorityV1 {
+    project_id: ProjectId,
+    enrollment_roots: Vec<PathBuf>,
+}
+
+impl LocalProjectEnrollmentAuthorityV1 {
+    pub(crate) fn new(
+        project_id: ProjectId,
+        enrollment_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
+        let mut enrollment_roots = enrollment_roots.into_iter().collect::<Vec<_>>();
+        enrollment_roots.sort();
+        enrollment_roots.dedup();
+        Self {
+            project_id,
+            enrollment_roots,
+        }
+    }
+
+    pub(crate) fn enrollment_roots(&self) -> &[PathBuf] {
+        &self.enrollment_roots
+    }
+}
+
+/// In-memory configuration failures for a local resolver.
+///
+/// This is deliberately separate from resolution unavailability: a duplicate
+/// typed authority is a daemon wiring bug, not a reason to choose an arbitrary
+/// path at runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LocalStoreRuntimeResolverConfigurationErrorV1 {
+    DuplicateProjectAuthority { project_id: ProjectId },
+}
+
+/// Infrastructure-only resolver for the local profile-sharded layout.
+///
+/// The resolver supports only physical mappings that the current storage layout
+/// can prove exactly: the profile authority database, a project database, and a
+/// project sessions database. Worktree/snapshot code shards need a separately
+/// typed graph-scope authority and are returned as unavailable rather than
+/// guessed from a branch name or path.
+#[derive(Clone, Debug)]
+pub(crate) struct LocalStoreRuntimeResolverV1 {
+    profile_authority: LocalProfileStoreAuthorityV1,
+    project_authorities: BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>,
+}
+
+impl LocalStoreRuntimeResolverV1 {
+    pub(crate) fn new(profile_authority: LocalProfileStoreAuthorityV1) -> Self {
+        Self {
+            profile_authority,
+            project_authorities: BTreeMap::new(),
+        }
+    }
+
+    /// Adds exactly one typed project authority.
+    ///
+    /// A project can carry many aliases in its one
+    /// [`LocalProjectEnrollmentAuthorityV1`], but two separately configured
+    /// authorities for the same typed project are refused rather than merged.
+    pub(crate) fn with_project_authority(
+        mut self,
+        authority: LocalProjectEnrollmentAuthorityV1,
+    ) -> Result<Self, LocalStoreRuntimeResolverConfigurationErrorV1> {
+        let project_id = authority.project_id.clone();
+        if self
+            .project_authorities
+            .insert(project_id.clone(), authority)
+            .is_some()
+        {
+            return Err(
+                LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateProjectAuthority {
+                    project_id,
+                },
+            );
+        }
+        Ok(self)
+    }
+
+    /// Resolves a canonical key without opening or reading its database.
+    ///
+    /// Callers that need the typed unavailable result should use this method.
+    /// [`StoreRuntimeResolver`] adapts it to the registry's current generic
+    /// infrastructure-failure channel without ever falling back to a locator.
+    pub(crate) fn resolve_key(&self, key: &StoreRuntimeKey) -> LocalStoreLocatorResolutionV1 {
+        self.resolve_key_with_filesystem_safety(key, &local_filesystem_safety)
+    }
+
+    fn resolve_key_with_filesystem_safety(
+        &self,
+        key: &StoreRuntimeKey,
+        filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
+    ) -> LocalStoreLocatorResolutionV1 {
+        let result = self.resolve_key_inner(key, filesystem_safety);
+        match result {
+            Ok(locator) => LocalStoreLocatorResolutionV1::Resolved(locator),
+            Err(reason) => {
+                LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                    shard_id: key.shard_id().clone(),
+                    reason,
+                })
+            }
+        }
+    }
+
+    fn resolve_key_inner(
+        &self,
+        key: &StoreRuntimeKey,
+        filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
+    ) -> LocalStoreLocatorResult<VerifiedLocalStoreLocatorV1> {
+        let shard_id = key.shard_id();
+        if shard_id.brain_id != *self.profile_authority.brain_id()
+            || shard_id.profile_id != *self.profile_authority.profile_id()
+        {
+            return Err(LocalStoreLocatorUnavailableReasonV1::ProfileAuthorityMismatch);
+        }
+
+        let canonical_profile_root =
+            canonical_existing_directory(self.profile_authority.profile_root())?;
+        // The profile root is the authority boundary. Reject a remote or
+        // unverified root even if a later child path looks locally mounted.
+        require_local_filesystem(&canonical_profile_root, filesystem_safety)?;
+
+        match &shard_id.scope {
+            StoreShardScopeV1::Profile => {
+                let locator_path = canonical_or_prospective_regular_file(
+                    &canonical_profile_root.join(PROFILE_DATABASE_FILENAME),
+                    &canonical_profile_root,
+                )?;
+                verified_locator(
+                    key,
+                    LocalStoreLocatorKindV1::ProfileAuthority,
+                    canonical_profile_root.clone(),
+                    canonical_profile_root,
+                    locator_path,
+                    filesystem_safety,
+                )
+            }
+            StoreShardScopeV1::Project { project_id } => self.resolve_project_locator(
+                key,
+                project_id,
+                LocalStoreLocatorKindV1::Project,
+                &canonical_profile_root,
+                filesystem_safety,
+            ),
+            StoreShardScopeV1::ProjectSessions { project_id } => self.resolve_project_locator(
+                key,
+                project_id,
+                LocalStoreLocatorKindV1::ProjectSessions,
+                &canonical_profile_root,
+                filesystem_safety,
+            ),
+            StoreShardScopeV1::Code { .. } => {
+                Err(LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope)
+            }
+        }
+    }
+
+    fn resolve_project_locator(
+        &self,
+        key: &StoreRuntimeKey,
+        project_id: &ProjectId,
+        kind: LocalStoreLocatorKindV1,
+        canonical_profile_root: &Path,
+        filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
+    ) -> LocalStoreLocatorResult<VerifiedLocalStoreLocatorV1> {
+        let authority = self
+            .project_authorities
+            .get(project_id)
+            .ok_or(LocalStoreLocatorUnavailableReasonV1::MissingProjectEnrollmentAuthority)?;
+        if authority.enrollment_roots().is_empty() {
+            return Err(LocalStoreLocatorUnavailableReasonV1::MissingProjectEnrollmentAuthority);
+        }
+
+        let mut deferred_unavailable = None;
+        for enrollment_root in authority.enrollment_roots() {
+            match Self::resolve_project_locator_at_root(
+                key,
+                project_id,
+                kind,
+                canonical_profile_root,
+                enrollment_root,
+                filesystem_safety,
+            ) {
+                Ok(locator) => return Ok(locator),
+                Err(reason) if reason.allows_alias_fallback() => {
+                    deferred_unavailable = Some(reason);
+                }
+                // A present but invalid/mismatched enrollment is evidence of a
+                // bad authority mapping, not a stale alias to silently ignore.
+                Err(reason) => return Err(reason),
+            }
+        }
+
+        Err(deferred_unavailable
+            .unwrap_or(LocalStoreLocatorUnavailableReasonV1::MissingProjectEnrollmentAuthority))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_project_locator_at_root(
+        key: &StoreRuntimeKey,
+        project_id: &ProjectId,
+        kind: LocalStoreLocatorKindV1,
+        canonical_profile_root: &Path,
+        enrollment_root: &Path,
+        filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
+    ) -> LocalStoreLocatorResult<VerifiedLocalStoreLocatorV1> {
+        let canonical_project_root =
+            canonical_existing_directory(enrollment_root).map_err(|reason| {
+                if reason == LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable {
+                    LocalStoreLocatorUnavailableReasonV1::ProjectEnrollmentRootUnavailable
+                } else {
+                    reason
+                }
+            })?;
+        require_local_filesystem(&canonical_project_root, filesystem_safety)?;
+
+        // This is lightweight enrollment metadata, not a store read. The typed
+        // project ID is compared before any layout-derived path is accepted.
+        let marker = read_matching_enrollment(&canonical_project_root, project_id)?;
+        let layout = storage::profile_sharded_layout(
+            &canonical_project_root,
+            canonical_profile_root,
+            &marker,
+        )
+        .map_err(|_| LocalStoreLocatorUnavailableReasonV1::InvalidEnrollment)?;
+        let expected_store_root =
+            storage::profile_sharded_data_root(canonical_profile_root, project_id.as_str());
+        if layout.data_root != expected_store_root {
+            return Err(LocalStoreLocatorUnavailableReasonV1::InvalidEnrollment);
+        }
+        let canonical_store_root =
+            canonical_or_prospective_directory(&layout.data_root, canonical_profile_root)?;
+        let locator_path = match kind {
+            LocalStoreLocatorKindV1::Project => layout.graph_db_path,
+            LocalStoreLocatorKindV1::ProjectSessions => layout.sessions_db_path,
+            LocalStoreLocatorKindV1::ProfileAuthority => {
+                return Err(LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope);
+            }
+        };
+        let locator_path =
+            canonical_or_prospective_regular_file(&locator_path, &canonical_store_root)?;
+        verified_locator(
+            key,
+            kind,
+            canonical_profile_root.to_path_buf(),
+            canonical_store_root,
+            locator_path,
+            filesystem_safety,
+        )
+    }
+}
+
+impl StoreRuntimeResolver for LocalStoreRuntimeResolverV1 {
+    fn resolve<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        Box::pin(async move {
+            match self.resolve_key(key) {
+                LocalStoreLocatorResolutionV1::Resolved(locator) => {
+                    Ok(locator.into_registry_locator())
+                }
+                LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
+                    Err(unavailable.into_registry_failure())
+                }
+            }
+        })
+    }
+}
+
+/// The exactly mapped database family selected by this resolver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalStoreLocatorKindV1 {
+    ProfileAuthority,
+    Project,
+    ProjectSessions,
+}
+
+/// Locality facts captured while resolving a physical locator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalStoreLocatorMetadataV1 {
+    pub(crate) kind: LocalStoreLocatorKindV1,
+    pub(crate) canonical_profile_root: PathBuf,
+    pub(crate) canonical_store_root: PathBuf,
+    pub(crate) filesystem_type: String,
+}
+
+/// A pre-open verified local locator plus metadata for runtime construction.
+///
+/// The wrapped [`ResolvedStoreLocator`] contains the exact canonical path and
+/// a path-only [`LocatorDigest`]. The digest is deliberately not database
+/// content evidence: this resolver never reads database bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedLocalStoreLocatorV1 {
+    locator: ResolvedStoreLocator,
+    metadata: LocalStoreLocatorMetadataV1,
+}
+
+impl VerifiedLocalStoreLocatorV1 {
+    pub(crate) fn locator(&self) -> &ResolvedStoreLocator {
+        &self.locator
+    }
+
+    pub(crate) fn metadata(&self) -> &LocalStoreLocatorMetadataV1 {
+        &self.metadata
+    }
+
+    fn into_registry_locator(self) -> ResolvedStoreLocator {
+        self.locator
+    }
+}
+
+/// A resolution result that preserves typed unavailability for local callers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LocalStoreLocatorResolutionV1 {
+    Resolved(VerifiedLocalStoreLocatorV1),
+    Unavailable(LocalStoreLocatorUnavailableV1),
+}
+
+/// Typed unavailability returned instead of choosing a fallback locator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalStoreLocatorUnavailableV1 {
+    pub(crate) shard_id: StoreShardIdV1,
+    pub(crate) reason: LocalStoreLocatorUnavailableReasonV1,
+}
+
+impl LocalStoreLocatorUnavailableV1 {
+    fn into_registry_failure(self) -> StoreRuntimeRegistryFailure {
+        match self.reason {
+            LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope => {
+                StoreRuntimeRegistryFailure::UnsupportedShardScope
+            }
+            LocalStoreLocatorUnavailableReasonV1::NetworkFilesystem { filesystem_type } => {
+                StoreRuntimeRegistryFailure::NetworkFilesystemUnavailable { filesystem_type }
+            }
+            LocalStoreLocatorUnavailableReasonV1::FilesystemLocalityUnverified {
+                filesystem_type,
+            } => StoreRuntimeRegistryFailure::FilesystemLocalityUnavailable { filesystem_type },
+            reason => StoreRuntimeRegistryFailure::ResolverFailed {
+                message: format!("local store locator unavailable: {reason}"),
+            },
+        }
+    }
+}
+
+/// Reasons a local path cannot be used for a typed shard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LocalStoreLocatorUnavailableReasonV1 {
+    ProfileAuthorityMismatch,
+    UnsupportedShardScope,
+    MissingProjectEnrollmentAuthority,
+    ProjectEnrollmentRootUnavailable,
+    MissingEnrollment,
+    InvalidEnrollment,
+    EnrollmentProjectMismatch,
+    EnrollmentStorageModeMismatch,
+    UnsafeLocatorPath,
+    FilesystemMetadataUnavailable,
+    NetworkFilesystem { filesystem_type: String },
+    FilesystemLocalityUnverified { filesystem_type: String },
+    LocatorDigestUnavailable,
+}
+
+impl LocalStoreLocatorUnavailableReasonV1 {
+    fn allows_alias_fallback(&self) -> bool {
+        matches!(
+            self,
+            Self::ProjectEnrollmentRootUnavailable | Self::MissingEnrollment
+        )
+    }
+}
+
+impl fmt::Display for LocalStoreLocatorUnavailableReasonV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ProfileAuthorityMismatch => formatter.write_str("profile authority mismatch"),
+            Self::UnsupportedShardScope => formatter.write_str("unsupported shard scope"),
+            Self::MissingProjectEnrollmentAuthority => {
+                formatter.write_str("missing project enrollment authority")
+            }
+            Self::ProjectEnrollmentRootUnavailable => {
+                formatter.write_str("project enrollment root is unavailable")
+            }
+            Self::MissingEnrollment => formatter.write_str("project enrollment is missing"),
+            Self::InvalidEnrollment => formatter.write_str("project enrollment is invalid"),
+            Self::EnrollmentProjectMismatch => {
+                formatter.write_str("project enrollment does not match typed project identity")
+            }
+            Self::EnrollmentStorageModeMismatch => {
+                formatter.write_str("project enrollment does not use profile-sharded storage")
+            }
+            Self::UnsafeLocatorPath => formatter.write_str("locator path is unsafe"),
+            Self::FilesystemMetadataUnavailable => {
+                formatter.write_str("filesystem metadata is unavailable")
+            }
+            Self::NetworkFilesystem { filesystem_type } => {
+                write!(formatter, "network filesystem '{filesystem_type}'")
+            }
+            Self::FilesystemLocalityUnverified { filesystem_type } => {
+                write!(
+                    formatter,
+                    "filesystem locality is unverified ('{filesystem_type}')"
+                )
+            }
+            Self::LocatorDigestUnavailable => formatter.write_str("locator digest is unavailable"),
+        }
+    }
+}
+
+type LocalStoreLocatorResult<T> = Result<T, LocalStoreLocatorUnavailableReasonV1>;
+
+fn read_matching_enrollment(
+    project_root: &Path,
+    expected_project_id: &ProjectId,
+) -> LocalStoreLocatorResult<storage::EnrollmentMarker> {
+    let marker_path = storage::enrollment_marker_path(project_root);
+    validate_absolute_no_symlink_components(&marker_path)?;
+    match fs::symlink_metadata(&marker_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
+            return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(LocalStoreLocatorUnavailableReasonV1::MissingEnrollment);
+        }
+        Err(_) => return Err(LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable),
+    }
+
+    let marker = storage::read_enrollment_marker(project_root)
+        .map_err(|_| LocalStoreLocatorUnavailableReasonV1::InvalidEnrollment)?
+        .ok_or(LocalStoreLocatorUnavailableReasonV1::MissingEnrollment)?;
+    if marker.storage_mode != storage::StorageMode::ProfileSharded {
+        return Err(LocalStoreLocatorUnavailableReasonV1::EnrollmentStorageModeMismatch);
+    }
+    if marker.project_id != expected_project_id.as_str() {
+        return Err(LocalStoreLocatorUnavailableReasonV1::EnrollmentProjectMismatch);
+    }
+    Ok(marker)
+}
+
+fn canonical_existing_directory(path: &Path) -> LocalStoreLocatorResult<PathBuf> {
+    validate_absolute_no_symlink_components(path)?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
+    }
+    fs::canonicalize(path)
+        .map_err(|_| LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable)
+}
+
+fn canonical_or_prospective_directory(
+    path: &Path,
+    canonical_parent: &Path,
+) -> LocalStoreLocatorResult<PathBuf> {
+    if !path.starts_with(canonical_parent) {
+        return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
+    }
+    validate_absolute_no_symlink_components(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
+            Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)
+        }
+        Ok(_) => {
+            let canonical = fs::canonicalize(path)
+                .map_err(|_| LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable)?;
+            canonical
+                .starts_with(canonical_parent)
+                .then_some(canonical)
+                .ok_or(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(_) => Err(LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable),
+    }
+}
+
+fn canonical_or_prospective_regular_file(
+    path: &Path,
+    canonical_parent: &Path,
+) -> LocalStoreLocatorResult<PathBuf> {
+    if !path.starts_with(canonical_parent) {
+        return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
+    }
+    validate_absolute_no_symlink_components(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
+            Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)
+        }
+        Ok(_) => {
+            let canonical = fs::canonicalize(path)
+                .map_err(|_| LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable)?;
+            canonical
+                .starts_with(canonical_parent)
+                .then_some(canonical)
+                .ok_or(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(_) => Err(LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable),
+    }
+}
+
+fn validate_absolute_no_symlink_components(path: &Path) -> LocalStoreLocatorResult<()> {
+    if !path.is_absolute() {
+        return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
+    }
+
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir | Component::Normal(_) => current.push(component.as_os_str()),
+            Component::CurDir | Component::ParentDir => {
+                return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
+            }
+        }
+        // A Windows drive prefix by itself is not an absolute path and can be
+        // resolved relative to that drive's CWD. Wait for its root component.
+        if !current.is_absolute() {
+            continue;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
+            }
+            Ok(_) => {}
+            // The remaining tail cannot exist while this ancestor is absent.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(_) => {
+                return Err(LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verified_locator(
+    key: &StoreRuntimeKey,
+    kind: LocalStoreLocatorKindV1,
+    canonical_profile_root: PathBuf,
+    canonical_store_root: PathBuf,
+    canonical_path: PathBuf,
+    filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
+) -> LocalStoreLocatorResult<VerifiedLocalStoreLocatorV1> {
+    let filesystem = require_local_filesystem(&canonical_path, filesystem_safety)?;
+    let locator_digest = canonical_locator_digest(&canonical_path)?;
+    let verified =
+        VerifiedStoreLocatorV1::new(key.shard_id().clone(), key.incarnation(), locator_digest);
+    Ok(VerifiedLocalStoreLocatorV1 {
+        locator: ResolvedStoreLocator::new(verified, canonical_path),
+        metadata: LocalStoreLocatorMetadataV1 {
+            kind,
+            canonical_profile_root,
+            canonical_store_root,
+            filesystem_type: filesystem.filesystem_type,
+        },
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LocalFilesystemMetadata {
+    filesystem_type: String,
+}
+
+fn require_local_filesystem(
+    path: &Path,
+    filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
+) -> LocalStoreLocatorResult<LocalFilesystemMetadata> {
+    match filesystem_safety(path) {
+        FilesystemSafety::Local { filesystem_type } => {
+            Ok(LocalFilesystemMetadata { filesystem_type })
+        }
+        FilesystemSafety::Network { filesystem_type } => {
+            Err(LocalStoreLocatorUnavailableReasonV1::NetworkFilesystem { filesystem_type })
+        }
+        FilesystemSafety::NotDetectable { filesystem_type } => Err(
+            LocalStoreLocatorUnavailableReasonV1::FilesystemLocalityUnverified { filesystem_type },
+        ),
+    }
+}
+
+fn canonical_locator_digest(path: &Path) -> LocalStoreLocatorResult<LocatorDigest> {
+    let path = path
+        .to_str()
+        .ok_or(LocalStoreLocatorUnavailableReasonV1::LocatorDigestUnavailable)?;
+    let mut hasher = Sha256::new();
+    hasher.update(LOCATOR_DIGEST_DOMAIN);
+    hasher.update((path.len() as u64).to_be_bytes());
+    hasher.update(path.as_bytes());
+    LocatorDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+        .map_err(|_| LocalStoreLocatorUnavailableReasonV1::LocatorDigestUnavailable)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FilesystemSafety {
+    Local { filesystem_type: String },
+    Network { filesystem_type: String },
+    NotDetectable { filesystem_type: String },
+}
+
+#[cfg(target_os = "linux")]
+fn local_filesystem_safety(path: &Path) -> FilesystemSafety {
+    let Ok(mountinfo) = fs::read_to_string("/proc/self/mountinfo") else {
+        return FilesystemSafety::NotDetectable {
+            filesystem_type: "unknown".to_owned(),
+        };
+    };
+    filesystem_safety_from_linux_mountinfo(path, &mountinfo)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn local_filesystem_safety(_path: &Path) -> FilesystemSafety {
+    // No portable std-only mount classifier exists on these targets. Returning
+    // unavailable is safer than assuming an arbitrary path is local.
+    FilesystemSafety::NotDetectable {
+        filesystem_type: "unknown".to_owned(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn filesystem_safety_from_linux_mountinfo(path: &Path, mountinfo: &str) -> FilesystemSafety {
+    let mut best_match = None::<(usize, String)>;
+    for line in mountinfo.lines() {
+        let Some((before_separator, after_separator)) = line.split_once(" - ") else {
+            continue;
+        };
+        let fields = before_separator.split_whitespace().collect::<Vec<_>>();
+        let Some(filesystem_type) = after_separator.split_whitespace().next() else {
+            continue;
+        };
+        let Some(mount_point) = fields
+            .get(4)
+            .and_then(|value| unescape_mountinfo_path(value))
+        else {
+            continue;
+        };
+        if !mount_point.is_absolute() || !path.starts_with(&mount_point) {
+            continue;
+        }
+        let depth = mount_point.components().count();
+        if best_match
+            .as_ref()
+            .is_none_or(|(best_depth, _)| depth > *best_depth)
+        {
+            best_match = Some((depth, filesystem_type.to_ascii_lowercase()));
+        }
+    }
+
+    let Some((_, filesystem_type)) = best_match else {
+        return FilesystemSafety::NotDetectable {
+            filesystem_type: "unknown".to_owned(),
+        };
+    };
+    if is_network_filesystem(&filesystem_type) {
+        FilesystemSafety::Network { filesystem_type }
+    } else if is_known_local_filesystem(&filesystem_type) {
+        FilesystemSafety::Local { filesystem_type }
+    } else {
+        FilesystemSafety::NotDetectable { filesystem_type }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn unescape_mountinfo_path(value: &str) -> Option<PathBuf> {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            output.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let digits = bytes.get(index + 1..index + 4)?;
+        if !digits.iter().all(u8::is_ascii_digit) || digits.iter().any(|digit| *digit > b'7') {
+            return None;
+        }
+        let value = (digits[0] - b'0') * 64 + (digits[1] - b'0') * 8 + (digits[2] - b'0');
+        output.push(value);
+        index += 4;
+    }
+    String::from_utf8(output).ok().map(PathBuf::from)
+}
+
+#[cfg(target_os = "linux")]
+fn is_network_filesystem(filesystem_type: &str) -> bool {
+    matches!(
+        filesystem_type,
+        "9p" | "afs"
+            | "ceph"
+            | "cifs"
+            | "davfs"
+            | "fuse.sshfs"
+            | "gfs"
+            | "gfs2"
+            | "glusterfs"
+            | "lustre"
+            | "ncp"
+            | "ncpfs"
+            | "nfs"
+            | "nfs4"
+            | "smb"
+            | "smb2"
+            | "smb3"
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn is_known_local_filesystem(filesystem_type: &str) -> bool {
+    matches!(
+        filesystem_type,
+        "btrfs"
+            | "bcachefs"
+            | "erofs"
+            | "exfat"
+            | "ext2"
+            | "ext3"
+            | "ext4"
+            | "f2fs"
+            | "iso9660"
+            | "msdos"
+            | "ntfs"
+            | "ntfs3"
+            | "ramfs"
+            | "squashfs"
+            | "tmpfs"
+            | "vfat"
+            | "xfs"
+            | "zfs"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Debug;
+    use std::fs;
+
+    use tempfile::TempDir;
+    use tracedecay_store::{BrainId, ProjectId, StoreIncarnationV1, StoreShardIdV1, UserProfileId};
+
+    use super::*;
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: Debug,
+    {
+        T::try_from(value.to_owned()).expect("canonical fixture identity")
+    }
+
+    fn incarnation() -> StoreIncarnationV1 {
+        StoreIncarnationV1::new(1).expect("non-zero fixture incarnation")
+    }
+
+    struct Fixture {
+        _temporary: TempDir,
+        root: PathBuf,
+        profile_root: PathBuf,
+        first_alias: PathBuf,
+        second_alias: PathBuf,
+        project_id: ProjectId,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir().expect("temporary fixture root");
+            // macOS commonly exposes /var through a system symlink. The real
+            // resolver requires its authority roots to already be canonical.
+            let root = temporary
+                .path()
+                .canonicalize()
+                .expect("canonical fixture root");
+            let profile_root = root.join("profile");
+            let first_alias = root.join("project-a");
+            let second_alias = root.join("project-b");
+            fs::create_dir_all(&profile_root).expect("profile root");
+            fs::create_dir_all(&first_alias).expect("first alias");
+            fs::create_dir_all(&second_alias).expect("second alias");
+            let project_id = id::<ProjectId>("project.canonical");
+            for project_root in [&first_alias, &second_alias] {
+                storage::write_enrollment_marker(
+                    project_root,
+                    &storage::EnrollmentMarker {
+                        project_id: project_id.as_str().to_owned(),
+                        storage_mode: storage::StorageMode::ProfileSharded,
+                    },
+                )
+                .expect("write enrollment marker");
+            }
+            Self {
+                _temporary: temporary,
+                root,
+                profile_root,
+                first_alias,
+                second_alias,
+                project_id,
+            }
+        }
+
+        fn shard(&self) -> StoreShardIdV1 {
+            StoreShardIdV1::project(
+                id::<BrainId>("brain.local-resolver"),
+                id::<UserProfileId>("profile.local-resolver"),
+                self.project_id.clone(),
+            )
+        }
+
+        fn profile_authority(&self) -> LocalProfileStoreAuthorityV1 {
+            LocalProfileStoreAuthorityV1::new(
+                id::<BrainId>("brain.local-resolver"),
+                id::<UserProfileId>("profile.local-resolver"),
+                self.profile_root.clone(),
+            )
+        }
+
+        fn resolver_for(
+            &self,
+            roots: impl IntoIterator<Item = PathBuf>,
+        ) -> LocalStoreRuntimeResolverV1 {
+            LocalStoreRuntimeResolverV1::new(self.profile_authority())
+                .with_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                    self.project_id.clone(),
+                    roots,
+                ))
+                .expect("one authority per typed project")
+        }
+    }
+
+    fn resolve_as_local(
+        resolver: &LocalStoreRuntimeResolverV1,
+        key: &StoreRuntimeKey,
+    ) -> LocalStoreLocatorResolutionV1 {
+        resolver.resolve_key_with_filesystem_safety(key, &|_| FilesystemSafety::Local {
+            filesystem_type: "fixture-local".to_owned(),
+        })
+    }
+
+    fn resolved(value: LocalStoreLocatorResolutionV1) -> VerifiedLocalStoreLocatorV1 {
+        match value {
+            LocalStoreLocatorResolutionV1::Resolved(locator) => locator,
+            LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
+                panic!("expected resolved locator, got {unavailable:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn aliases_converge_by_typed_project_id_without_creating_a_store() {
+        let fixture = Fixture::new();
+        let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
+        let first = resolved(resolve_as_local(
+            &fixture.resolver_for([fixture.first_alias.clone()]),
+            &key,
+        ));
+        let second = resolved(resolve_as_local(
+            &fixture.resolver_for([fixture.second_alias.clone()]),
+            &key,
+        ));
+
+        assert_eq!(first.locator().verified().shard_id, key.shard_id().clone());
+        assert_eq!(first.locator().path(), second.locator().path());
+        assert_eq!(
+            first.locator().verified().locator_digest,
+            second.locator().verified().locator_digest
+        );
+        assert_eq!(first.metadata(), second.metadata());
+        assert_eq!(
+            first.metadata().canonical_store_root,
+            fixture
+                .profile_root
+                .join("projects")
+                .join(fixture.project_id.as_str())
+        );
+        assert!(
+            !first.locator().path().exists() && !first.metadata().canonical_store_root.exists(),
+            "resolution must not create or require a live database family"
+        );
+    }
+
+    #[test]
+    fn exact_profile_and_session_layout_mappings_remain_pre_open() {
+        let fixture = Fixture::new();
+        let resolver = fixture.resolver_for([fixture.first_alias.clone()]);
+        let profile_key = StoreRuntimeKey::new(
+            StoreShardIdV1::profile(
+                id::<BrainId>("brain.local-resolver"),
+                id::<UserProfileId>("profile.local-resolver"),
+            ),
+            incarnation(),
+        );
+        let profile = resolved(resolve_as_local(&resolver, &profile_key));
+        assert_eq!(
+            profile.locator().path(),
+            fixture.profile_root.join(PROFILE_DATABASE_FILENAME)
+        );
+        assert_eq!(
+            profile.metadata().kind,
+            LocalStoreLocatorKindV1::ProfileAuthority
+        );
+
+        let sessions_key = StoreRuntimeKey::new(
+            StoreShardIdV1::project_sessions(
+                id::<BrainId>("brain.local-resolver"),
+                id::<UserProfileId>("profile.local-resolver"),
+                fixture.project_id.clone(),
+            ),
+            incarnation(),
+        );
+        let sessions = resolved(resolve_as_local(&resolver, &sessions_key));
+        assert_eq!(
+            sessions.locator().path(),
+            fixture
+                .profile_root
+                .join("projects")
+                .join(fixture.project_id.as_str())
+                .join(storage::SESSIONS_DB_FILENAME)
+        );
+        assert_eq!(
+            sessions.metadata().kind,
+            LocalStoreLocatorKindV1::ProjectSessions
+        );
+        assert!(
+            !profile.locator().path().exists() && !sessions.locator().path().exists(),
+            "resolution must not create or read live database files"
+        );
+    }
+
+    #[test]
+    fn project_alias_paths_do_not_influence_the_shard_identity() {
+        let fixture = Fixture::new();
+        let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
+        let locator = resolved(resolve_as_local(
+            &fixture.resolver_for([fixture.second_alias.clone()]),
+            &key,
+        ));
+
+        assert_ne!(
+            storage::default_profile_project_id(&fixture.second_alias),
+            fixture.project_id.as_str(),
+            "fixture protects against accidentally falling back to path-hashed identity"
+        );
+        assert_eq!(
+            locator.locator().verified().shard_id,
+            key.shard_id().clone()
+        );
+        assert_eq!(
+            locator.metadata().canonical_store_root,
+            fixture
+                .profile_root
+                .join("projects")
+                .join(fixture.project_id.as_str())
+        );
+    }
+
+    #[test]
+    fn missing_enrollment_is_typed_unavailable() {
+        let temporary = tempfile::tempdir().expect("temporary fixture root");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        fs::create_dir_all(&profile_root).expect("profile root");
+        fs::create_dir_all(&project_root).expect("project root");
+        let project_id = id::<ProjectId>("project.missing-enrollment");
+        let shard = StoreShardIdV1::project(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            project_id.clone(),
+        );
+        let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            profile_root,
+        ))
+        .with_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+            project_id,
+            [project_root],
+        ))
+        .expect("one project authority");
+
+        assert!(matches!(
+            resolve_as_local(&resolver, &StoreRuntimeKey::new(shard, incarnation())),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::MissingEnrollment,
+                ..
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_profile_root_is_typed_unavailable() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let profile_alias = fixture.root.join("profile-alias");
+        symlink(&fixture.profile_root, &profile_alias).expect("profile symlink");
+        let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            profile_alias,
+        ))
+        .with_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+            fixture.project_id.clone(),
+            [fixture.first_alias.clone()],
+        ))
+        .expect("one project authority");
+
+        assert!(matches!(
+            resolve_as_local(
+                &resolver,
+                &StoreRuntimeKey::new(fixture.shard(), incarnation())
+            ),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn network_filesystems_are_typed_unavailable() {
+        let fixture = Fixture::new();
+        let resolver = fixture.resolver_for([fixture.first_alias.clone()]);
+        let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
+
+        let resolution =
+            resolver.resolve_key_with_filesystem_safety(&key, &|_| FilesystemSafety::Network {
+                filesystem_type: "nfs4".to_owned(),
+            });
+        assert!(matches!(
+            resolution,
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::NetworkFilesystem {
+                    filesystem_type
+                },
+                ..
+            }) if filesystem_type == "nfs4"
+        ));
+    }
+
+    #[test]
+    fn registry_adapter_preserves_safety_critical_unavailability() {
+        let shard_id = Fixture::new().shard();
+        for (reason, expected) in [
+            (
+                LocalStoreLocatorUnavailableReasonV1::NetworkFilesystem {
+                    filesystem_type: "nfs4".to_owned(),
+                },
+                StoreRuntimeRegistryFailure::NetworkFilesystemUnavailable {
+                    filesystem_type: "nfs4".to_owned(),
+                },
+            ),
+            (
+                LocalStoreLocatorUnavailableReasonV1::FilesystemLocalityUnverified {
+                    filesystem_type: "overlay".to_owned(),
+                },
+                StoreRuntimeRegistryFailure::FilesystemLocalityUnavailable {
+                    filesystem_type: "overlay".to_owned(),
+                },
+            ),
+            (
+                LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope,
+                StoreRuntimeRegistryFailure::UnsupportedShardScope,
+            ),
+        ] {
+            assert_eq!(
+                LocalStoreLocatorUnavailableV1 {
+                    shard_id: shard_id.clone(),
+                    reason,
+                }
+                .into_registry_failure(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_or_insufficient_typed_inputs_do_not_guess_a_locator() {
+        let fixture = Fixture::new();
+        let profile_authority = fixture.profile_authority();
+        let resolver = LocalStoreRuntimeResolverV1::new(profile_authority);
+        let missing_project_authority = StoreRuntimeKey::new(fixture.shard(), incarnation());
+        assert!(matches!(
+            resolve_as_local(&resolver, &missing_project_authority),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::MissingProjectEnrollmentAuthority,
+                ..
+            })
+        ));
+
+        let code_shard = StoreShardIdV1::code(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            fixture.project_id.clone(),
+            id("repository.local-resolver"),
+            tracedecay_store::CodeShardScopeV1::Worktree {
+                worktree_id: id("worktree.local-resolver"),
+            },
+        );
+        assert!(matches!(
+            resolve_as_local(&resolver, &StoreRuntimeKey::new(code_shard, incarnation())),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope,
+                ..
+            })
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_mountinfo_detects_network_filesystems_without_opening_a_store() {
+        let mountinfo = concat!(
+            "31 24 0:27 / / rw,relatime - ext4 /dev/root rw\n",
+            "32 31 0:42 / /network rw,relatime - nfs4 server:/export rw\n"
+        );
+        assert_eq!(
+            filesystem_safety_from_linux_mountinfo(Path::new("/network/projects/proj"), mountinfo),
+            FilesystemSafety::Network {
+                filesystem_type: "nfs4".to_owned(),
+            }
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unsupported_platform_locality_is_typed_unavailable() {
+        let fixture = Fixture::new();
+        let resolver = fixture.resolver_for([fixture.first_alias.clone()]);
+        let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
+
+        assert!(matches!(
+            resolver.resolve_key(&key),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::FilesystemLocalityUnverified { .. },
+                ..
+            })
+        ));
+    }
+}
