@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{
-    bootstrap_runtime_configuration, db_filename, runtime_configuration_for_layout,
+    bootstrap_runtime_configuration, db_filename, ensure_runtime_configuration_for_layout,
 };
 use crate::db::{Database, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
@@ -344,7 +344,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
-        let config = runtime_configuration_for_layout(project_root, &store_layout)?.config;
+        let config = ensure_runtime_configuration_for_layout(project_root, &store_layout)?.config;
         let active_branch = branch::current_branch(project_root);
         Self::auto_track_active_branch(
             project_root,
@@ -569,7 +569,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project_read_only(project_root, &open_options).await?;
-        let config = runtime_configuration_for_layout(project_root, &store_layout)?.config;
+        let config = ensure_runtime_configuration_for_layout(project_root, &store_layout)?.config;
         let active_branch = branch::current_branch(project_root);
 
         let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
@@ -808,7 +808,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
-        let config = runtime_configuration_for_layout(project_root, &store_layout)?.config;
+        let config = ensure_runtime_configuration_for_layout(project_root, &store_layout)?.config;
 
         let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
             TraceDecayError::Config {

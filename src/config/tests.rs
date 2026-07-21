@@ -1318,6 +1318,7 @@ mod runtime_configuration_cutover {
         cached_runtime_configuration, cached_sync_config, cached_telemetry_config,
         commit_runtime_configuration_mutation, direct_mutation_for_runtime_config_diff,
         install_pinned_runtime_configuration, mutate_pinned_runtime_configuration,
+        ensure_runtime_configuration_for_layout, runtime_configuration_for_layout,
     };
 
     fn project_id(value: &str) -> ProjectId {
@@ -1684,5 +1685,37 @@ mod runtime_configuration_cutover {
         assert_eq!(first.target.project_root, first_root);
         assert_eq!(second.target.project_root, second_root);
         assert_ne!(first.config.root_dir, second.config.root_dir);
+    }
+
+    #[test]
+    fn ensure_runtime_configuration_bootstraps_when_cache_is_empty() {
+        let root = TempDir::new().expect("temporary project root");
+        crate::storage::write_enrollment_marker(
+            root.path(),
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_ensure_runtime_bootstrap".to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("write enrollment marker");
+        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+
+        assert!(
+            runtime_configuration_for_layout(root.path(), &layout).is_err(),
+            "fail-closed lookup must reject an unpublished project"
+        );
+
+        let pinned = ensure_runtime_configuration_for_layout(root.path(), &layout)
+            .expect("cold open publishes bootstrap defaults");
+        assert_eq!(
+            pinned.target.project_id.as_str(),
+            "proj_ensure_runtime_bootstrap"
+        );
+        assert!(
+            runtime_configuration_for_layout(root.path(), &layout).is_ok(),
+            "after ensure, fail-closed lookup must see the published pin"
+        );
     }
 }

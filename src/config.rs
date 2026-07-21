@@ -663,6 +663,11 @@ pub fn runtime_configuration_target_for_project_id(
 }
 
 /// Returns the pinned configuration for an exact authoritative layout.
+///
+/// This is fail-closed: callers that must not invent authority (hooks,
+/// destructive branch administration) use it after the daemon has published a
+/// snapshot. Project open paths that need to cold-start a process use
+/// [`ensure_runtime_configuration_for_layout`] instead.
 pub fn runtime_configuration_for_layout(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
@@ -673,6 +678,19 @@ pub fn runtime_configuration_for_layout(
         .retarget(target)?;
     runtime_configuration_cache().insert(configuration.clone())?;
     Ok(configuration)
+}
+
+/// Ensures a process-local pinned snapshot for a resolved store layout.
+///
+/// Prefer an already-published control-plane revision. When the process-local
+/// cache is empty (cold daemon open, CLI open before any publish), publish
+/// registry defaults with the synthetic bootstrap revision so open cannot fail
+/// closed solely because no pin exists yet.
+pub fn ensure_runtime_configuration_for_layout(
+    project_root: &Path,
+    layout: &crate::storage::StoreLayout,
+) -> Result<PinnedRuntimeConfiguration> {
+    bootstrap_runtime_configuration(project_root, layout)
 }
 
 /// Returns a cached configuration without resolving a layout, opening a
