@@ -103,14 +103,11 @@ where
         }
         let receipt = recovery_proof_at(&receipt, record, observed_at)?;
 
-        let preterminal =
-            match advance_to_terminal(self.store, record, receipt.outcome, observed_at) {
-                Ok(journal) => journal,
-                Err(_) => {
-                    quarantine(self.store, record)?;
-                    return Err(GitIndexRecoveryError::Indeterminate);
-                }
-            };
+        let Ok(preterminal) = advance_to_terminal(self.store, record, receipt.outcome, observed_at)
+        else {
+            quarantine(self.store, record)?;
+            return Err(GitIndexRecoveryError::Indeterminate);
+        };
         if receipt.outcome == GitIndexReceiptOutcomeV1::NeedsInspection {
             // Persist the blocking truth first. If the subsequent atomic
             // receipt write fails, the repository still remains fenced.
@@ -134,12 +131,11 @@ where
             quarantine(self.store, record)?;
             return Err(GitIndexRecoveryError::Indeterminate);
         }
-        match self.store.write_terminal(write) {
-            Ok(stored) => Ok(stored),
-            Err(_) => {
-                quarantine(self.store, record)?;
-                Err(GitIndexRecoveryError::Indeterminate)
-            }
+        if let Ok(stored) = self.store.write_terminal(write) {
+            Ok(stored)
+        } else {
+            quarantine(self.store, record)?;
+            Err(GitIndexRecoveryError::Indeterminate)
         }
     }
 
@@ -148,12 +144,11 @@ where
         record: &GitIndexTransactionRecordV1,
         observed_at: UtcMicros,
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError> {
-        match self.native.reconcile(record) {
-            Ok(receipt) => Ok(receipt),
-            Err(_) => {
-                quarantine(self.store, record)?;
-                unobserved_needs_inspection(record, observed_at)
-            }
+        if let Ok(receipt) = self.native.reconcile(record) {
+            Ok(receipt)
+        } else {
+            quarantine(self.store, record)?;
+            unobserved_needs_inspection(record, observed_at)
         }
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon_client::RequestedOutputFormat;
 use crate::mcp::response_handles::{
     ResponseHandleLookup, lock_response_handle_store, retrieve_response_handle_from_root,
 };
@@ -7,20 +8,26 @@ use serde_json::json;
 
 #[test]
 fn default_format_is_markdown() {
-    assert_eq!(parse_format(&json!({})), OutputFormat::Markdown);
+    assert_eq!(parse_format(&json!({})), RequestedOutputFormat::Markdown);
     assert_eq!(
         parse_format(&json!({"format": "markdown"})),
-        OutputFormat::Markdown
+        RequestedOutputFormat::Markdown
     );
     assert_eq!(
         parse_format(&json!({"format": "md"})),
-        OutputFormat::Markdown
+        RequestedOutputFormat::Markdown
     );
-    assert_eq!(parse_format(&json!({"format": "json"})), OutputFormat::Json);
-    assert_eq!(parse_format(&json!({"format": "JSON"})), OutputFormat::Json);
+    assert_eq!(
+        parse_format(&json!({"format": "json"})),
+        RequestedOutputFormat::Json
+    );
+    assert_eq!(
+        parse_format(&json!({"format": "JSON"})),
+        RequestedOutputFormat::Json
+    );
     assert_eq!(
         parse_format(&json!({"format": "yaml"})),
-        OutputFormat::Markdown
+        RequestedOutputFormat::Markdown
     );
 }
 

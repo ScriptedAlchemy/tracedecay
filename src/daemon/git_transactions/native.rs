@@ -1018,11 +1018,10 @@ where
             {
                 return Err(GitIndexTransactionPortError::StalePreview);
             }
-            Some(_) => {}
             None if materialized.preview.disposition.is_applicable() => {
                 previews.insert(materialized.preview.preview_id.clone(), materialized);
             }
-            None => {}
+            Some(_) | None => {}
         }
         Ok(result)
     }
@@ -1125,7 +1124,7 @@ where
             request,
             created_commit.as_ref(),
         ) {
-            Ok(result) => Ok(NativeGitIndexApplyOutcomeV1::Completed(result)),
+            Ok(result) => Ok(NativeGitIndexApplyOutcomeV1::Completed(Box::new(result))),
             // Final observation happens after the native publication/commit
             // operation, so failing to observe it is itself ambiguous.
             Err(_) => Ok(NativeGitIndexApplyOutcomeV1::CommitBoundaryUnknown),

@@ -37,7 +37,7 @@ enum StoreCommand {
     SavePreview(GitIndexPreviewV1, Reply<()>),
     ReadPreview(GitIndexPreviewId, Reply<Option<GitIndexPreviewV1>>),
     BeginOrReplay(
-        GitIndexTransactionBeginRequestV1,
+        Box<GitIndexTransactionBeginRequestV1>,
         Reply<GitIndexTransactionBeginResultV1>,
     ),
     CompareAndSwapJournal(
@@ -88,7 +88,7 @@ impl DaemonGitIndexTransactionStore {
                 if ready.send(Ok(())).is_err() {
                     return;
                 }
-                run_store_actor(runtime, database, receiver);
+                run_store_actor(&runtime, &database, &receiver);
             })
             .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
         started
@@ -108,8 +108,7 @@ impl DaemonGitIndexTransactionStore {
     }
 
     fn await_reply<T>(
-        &self,
-        receiver: Receiver<GitIndexTransactionStoreResult<T>>,
+        receiver: &Receiver<GitIndexTransactionStoreResult<T>>,
     ) -> GitIndexTransactionStoreResult<T> {
         receiver
             .recv_timeout(GIT_INDEX_TRANSACTION_STORE_ACTOR_TIMEOUT)
@@ -125,7 +124,7 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
     fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
         let (reply, receiver) = sync_channel(1);
         self.submit(StoreCommand::SavePreview(preview, reply))?;
-        self.await_reply(receiver)
+        Self::await_reply(&receiver)
     }
 
     fn read_preview(
@@ -134,7 +133,7 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
     ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
         let (reply, receiver) = sync_channel(1);
         self.submit(StoreCommand::ReadPreview(preview_id.clone(), reply))?;
-        self.await_reply(receiver)
+        Self::await_reply(&receiver)
     }
 
     fn begin_or_replay(
@@ -142,8 +141,8 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
         request: GitIndexTransactionBeginRequestV1,
     ) -> GitIndexTransactionStoreResult<GitIndexTransactionBeginResultV1> {
         let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::BeginOrReplay(request, reply))?;
-        self.await_reply(receiver)
+        self.submit(StoreCommand::BeginOrReplay(Box::new(request), reply))?;
+        Self::await_reply(&receiver)
     }
 
     fn compare_and_swap_journal(
@@ -159,7 +158,7 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
             replacement,
             reply,
         ))?;
-        self.await_reply(receiver)
+        Self::await_reply(&receiver)
     }
 
     fn write_terminal(
@@ -168,7 +167,7 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
     ) -> GitIndexTransactionStoreResult<GitIndexTransactionReceiptV1> {
         let (reply, receiver) = sync_channel(1);
         self.submit(StoreCommand::WriteTerminal(write, reply))?;
-        self.await_reply(receiver)
+        Self::await_reply(&receiver)
     }
 
     fn recovery_candidates(
@@ -180,13 +179,13 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
             repository_id.clone(),
             reply,
         ))?;
-        self.await_reply(receiver)
+        Self::await_reply(&receiver)
     }
 
     fn recovery_repositories(&self) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
         let (reply, receiver) = sync_channel(1);
         self.submit(StoreCommand::RecoveryRepositories(reply))?;
-        self.await_reply(receiver)
+        Self::await_reply(&receiver)
     }
 
     fn quarantine_repository(
@@ -200,7 +199,7 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
             transaction_id.clone(),
             reply,
         ))?;
-        self.await_reply(receiver)
+        Self::await_reply(&receiver)
     }
 
     fn clear_repository_quarantine(
@@ -216,14 +215,14 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
             recovery_receipt,
             reply,
         ))?;
-        self.await_reply(receiver)
+        Self::await_reply(&receiver)
     }
 }
 
 fn run_store_actor(
-    runtime: tokio::runtime::Runtime,
-    database: Arc<GlobalDb>,
-    receiver: Receiver<StoreCommand>,
+    runtime: &tokio::runtime::Runtime,
+    database: &Arc<GlobalDb>,
+    receiver: &Receiver<StoreCommand>,
 ) {
     while let Ok(command) = receiver.recv() {
         match command {
@@ -244,7 +243,7 @@ fn run_store_actor(
                 let result = runtime.block_on(
                     database
                         .git_index_transaction_store()
-                        .begin_or_replay(request),
+                        .begin_or_replay(*request),
                 );
                 let _ = reply.send(result);
             }

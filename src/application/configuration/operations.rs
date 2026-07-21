@@ -224,7 +224,8 @@ where
                 &expected_revision,
                 ConfigurationMutationSinkV1::ConfigurationStore,
                 ConfigurationMutationEffectV1::CommitConfigurationRevision,
-            )?;
+            )
+            .await?;
             self.store
                 .commit_direct(&authority, &mutation, &expected_revision)
                 .await
@@ -254,7 +255,8 @@ where
                 &expected_revision,
                 ConfigurationMutationSinkV1::CredentialStore,
                 ConfigurationMutationEffectV1::WriteCredentialReference,
-            )?;
+            )
+            .await?;
             self.credentials
                 .write_reference(&authority, &write, &expected_revision)
                 .await
@@ -286,15 +288,20 @@ where
             if current.revision_id != expected_revision {
                 return Err(ConfigurationError::RevisionConflict);
             }
-            let current_authorization = self.authorize_mutation(
-                &authority,
-                ConfigurationMutationOperationV1::ProtectedDryRun,
-                &expected_revision,
-                ConfigurationMutationSinkV1::ConfigurationStore,
-                ConfigurationMutationEffectV1::CreateProtectedChangePlan,
-            )?;
+            let current_authorization = self
+                .authorize_mutation(
+                    &authority,
+                    ConfigurationMutationOperationV1::ProtectedDryRun,
+                    &expected_revision,
+                    ConfigurationMutationSinkV1::ConfigurationStore,
+                    ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+                )
+                .await?;
             let actor = authority.actor();
-            let evidence = self.scopes.resolve_protected_change(&actor, &change)?;
+            let evidence = self
+                .scopes
+                .resolve_protected_change(&actor, &change)
+                .await?;
             validate_authorization_evidence(&current_authorization, &evidence)?;
             let now = self.clock.now();
             let operation_digest = change
@@ -368,7 +375,8 @@ where
                 &expected_revision,
                 ConfigurationMutationSinkV1::ConfigurationStore,
                 ConfigurationMutationEffectV1::CreateProtectedChangePlan,
-            )?;
+            )
+            .await?;
             self.store
                 .dry_run_rollback(&authority, &rollback, self.clock.now())
                 .await
@@ -438,18 +446,20 @@ where
             } else {
                 ConfigurationMutationOperationV1::ProtectedApply
             };
-            let current_authorization = self.authorize_mutation(
-                &authority,
-                operation,
-                &plan.base_revision_id,
-                ConfigurationMutationSinkV1::ConfigurationStore,
-                ConfigurationMutationEffectV1::CommitConfigurationRevision,
-            )?;
+            let current_authorization = self
+                .authorize_mutation(
+                    &authority,
+                    operation,
+                    &plan.base_revision_id,
+                    ConfigurationMutationSinkV1::ConfigurationStore,
+                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                )
+                .await?;
             let actor = authority.actor();
             if request.actor_id != actor.actor_id {
                 return Err(ConfigurationError::MutationAuthorityRejected);
             }
-            let evidence = self.scopes.revalidate_plan(&actor, &plan)?;
+            let evidence = self.scopes.revalidate_plan(&actor, &plan).await?;
             validate_frozen_evidence(&plan, &evidence)?;
             validate_authorization_evidence(&current_authorization, &evidence)?;
             if rollback {
@@ -464,7 +474,7 @@ where
         })
     }
 
-    fn authorize_mutation(
+    async fn authorize_mutation(
         &self,
         authority: &ConfigurationMutationAuthority,
         operation: ConfigurationMutationOperationV1,
@@ -474,14 +484,17 @@ where
     ) -> Result<super::ports::CurrentConfigurationMutationAuthorizationV1, ConfigurationError> {
         authority.validate_integrity()?;
         let now = self.clock.now();
-        let current = self.authorization.recheck(
-            &authority.receipt,
-            operation,
-            expected_revision,
-            sink,
-            effect,
-            now,
-        )?;
+        let current = self
+            .authorization
+            .recheck(
+                &authority.receipt,
+                operation,
+                expected_revision,
+                sink,
+                effect,
+                now,
+            )
+            .await?;
         authority
             .receipt
             .validate_for(
@@ -735,16 +748,18 @@ mod tests {
             &self,
             _actor: &AuthorizedActor,
             _change: &ProtectedChange,
-        ) -> Result<ScopeRevalidationEvidenceV1, ConfigurationError> {
-            Ok(self.evidence.clone())
+        ) -> ConfigurationOperationFuture<'_, ScopeRevalidationEvidenceV1> {
+            let evidence = self.evidence.clone();
+            Box::pin(async move { Ok(evidence) })
         }
 
         fn revalidate_plan(
             &self,
             _actor: &AuthorizedActor,
             _plan: &ProtectedChangePlan,
-        ) -> Result<ScopeRevalidationEvidenceV1, ConfigurationError> {
-            Ok(self.evidence.clone())
+        ) -> ConfigurationOperationFuture<'_, ScopeRevalidationEvidenceV1> {
+            let evidence = self.evidence.clone();
+            Box::pin(async move { Ok(evidence) })
         }
     }
 
@@ -774,11 +789,12 @@ mod tests {
             _sink: ConfigurationMutationSinkV1,
             _effect: ConfigurationMutationEffectV1,
             _now: UtcMicros,
-        ) -> Result<
+        ) -> ConfigurationOperationFuture<
+            '_,
             super::super::ports::CurrentConfigurationMutationAuthorizationV1,
-            ConfigurationError,
         > {
-            Ok(self.current.clone())
+            let current = self.current.clone();
+            Box::pin(async move { Ok(current) })
         }
     }
 

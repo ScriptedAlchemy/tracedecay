@@ -27,6 +27,8 @@ use tracedecay_domain::{
 use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
 use tracedecay_store::{
     GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1, GitIndexTransactionStore,
+    GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
+    GitIndexTransactionTerminalWriteV1,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -368,10 +370,10 @@ impl GitIndexNativeExecutor for FakeNative {
                 Ok(NativeGitIndexApplyOutcomeV1::CommitBoundaryUnknown)
             }
             NativeMode::Completed(outcome) => Ok(NativeGitIndexApplyOutcomeV1::Completed(
-                NativeGitIndexApplyResult {
+                Box::new(NativeGitIndexApplyResult {
                     receipt: receipt_for(transaction_id, preview, outcome),
                     execution: execution_for(request, outcome),
-                },
+                }),
             )),
         }
     }
@@ -473,6 +475,74 @@ fn test_store(directory: &tempfile::TempDir) -> DaemonGitIndexTransactionStore {
         .block_on(GlobalDb::open_at_without_structured_backfill(&path))
         .expect("canonical project database");
     DaemonGitIndexTransactionStore::open(Arc::new(database)).expect("canonical store actor")
+}
+
+struct StartupUnavailableStore(DaemonGitIndexTransactionStore);
+
+impl GitIndexTransactionStore for StartupUnavailableStore {
+    fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
+        self.0.save_preview(preview)
+    }
+
+    fn read_preview(
+        &self,
+        preview_id: &GitIndexPreviewId,
+    ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
+        self.0.read_preview(preview_id)
+    }
+
+    fn begin_or_replay(
+        &self,
+        request: GitIndexTransactionBeginRequestV1,
+    ) -> GitIndexTransactionStoreResult<GitIndexTransactionBeginResultV1> {
+        self.0.begin_or_replay(request)
+    }
+
+    fn compare_and_swap_journal(
+        &self,
+        idempotency_key: &GitIndexIdempotencyKey,
+        expected_phase_epoch: u64,
+        replacement: GitIndexTransactionJournalV1,
+    ) -> GitIndexTransactionStoreResult<GitIndexTransactionJournalV1> {
+        self.0
+            .compare_and_swap_journal(idempotency_key, expected_phase_epoch, replacement)
+    }
+
+    fn write_terminal(
+        &self,
+        write: GitIndexTransactionTerminalWriteV1,
+    ) -> GitIndexTransactionStoreResult<GitIndexTransactionReceiptV1> {
+        self.0.write_terminal(write)
+    }
+
+    fn recovery_candidates(
+        &self,
+        repository_id: &RepositoryId,
+    ) -> GitIndexTransactionStoreResult<Vec<tracedecay_store::GitIndexTransactionRecordV1>> {
+        self.0.recovery_candidates(repository_id)
+    }
+
+    fn recovery_repositories(&self) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
+        Err(GitIndexTransactionStoreError::Unavailable)
+    }
+
+    fn quarantine_repository(
+        &self,
+        repository_id: &RepositoryId,
+        transaction_id: &GitIndexTransactionId,
+    ) -> GitIndexTransactionStoreResult<()> {
+        self.0.quarantine_repository(repository_id, transaction_id)
+    }
+
+    fn clear_repository_quarantine(
+        &self,
+        repository_id: &RepositoryId,
+        transaction_id: &GitIndexTransactionId,
+        recovery_receipt: GitIndexTransactionReceiptV1,
+    ) -> GitIndexTransactionStoreResult<()> {
+        self.0
+            .clear_repository_quarantine(repository_id, transaction_id, recovery_receipt)
+    }
 }
 
 fn test_port(
@@ -796,6 +866,28 @@ fn startup_service_recovers_before_exposing_the_mutation_port() {
         replay.receipt.outcome,
         GitIndexReceiptOutcomeV1::AbortedNoChange
     );
+    assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn startup_recovery_failure_returns_no_mutation_service() {
+    let directory = tempfile::tempdir().expect("store directory");
+    let store = StartupUnavailableStore(test_store(&directory));
+    let native = FakeNative::new([], []);
+    let apply_calls = Arc::clone(&native.apply_calls);
+
+    let result = DaemonGitIndexTransactionService::start(
+        store,
+        native,
+        GitEffectClassifierV1::default(),
+        TestPolicy::allowing(),
+        UtcMicros(20),
+    );
+
+    assert!(matches!(
+        result,
+        Err(GitIndexTransactionPortError::DaemonUnavailable)
+    ));
     assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
 }
 

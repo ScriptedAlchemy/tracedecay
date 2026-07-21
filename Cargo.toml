@@ -1,7 +1,9 @@
 [workspace]
 members = [
+    "crates/tracedecay-api",
     "crates/tracedecay-application",
     "crates/tracedecay-domain",
+    "crates/tracedecay-hooks",
     "crates/tracedecay-policy",
     "crates/tracedecay-store",
     "crates/tracedecay-tool-catalog",

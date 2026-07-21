@@ -555,6 +555,62 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
 }
 
 #[tokio::test]
+async fn proven_terminal_receipt_atomically_resolves_an_admission_quarantine() {
+    let (_directory, _path, database) = open_database().await;
+    let preview = preview();
+    let request = begin_request(&preview, "idempotency.quarantine.terminal-proof");
+    let store = database.git_index_transaction_store();
+    store
+        .begin_or_replay(request.clone())
+        .await
+        .expect("start transaction");
+    store
+        .quarantine_repository(
+            &preview.repository_snapshot.repository_id,
+            &request.journal.transaction_id,
+        )
+        .await
+        .expect("fence admitted transaction");
+
+    store
+        .write_terminal(terminal_write(
+            &request,
+            GitIndexReceiptOutcomeV1::AbortedNoChange,
+            UtcMicros(12),
+        ))
+        .await
+        .expect("publish proof and resolve fence atomically");
+
+    assert!(
+        store
+            .recovery_repositories()
+            .await
+            .expect("recovery repositories")
+            .is_empty()
+    );
+    let snapshot = database.read_snapshot().await.expect("quarantine snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT active, resolution_receipt_json IS NOT NULL
+             FROM git_index_repository_quarantines
+             WHERE repository_id = ?1 AND transaction_id = ?2",
+            params![
+                preview.repository_snapshot.repository_id.as_str(),
+                request.journal.transaction_id.as_str(),
+            ],
+        )
+        .await
+        .expect("read retained quarantine");
+    let row = rows
+        .next()
+        .await
+        .expect("read quarantine row")
+        .expect("retained quarantine row");
+    assert_eq!(row.get::<i64>(0).expect("active"), 0);
+    assert_eq!(row.get::<i64>(1).expect("resolution receipt"), 1);
+}
+
+#[tokio::test]
 async fn recovery_indexes_include_only_repositories_with_recoverable_records() {
     let (_directory, _path, database) = open_database().await;
     let first_preview = preview();

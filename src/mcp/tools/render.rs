@@ -4,8 +4,11 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::Value;
+use tracedecay_application::ApplicationProblem;
 
 use crate::context::CONTEXT_PRIORITY_HEADINGS;
+use crate::daemon_client::RequestedOutputFormat;
+use crate::daemon_client::concealed_not_found_or_not_authorized;
 use crate::display::format_relative_time;
 use crate::mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL, ResponseHandleRecord,
@@ -20,22 +23,26 @@ use super::MAX_RESPONSE_CHARS;
 
 const MARKDOWN_TRUNCATION_RESERVED_CHARS: usize = 2_048;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutputFormat {
-    Markdown,
-    Json,
-}
-
-fn parse_format(args: &Value) -> OutputFormat {
+fn parse_format(args: &Value) -> RequestedOutputFormat {
     match args.get("format").and_then(Value::as_str) {
-        Some(v) if v.eq_ignore_ascii_case("json") => OutputFormat::Json,
-        _ => OutputFormat::Markdown,
+        Some(v) if v.eq_ignore_ascii_case("json") => RequestedOutputFormat::Json,
+        _ => RequestedOutputFormat::Markdown,
     }
 }
 
 /// True when the caller explicitly opted into JSON output via `format: "json"`.
 pub(super) fn wants_json(args: &Value) -> bool {
-    parse_format(args) == OutputFormat::Json
+    parse_format(args) == RequestedOutputFormat::Json
+}
+
+/// Serializes a canonical pre-admission problem for MCP structured content.
+pub(super) fn application_problem_value(problem: &ApplicationProblem) -> serde_json::Result<Value> {
+    serde_json::to_value(problem)
+}
+
+/// Returns the common non-disclosing unknown-or-unauthorized problem value.
+pub(super) fn concealed_problem_value() -> serde_json::Result<Value> {
+    application_problem_value(&concealed_not_found_or_not_authorized())
 }
 
 pub(super) fn finalize<F>(project_root: Option<&Path>, args: &Value, value: &Value, md: F) -> String
@@ -43,11 +50,11 @@ where
     F: FnOnce() -> String,
 {
     match parse_format(args) {
-        OutputFormat::Json => {
+        RequestedOutputFormat::Json => {
             let json = serde_json::to_string(value).unwrap_or_default();
             truncated_json_envelope_with_handle(project_root, &json)
         }
-        OutputFormat::Markdown => {
+        RequestedOutputFormat::Markdown => {
             let text = md();
             if text.is_empty() {
                 return text;

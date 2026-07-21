@@ -187,6 +187,17 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
             }
             if write.receipt.outcome == GitIndexReceiptOutcomeV1::NeedsInspection {
                 ensure_active_quarantine(&transaction, &write.journal).await?;
+            } else if transaction_has_active_quarantine(
+                &transaction,
+                &write.journal.repository_id,
+                &write.journal.transaction_id,
+            )
+            .await?
+            {
+                if !write.receipt.final_snapshot_captured {
+                    return Err(GitIndexTransactionStoreError::RepositoryQuarantined);
+                }
+                resolve_active_quarantine(&transaction, &write.journal, &write.receipt).await?;
             }
             if !journal_transition_matches(
                 &record.journal,
@@ -400,7 +411,7 @@ async fn commit_outcome<T>(
         Ok(value) => transaction
             .commit()
             .await
-            .map(|_| value)
+            .map(|()| value)
             .map_err(unavailable),
         Err(error) => match transaction.rollback().await {
             Ok(()) => Err(error),
@@ -435,13 +446,13 @@ async fn insert_preview_if_absent(
                     .repository_snapshot
                     .worktree_id
                     .as_ref()
-                    .map(|value| value.as_str()),
+                    .map(tracedecay_domain::WorktreeId::as_str),
                 operation_code(preview.operation),
                 preview.repository_snapshot_digest.as_str(),
                 preview
                     .commit_intent_digest
                     .as_ref()
-                    .map(|value| value.as_str()),
+                    .map(tracedecay_domain::ManifestDigest::as_str),
                 preview.created_at.0,
                 preview.expires_at.0,
                 encode(preview)?,
@@ -736,6 +747,36 @@ async fn ensure_active_quarantine(
     }
 }
 
+/// Resolve a fence created after admission in the same atomic write that
+/// publishes a native-observed terminal receipt. The retained resolution row
+/// prevents a crash between receipt publication and fence clearing from
+/// permanently quarantining a transaction that recovery already proved.
+async fn resolve_active_quarantine(
+    transaction: &Transaction,
+    journal: &GitIndexTransactionJournalV1,
+    receipt: &GitIndexTransactionReceiptV1,
+) -> GitIndexTransactionStoreResult<()> {
+    let updated = transaction
+        .execute(
+            "UPDATE git_index_repository_quarantines
+             SET active = 0, resolved_at = ?1, resolution_receipt_json = ?2
+             WHERE repository_id = ?3 AND transaction_id = ?4 AND active = 1",
+            params![
+                receipt.committed_at.0,
+                encode(receipt)?,
+                journal.repository_id.as_str(),
+                journal.transaction_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(unavailable)?;
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(GitIndexTransactionStoreError::RepositoryQuarantined)
+    }
+}
+
 async fn needs_inspection_recovery_transactions(
     transaction: &Transaction,
     repository_id: &RepositoryId,
@@ -844,6 +885,7 @@ fn invalid(message: impl Into<String>) -> GitIndexTransactionStoreError {
     GitIndexTransactionStoreError::InvalidData(message.into())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn invalid_domain(error: tracedecay_domain::DomainError) -> GitIndexTransactionStoreError {
     GitIndexTransactionStoreError::InvalidData(error.to_string())
 }

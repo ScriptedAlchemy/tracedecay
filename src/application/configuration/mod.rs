@@ -7,7 +7,7 @@ pub mod types;
 
 pub use authorization::{
     ConfigurationMutationGrantAuthority, ConfigurationMutationGrantAuthorityError,
-    PolicyBackedConfigurationMutationAuthorization,
+    ConfigurationMutationGrantAuthorityFuture, PolicyBackedConfigurationMutationAuthorization,
 };
 pub use operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
 pub use ports::{

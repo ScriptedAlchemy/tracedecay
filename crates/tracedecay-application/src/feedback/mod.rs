@@ -5,10 +5,17 @@
 //! delivery adapter, task relation, or durable overlay path.
 
 mod adapters;
+mod catalog;
+mod github_ci_proximity;
 mod ports;
 mod service;
 
+pub use catalog::{feedback_surface_catalog_contribution, feedback_surface_handler_descriptors};
+
 pub use adapters::{GenerationBoundFeedbackDiagnosticsAdapter, GraphImpactFeedbackAdapter};
+pub use github_ci_proximity::{
+    GitHubReadCredentialScopeV1, GitHubReviewReadPort, GitHubReviewReadRequestV1,
+};
 pub use ports::{
     FeedbackCompletedPublicationV1, FeedbackCycleDedupePort, FeedbackCycleDedupePublicationState,
     FeedbackCycleDedupeState, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest,

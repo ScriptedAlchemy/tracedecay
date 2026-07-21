@@ -77,6 +77,7 @@ pub use core_proxy::*;
 mod git_transactions;
 #[cfg(unix)]
 mod git_watch;
+pub mod lsp_gateway;
 #[cfg(unix)]
 mod memory_repair_scheduler;
 #[cfg(unix)]

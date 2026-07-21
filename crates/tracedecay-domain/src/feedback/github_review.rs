@@ -1,0 +1,369 @@
+//! Read-only GitHub review-ingress contracts.
+//!
+//! These values preserve observed review state and immutable anchors. They
+//! contain no outbound operation, credential, HTTP-method, or client type:
+//! callers can represent only allowlisted REST `GET` reads and GraphQL
+//! `query` reads. A connector implementation therefore receives no typed
+//! request that can express a GitHub mutation.
+
+use std::fmt;
+
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::code_intelligence::identity::{
+    ContentDigest, FileOccurrenceId, SourceSpan, SymbolOccurrenceId,
+};
+use crate::research::{
+    CommitId, DomainError, ManifestDigest, ProviderId, RepositoryId, RetrievalAnchorId, UtcMicros,
+};
+
+use super::FeedbackScopeV1;
+
+macro_rules! github_review_id {
+    ($name:ident, $field:literal) => {
+        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
+                let value = value.into();
+                super::validate_label(&value, $field)?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn validate(&self) -> Result<(), DomainError> {
+                super::validate_label(&self.0, $field)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    };
+}
+
+github_review_id!(GitHubPullRequestIdV1, "github pull request id");
+github_review_id!(GitHubReviewIdV1, "github review id");
+github_review_id!(GitHubReviewThreadIdV1, "github review thread id");
+github_review_id!(GitHubReviewCommentIdV1, "github review comment id");
+
+/// Closed allowlist for the review-ingress connector. REST variants denote
+/// exactly one HTTP `GET`; the GraphQL variant denotes a normalized `query`
+/// document, never a mutation. There is intentionally no generic endpoint,
+/// HTTP-method, or mutation variant.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubReviewReadOperationV1 {
+    RestGetPullRequest,
+    RestListPullRequestReviews,
+    RestListPullRequestReviewComments,
+    GraphQlQueryPullRequestReviewThreads,
+}
+
+impl GitHubReviewReadOperationV1 {
+    /// This is structurally true for every representable operation.
+    pub const fn is_read_only(self) -> bool {
+        true
+    }
+}
+
+/// Observed lifecycle of an item or thread. This remains independent from
+/// [`GitHubReviewIngressProviderOutcomeV1`], which describes a fetch attempt.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubReviewLifecycleV1 {
+    Current,
+    Outdated,
+    Resolved,
+    Edited,
+    Deleted,
+}
+
+/// Outcome of a read-ingress fetch, refresh, or expansion attempt. It never
+/// represents an outbound comment or thread action.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubReviewIngressProviderOutcomeV1 {
+    Complete,
+    Partial,
+    Unavailable,
+    Denied,
+    RateLimited,
+    Stale,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubReviewAuthorClassV1 {
+    Bot,
+    Maintainer,
+    OtherObservedRole,
+}
+
+/// Review-level state reported by GitHub. This is observed framing only and
+/// never upgrades finding severity, confidence, or coverage.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubReviewStateV1 {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Dismissed,
+    Pending,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubReviewCoverageV1 {
+    Complete,
+    Partial,
+    Unavailable,
+    Denied,
+    Stale,
+}
+
+/// Whether an original review anchor has a provable exact representation on
+/// the current branch. Similar paths or lines alone never produce
+/// [`Self::ExactCurrent`].
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubReviewRemapStateV1 {
+    ExactCurrent,
+    Unmapped,
+    Stale,
+}
+
+/// An immutable, generation-independent address captured from either the
+/// original review position or a later exact current-branch projection.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewImmutableAnchorV1 {
+    pub repository_id: RepositoryId,
+    pub commit_id: CommitId,
+    pub retrieval_anchor_id: RetrievalAnchorId,
+    pub file: FileOccurrenceId,
+    pub content_digest: ContentDigest,
+    pub span: Option<SourceSpan>,
+    pub symbol: Option<SymbolOccurrenceId>,
+}
+
+impl GitHubReviewImmutableAnchorV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.repository_id.validate()?;
+        self.commit_id.validate()?;
+        self.retrieval_anchor_id.validate()?;
+        self.file.validate()?;
+        self.content_digest.validate()?;
+        self.span.as_ref().map_or(Ok(()), SourceSpan::validate)?;
+        self.symbol
+            .as_ref()
+            .map_or(Ok(()), SymbolOccurrenceId::validate)
+    }
+}
+
+/// Preserves the original observed review anchor and, only when provable,
+/// stores a separate derived projection onto the current branch. Remapping
+/// never mutates or replaces the original observed history.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewCurrentBranchRemapV1 {
+    pub original: GitHubReviewImmutableAnchorV1,
+    pub current_scope: FeedbackScopeV1,
+    pub current: Option<GitHubReviewImmutableAnchorV1>,
+    pub state: GitHubReviewRemapStateV1,
+}
+
+impl GitHubReviewCurrentBranchRemapV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.original.validate()?;
+        self.current_scope.validate()?;
+        if self.original.repository_id != self.current_scope.repository_id {
+            return Err(DomainError::NonCanonical {
+                field: "github review remap repository",
+            });
+        }
+
+        match (&self.state, &self.current) {
+            (GitHubReviewRemapStateV1::ExactCurrent, Some(current)) => {
+                current.validate()?;
+                if current.repository_id != self.current_scope.repository_id
+                    || current.commit_id != self.current_scope.head_commit_id
+                {
+                    return Err(DomainError::NonCanonical {
+                        field: "github review exact current anchor",
+                    });
+                }
+            }
+            (GitHubReviewRemapStateV1::ExactCurrent, None) => {
+                return Err(DomainError::NonCanonical {
+                    field: "github review exact current remap",
+                });
+            }
+            (GitHubReviewRemapStateV1::Unmapped | GitHubReviewRemapStateV1::Stale, None) => {}
+            (GitHubReviewRemapStateV1::Unmapped | GitHubReviewRemapStateV1::Stale, Some(_)) => {
+                return Err(DomainError::NonCanonical {
+                    field: "github review non-exact current anchor",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One observed GitHub review comment or reply. The review lifecycle and
+/// provider outcome are deliberately separate dimensions.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewItemV1 {
+    pub provider: ProviderId,
+    pub repository_id: RepositoryId,
+    pub pull_request_id: GitHubPullRequestIdV1,
+    pub review_id: Option<GitHubReviewIdV1>,
+    pub thread_id: Option<GitHubReviewThreadIdV1>,
+    pub comment_id: GitHubReviewCommentIdV1,
+    pub reply_to_comment_id: Option<GitHubReviewCommentIdV1>,
+    pub author_anchor: RetrievalAnchorId,
+    pub author_class: GitHubReviewAuthorClassV1,
+    pub review_state: GitHubReviewStateV1,
+    pub body_digest: ManifestDigest,
+    pub body_anchor: RetrievalAnchorId,
+    pub safe_url_anchor: Option<RetrievalAnchorId>,
+    pub lifecycle: GitHubReviewLifecycleV1,
+    pub provider_outcome: GitHubReviewIngressProviderOutcomeV1,
+    pub remap: GitHubReviewCurrentBranchRemapV1,
+    pub observed_at: UtcMicros,
+}
+
+impl GitHubReviewItemV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.provider.validate()?;
+        self.repository_id.validate()?;
+        self.pull_request_id.validate()?;
+        self.review_id
+            .as_ref()
+            .map_or(Ok(()), GitHubReviewIdV1::validate)?;
+        self.thread_id
+            .as_ref()
+            .map_or(Ok(()), GitHubReviewThreadIdV1::validate)?;
+        self.comment_id.validate()?;
+        self.reply_to_comment_id
+            .as_ref()
+            .map_or(Ok(()), GitHubReviewCommentIdV1::validate)?;
+        self.author_anchor.validate()?;
+        self.body_digest.validate()?;
+        self.body_anchor.validate()?;
+        self.safe_url_anchor
+            .as_ref()
+            .map_or(Ok(()), RetrievalAnchorId::validate)?;
+        self.remap.validate()?;
+        if self.remap.original.repository_id != self.repository_id {
+            return Err(DomainError::NonCanonical {
+                field: "github review item repository",
+            });
+        }
+        if self.lifecycle == GitHubReviewLifecycleV1::Current
+            && self.remap.state != GitHubReviewRemapStateV1::ExactCurrent
+        {
+            return Err(DomainError::NonCanonical {
+                field: "github review current lifecycle remap",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Read-only connector output. Partial and stale outcomes may still include
+/// previously observed items, whose lifecycle remains independently typed.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewIngressResultV1 {
+    pub provider: ProviderId,
+    pub scope: FeedbackScopeV1,
+    pub pull_request_id: GitHubPullRequestIdV1,
+    pub provider_base_commit_id: CommitId,
+    pub provider_head_commit_id: CommitId,
+    pub merge_base_commit_id: CommitId,
+    pub operation: GitHubReviewReadOperationV1,
+    pub outcome: GitHubReviewIngressProviderOutcomeV1,
+    pub coverage: GitHubReviewCoverageV1,
+    pub items: Vec<GitHubReviewItemV1>,
+    pub fetched_at: UtcMicros,
+}
+
+impl GitHubReviewIngressResultV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.provider.validate()?;
+        self.scope.validate()?;
+        self.pull_request_id.validate()?;
+        self.provider_base_commit_id.validate()?;
+        self.provider_head_commit_id.validate()?;
+        self.merge_base_commit_id.validate()?;
+        if self.scope.head_commit_id != self.provider_head_commit_id {
+            return Err(DomainError::NonCanonical {
+                field: "github review provider head commit",
+            });
+        }
+        let coverage_matches = matches!(
+            (self.outcome, self.coverage),
+            (
+                GitHubReviewIngressProviderOutcomeV1::Complete,
+                GitHubReviewCoverageV1::Complete
+            ) | (
+                GitHubReviewIngressProviderOutcomeV1::Partial,
+                GitHubReviewCoverageV1::Partial
+            ) | (
+                GitHubReviewIngressProviderOutcomeV1::Unavailable,
+                GitHubReviewCoverageV1::Unavailable
+            ) | (
+                GitHubReviewIngressProviderOutcomeV1::Denied,
+                GitHubReviewCoverageV1::Denied
+            ) | (
+                GitHubReviewIngressProviderOutcomeV1::Stale,
+                GitHubReviewCoverageV1::Stale
+            ) | (
+                GitHubReviewIngressProviderOutcomeV1::RateLimited,
+                GitHubReviewCoverageV1::Partial | GitHubReviewCoverageV1::Unavailable
+            ) | (
+                GitHubReviewIngressProviderOutcomeV1::Failed,
+                GitHubReviewCoverageV1::Partial | GitHubReviewCoverageV1::Unavailable
+            )
+        );
+        if !coverage_matches {
+            return Err(DomainError::NonCanonical {
+                field: "github review ingress coverage",
+            });
+        }
+        for item in &self.items {
+            item.validate()?;
+            if item.provider != self.provider
+                || item.repository_id != self.scope.repository_id
+                || item.pull_request_id != self.pull_request_id
+                || item.provider_outcome != self.outcome
+                || item.remap.current_scope != self.scope
+            {
+                return Err(DomainError::NonCanonical {
+                    field: "github review ingress item scope",
+                });
+            }
+        }
+        Ok(())
+    }
+}

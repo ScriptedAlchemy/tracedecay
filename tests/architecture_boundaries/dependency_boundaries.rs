@@ -345,3 +345,35 @@ fn code_index_is_filesystem_store_model_and_transport_free() {
         violations.into_iter().collect::<Vec<_>>().join("\n")
     );
 }
+
+#[test]
+fn pr12_lsp_bridge_and_gateway_do_not_duplicate_store_or_transport_authority() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [
+        PathBuf::from("src/lsp_bridge.rs"),
+        PathBuf::from("src/daemon/lsp_gateway"),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let sources = filesystem_rust_sources(&repository, &roots).expect("resolve PR12 LSP sources");
+    assert!(!sources.is_empty(), "PR12 LSP sources must exist");
+
+    let forbidden: &[&[&str]] = &[
+        &["crate", "db"],
+        &["crate", "global_db"],
+        &["crate", "store"],
+        &["libsql"],
+        &["rusqlite"],
+        &["sqlx"],
+        &["std", "fs"],
+        &["std", "net"],
+        &["std", "process"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect PR12 LSP sources");
+    assert!(
+        violations.is_empty(),
+        "PR12 LSP bridge/gateway must not own stores, sockets, analyzers, or processes:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}

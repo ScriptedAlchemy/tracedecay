@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod advisory;
 pub mod authorization;
 pub mod context;
 pub mod diagnostics;
@@ -16,6 +17,7 @@ pub mod retrieval;
 
 mod error;
 
+pub use advisory::*;
 pub use authorization::{
     AuthorizationAdmission, AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome,
     AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,
@@ -35,12 +37,14 @@ pub use diagnostics::{
     ProviderSourceIdentity, RevisionDigest,
 };
 pub use error::ApplicationContractError;
+pub use feedback::{feedback_surface_catalog_contribution, feedback_surface_handler_descriptors};
 pub use git::{
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
     GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
     GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
     GitIndexTransactionPortError, GitIndexTransactionService, git_index_catalog_contribution,
-    git_index_effect_class, git_index_handler_descriptors,
+    git_index_effect_class, git_index_handler_descriptors, git_surface_catalog_contribution,
+    git_surface_handler_descriptors,
 };
 pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,

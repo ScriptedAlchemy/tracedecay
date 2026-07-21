@@ -4403,6 +4403,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracedecay-application",
+ "tracedecay-tool-catalog",
+]
+
+[[package]]
 name = "tracedecay-application"
 version = "0.1.0"
 dependencies = [
@@ -4422,6 +4433,17 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tracedecay-hooks"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracedecay-application",
+ "tracedecay-domain",
 ]
 
 [[package]]

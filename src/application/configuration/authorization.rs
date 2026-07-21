@@ -4,6 +4,9 @@
 //! receipt; the adapter reloads its current immutable grant authority and runs
 //! the approved pure policy evaluator immediately before the effect.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::configuration::{
     ConfigurationGrantId, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
@@ -16,7 +19,8 @@ use tracedecay_policy::configuration::{
 };
 
 use super::ports::{
-    ConfigurationMutationAuthorizationPort, CurrentConfigurationMutationAuthorizationV1,
+    ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
+    CurrentConfigurationMutationAuthorizationV1,
 };
 use super::types::ConfigurationError;
 
@@ -28,11 +32,25 @@ pub enum ConfigurationMutationGrantAuthorityError {
 
 /// Current grant authority lookup. Missing, denied, expired, and revoked
 /// grants must all return `Rejected`; adapters must not expose which occurred.
-pub trait ConfigurationMutationGrantAuthority {
-    fn current_grant(
-        &self,
-        grant_id: &ConfigurationGrantId,
-    ) -> Result<ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantAuthorityError>;
+/// The lookup is asynchronous because the immutable grant authority may be
+/// durable and must not be reached through executor-blocking shims.
+pub type ConfigurationMutationGrantAuthorityFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    ConfigurationMutationGrantSnapshotV1,
+                    ConfigurationMutationGrantAuthorityError,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+pub trait ConfigurationMutationGrantAuthority: Send + Sync {
+    fn current_grant<'a>(
+        &'a self,
+        grant_id: &'a ConfigurationGrantId,
+    ) -> ConfigurationMutationGrantAuthorityFuture<'a>;
 }
 
 pub struct PolicyBackedConfigurationMutationAuthorization<Authority, Evaluator> {
@@ -69,21 +87,23 @@ where
     Authority: ConfigurationMutationGrantAuthority + Sync,
     Evaluator: ConfigurationMutationPolicyEvaluator + Sync,
 {
-    fn recheck(
-        &self,
-        receipt: &ConfigurationMutationGrantReceiptV1,
+    fn recheck<'a>(
+        &'a self,
+        receipt: &'a ConfigurationMutationGrantReceiptV1,
         operation: ConfigurationMutationOperationV1,
-        expected_revision: &ConfigurationRevisionId,
+        expected_revision: &'a ConfigurationRevisionId,
         sink: ConfigurationMutationSinkV1,
         effect: ConfigurationMutationEffectV1,
         now: UtcMicros,
-    ) -> Result<CurrentConfigurationMutationAuthorizationV1, ConfigurationError> {
-        receipt
-            .validate()
-            .map_err(|_| ConfigurationError::MutationAuthorityRejected)?;
-        let current =
-            self.authority
+    ) -> ConfigurationOperationFuture<'a, CurrentConfigurationMutationAuthorizationV1> {
+        Box::pin(async move {
+            receipt
+                .validate()
+                .map_err(|_| ConfigurationError::MutationAuthorityRejected)?;
+            let current = self
+                .authority
                 .current_grant(&receipt.grant_id)
+                .await
                 .map_err(|error| match error {
                     ConfigurationMutationGrantAuthorityError::Rejected => {
                         ConfigurationError::MutationAuthorityRejected
@@ -92,24 +112,25 @@ where
                         ConfigurationError::Unavailable
                     }
                 })?;
-        let disposition = self.evaluator.evaluate(
-            &current,
-            ConfigurationMutationRecheckInputV1 {
-                receipt,
-                operation,
-                expected_revision,
-                sink,
-                effect,
-                evaluated_at: now,
-            },
-        );
-        if disposition != ConfigurationMutationRecheckDispositionV1::Allow {
-            return Err(ConfigurationError::MutationAuthorityRejected);
-        }
-        Ok(CurrentConfigurationMutationAuthorizationV1 {
-            scope_digest: current.scope_digest,
-            policy_epoch: current.policy_epoch,
-            policy_digest: current.policy_digest,
+            let disposition = self.evaluator.evaluate(
+                &current,
+                ConfigurationMutationRecheckInputV1 {
+                    receipt,
+                    operation,
+                    expected_revision,
+                    sink,
+                    effect,
+                    evaluated_at: now,
+                },
+            );
+            if disposition != ConfigurationMutationRecheckDispositionV1::Allow {
+                return Err(ConfigurationError::MutationAuthorityRejected);
+            }
+            Ok(CurrentConfigurationMutationAuthorizationV1 {
+                scope_digest: current.scope_digest,
+                policy_epoch: current.policy_epoch,
+                policy_digest: current.policy_digest,
+            })
         })
     }
 }
@@ -136,9 +157,9 @@ mod tests {
         fn current_grant(
             &self,
             _grant_id: &ConfigurationGrantId,
-        ) -> Result<ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantAuthorityError>
-        {
-            self.0.clone()
+        ) -> ConfigurationMutationGrantAuthorityFuture<'_> {
+            let result = self.0.clone();
+            Box::pin(async move { result })
         }
     }
 
@@ -202,8 +223,8 @@ mod tests {
         (snapshot, receipt)
     }
 
-    #[test]
-    fn current_policy_grant_authorizes_exact_internal_effect() {
+    #[tokio::test]
+    async fn current_policy_grant_authorizes_exact_internal_effect() {
         let (snapshot, receipt) = fixture();
         let service =
             PolicyBackedConfigurationMutationAuthorization::new(Authority(Ok(snapshot.clone())));
@@ -216,14 +237,15 @@ mod tests {
                 receipt.effect,
                 UtcMicros(19),
             )
+            .await
             .unwrap();
         assert_eq!(current.scope_digest, snapshot.scope_digest);
         assert_eq!(current.policy_epoch, snapshot.policy_epoch);
         assert_eq!(current.policy_digest, snapshot.policy_digest);
     }
 
-    #[test]
-    fn hidden_and_revoked_grants_share_one_rejection() {
+    #[tokio::test]
+    async fn hidden_and_revoked_grants_share_one_rejection() {
         let (mut snapshot, receipt) = fixture();
         let hidden = PolicyBackedConfigurationMutationAuthorization::new(Authority(Err(
             ConfigurationMutationGrantAuthorityError::Rejected,
@@ -237,6 +259,7 @@ mod tests {
                 receipt.effect,
                 UtcMicros(19),
             )
+            .await
             .unwrap_err();
 
         snapshot.state = ConfigurationMutationGrantStateV1::Revoked;
@@ -250,6 +273,7 @@ mod tests {
                 receipt.effect,
                 UtcMicros(19),
             )
+            .await
             .unwrap_err();
 
         assert_eq!(hidden_error, ConfigurationError::MutationAuthorityRejected);

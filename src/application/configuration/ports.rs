@@ -39,19 +39,21 @@ pub struct ScopeRevalidationEvidenceV1 {
 
 /// Plan 16-backed authority resolver. This port owns re-resolution; adapters
 /// and the configuration layer do not infer project authority from a path,
-/// CWD, source locator, collection label, or host profile.
+/// CWD, source locator, collection label, or host profile. Resolution is
+/// asynchronous so a durable authority implementation never has to block a
+/// Tokio worker to satisfy this application boundary.
 pub trait ScopeResolutionPort: Sync {
-    fn resolve_protected_change(
-        &self,
-        actor: &AuthorizedActor,
-        change: &ProtectedChange,
-    ) -> Result<ScopeRevalidationEvidenceV1, ConfigurationError>;
+    fn resolve_protected_change<'a>(
+        &'a self,
+        actor: &'a AuthorizedActor,
+        change: &'a ProtectedChange,
+    ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>;
 
-    fn revalidate_plan(
-        &self,
-        actor: &AuthorizedActor,
-        plan: &ProtectedChangePlan,
-    ) -> Result<ScopeRevalidationEvidenceV1, ConfigurationError>;
+    fn revalidate_plan<'a>(
+        &'a self,
+        actor: &'a AuthorizedActor,
+        plan: &'a ProtectedChangePlan,
+    ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>;
 }
 
 pub trait ConfigurationClock: Sync {
@@ -67,17 +69,18 @@ pub struct CurrentConfigurationMutationAuthorizationV1 {
 
 /// Current policy/grant recheck. Implementations consume the immutable policy
 /// decision/grant state; the configuration layer cannot mint or refresh a
-/// receipt and cannot infer authority from transport origin.
+/// receipt and cannot infer authority from transport origin. The future keeps
+/// database-backed rechecks on the owning async lane.
 pub trait ConfigurationMutationAuthorizationPort: Sync {
-    fn recheck(
-        &self,
-        receipt: &ConfigurationMutationGrantReceiptV1,
+    fn recheck<'a>(
+        &'a self,
+        receipt: &'a ConfigurationMutationGrantReceiptV1,
         operation: ConfigurationMutationOperationV1,
-        expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
+        expected_revision: &'a tracedecay_domain::configuration::ConfigurationRevisionId,
         sink: ConfigurationMutationSinkV1,
         effect: ConfigurationMutationEffectV1,
         now: UtcMicros,
-    ) -> Result<CurrentConfigurationMutationAuthorizationV1, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<'a, CurrentConfigurationMutationAuthorizationV1>;
 }
 
 /// Transactional persistence boundary. Each `commit_*` method must atomically

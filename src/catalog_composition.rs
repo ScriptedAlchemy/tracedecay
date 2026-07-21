@@ -3,16 +3,18 @@
 //! Composition validates metadata against the closed application handler
 //! descriptors. It does not retain handlers or provide an invocation path.
 
+use std::collections::BTreeMap;
+
 use thiserror::Error;
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationHandlerDescriptors,
     application_catalog_contributions, application_handler_descriptors,
 };
 use tracedecay_tool_catalog::{
-    AvailabilityContract, CapabilityId, CatalogContributionV1, CatalogSnapshotBuilderV1,
+    AvailabilityContract, BindingId, CapabilityId, CatalogContributionV1, CatalogSnapshotBuilderV1,
     CatalogSnapshotV1, CatalogValidationError, IdentifierError, ProfileBudget, ProfileDefinition,
     ProfileDefinitionInputV1, ProfileId, ProfileKind, RoutingFixtureExpectation, RoutingFixtureV1,
-    UnavailabilityReason,
+    SchemaRef, UnavailabilityReason,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -23,6 +25,87 @@ pub enum CatalogCompositionError {
     Catalog(#[from] CatalogValidationError),
     #[error("application catalog identifier is invalid: {0}")]
     Identifier(#[from] IdentifierError),
+}
+
+/// Schema references declared for one public surface binding.
+///
+/// The index stores only catalog `SchemaRef` values, never schema bodies,
+/// handlers, authorization state, or executable routes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BindingSchemaReferences {
+    request_schema: SchemaRef,
+    result_schema: SchemaRef,
+}
+
+impl BindingSchemaReferences {
+    fn new(request_schema: SchemaRef, result_schema: SchemaRef) -> Self {
+        Self {
+            request_schema,
+            result_schema,
+        }
+    }
+
+    pub fn request_schema(&self) -> &SchemaRef {
+        &self.request_schema
+    }
+
+    pub fn result_schema(&self) -> &SchemaRef {
+        &self.result_schema
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum SchemaReferenceIndexError {
+    #[error("catalog contains more than one schema reference for a binding")]
+    DuplicateBinding,
+}
+
+/// Immutable binding-to-schema-reference lookup derived from a catalog
+/// snapshot. It is metadata only and intentionally cannot dispatch a binding.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CatalogSchemaReferenceIndex {
+    by_binding: BTreeMap<BindingId, BindingSchemaReferences>,
+}
+
+impl CatalogSchemaReferenceIndex {
+    fn insert(
+        &mut self,
+        binding_id: BindingId,
+        schemas: BindingSchemaReferences,
+    ) -> Result<(), SchemaReferenceIndexError> {
+        if self.by_binding.contains_key(&binding_id) {
+            return Err(SchemaReferenceIndexError::DuplicateBinding);
+        }
+        self.by_binding.insert(binding_id, schemas);
+        Ok(())
+    }
+
+    pub fn get(&self, binding_id: &BindingId) -> Option<&BindingSchemaReferences> {
+        self.by_binding.get(binding_id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&BindingId, &BindingSchemaReferences)> {
+        self.by_binding.iter()
+    }
+}
+
+/// Indexes schema references already declared by the immutable catalog.
+///
+/// This function performs no handler lookup and provides no invocation path.
+pub fn catalog_schema_reference_index(
+    snapshot: &CatalogSnapshotV1,
+) -> Result<CatalogSchemaReferenceIndex, SchemaReferenceIndexError> {
+    let mut index = CatalogSchemaReferenceIndex::default();
+    for capability in snapshot.capabilities() {
+        let schemas = BindingSchemaReferences::new(
+            capability.request_schema().clone(),
+            capability.result_schema().clone(),
+        );
+        for binding_id in capability.binding_ids() {
+            index.insert(binding_id.clone(), schemas.clone())?;
+        }
+    }
+    Ok(index)
 }
 
 /// Build the immutable catalog snapshot for currently declared application use

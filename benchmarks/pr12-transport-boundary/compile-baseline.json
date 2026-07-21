@@ -1,0 +1,6 @@
+{
+  "packages": ["tracedecay-api", "tracedecay"],
+  "command": "cargo check -p tracedecay-api -p tracedecay --lib",
+  "recorded_at": "2026-07-21T09:20:19Z",
+  "notes": "PR12 CLI/MCP/HTTP transport compile baseline; adapters must remain free of store/query/policy authority."
+}

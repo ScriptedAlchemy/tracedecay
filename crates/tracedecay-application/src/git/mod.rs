@@ -1,9 +1,11 @@
 //! Git index transaction application boundary.
 
 mod catalog;
+mod surface_catalog;
 mod transactions;
 
 pub use catalog::{git_index_catalog_contribution, git_index_handler_descriptors};
+pub use surface_catalog::{git_surface_catalog_contribution, git_surface_handler_descriptors};
 pub use transactions::{
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
     GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,

@@ -1,0 +1,269 @@
+//! Public Git preview/apply surface bindings.
+//!
+//! Internal `stage_hunks` / `unstage_hunks` / `commit_index` capabilities remain
+//! application-only (no surface bindings). Adapters expose only `git_preview`
+//! and `git_apply`.
+
+use tracedecay_tool_catalog::{
+    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
+    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
+    LifecycleClass, PrivacyClass, ProtocolRevisionRange, ReceiptContract, ReconciliationContract,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
+    SurfaceOperationName, TerminalState, TerminalStateContract, UnavailabilityReason, UseCaseId,
+};
+
+use crate::error::ApplicationContractError;
+use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::result::ResultContractRef;
+
+struct SurfaceSpec {
+    capability: &'static str,
+    use_case: &'static str,
+    request_schema: &'static str,
+    result_schema: &'static str,
+    operation: &'static str,
+    effect: EffectClass,
+    summary: &'static str,
+    description: &'static str,
+    example: &'static str,
+}
+
+const SURFACE_SPECS: [SurfaceSpec; 2] = [
+    SurfaceSpec {
+        capability: "capability.application.git.preview",
+        use_case: "use-case.application.git.preview",
+        request_schema: "schema.application.git.preview.request",
+        result_schema: "schema.application.git.preview.result",
+        operation: "git_preview",
+        effect: EffectClass::Preview,
+        summary: "Preview Git index mutations",
+        description: "Build an immutable preview for selected index mutations with CAS evidence.",
+        example: "Preview staging these hunks",
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.apply",
+        use_case: "use-case.application.git.apply",
+        request_schema: "schema.application.git.apply.request",
+        result_schema: "schema.application.git.apply.result",
+        operation: "git_apply",
+        // Public apply is a facade over preview-bound stage/unstage/commit.
+        // The exact Git-index effect class is fixed by the preview identity.
+        effect: EffectClass::Administrative,
+        summary: "Apply a Git index preview",
+        description: "Apply one exact preview identity through daemon-serialized index transactions.",
+        example: "Apply the previewed Git index mutation",
+    },
+];
+
+const SURFACES: [BindingSurface; 3] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+];
+
+/// Inert catalog contribution for public Git preview/apply bindings only.
+pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError>
+{
+    let mut capabilities = Vec::with_capacity(SURFACE_SPECS.len());
+    let mut bindings = Vec::with_capacity(SURFACE_SPECS.len() * SURFACES.len());
+
+    for spec in &SURFACE_SPECS {
+        let capability_id = CapabilityId::new(spec.capability)?;
+        let mut binding_ids = Vec::with_capacity(SURFACES.len());
+        for surface in SURFACES {
+            let binding_id = BindingId::new(format!(
+                "binding.{}.{}.{}",
+                match surface {
+                    BindingSurface::Cli => "cli",
+                    BindingSurface::Mcp => "mcp",
+                    BindingSurface::Http => "http",
+                    BindingSurface::Lsp => "lsp",
+                    BindingSurface::Dashboard => "dashboard",
+                },
+                spec.operation,
+                "v1"
+            ))?;
+            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+                binding_id: binding_id.clone(),
+                capability_id: capability_id.clone(),
+                surface,
+                operation: SurfaceOperationName::new(spec.operation)?,
+                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+                required_features: Vec::new(),
+                status: BindingStatus::Current,
+                alias_of: None,
+            })?);
+            binding_ids.push(binding_id);
+        }
+        capabilities.push(capability(spec, capability_id, binding_ids)?);
+    }
+
+    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
+        contribution_id: ContributionId::new("contribution.application.git-surface")?,
+        depends_on: Vec::new(),
+        capabilities,
+        retrieval_primitives: Vec::new(),
+        bindings,
+    })?)
+}
+
+pub fn git_surface_handler_descriptors()
+-> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
+    SURFACE_SPECS.iter().map(handler_descriptor).collect()
+}
+
+fn capability(
+    spec: &SurfaceSpec,
+    capability_id: CapabilityId,
+    binding_ids: Vec<BindingId>,
+) -> Result<CapabilityManifestV1, ApplicationContractError> {
+    Ok(CapabilityManifestV1::new(CapabilityManifestInputV1 {
+        capability_id,
+        use_case_id: UseCaseId::new(spec.use_case)?,
+        routing: RoutingContractV1::new(
+            1,
+            spec.summary,
+            spec.description,
+            vec![spec.example.to_owned()],
+        )?,
+        request_schema: schema(spec.request_schema)?,
+        result_schema: schema(spec.result_schema)?,
+        effect: spec.effect,
+        scope: ScopeRequirement::new(vec![
+            ScopeDimension::Project,
+            ScopeDimension::Repository,
+            ScopeDimension::Worktree,
+        ])?,
+        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
+        denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+        privacy: PrivacyClass::ScopedMetadata,
+        lifecycle: LifecycleClass::Resumable,
+        streaming: StreamingContract::Unsupported,
+        cancellation: CancellationContract::cooperative(cancellation_points(spec.effect))?,
+        deadline: DeadlineContract::new(30_000, deadline_behavior(spec.effect))?,
+        pagination: None,
+        idempotency: if spec.effect.is_effect() {
+            IdempotencyContract::Required
+        } else {
+            IdempotencyContract::NotRequired
+        },
+        authority_revalidation: RevalidationContract::required(vec![
+            RevalidationPoint::Authority,
+            RevalidationPoint::Scope,
+            RevalidationPoint::Policy,
+            RevalidationPoint::Configuration,
+            RevalidationPoint::ExpectedState,
+        ])?,
+        reconciliation: if spec.effect.is_effect() {
+            ReconciliationContract::Required
+        } else {
+            ReconciliationContract::NotRequired
+        },
+        receipt: if spec.effect.is_effect() {
+            ReceiptContract::DurableEffect
+        } else {
+            ReceiptContract::Operation
+        },
+        terminal_states: TerminalStateContract::new(terminal_states(spec.effect))?,
+        availability: AvailabilityContract::Unavailable {
+            reason: UnavailabilityReason::NotImplemented,
+        },
+        binding_ids,
+        profile_eligibility: Vec::new(),
+        required_features: Vec::new(),
+    })?)
+}
+
+fn cancellation_points(effect: EffectClass) -> Vec<CancellationPoint> {
+    if effect.is_effect() {
+        vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::BeforeEffect,
+            CancellationPoint::EffectInFlight,
+            CancellationPoint::AfterCommit,
+        ]
+    } else {
+        vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::BeforeRead,
+            CancellationPoint::DuringRead,
+        ]
+    }
+}
+
+fn deadline_behavior(effect: EffectClass) -> DeadlineBehavior {
+    if effect.is_effect() {
+        DeadlineBehavior::ReturnEffectReceipt
+    } else {
+        DeadlineBehavior::ReturnOperationReceipt
+    }
+}
+
+fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
+    if effect.is_effect() {
+        vec![
+            TerminalState::Completed,
+            TerminalState::Cancelled,
+            TerminalState::TimedOut,
+            TerminalState::Failed,
+            TerminalState::EffectUnknown,
+            TerminalState::Partial,
+        ]
+    } else {
+        vec![
+            TerminalState::Completed,
+            TerminalState::Cancelled,
+            TerminalState::TimedOut,
+            TerminalState::Failed,
+            TerminalState::Partial,
+        ]
+    }
+}
+
+fn handler_descriptor(
+    spec: &SurfaceSpec,
+) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
+    let result_schema = schema(spec.result_schema)?;
+    ApplicationHandlerDescriptor::new(
+        ApplicationOperation::new(
+            CapabilityId::new(spec.capability)?,
+            UseCaseId::new(spec.use_case)?,
+            ResultContractRef::from_schema(&result_schema),
+            true,
+        ),
+        schema(spec.request_schema)?,
+        result_schema,
+    )
+}
+
+fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
+    Ok(SchemaRef::new(SchemaId::new(id)?, 1, 8_192)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_git_bindings_exclude_internal_index_steps() {
+        let contribution = git_surface_catalog_contribution().expect("contribution");
+        let operations: Vec<_> = contribution
+            .bindings()
+            .iter()
+            .map(|binding| binding.operation().as_str().to_owned())
+            .collect();
+        assert!(
+            operations
+                .iter()
+                .all(|name| name == "git_preview" || name == "git_apply")
+        );
+        assert!(!operations.iter().any(|name| {
+            name.contains("stage_hunks")
+                || name.contains("unstage_hunks")
+                || name.contains("commit_index")
+        }));
+    }
+}

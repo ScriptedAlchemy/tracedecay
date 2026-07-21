@@ -63,7 +63,7 @@ pub(crate) struct NativeGitIndexApplyResult {
 pub(crate) enum NativeGitIndexApplyOutcomeV1 {
     ProvenNoMutation,
     CommitBoundaryUnknown,
-    Completed(NativeGitIndexApplyResult),
+    Completed(Box<NativeGitIndexApplyResult>),
 }
 
 /// Fixed native boundary used by the daemon transaction coordinator.
@@ -265,31 +265,28 @@ where
                 request,
             );
         }
-        let started = match durable.advance(
+        let Ok(started) = durable.advance(
             &idempotency_key,
             &record.journal,
             GitIndexJournalPhaseV1::NativeApplyStarted,
             request.observed_at,
-        ) {
-            Ok(journal) => journal,
-            Err(_) => {
-                // No native boundary was entered. Prefer a durable no-change
-                // terminal receipt; quarantine only if that safe terminal
-                // write cannot be proven.
-                self.native.discard_preview(&preview.preview_id);
-                return finish_aborted_no_change(
-                    &self.store,
-                    &durable,
-                    &idempotency_key,
-                    &record.journal,
-                    &transaction_id,
-                    preview,
-                    request,
-                )
-                .inspect_err(|_| {
-                    let _ = quarantine_after_admission(&self.store, preview, &transaction_id);
-                });
-            }
+        ) else {
+            // No native boundary was entered. Prefer a durable no-change
+            // terminal receipt; quarantine only if that safe terminal
+            // write cannot be proven.
+            self.native.discard_preview(&preview.preview_id);
+            return finish_aborted_no_change(
+                &self.store,
+                &durable,
+                &idempotency_key,
+                &record.journal,
+                &transaction_id,
+                preview,
+                request,
+            )
+            .inspect_err(|_| {
+                let _ = quarantine_after_admission(&self.store, preview, &transaction_id);
+            });
         };
         match self.native.apply(&transaction_id, preview, request) {
             Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation) => finish_aborted_no_change(
@@ -477,25 +474,23 @@ where
     if receipt.outcome == GitIndexReceiptOutcomeV1::NeedsInspection {
         quarantine_after_admission(store, preview, transaction_id)?;
     }
-    let final_journal = match advance_for_native_outcome(
+    let Ok(final_journal) = advance_for_native_outcome(
         durable,
         idempotency_key,
         journal,
         receipt.outcome,
         observed_at,
-    ) {
-        Ok(journal) => journal,
-        Err(_) => {
-            quarantine_after_admission(store, preview, transaction_id)?;
-            return Err(GitIndexTransactionPortError::NeedsInspection);
-        }
+    ) else {
+        quarantine_after_admission(store, preview, transaction_id)?;
+        return Err(GitIndexTransactionPortError::NeedsInspection);
     };
-    match durable.write_terminal(idempotency_key, &final_journal, receipt, observed_at) {
-        Ok(receipt) => Ok(receipt),
-        Err(_) => {
-            quarantine_after_admission(store, preview, transaction_id)?;
-            Err(GitIndexTransactionPortError::NeedsInspection)
-        }
+    if let Ok(receipt) =
+        durable.write_terminal(idempotency_key, &final_journal, receipt, observed_at)
+    {
+        Ok(receipt)
+    } else {
+        quarantine_after_admission(store, preview, transaction_id)?;
+        Err(GitIndexTransactionPortError::NeedsInspection)
     }
 }
 

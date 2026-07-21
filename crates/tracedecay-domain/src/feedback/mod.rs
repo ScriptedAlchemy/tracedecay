@@ -17,9 +17,17 @@ use crate::research::{
     RepositoryId, RetrievalAnchorId, SessionId, TurnId, UtcMicros, WorktreeId, canonical_sha256,
 };
 
+pub mod ci_localization;
 pub mod evidence_packet;
+pub mod github_review;
+pub mod proximity;
+pub mod reference_packet;
 
-pub use evidence_packet::FeedbackEvidencePacketV1;
+pub use ci_localization::*;
+pub use evidence_packet::*;
+pub use github_review::*;
+pub use proximity::*;
+pub use reference_packet::*;
 
 const FEEDBACK_DEDUPE_KEY_DOMAIN: &str = "tracedecay.feedback.dedupe.v1";
 const FEEDBACK_FINDING_ID_DOMAIN: &str = "tracedecay.feedback.finding.v1";

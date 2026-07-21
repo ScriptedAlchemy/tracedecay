@@ -15,6 +15,7 @@ pub mod cursor;
 pub(crate) mod cursor_diagnostics;
 pub mod gemini;
 pub mod hermes;
+pub mod host_bundle_v2;
 pub mod kilo;
 pub mod kimi;
 pub mod kiro;

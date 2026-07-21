@@ -1,7 +1,9 @@
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::PossibleValuesParser};
 
 mod automation;
+pub mod dispatch;
 mod help;
+pub(crate) mod output;
 pub use automation::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationFactsAction,
     AutomationRunAction, AutomationRunsAction, AutomationSkillsAction,
