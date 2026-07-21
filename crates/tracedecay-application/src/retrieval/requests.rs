@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    EphemeralSanitizedQueryViewV1, FileOccurrenceId, Pr9FallbackSubpayload, RetrievalAnchorId,
-    SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1,
+    CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, Pr9FallbackSubpayload,
+    RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1,
 };
 
 use crate::error::ApplicationContractError;
@@ -138,6 +138,29 @@ pub struct GraphCallersRequest {
 #[serde(deny_unknown_fields)]
 pub struct GraphCallersResult {
     pub callers: Vec<SymbolOccurrenceId>,
+}
+
+/// Plan-05 graph-kernel input for one exact feedback target. The feedback
+/// layer only translates its typed address; graph traversal remains owned by
+/// the retrieval implementation behind this request.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphImpactRequest {
+    pub file: FileOccurrenceId,
+    pub symbol: SymbolOccurrenceId,
+    pub generation: CodeGenerationId,
+    pub meta: RetrievalRequestMeta,
+}
+
+/// Reference-only graph impact returned by the Plan-05 query kernel. The
+/// kernel supplies canonical occurrence and anchor identities; adapters never
+/// reconstruct the graph from source text or edge tables.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphImpactResult {
+    pub affected_files: Vec<FileOccurrenceId>,
+    pub affected_callers: Vec<SymbolOccurrenceId>,
+    pub evidence_anchors: Vec<RetrievalAnchorId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

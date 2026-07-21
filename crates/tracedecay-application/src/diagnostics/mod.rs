@@ -1,8 +1,10 @@
 mod provider;
 
 pub use provider::{
-    CurrentDiagnosticsRequest, DiagnosticProviderDescriptor, DiagnosticProviderIdentity,
-    DiagnosticProviderIdentityParts, DiagnosticProviderPort, DiagnosticProviderResult,
-    DiagnosticProviderState, ProviderCoverage, ProviderDocumentIdentity, ProviderFreshness,
-    ProviderOrigin, ProviderProvenance, ProviderSourceIdentity, RevisionDigest,
+    AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderDescriptor,
+    DiagnosticProviderFuture, DiagnosticProviderIdentity, DiagnosticProviderIdentityParts,
+    DiagnosticProviderPort, DiagnosticProviderResult, DiagnosticProviderState,
+    GenerationDiagnosticHistoryPort, GenerationDiagnosticHistoryRequest, ProviderCoverage,
+    ProviderDocumentIdentity, ProviderFreshness, ProviderOrigin, ProviderProvenance,
+    ProviderSourceIdentity, RevisionDigest,
 };

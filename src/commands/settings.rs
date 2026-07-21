@@ -23,17 +23,19 @@ pub(crate) async fn handle_gitignore(
     action: Option<String>,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(path);
-    let mut config = tracedecay::config::load_config_with_identity(&project_path).await?;
+    let current = tracedecay::config::cached_runtime_configuration(&project_path)?;
     match action.as_deref() {
         Some("on") => {
+            let mut config = current.config.clone();
             config.git_ignore = true;
-            tracedecay::config::save_config_with_identity(&project_path, &config).await?;
+            tracedecay::config::mutate_pinned_runtime_configuration(&current, config).await?;
             eprintln!("gitignore enabled — .gitignore rules will be respected during indexing.");
             eprintln!("Run `tracedecay sync` to re-index with the new setting.");
         }
         Some("off") => {
+            let mut config = current.config.clone();
             config.git_ignore = false;
-            tracedecay::config::save_config_with_identity(&project_path, &config).await?;
+            tracedecay::config::mutate_pinned_runtime_configuration(&current, config).await?;
             eprintln!("gitignore disabled — .gitignore rules will be ignored during indexing.");
             eprintln!("Run `tracedecay sync` to re-index with the new setting.");
         }
@@ -43,7 +45,11 @@ pub(crate) async fn handle_gitignore(
             });
         }
         None => {
-            let status = if config.git_ignore { "on" } else { "off" };
+            let status = if current.config.git_ignore {
+                "on"
+            } else {
+                "off"
+            };
             eprintln!("gitignore: {status}");
         }
     }

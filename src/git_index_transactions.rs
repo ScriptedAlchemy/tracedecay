@@ -57,8 +57,31 @@ pub enum NativeGitIndexError {
     EmptyIndexCommit,
     #[error("native Git I/O failed: {0}")]
     Io(String),
+    #[error("native Git {operation} crossed a commit boundary with an unknown result: {detail}")]
+    CommitBoundaryUnknown {
+        operation: &'static str,
+        detail: String,
+    },
     #[error(transparent)]
     Domain(#[from] DomainError),
+}
+
+impl NativeGitIndexError {
+    /// Preserve ambiguity once a native publication/commit boundary may have
+    /// happened. Callers must reconcile rather than retry the operation.
+    pub(crate) fn into_commit_boundary_unknown(self, operation: &'static str) -> Self {
+        match self {
+            Self::CommitBoundaryUnknown { .. } => self,
+            error => Self::CommitBoundaryUnknown {
+                operation,
+                detail: error.to_string(),
+            },
+        }
+    }
+
+    pub(crate) const fn is_commit_boundary_unknown(&self) -> bool {
+        matches!(self, Self::CommitBoundaryUnknown { .. })
+    }
 }
 
 /// A patch fragment produced by the fixed preview builder. Its fields are
@@ -535,23 +558,30 @@ impl FixedGitIndexRunner {
         {
             command.arg(format!("-S{key_reference}"));
         }
+        // `commit-tree` may write an unreachable object, but it cannot publish
+        // an index or ref mutation. Hook/signing/process failures here are
+        // therefore proven no-change at the PR11 repository-state boundary.
         let output = run_command_with_stdin(command, "commit-tree", intent.message.as_bytes())?;
         let created_commit = parse_git_oid("commit-tree", &output.stdout)?;
 
-        let update = self.run_git(
-            "update-ref",
-            &[
+        let update = self
+            .run_git_output(&[
                 "update-ref",
                 &current_ref,
                 created_commit.as_str(),
                 commit.as_str(),
-            ],
-        )?;
+            ])
+            .map_err(|error| error.into_commit_boundary_unknown("update-ref"))?;
         if !update.status.success() {
+            // The old-value CAS prevents competing ref updates, but a killed
+            // or failing process can still report non-success after Git has
+            // crossed its ref publication boundary. Never classify the exit
+            // status alone as proof that the ref was unchanged.
             return Err(NativeGitIndexError::GitFailed {
                 operation: "update-ref",
                 status: update.status.to_string(),
-            });
+            }
+            .into_commit_boundary_unknown("update-ref"));
         }
         Ok(created_commit)
     }
@@ -647,10 +677,14 @@ impl FixedGitIndexRunner {
             .and_then(|()| lock.file.write_all(&candidate_bytes))
             .and_then(|()| lock.file.sync_all())
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        // rename either publishes atomically or reports failure without
+        // changing the destination. Durability becomes ambiguous only after a
+        // successful rename when syncing the parent directory fails.
         std::fs::rename(&lock.path, &self.index_path)
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
         lock.published = true;
-        sync_parent_directory(&self.index_path)?;
+        sync_parent_directory(&self.index_path)
+            .map_err(|error| error.into_commit_boundary_unknown("index publish"))?;
         Ok(())
     }
 
@@ -1125,5 +1159,13 @@ mod tests {
             runner.ensure_index_unlocked(),
             Err(NativeGitIndexError::IndexLocked)
         ));
+    }
+
+    #[test]
+    fn commit_boundary_errors_remain_distinct_from_safe_native_failures() {
+        let safe = NativeGitIndexError::StaleRepositoryState;
+        let unknown = safe.into_commit_boundary_unknown("index publish");
+        assert!(unknown.is_commit_boundary_unknown());
+        assert!(!NativeGitIndexError::PatchDoesNotMatchHunk.is_commit_boundary_unknown());
     }
 }

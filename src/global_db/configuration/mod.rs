@@ -15,4 +15,4 @@ pub use schema::{
     ConfigurationSchemaError, TOPOLOGY_POLICY_SCHEMA_VERSION,
     WORK_TOPOLOGY_POLICY_MIGRATION_RECEIPT_NAME, ensure_configuration_schema,
 };
-pub use store::{ConfigurationSqlStore, ConfigurationStorageError};
+pub use store::{ConfigurationStorageError, GlobalDbConfigurationControlStore};

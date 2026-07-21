@@ -66,8 +66,8 @@ impl<Authority, Evaluator> PolicyBackedConfigurationMutationAuthorization<Author
 impl<Authority, Evaluator> ConfigurationMutationAuthorizationPort
     for PolicyBackedConfigurationMutationAuthorization<Authority, Evaluator>
 where
-    Authority: ConfigurationMutationGrantAuthority,
-    Evaluator: ConfigurationMutationPolicyEvaluator,
+    Authority: ConfigurationMutationGrantAuthority + Sync,
+    Evaluator: ConfigurationMutationPolicyEvaluator + Sync,
 {
     fn recheck(
         &self,

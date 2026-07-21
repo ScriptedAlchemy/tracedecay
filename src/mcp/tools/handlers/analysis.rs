@@ -1612,20 +1612,12 @@ async fn enclosing_diagnostic_node(
 /// Whether the diagnostics prewarm behaviour is enabled. Off by default: the
 /// first `tracedecay_diagnostics` call on a cold Rust tree otherwise blocks for
 /// minutes while cargo builds every dependency, which agents rationally avoid.
-/// When enabled (config knob `diagnostics_prewarm`, surfaced as the
-/// `TRACEDECAY_DIAGNOSTICS_PREWARM` env var), a cold tree instead kicks a
-/// detached `cargo check` and returns a `warming` status immediately.
+/// When enabled by the pinned resolved configuration snapshot, a cold tree
+/// instead kicks a detached `cargo check` and returns a `warming` status
+/// immediately. Legacy environment precedence is resolved before the snapshot
+/// is published, never in this request path.
 fn diagnostics_prewarm_enabled(config_flag: bool) -> bool {
-    prewarm_enabled_from(crate::config::env_bool("DIAGNOSTICS_PREWARM"), config_flag)
-}
-
-/// Pure precedence for the `diagnostics_prewarm` knob: a parseable
-/// `TRACEDECAY_DIAGNOSTICS_PREWARM` env value wins; unset or unparseable env
-/// falls through to the project config field (matching the
-/// `SyncConfig::with_env_overrides` convention). Split out from the env read
-/// so it is testable without mutating process env.
-fn prewarm_enabled_from(env_value: Option<bool>, config_flag: bool) -> bool {
-    env_value.unwrap_or(config_flag)
+    config_flag
 }
 
 /// Build the early-return `warming` payload for a cold prewarm. Factored out so
@@ -2527,23 +2519,14 @@ mod circular_render_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod diagnostics_warming_tests {
-    use super::{diagnostics_warming_result, prewarm_enabled_from};
+    use super::{diagnostics_prewarm_enabled, diagnostics_warming_result};
     use serde_json::{Value, json};
     use std::path::Path;
 
     #[test]
-    fn prewarm_follows_config_when_env_unset() {
-        assert!(!prewarm_enabled_from(None, false));
-        assert!(prewarm_enabled_from(None, true));
-    }
-
-    #[test]
-    fn parseable_env_wins_over_config() {
-        assert!(prewarm_enabled_from(Some(true), false));
-        assert!(
-            !prewarm_enabled_from(Some(false), true),
-            "an explicit env off must beat a config on"
-        );
+    fn prewarm_follows_resolved_config_snapshot() {
+        assert!(!diagnostics_prewarm_enabled(false));
+        assert!(diagnostics_prewarm_enabled(true));
     }
 
     #[test]

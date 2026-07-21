@@ -1550,6 +1550,32 @@ impl GitIndexJournalPhaseV1 {
                 | (Self::Verifying, Self::NeedsInspection)
         )
     }
+
+    /// Whether a restart-only reconciliation can prove `outcome` from this
+    /// durable phase. This deliberately requires evidence written *after* a
+    /// native commit boundary: matching a candidate tree alone is not proof
+    /// that this transaction published it.
+    pub const fn permits_recovered_outcome(
+        self,
+        operation: GitIndexTransactionOperationV1,
+        outcome: GitIndexReceiptOutcomeV1,
+    ) -> bool {
+        match outcome {
+            GitIndexReceiptOutcomeV1::AbortedNoChange => {
+                matches!(self, Self::Prepared | Self::NativeApplyStarted)
+            }
+            GitIndexReceiptOutcomeV1::NeedsInspection => !self.is_terminal(),
+            GitIndexReceiptOutcomeV1::Committed => match operation {
+                GitIndexTransactionOperationV1::StageHunks
+                | GitIndexTransactionOperationV1::UnstageHunks => {
+                    matches!(self, Self::IndexCommitted | Self::Verifying)
+                }
+                GitIndexTransactionOperationV1::CommitIndex => {
+                    matches!(self, Self::RefCommitted | Self::Verifying)
+                }
+            },
+        }
+    }
 }
 
 /// Durable recovery record. The daemon fsyncs this record before the first
@@ -1639,7 +1665,7 @@ impl GitIndexTransactionJournalV1 {
         self.repository_id.validate()?;
         self.worktree_id.validate()?;
         self.expected_snapshot_digest.validate()?;
-        if self.phase_epoch == 0 || self.updated_at < self.started_at {
+        if self.updated_at < self.started_at || !self.has_canonical_phase_epoch() {
             return Err(DomainError::NonCanonical {
                 field: "git index transaction journal timing",
             });
@@ -1652,6 +1678,22 @@ impl GitIndexTransactionJournalV1 {
             });
         }
         Ok(())
+    }
+
+    fn has_canonical_phase_epoch(&self) -> bool {
+        let is_commit = self.operation == GitIndexTransactionOperationV1::CommitIndex;
+        match self.phase {
+            GitIndexJournalPhaseV1::Prepared => self.phase_epoch == 1,
+            GitIndexJournalPhaseV1::NativeApplyStarted => self.phase_epoch == 2,
+            GitIndexJournalPhaseV1::IndexCommitted => self.phase_epoch == 3,
+            GitIndexJournalPhaseV1::RefCommitted => is_commit && self.phase_epoch == 4,
+            GitIndexJournalPhaseV1::Verifying => self.phase_epoch == if is_commit { 5 } else { 4 },
+            GitIndexJournalPhaseV1::Committed => self.phase_epoch == if is_commit { 6 } else { 5 },
+            GitIndexJournalPhaseV1::AbortedNoChange => matches!(self.phase_epoch, 2 | 3),
+            GitIndexJournalPhaseV1::NeedsInspection => {
+                (2..=if is_commit { 6 } else { 5 }).contains(&self.phase_epoch)
+            }
+        }
     }
 }
 
@@ -1674,7 +1716,15 @@ pub struct GitIndexTransactionReceiptV1 {
     pub preview_id: GitIndexPreviewId,
     pub operation: GitIndexTransactionOperationV1,
     pub old_snapshot_digest: ManifestDigest,
+    /// Digest of a snapshot that was actually captured after the terminal
+    /// observation. When `final_snapshot_captured` is false this retains the
+    /// expected snapshot digest only as a stable schema placeholder; callers
+    /// must not treat it as an observation.
     pub final_snapshot_digest: ManifestDigest,
+    /// Whether `final_snapshot_digest`, `new_index_tree`, and `new_head` came
+    /// from a post-outcome native observation. An unavailable observation is
+    /// valid only for a terminal outcome that does not claim a commit.
+    pub final_snapshot_captured: bool,
     pub old_index_tree: Option<GitOidV1>,
     pub new_index_tree: Option<GitOidV1>,
     pub old_head: Option<GitOidV1>,
@@ -1695,6 +1745,7 @@ struct GitIndexReceiptDigestMaterial<'a> {
     operation: GitIndexTransactionOperationV1,
     old_snapshot_digest: &'a ManifestDigest,
     final_snapshot_digest: &'a ManifestDigest,
+    final_snapshot_captured: bool,
     old_index_tree: Option<&'a GitOidV1>,
     new_index_tree: Option<&'a GitOidV1>,
     old_head: Option<&'a GitOidV1>,
@@ -1718,16 +1769,47 @@ impl GitIndexTransactionReceiptV1 {
         outcome: GitIndexReceiptOutcomeV1,
         committed_at: UtcMicros,
     ) -> Result<Self, DomainError> {
+        Self::new_with_final_snapshot(
+            receipt_id,
+            transaction_id,
+            preview,
+            Some(final_snapshot_digest),
+            new_index_tree,
+            new_head,
+            created_commit,
+            outcome,
+            committed_at,
+        )
+    }
+
+    /// Construct a receipt while representing an unavailable terminal native
+    /// snapshot explicitly. The unavailable form never fabricates observed
+    /// repository state and cannot be used for a committed outcome.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_final_snapshot(
+        receipt_id: GitIndexReceiptId,
+        transaction_id: GitIndexTransactionId,
+        preview: &GitIndexPreviewV1,
+        final_snapshot_digest: Option<ManifestDigest>,
+        new_index_tree: Option<GitOidV1>,
+        new_head: Option<GitOidV1>,
+        created_commit: Option<GitOidV1>,
+        outcome: GitIndexReceiptOutcomeV1,
+        committed_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
         preview.validate()?;
         let old_index_tree = preview.repository_snapshot.index.tree_id.clone();
         let old_head = preview.repository_snapshot.head.commit().cloned();
+        let final_snapshot_captured = final_snapshot_digest.is_some();
         let mut receipt = Self {
             receipt_id,
             transaction_id,
             preview_id: preview.preview_id.clone(),
             operation: preview.operation,
             old_snapshot_digest: preview.repository_snapshot_digest.clone(),
-            final_snapshot_digest,
+            final_snapshot_digest: final_snapshot_digest
+                .unwrap_or_else(|| preview.repository_snapshot_digest.clone()),
+            final_snapshot_captured,
             old_index_tree,
             new_index_tree,
             old_head,
@@ -1753,6 +1835,7 @@ impl GitIndexTransactionReceiptV1 {
             operation: self.operation,
             old_snapshot_digest: &self.old_snapshot_digest,
             final_snapshot_digest: &self.final_snapshot_digest,
+            final_snapshot_captured: self.final_snapshot_captured,
             old_index_tree: self.old_index_tree.as_ref(),
             new_index_tree: self.new_index_tree.as_ref(),
             old_head: self.old_head.as_ref(),
@@ -1810,8 +1893,19 @@ impl GitIndexTransactionReceiptV1 {
                 field: "git index hunk receipt created commit",
             });
         }
+        if !self.final_snapshot_captured
+            && (self.old_snapshot_digest != self.final_snapshot_digest
+                || self.old_index_tree != self.new_index_tree
+                || self.old_head != self.new_head
+                || self.created_commit.is_some())
+        {
+            return Err(DomainError::SnapshotMismatch {
+                field: "unobserved git index receipt placeholder state",
+            });
+        }
         if self.outcome == GitIndexReceiptOutcomeV1::Committed
-            && (self.new_index_tree.is_none()
+            && (!self.final_snapshot_captured
+                || self.new_index_tree.is_none()
                 || (self.operation == GitIndexTransactionOperationV1::CommitIndex
                     && self.created_commit.is_none()))
         {
@@ -1833,6 +1927,10 @@ impl GitIndexTransactionReceiptV1 {
     }
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 impl<'de> Deserialize<'de> for GitIndexTransactionReceiptV1 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1847,6 +1945,8 @@ impl<'de> Deserialize<'de> for GitIndexTransactionReceiptV1 {
             operation: GitIndexTransactionOperationV1,
             old_snapshot_digest: ManifestDigest,
             final_snapshot_digest: ManifestDigest,
+            #[serde(default = "default_true")]
+            final_snapshot_captured: bool,
             old_index_tree: Option<GitOidV1>,
             new_index_tree: Option<GitOidV1>,
             old_head: Option<GitOidV1>,
@@ -1866,6 +1966,7 @@ impl<'de> Deserialize<'de> for GitIndexTransactionReceiptV1 {
             operation: wire.operation,
             old_snapshot_digest: wire.old_snapshot_digest,
             final_snapshot_digest: wire.final_snapshot_digest,
+            final_snapshot_captured: wire.final_snapshot_captured,
             old_index_tree: wire.old_index_tree,
             new_index_tree: wire.new_index_tree,
             old_head: wire.old_head,

@@ -4,9 +4,9 @@ use crate::result::RetrievalEvidence;
 
 use super::{
     AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest, AnchorExpandResult,
-    GraphCallersRequest, GraphCallersResult, HealthReadRequest, HealthReadResult,
-    SessionLookupRequest, SessionLookupResult, SourceLinesRequest, SourceLinesResult,
-    SymbolSearchRequest, SymbolSearchResult,
+    GraphCallersRequest, GraphCallersResult, GraphImpactRequest, GraphImpactResult,
+    HealthReadRequest, HealthReadResult, SessionLookupRequest, SessionLookupResult,
+    SourceLinesRequest, SourceLinesResult, SymbolSearchRequest, SymbolSearchResult,
 };
 
 /// Context supplied to exactly one named retrieval port after admission.
@@ -63,6 +63,18 @@ pub trait GraphRetrievalPort {
         context: &RetrievalPortContext<'_>,
         request: &GraphCallersRequest,
     ) -> RetrievalPortOutcome<GraphCallersResult>;
+}
+
+/// Plan-05 graph-impact query boundary used by feedback orchestration.
+/// It is intentionally distinct from the legacy callers projection because a
+/// feedback result needs the query kernel's file, caller, and anchor evidence
+/// as one bounded snapshot.
+pub trait GraphImpactRetrievalPort {
+    fn graph_impact(
+        &self,
+        context: &RetrievalPortContext<'_>,
+        request: &GraphImpactRequest,
+    ) -> RetrievalPortOutcome<GraphImpactResult>;
 }
 
 pub trait AffectedTestsRetrievalPort {

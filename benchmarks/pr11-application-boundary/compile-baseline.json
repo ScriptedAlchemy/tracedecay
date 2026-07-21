@@ -1,0 +1,7 @@
+{
+  "package": "tracedecay-application",
+  "command": "cargo check -p tracedecay-application",
+  "elapsed_ms": 22938,
+  "recorded_at": "2026-07-21T08:32:20Z",
+  "notes": "PR11 application-boundary compile baseline; dependency tree must remain free of transport/store/model-runtime edges."
+}

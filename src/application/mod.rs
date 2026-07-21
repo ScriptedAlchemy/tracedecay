@@ -3,6 +3,7 @@
 pub mod anchor_resolution;
 pub mod configuration;
 pub mod context;
+pub mod feedback;
 pub mod host_admission;
 pub mod memory;
 pub mod observation;

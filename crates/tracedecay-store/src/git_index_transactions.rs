@@ -49,6 +49,24 @@ pub struct GitIndexTransactionRecordV1 {
 }
 
 impl GitIndexTransactionRecordV1 {
+    /// Verify immutable receipt fields against this record's durable preview.
+    /// Terminal phase/timestamp checks remain in `validate` because recovery
+    /// proofs are checked against the same immutable binding before terminal
+    /// journal publication.
+    pub fn receipt_binds_preview(&self, receipt: &GitIndexTransactionReceiptV1) -> bool {
+        receipt.validate().is_ok()
+            && receipt.transaction_id == self.journal.transaction_id
+            && receipt.preview_id == self.preview.preview_id
+            && receipt.operation == self.preview.operation
+            && receipt.old_snapshot_digest == self.preview.repository_snapshot_digest
+            && receipt.old_index_tree == self.preview.repository_snapshot.index.tree_id
+            && receipt.old_head == self.preview.repository_snapshot.head.commit().cloned()
+            && self
+                .preview
+                .selected_hunk_digests()
+                .is_ok_and(|digests| receipt.selected_hunk_digests == digests)
+    }
+
     pub fn validate(&self) -> Result<(), DomainError> {
         self.idempotency_key.validate()?;
         self.input_digest.validate()?;
@@ -77,11 +95,8 @@ impl GitIndexTransactionRecordV1 {
             }),
             None => Ok(()),
             Some(receipt) => {
-                receipt.validate()?;
-                if receipt.transaction_id != self.journal.transaction_id
-                    || receipt.preview_id != self.preview.preview_id
-                    || receipt.operation != self.preview.operation
-                    || receipt.old_snapshot_digest != self.preview.repository_snapshot_digest
+                if !self.receipt_binds_preview(receipt)
+                    || receipt.committed_at != self.journal.updated_at
                     || !self.journal.phase.is_terminal()
                 {
                     return Err(DomainError::SnapshotMismatch {
@@ -137,16 +152,19 @@ impl GitIndexTransactionBeginRequestV1 {
     }
 }
 
-/// Whether an idempotency key starts a native transaction or returns its
-/// already durable terminal receipt.
+/// Whether an idempotency key starts a native transaction, returns its already
+/// durable terminal receipt, or must be reconciled before it can be used
+/// again. A non-terminal record is never permission to replay native Git.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GitIndexTransactionBeginResultV1 {
     Started(Box<GitIndexTransactionRecordV1>),
     Replay(Box<GitIndexTransactionReceiptV1>),
+    RecoveryRequired(Box<GitIndexTransactionRecordV1>),
 }
 
-/// One terminal write. The journal must already have transitioned to the
-/// matching terminal phase with a durable compare-and-swap.
+/// One atomic terminal write. The store advances the current non-terminal
+/// journal to the matching terminal phase and inserts the immutable receipt in
+/// one durable transaction.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitIndexTransactionTerminalWriteV1 {
     pub idempotency_key: GitIndexIdempotencyKey,
@@ -221,5 +239,15 @@ pub trait GitIndexTransactionStore {
         &self,
         repository_id: &RepositoryId,
         transaction_id: &tracedecay_domain::GitIndexTransactionId,
+    ) -> GitIndexTransactionStoreResult<()>;
+
+    /// Clear one active repository quarantine only with a fresh, native
+    /// recovery proof. Implementations retain the proof durably so a later
+    /// reader can distinguish a proven clear from an accidental deletion.
+    fn clear_repository_quarantine(
+        &self,
+        repository_id: &RepositoryId,
+        transaction_id: &tracedecay_domain::GitIndexTransactionId,
+        recovery_receipt: GitIndexTransactionReceiptV1,
     ) -> GitIndexTransactionStoreResult<()>;
 }

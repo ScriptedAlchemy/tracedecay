@@ -9,9 +9,7 @@ use serde_json::{Value, json};
 use super::DashboardState;
 use super::util::{JsonError, http_detail};
 use crate::automation::config as automation_config;
-use crate::config::{
-    TelemetryConfig, TraceDecayConfig, load_config_from_path, save_config_to_path,
-};
+use crate::config::{TelemetryConfig, TraceDecayConfig};
 use crate::user_config::{self, UserConfig};
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -106,42 +104,53 @@ pub(crate) async fn patch_project_settings(
         return Err(validation_failed(&errors));
     }
 
-    let current = load_config_from_path(&state.project_root, &state.config_path)
-        .map_err(|err| internal_error(&err))?;
+    let current = crate::config::cached_runtime_configuration(&state.project_root)
+        .map_err(|err| configuration_unavailable(&err))?;
+    let current_config = &current.config;
     let sync = patch.sync.as_ref().map_or_else(
-        || current.sync.clone(),
+        || current_config.sync.clone(),
         |sync| crate::config::SyncConfig {
             auto_track_pr_branches: sync
                 .auto_track_pr_branches
-                .unwrap_or(current.sync.auto_track_pr_branches),
+                .unwrap_or(current_config.sync.auto_track_pr_branches),
             auto_track_pr_poll_secs: sync
                 .auto_track_pr_poll_secs
-                .unwrap_or(current.sync.auto_track_pr_poll_secs),
-            ..current.sync.clone()
+                .unwrap_or(current_config.sync.auto_track_pr_poll_secs),
+            ..current_config.sync.clone()
         },
     );
     let telemetry = patch.telemetry.map_or_else(
-        || current.telemetry.clone(),
+        || current_config.telemetry.clone(),
         |telemetry| TelemetryConfig {
-            timings: telemetry.timings.unwrap_or(current.telemetry.timings),
+            timings: telemetry
+                .timings
+                .unwrap_or(current_config.telemetry.timings),
         },
     );
     let updated = TraceDecayConfig {
-        include: patch.include.unwrap_or_else(|| current.include.clone()),
-        exclude: patch.exclude.unwrap_or_else(|| current.exclude.clone()),
-        max_file_size: patch.max_file_size.unwrap_or(current.max_file_size),
+        include: patch
+            .include
+            .unwrap_or_else(|| current_config.include.clone()),
+        exclude: patch
+            .exclude
+            .unwrap_or_else(|| current_config.exclude.clone()),
+        max_file_size: patch.max_file_size.unwrap_or(current_config.max_file_size),
         extract_docstrings: patch
             .extract_docstrings
-            .unwrap_or(current.extract_docstrings),
-        track_call_sites: patch.track_call_sites.unwrap_or(current.track_call_sites),
-        git_ignore: patch.git_ignore.unwrap_or(current.git_ignore),
+            .unwrap_or(current_config.extract_docstrings),
+        track_call_sites: patch
+            .track_call_sites
+            .unwrap_or(current_config.track_call_sites),
+        git_ignore: patch.git_ignore.unwrap_or(current_config.git_ignore),
         telemetry,
         sync,
-        ..current.clone()
+        ..current_config.clone()
     };
-    let resync_recommended = updated != current;
+    let resync_recommended = updated != *current_config;
     if resync_recommended {
-        save_config_to_path(&state.config_path, &updated).map_err(|err| internal_error(&err))?;
+        crate::config::mutate_pinned_runtime_configuration(&current, updated)
+            .await
+            .map_err(|err| configuration_unavailable(&err))?;
     }
 
     let mut payload = settings_payload(&state).await?;
@@ -213,9 +222,9 @@ pub(crate) async fn patch_user_settings(
 }
 
 async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, JsonError> {
-    let project_config = load_config_from_path(&state.project_root, &state.config_path)
-        .map_err(|err| internal_error(&err))?;
-    let project_config_path = state.config_path.clone();
+    let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
+        .map_err(|err| configuration_unavailable(&err))?;
+    let legacy_config_path = state.config_path.clone();
     let user = UserConfig::load();
     let user_config_path = user_config::config_path()
         .map(|path| path.display().to_string())
@@ -232,8 +241,12 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
 
     Ok(json!({
         "project": {
-            "config_path": project_config_path.display().to_string(),
-            "config": project_config,
+            "config_path": legacy_config_path.display().to_string(),
+            "legacy_config_path": legacy_config_path.display().to_string(),
+            "legacy_config_read_only": true,
+            "configuration_snapshot_id": project_configuration.snapshot.snapshot_id.as_str(),
+            "configuration_revision_id": project_configuration.revision_id.as_str(),
+            "config": project_configuration.config,
             "tracedecay_dir_gitignored": crate::config::is_in_gitignore(&state.project_root),
             "pr_autotrack": pr_autotrack_payload(state),
         },
@@ -398,5 +411,15 @@ fn internal_error(err: &impl ToString) -> JsonError {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(http_detail(&err.to_string())),
+    )
+}
+
+fn configuration_unavailable(_err: &impl ToString) -> JsonError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "code": "configuration_authority_unavailable",
+            "detail": "configuration authority is unavailable",
+        })),
     )
 }

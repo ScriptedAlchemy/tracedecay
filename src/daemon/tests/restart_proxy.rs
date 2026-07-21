@@ -253,7 +253,7 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn initialize_root_routing_delegates_config_gated_git_auto_init() {
+async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     let profile = TempDir::new().expect("profile temp dir");
     let fallback = TempDir::new().expect("fallback temp dir");
     let project = TempDir::new().expect("git project temp dir");
@@ -285,6 +285,16 @@ async fn initialize_root_routing_delegates_config_gated_git_auto_init() {
     })
     .to_string();
 
+    let config = crate::config::TraceDecayConfig {
+        root_dir: project.display().to_string(),
+        ..crate::config::TraceDecayConfig::default()
+    };
+    let config_path = crate::config::get_config_path(&project);
+    std::fs::create_dir_all(config_path.parent().expect("legacy config parent"))
+        .expect("create legacy config parent");
+    let legacy_input = serde_json::to_string_pretty(&config).expect("serialize legacy config");
+    std::fs::write(&config_path, &legacy_input).expect("write legacy config fixture");
+
     let mut routed_handshake = base_handshake.clone();
     let store_administration = super::super::StoreAdministration::default();
     super::super::reset_proxy_handshake_for_initialize(
@@ -303,31 +313,15 @@ async fn initialize_root_routing_delegates_config_gated_git_auto_init() {
         routed_handshake.project_path.as_deref(),
         Some(project.as_path())
     );
-    assert!(routed_handshake.allow_init);
-
-    let mut config = crate::config::TraceDecayConfig {
-        root_dir: project.display().to_string(),
-        ..crate::config::TraceDecayConfig::default()
-    };
-    config.sync.auto_init = false;
-    crate::config::save_config(&project, &config).expect("disable auto-init");
-    super::super::reset_proxy_handshake_for_initialize(
-        &base_handshake,
-        &mut routed_handshake,
-        &line,
+    assert!(
+        !routed_handshake.allow_init,
+        "legacy config.json must not enable initialization without a pinned snapshot"
     );
-    super::super::apply_daemon_initialize_route(
-        &mut routed_handshake,
-        &line,
-        &store_administration,
-    )
-    .await
-    .expect("daemon should resolve git root with auto-init disabled");
     assert_eq!(
-        routed_handshake.project_path.as_deref(),
-        Some(project.as_path())
+        std::fs::read_to_string(config_path).expect("legacy fixture remains readable"),
+        legacy_input,
+        "initialize routing must not rewrite legacy configuration input"
     );
-    assert!(!routed_handshake.allow_init);
 }
 
 #[cfg(unix)]

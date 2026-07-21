@@ -4,13 +4,16 @@
 //! narrow ports. It owns neither a diagnostic store nor a graph, scheduler,
 //! delivery adapter, task relation, or durable overlay path.
 
+mod adapters;
 mod ports;
 mod service;
 
+pub use adapters::{GenerationBoundFeedbackDiagnosticsAdapter, GraphImpactFeedbackAdapter};
 pub use ports::{
-    FeedbackCycleDedupePort, FeedbackCycleDedupeState, FeedbackDiagnosticsPort,
-    FeedbackDiagnosticsRequest, FeedbackImpactPort, FeedbackImpactPortOutcome,
-    FeedbackImpactRequest, FeedbackObservationPort,
+    FeedbackCompletedPublicationV1, FeedbackCycleDedupePort, FeedbackCycleDedupePublicationState,
+    FeedbackCycleDedupeState, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest,
+    FeedbackImpactPort, FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
+    FeedbackPortFuture, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
 };
 pub use service::{
     FeedbackBudgetUsage, FeedbackCycleControl, FeedbackCycleExecutionRequest,

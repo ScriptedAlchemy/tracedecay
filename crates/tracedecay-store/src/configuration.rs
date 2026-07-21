@@ -8,9 +8,10 @@ use std::future::Future;
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ConfigurationAuditEvent, ConfigurationIdempotencyKey, ConfigurationReceiptId,
-    ConfigurationRevisionId, ConfigurationSnapshotV1, ProtectedChangePlan,
+    ConfigurationRevisionId, ConfigurationSnapshotV1, ProtectedChange, ProtectedChangePlan,
+    RollbackModeV1,
 };
-use tracedecay_domain::{ActorId, DomainError, ManifestDigest, UtcMicros};
+use tracedecay_domain::{ActorId, DomainError, ManifestDigest, UtcMicros, canonical_sha256};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ConfigurationStoreError {
@@ -122,6 +123,67 @@ impl ConfigurationCommitV1 {
     }
 }
 
+/// Exact protected operation retained by the durable control-plane store.
+///
+/// `ProtectedChangePlan` intentionally contains only a redacted diff for
+/// callers.  The typed operation is a separate store-contract value so an
+/// apply after restart can reconstruct the exact approved mutation without
+/// treating the redacted summary as executable authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigurationProtectedOperationV1 {
+    Change(Box<ProtectedChange>),
+    Rollback {
+        target_revision_id: ConfigurationRevisionId,
+        mode: RollbackModeV1,
+    },
+}
+
+impl ConfigurationProtectedOperationV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        match self {
+            Self::Change(change) => change.validate(),
+            Self::Rollback {
+                target_revision_id, ..
+            } => target_revision_id.validate(),
+        }
+    }
+
+    pub fn operation_digest(&self) -> Result<ManifestDigest, DomainError> {
+        self.validate()?;
+        match self {
+            Self::Change(change) => change.compute_digest(),
+            Self::Rollback {
+                target_revision_id,
+                mode,
+            } => canonical_sha256(&(
+                "tracedecay.configuration.rollback.v1",
+                target_revision_id,
+                mode,
+            )),
+        }
+    }
+}
+
+/// One redacted plan paired with its exact, sealed-store-only operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigurationProtectedPlanRecordV1 {
+    pub plan: ProtectedChangePlan,
+    pub operation: ConfigurationProtectedOperationV1,
+}
+
+impl ConfigurationProtectedPlanRecordV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.plan.validate()?;
+        self.operation.validate()?;
+        if self.plan.operation_digest != self.operation.operation_digest()? {
+            return Err(DomainError::SnapshotMismatch {
+                field: "configuration protected plan operation binding",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Append-only configuration persistence contract.
 pub trait ConfigurationRevisionStore {
     fn current_revision(
@@ -135,13 +197,13 @@ pub trait ConfigurationRevisionStore {
 
     fn save_change_plan(
         &self,
-        plan: &ProtectedChangePlan,
+        plan: &ConfigurationProtectedPlanRecordV1,
     ) -> impl Future<Output = ConfigurationStoreResult<()>> + Send;
 
     fn read_change_plan(
         &self,
         plan_id: &tracedecay_domain::configuration::ChangePlanId,
-    ) -> impl Future<Output = ConfigurationStoreResult<Option<ProtectedChangePlan>>> + Send;
+    ) -> impl Future<Output = ConfigurationStoreResult<Option<ConfigurationProtectedPlanRecordV1>>> + Send;
 
     fn commit(
         &self,

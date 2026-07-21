@@ -27,10 +27,12 @@ pub use context::{
     RequestId, ResolvedScope,
 };
 pub use diagnostics::{
-    CurrentDiagnosticsRequest, DiagnosticProviderDescriptor, DiagnosticProviderIdentity,
-    DiagnosticProviderIdentityParts, DiagnosticProviderPort, DiagnosticProviderResult,
-    DiagnosticProviderState, ProviderCoverage, ProviderDocumentIdentity, ProviderFreshness,
-    ProviderOrigin, ProviderProvenance, ProviderSourceIdentity, RevisionDigest,
+    AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderDescriptor,
+    DiagnosticProviderFuture, DiagnosticProviderIdentity, DiagnosticProviderIdentityParts,
+    DiagnosticProviderPort, DiagnosticProviderResult, DiagnosticProviderState,
+    GenerationDiagnosticHistoryPort, GenerationDiagnosticHistoryRequest, ProviderCoverage,
+    ProviderDocumentIdentity, ProviderFreshness, ProviderOrigin, ProviderProvenance,
+    ProviderSourceIdentity, RevisionDigest,
 };
 pub use error::ApplicationContractError;
 pub use git::{
@@ -60,9 +62,10 @@ pub use result::{
 pub use retrieval::catalog::{APPLICATION_DEFAULT_PROFILE_ID, application_catalog_contributions};
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AffectedTestsService, AnchorExpandRequest,
-    AnchorHydrationPort, GraphCallersRequest, GraphCallersService, GraphRetrievalPort,
-    HealthReadRequest, OperationalRetrievalPort, PageRequest, ResultProjection, RetrievalOrder,
-    RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest, SourceLinesRequest,
+    AnchorHydrationPort, GraphCallersRequest, GraphCallersService, GraphImpactRequest,
+    GraphImpactResult, GraphImpactRetrievalPort, GraphRetrievalPort, HealthReadRequest,
+    OperationalRetrievalPort, PageRequest, ResultProjection, RetrievalOrder, RetrievalPortContext,
+    RetrievalPortOutcome, RetrievalRequestMeta, SessionLookupRequest, SourceLinesRequest,
     SourceLinesResult, SourceLinesService, SourceRetrievalPort, SymbolRetrievalPort,
     SymbolSearchRequest, SymbolSearchResult, SymbolSearchService, TemporalRetrievalPort,
     TestRetrievalPort,

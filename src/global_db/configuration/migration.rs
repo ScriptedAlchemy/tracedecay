@@ -4,7 +4,7 @@
 //! never writes a legacy configuration file, derives authority from a path, or
 //! guesses source bindings from CWD, host configuration, or registry adjacency.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
 use thiserror::Error;
@@ -18,14 +18,16 @@ use tracedecay_domain::{DomainError, ManifestDigest, UtcMicros};
 
 use crate::config::registry::{ConfigurationRegistry, ConfigurationRegistryError};
 use crate::config::resolver::{
-    ConfigurationLayerV1, ConfigurationResolutionError, ConfigurationResolutionV1,
-    resolve_configuration,
+    ConfigurationLayerV1, ConfigurationResolutionError, ConfigurationResolutionInputSourceV1,
+    ConfigurationResolutionInputV1, ConfigurationResolutionV1, resolve_configuration_inputs,
 };
 
 pub const CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME: &str =
     "configuration-control-plane-v1";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LegacyConfigurationSourceKindV1 {
     ConfigJson,
@@ -41,6 +43,17 @@ impl LegacyConfigurationSourceKindV1 {
             Self::HostProfile => "host_profile",
         }
     }
+
+    /// Legacy source precedence is explicit and low-to-high. Environment
+    /// values are an input layer, never adapter-local mutation performed after
+    /// resolution.
+    pub const fn precedence(self) -> u8 {
+        match self {
+            Self::HostProfile => 0,
+            Self::ConfigJson => 1,
+            Self::Environment => 2,
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -50,6 +63,10 @@ pub struct LegacyConfigurationEntryV1 {
     pub setting_key: Option<SettingKey>,
     pub value: Option<ConfigurationValueV1>,
     pub redacted_value_digest: ManifestDigest,
+    /// A decoder can preserve an exact quarantine reason without attempting to
+    /// turn a path-derived or malformed legacy value into durable authority.
+    #[serde(default)]
+    pub quarantine_reason: Option<ConfigurationMigrationQuarantineReasonV1>,
 }
 
 impl LegacyConfigurationEntryV1 {
@@ -61,7 +78,16 @@ impl LegacyConfigurationEntryV1 {
         self.value
             .as_ref()
             .map_or(Ok(()), ConfigurationValueV1::validate)?;
-        self.redacted_value_digest.validate()
+        self.redacted_value_digest.validate()?;
+        let decoded = self.setting_key.is_some() && self.value.is_some();
+        let quarantined =
+            self.setting_key.is_none() && self.value.is_none() && self.quarantine_reason.is_some();
+        if decoded == quarantined {
+            return Err(DomainError::NonCanonical {
+                field: "legacy configuration entry state",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -89,6 +115,55 @@ impl ReadonlyLegacyConfigurationInputV1 {
     pub fn snapshot_digest(&self) -> Result<ManifestDigest, DomainError> {
         self.validate()?;
         canonical_sha256(&("tracedecay.configuration.legacy-input.v1", self))
+    }
+}
+
+/// Ordered low-to-high snapshots from legacy configuration sources. All
+/// snapshots target one already-authorized canonical layer and revision; a
+/// path or host label never supplies that authority. The only permitted source
+/// order is `HostProfile < ConfigJson < Environment`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadonlyLegacyConfigurationInputsV1 {
+    pub inputs: Vec<ReadonlyLegacyConfigurationInputV1>,
+}
+
+impl ReadonlyLegacyConfigurationInputsV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        let Some(first) = self.inputs.first() else {
+            return Err(DomainError::Empty {
+                field: "legacy configuration inputs",
+            });
+        };
+        first.validate()?;
+        let target_layer = &first.target_layer;
+        let target_revision_id = &first.target_revision_id;
+        let mut previous_precedence = first.source_kind.precedence();
+        for input in &self.inputs[1..] {
+            input.validate()?;
+            if &input.target_layer != target_layer {
+                return Err(DomainError::NonCanonical {
+                    field: "legacy configuration input target layer",
+                });
+            }
+            if &input.target_revision_id != target_revision_id {
+                return Err(DomainError::NonCanonical {
+                    field: "legacy configuration input target revision",
+                });
+            }
+            if input.source_kind.precedence() <= previous_precedence {
+                return Err(DomainError::NonCanonical {
+                    field: "legacy configuration input source order",
+                });
+            }
+            previous_precedence = input.source_kind.precedence();
+        }
+        Ok(())
+    }
+
+    pub fn snapshot_digest(&self) -> Result<ManifestDigest, DomainError> {
+        self.validate()?;
+        canonical_sha256(&("tracedecay.configuration.legacy-inputs.v1", self))
     }
 }
 
@@ -198,6 +273,51 @@ where
 {
     input.validate()?;
     let source_snapshot_digest = input.snapshot_digest()?;
+    migrate_legacy_configuration_inputs_with_digest(
+        registry,
+        std::slice::from_ref(input),
+        source_snapshot_digest,
+        store,
+        now,
+    )
+    .await
+}
+
+/// Migrate explicitly ordered legacy snapshots. `Environment` entries are
+/// resolved after persisted `config.json` entries in the same canonical layer,
+/// preserving the legacy override rule without allowing an adapter-local
+/// default to mutate a resolved snapshot.
+pub async fn migrate_legacy_configuration_inputs<Store>(
+    registry: &ConfigurationRegistry,
+    inputs: &ReadonlyLegacyConfigurationInputsV1,
+    store: &Store,
+    now: UtcMicros,
+) -> Result<ConfigurationMigrationOutcomeV1, ConfigurationMigrationError>
+where
+    Store: ConfigurationMigrationStore,
+{
+    inputs.validate()?;
+    let source_snapshot_digest = inputs.snapshot_digest()?;
+    migrate_legacy_configuration_inputs_with_digest(
+        registry,
+        &inputs.inputs,
+        source_snapshot_digest,
+        store,
+        now,
+    )
+    .await
+}
+
+async fn migrate_legacy_configuration_inputs_with_digest<Store>(
+    registry: &ConfigurationRegistry,
+    inputs: &[ReadonlyLegacyConfigurationInputV1],
+    source_snapshot_digest: ManifestDigest,
+    store: &Store,
+    now: UtcMicros,
+) -> Result<ConfigurationMigrationOutcomeV1, ConfigurationMigrationError>
+where
+    Store: ConfigurationMigrationStore,
+{
     if let Some(receipt) = store
         .receipt(
             CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME,
@@ -207,63 +327,26 @@ where
     {
         return Ok(ConfigurationMigrationOutcomeV1::AlreadyApplied(receipt));
     }
+    let initial_revision_id = inputs
+        .first()
+        .map(|input| input.target_revision_id.clone())
+        .ok_or(DomainError::Empty {
+            field: "legacy configuration inputs",
+        })?;
 
-    let mut entries = BTreeMap::new();
-    let mut imported_keys = Vec::new();
+    let mut resolution_inputs = Vec::new();
+    let mut imported_keys = BTreeSet::new();
     let mut quarantine = Vec::new();
-    for entry in &input.entries {
-        let Some(key) = entry.setting_key.clone() else {
-            quarantine.push(quarantine_entry(
-                input,
-                entry,
-                ConfigurationMigrationQuarantineReasonV1::Undecodable,
-                now,
-            ));
-            continue;
-        };
-        let Some(value) = entry.value.clone() else {
-            quarantine.push(quarantine_entry(
-                input,
-                entry,
-                ConfigurationMigrationQuarantineReasonV1::Undecodable,
-                now,
-            ));
-            continue;
-        };
-
-        let definition = match registry.definition(&key) {
-            Ok(definition) => definition,
-            Err(ConfigurationRegistryError::UnknownSetting(_)) => {
-                quarantine.push(quarantine_entry(
-                    input,
-                    entry,
-                    ConfigurationMigrationQuarantineReasonV1::UnknownKey,
-                    now,
-                ));
+    for input in inputs {
+        input.validate()?;
+        let mut entries = BTreeMap::new();
+        for entry in &input.entries {
+            if let Some(reason) = entry.quarantine_reason {
+                quarantine.push(quarantine_entry(input, entry, reason, now));
                 continue;
             }
-            Err(error) => return Err(error.into()),
-        };
-        if !layer_can_override(definition.scope, &input.target_layer) {
-            quarantine.push(quarantine_entry(
-                input,
-                entry,
-                ConfigurationMigrationQuarantineReasonV1::InvalidLayer,
-                now,
-            ));
-            continue;
-        }
-        if key.as_str() == SOURCE_BINDINGS_SETTING_KEY || key.as_str() == ACCESS_RULES_SETTING_KEY {
-            quarantine.push(quarantine_entry(
-                input,
-                entry,
-                ConfigurationMigrationQuarantineReasonV1::PathDerivedAuthority,
-                now,
-            ));
-            continue;
-        }
-        if key.as_str() == WORK_TOPOLOGY_POLICY_SETTING_KEY {
-            let ConfigurationValueV1::WorkTopologyPolicy(policy) = &value else {
+
+            let Some(key) = entry.setting_key.clone() else {
                 quarantine.push(quarantine_entry(
                     input,
                     entry,
@@ -272,50 +355,105 @@ where
                 ));
                 continue;
             };
-            if policy.validate().is_err() || !policy.meets_protected_ref_floor() {
+            let Some(value) = entry.value.clone() else {
                 quarantine.push(quarantine_entry(
                     input,
                     entry,
-                    ConfigurationMigrationQuarantineReasonV1::InvalidTopologyFloor,
+                    ConfigurationMigrationQuarantineReasonV1::Undecodable,
+                    now,
+                ));
+                continue;
+            };
+
+            let definition = match registry.definition(&key) {
+                Ok(definition) => definition,
+                Err(ConfigurationRegistryError::UnknownSetting(_)) => {
+                    quarantine.push(quarantine_entry(
+                        input,
+                        entry,
+                        ConfigurationMigrationQuarantineReasonV1::UnknownKey,
+                        now,
+                    ));
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if !layer_can_override(definition.scope, &input.target_layer) {
+                quarantine.push(quarantine_entry(
+                    input,
+                    entry,
+                    ConfigurationMigrationQuarantineReasonV1::InvalidLayer,
                     now,
                 ));
                 continue;
             }
+            if key.as_str() == SOURCE_BINDINGS_SETTING_KEY
+                || key.as_str() == ACCESS_RULES_SETTING_KEY
+            {
+                quarantine.push(quarantine_entry(
+                    input,
+                    entry,
+                    ConfigurationMigrationQuarantineReasonV1::PathDerivedAuthority,
+                    now,
+                ));
+                continue;
+            }
+            if key.as_str() == WORK_TOPOLOGY_POLICY_SETTING_KEY {
+                let ConfigurationValueV1::WorkTopologyPolicy(policy) = &value else {
+                    quarantine.push(quarantine_entry(
+                        input,
+                        entry,
+                        ConfigurationMigrationQuarantineReasonV1::Undecodable,
+                        now,
+                    ));
+                    continue;
+                };
+                if policy.validate().is_err() || !policy.meets_protected_ref_floor() {
+                    quarantine.push(quarantine_entry(
+                        input,
+                        entry,
+                        ConfigurationMigrationQuarantineReasonV1::InvalidTopologyFloor,
+                        now,
+                    ));
+                    continue;
+                }
+            }
+            if registry.validate_value(&key, &value).is_err() {
+                quarantine.push(quarantine_entry(
+                    input,
+                    entry,
+                    ConfigurationMigrationQuarantineReasonV1::DeprecatedInvalid,
+                    now,
+                ));
+                continue;
+            }
+            if entries.contains_key(&key) {
+                quarantine.push(quarantine_entry(
+                    input,
+                    entry,
+                    ConfigurationMigrationQuarantineReasonV1::DuplicateKey,
+                    now,
+                ));
+                continue;
+            }
+            entries.insert(key.clone(), value);
+            imported_keys.insert(key);
         }
-        if registry.validate_value(&key, &value).is_err() {
-            quarantine.push(quarantine_entry(
-                input,
-                entry,
-                ConfigurationMigrationQuarantineReasonV1::DeprecatedInvalid,
-                now,
-            ));
-            continue;
-        }
-        if entries.contains_key(&key) {
-            quarantine.push(quarantine_entry(
-                input,
-                entry,
-                ConfigurationMigrationQuarantineReasonV1::DuplicateKey,
-                now,
-            ));
-            continue;
-        }
-        entries.insert(key.clone(), value);
-        imported_keys.push(key);
+        resolution_inputs.push(ConfigurationResolutionInputV1 {
+            source: legacy_resolution_source(input.source_kind),
+            layer: ConfigurationLayerV1 {
+                layer: input.target_layer.clone(),
+                revision_id: input.target_revision_id.clone(),
+                entries,
+            },
+        });
     }
 
-    let resolution = resolve_configuration(
-        registry,
-        &[ConfigurationLayerV1 {
-            layer: input.target_layer.clone(),
-            revision_id: input.target_revision_id.clone(),
-            entries,
-        }],
-    )?;
+    let resolution = resolve_configuration_inputs(registry, &resolution_inputs)?;
     let receipt = ConfigurationMigrationReceiptV1 {
         receipt_name: CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME,
         source_snapshot_digest,
-        initial_revision_id: input.target_revision_id.clone(),
+        initial_revision_id,
         initial_snapshot_id: resolution.snapshot.snapshot_id.clone(),
         created_at: now,
     };
@@ -324,9 +462,25 @@ where
         .await?;
     Ok(ConfigurationMigrationOutcomeV1::Applied {
         receipt,
-        imported_keys,
+        imported_keys: imported_keys.into_iter().collect(),
         quarantined: quarantine,
     })
+}
+
+fn legacy_resolution_source(
+    source_kind: LegacyConfigurationSourceKindV1,
+) -> ConfigurationResolutionInputSourceV1 {
+    match source_kind {
+        LegacyConfigurationSourceKindV1::ConfigJson => {
+            ConfigurationResolutionInputSourceV1::LegacyConfigJson
+        }
+        LegacyConfigurationSourceKindV1::Environment => {
+            ConfigurationResolutionInputSourceV1::LegacyEnvironment
+        }
+        LegacyConfigurationSourceKindV1::HostProfile => {
+            ConfigurationResolutionInputSourceV1::LegacyHostProfile
+        }
+    }
 }
 
 fn layer_can_override(scope: SettingScopeV1, layer: &ConfigurationLayerIdV1) -> bool {
@@ -375,6 +529,7 @@ mod tests {
     struct Store {
         receipt: Mutex<Option<ConfigurationMigrationReceiptV1>>,
         quarantined: Mutex<Vec<ConfigurationMigrationQuarantineEntryV1>>,
+        resolution: Mutex<Option<ConfigurationResolutionV1>>,
     }
 
     impl ConfigurationMigrationStore for Store {
@@ -391,7 +546,7 @@ mod tests {
         fn commit_initial_migration(
             &self,
             receipt: &ConfigurationMigrationReceiptV1,
-            _resolution: &ConfigurationResolutionV1,
+            resolution: &ConfigurationResolutionV1,
             quarantine: &[ConfigurationMigrationQuarantineEntryV1],
         ) -> impl Future<Output = Result<(), ConfigurationMigrationError>> + Send {
             async move {
@@ -400,6 +555,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .extend_from_slice(quarantine);
+                *self.resolution.lock().unwrap() = Some(resolution.clone());
                 Ok(())
             }
         }
@@ -438,6 +594,7 @@ mod tests {
                     .unwrap(),
                 ])),
                 redacted_value_digest: digest('c'),
+                quarantine_reason: None,
             }],
         };
         let store = Store::default();
@@ -463,6 +620,100 @@ mod tests {
         let replay = migrate_legacy_configuration(
             &ConfigurationRegistry::core().unwrap(),
             &input,
+            &store,
+            UtcMicros(2),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            replay,
+            ConfigurationMigrationOutcomeV1::AlreadyApplied(_)
+        ));
+        assert_eq!(store.quarantined.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ordered_inputs_apply_environment_after_config_and_keep_the_digest_idempotent() {
+        use tracedecay_domain::configuration::SYNC_AUTO_WATCH_SETTING_KEY;
+
+        let target_layer = ConfigurationLayerIdV1::Project {
+            project_id: id("project.fixture"),
+        };
+        let inputs = ReadonlyLegacyConfigurationInputsV1 {
+            inputs: vec![
+                ReadonlyLegacyConfigurationInputV1 {
+                    source_kind: LegacyConfigurationSourceKindV1::ConfigJson,
+                    target_layer: target_layer.clone(),
+                    target_revision_id: id("revision.legacy"),
+                    entries: vec![
+                        LegacyConfigurationEntryV1 {
+                            source_key_digest: digest('a'),
+                            setting_key: Some(id(SYNC_AUTO_WATCH_SETTING_KEY)),
+                            value: Some(ConfigurationValueV1::Boolean(true)),
+                            redacted_value_digest: digest('b'),
+                            quarantine_reason: None,
+                        },
+                        LegacyConfigurationEntryV1 {
+                            source_key_digest: digest('c'),
+                            setting_key: None,
+                            value: None,
+                            redacted_value_digest: digest('d'),
+                            quarantine_reason: Some(
+                                ConfigurationMigrationQuarantineReasonV1::PathDerivedAuthority,
+                            ),
+                        },
+                    ],
+                },
+                ReadonlyLegacyConfigurationInputV1 {
+                    source_kind: LegacyConfigurationSourceKindV1::Environment,
+                    target_layer,
+                    target_revision_id: id("revision.legacy"),
+                    entries: vec![LegacyConfigurationEntryV1 {
+                        source_key_digest: digest('e'),
+                        setting_key: Some(id(SYNC_AUTO_WATCH_SETTING_KEY)),
+                        value: Some(ConfigurationValueV1::Boolean(false)),
+                        redacted_value_digest: digest('f'),
+                        quarantine_reason: None,
+                    }],
+                },
+            ],
+        };
+        let digest = inputs.snapshot_digest().unwrap();
+        let store = Store::default();
+        let outcome = migrate_legacy_configuration_inputs(
+            &ConfigurationRegistry::core().unwrap(),
+            &inputs,
+            &store,
+            UtcMicros(1),
+        )
+        .await
+        .unwrap();
+
+        let ConfigurationMigrationOutcomeV1::Applied { receipt, .. } = outcome else {
+            panic!("first migration must apply")
+        };
+        assert_eq!(receipt.source_snapshot_digest, digest);
+        let resolution = store.resolution.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            resolution.snapshot.effective_values[&id(SYNC_AUTO_WATCH_SETTING_KEY)],
+            ConfigurationValueV1::Boolean(false)
+        );
+        assert_eq!(
+            resolution.settings[&id(SYNC_AUTO_WATCH_SETTING_KEY)]
+                .candidates
+                .last()
+                .and_then(|candidate| candidate.safe_reason.as_deref()),
+            Some("highest_valid_legacy_environment")
+        );
+        assert_eq!(store.quarantined.lock().unwrap().len(), 1);
+        assert_eq!(
+            store.quarantined.lock().unwrap()[0].reason,
+            ConfigurationMigrationQuarantineReasonV1::PathDerivedAuthority
+        );
+
+        let replay = migrate_legacy_configuration_inputs(
+            &ConfigurationRegistry::core().unwrap(),
+            &inputs,
             &store,
             UtcMicros(2),
         )

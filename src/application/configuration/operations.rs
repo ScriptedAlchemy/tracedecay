@@ -4,7 +4,7 @@ use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ChangePlanId, ConfigurationMutationEffectV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
     ConfigurationValueV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
-    SOURCE_BINDINGS_SETTING_KEY, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
@@ -15,81 +15,86 @@ use crate::config::scope_control::{
 
 use super::ports::{
     ConfigurationClock, ConfigurationControlStore, ConfigurationMutationAuthorizationPort,
-    CredentialWritePort, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
+    ConfigurationOperationFuture, CredentialWritePort, ScopeResolutionPort,
+    ScopeRevalidationEvidenceV1,
 };
 use super::types::{
-    AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
-    ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
-    ConfigurationRollbackRequest, DirectConfigurationMutation, ResolvedSetting, SettingSummary,
-    WriteOnlyCredentialMutation,
+    AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
+    ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
+    ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationRollbackRequest,
+    DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
 };
 
 /// One transport-neutral control-plane contract. CLI, MCP, HTTP, dashboard,
 /// and Doctor call this shape rather than rebuilding mutation semantics.
-pub trait ConfigurationControlPlane {
-    fn list(&self, actor: AuthorizedActor) -> Result<Vec<SettingSummary>, ConfigurationError>;
+pub trait ConfigurationControlPlane: Sync {
+    fn list(&self, actor: AuthorizedActor)
+    -> ConfigurationOperationFuture<'_, Vec<SettingSummary>>;
 
     fn explain(
         &self,
         actor: AuthorizedActor,
         key: SettingKey,
-    ) -> Result<ResolvedSetting, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<'_, ResolvedSetting>;
 
     fn get(
         &self,
         actor: AuthorizedActor,
         key: SettingKey,
-    ) -> Result<ResolvedSetting, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<'_, ResolvedSetting>;
 
     fn mutate_direct(
         &self,
         authority: ConfigurationMutationAuthority,
         mutation: DirectConfigurationMutation,
         expected_revision: ConfigurationRevisionId,
-    ) -> Result<ConfigurationMutationReceipt, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt>;
 
     fn write_credential(
         &self,
         authority: ConfigurationMutationAuthority,
         write: WriteOnlyCredentialMutation,
         expected_revision: ConfigurationRevisionId,
-    ) -> Result<tracedecay_domain::configuration::CredentialReferenceMetadataV1, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<
+        '_,
+        tracedecay_domain::configuration::CredentialReferenceMetadataV1,
+    >;
 
     fn observed_state(
         &self,
         actor: AuthorizedActor,
-    ) -> Result<Vec<ComponentConfigurationState>, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>>;
 
     fn dry_run_protected_change(
         &self,
         authority: ConfigurationMutationAuthority,
         change: ProtectedChange,
         expected_revision: ConfigurationRevisionId,
-    ) -> Result<ProtectedChangePlan, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan>;
 
     fn apply_protected_change(
         &self,
         authority: ConfigurationMutationAuthority,
         request: ProtectedApplyRequest,
-    ) -> Result<ConfigurationMutationReceipt, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt>;
 
     fn dry_run_rollback(
         &self,
         authority: ConfigurationMutationAuthority,
         rollback: ConfigurationRollbackRequest,
-    ) -> Result<ProtectedChangePlan, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan>;
 
     fn apply_rollback(
         &self,
         authority: ConfigurationMutationAuthority,
         request: ProtectedApplyRequest,
-    ) -> Result<ConfigurationMutationReceipt, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt>;
 
     fn audit(
         &self,
         actor: AuthorizedActor,
         query: ConfigurationAuditQuery,
-    ) -> Result<ConfigurationAuditPage, ConfigurationError>;
+    ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage>;
 }
 
 pub struct ConfigurationControlPlaneOperations<'a, Store, Scopes, Credentials, Authorization, Clock>
@@ -133,59 +138,66 @@ where
     Authorization: ConfigurationMutationAuthorizationPort,
     Clock: ConfigurationClock,
 {
-    fn list(&self, actor: AuthorizedActor) -> Result<Vec<SettingSummary>, ConfigurationError> {
-        actor.validate()?;
-        Ok(self
-            .registry
-            .definitions()
-            .map(|definition| SettingSummary {
-                key: definition.key.clone(),
-                sensitivity: definition.sensitivity,
-                restart_requirement: definition.restart_requirement,
-            })
-            .collect())
+    fn list(
+        &self,
+        actor: AuthorizedActor,
+    ) -> ConfigurationOperationFuture<'_, Vec<SettingSummary>> {
+        Box::pin(async move {
+            actor.validate()?;
+            Ok(self
+                .registry
+                .definitions()
+                .map(|definition| SettingSummary {
+                    key: definition.key.clone(),
+                    sensitivity: definition.sensitivity,
+                    restart_requirement: definition.restart_requirement,
+                })
+                .collect())
+        })
     }
 
     fn explain(
         &self,
         actor: AuthorizedActor,
         key: SettingKey,
-    ) -> Result<ResolvedSetting, ConfigurationError> {
-        self.get(actor, key)
+    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
+        Box::pin(async move { self.get(actor, key).await })
     }
 
     fn get(
         &self,
         actor: AuthorizedActor,
         key: SettingKey,
-    ) -> Result<ResolvedSetting, ConfigurationError> {
-        actor.validate()?;
-        self.registry
-            .definition(&key)
-            .map_err(ConfigurationError::validation)?;
-        let current = self.store.current()?;
-        current
-            .snapshot
-            .validate()
-            .map_err(ConfigurationError::validation)?;
-        let effective_value = current
-            .snapshot
-            .effective_values
-            .get(&key)
-            .cloned()
-            .ok_or(ConfigurationError::TargetUnavailable)?;
-        Ok(ResolvedSetting {
-            key: key.clone(),
-            effective_value,
-            snapshot_id: current.snapshot.snapshot_id,
-            effective_behavior_digest: current.snapshot.effective_behavior_digest,
-            resolution_provenance_digest: current.snapshot.resolution_provenance_digest,
-            candidates: current
+    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
+        Box::pin(async move {
+            actor.validate()?;
+            self.registry
+                .definition(&key)
+                .map_err(ConfigurationError::validation)?;
+            let current = self.store.current().await?;
+            current
                 .snapshot
-                .provenance
+                .validate()
+                .map_err(ConfigurationError::validation)?;
+            let effective_value = current
+                .snapshot
+                .effective_values
                 .get(&key)
                 .cloned()
-                .unwrap_or_default(),
+                .ok_or(ConfigurationError::TargetUnavailable)?;
+            Ok(ResolvedSetting {
+                key: key.clone(),
+                effective_value,
+                snapshot_id: current.snapshot.snapshot_id,
+                effective_behavior_digest: current.snapshot.effective_behavior_digest,
+                resolution_provenance_digest: current.snapshot.resolution_provenance_digest,
+                candidates: current
+                    .snapshot
+                    .provenance
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default(),
+            })
         })
     }
 
@@ -194,24 +206,29 @@ where
         authority: ConfigurationMutationAuthority,
         mutation: DirectConfigurationMutation,
         expected_revision: ConfigurationRevisionId,
-    ) -> Result<ConfigurationMutationReceipt, ConfigurationError> {
-        expected_revision
-            .validate()
-            .map_err(ConfigurationError::validation)?;
-        validate_direct_mutation(self.registry, &mutation)?;
-        let current = self.store.current()?;
-        if current.revision_id != expected_revision {
-            return Err(ConfigurationError::RevisionConflict);
-        }
-        self.authorize_mutation(
-            &authority,
-            ConfigurationMutationOperationV1::DirectMutation,
-            &expected_revision,
-            ConfigurationMutationSinkV1::ConfigurationStore,
-            ConfigurationMutationEffectV1::CommitConfigurationRevision,
-        )?;
-        self.store
-            .commit_direct(&authority, &mutation, &expected_revision)
+    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
+        Box::pin(async move {
+            expected_revision
+                .validate()
+                .map_err(ConfigurationError::validation)?;
+            validate_direct_mutation(self.registry, &mutation)?;
+            if authority.receipt.scope_digest != mutation.target_scope_digest()? {
+                return Err(ConfigurationError::MutationAuthorityRejected);
+            }
+            // The transactional store checks exact replay before its CAS. A
+            // preflight current-revision read here would turn a successful
+            // retry into `revision_conflict` after the first commit.
+            self.authorize_mutation(
+                &authority,
+                ConfigurationMutationOperationV1::DirectMutation,
+                &expected_revision,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+            )?;
+            self.store
+                .commit_direct(&authority, &mutation, &expected_revision)
+                .await
+        })
     }
 
     fn write_credential(
@@ -219,32 +236,39 @@ where
         authority: ConfigurationMutationAuthority,
         write: WriteOnlyCredentialMutation,
         expected_revision: ConfigurationRevisionId,
-    ) -> Result<tracedecay_domain::configuration::CredentialReferenceMetadataV1, ConfigurationError>
-    {
-        expected_revision
-            .validate()
-            .map_err(ConfigurationError::validation)?;
-        let current = self.store.current()?;
-        if current.revision_id != expected_revision {
-            return Err(ConfigurationError::RevisionConflict);
-        }
-        self.authorize_mutation(
-            &authority,
-            ConfigurationMutationOperationV1::CredentialWrite,
-            &expected_revision,
-            ConfigurationMutationSinkV1::CredentialStore,
-            ConfigurationMutationEffectV1::WriteCredentialReference,
-        )?;
-        self.credentials
-            .write_reference(&authority, &write, &expected_revision)
+    ) -> ConfigurationOperationFuture<
+        '_,
+        tracedecay_domain::configuration::CredentialReferenceMetadataV1,
+    > {
+        Box::pin(async move {
+            expected_revision
+                .validate()
+                .map_err(ConfigurationError::validation)?;
+            let current = self.store.current().await?;
+            if current.revision_id != expected_revision {
+                return Err(ConfigurationError::RevisionConflict);
+            }
+            self.authorize_mutation(
+                &authority,
+                ConfigurationMutationOperationV1::CredentialWrite,
+                &expected_revision,
+                ConfigurationMutationSinkV1::CredentialStore,
+                ConfigurationMutationEffectV1::WriteCredentialReference,
+            )?;
+            self.credentials
+                .write_reference(&authority, &write, &expected_revision)
+                .await
+        })
     }
 
     fn observed_state(
         &self,
         actor: AuthorizedActor,
-    ) -> Result<Vec<ComponentConfigurationState>, ConfigurationError> {
-        actor.validate()?;
-        self.store.observed_state(&actor)
+    ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
+        Box::pin(async move {
+            actor.validate()?;
+            self.store.observed_state(&actor).await
+        })
     }
 
     fn dry_run_protected_change(
@@ -252,117 +276,134 @@ where
         authority: ConfigurationMutationAuthority,
         change: ProtectedChange,
         expected_revision: ConfigurationRevisionId,
-    ) -> Result<ProtectedChangePlan, ConfigurationError> {
-        expected_revision
-            .validate()
+    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
+        Box::pin(async move {
+            expected_revision
+                .validate()
+                .map_err(ConfigurationError::validation)?;
+            change.validate().map_err(ConfigurationError::validation)?;
+            let current = self.store.current().await?;
+            if current.revision_id != expected_revision {
+                return Err(ConfigurationError::RevisionConflict);
+            }
+            let current_authorization = self.authorize_mutation(
+                &authority,
+                ConfigurationMutationOperationV1::ProtectedDryRun,
+                &expected_revision,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+            )?;
+            let actor = authority.actor();
+            let evidence = self.scopes.resolve_protected_change(&actor, &change)?;
+            validate_authorization_evidence(&current_authorization, &evidence)?;
+            let now = self.clock.now();
+            let operation_digest = change
+                .compute_digest()
+                .map_err(ConfigurationError::validation)?;
+            let plan_id = derive_plan_id(
+                &actor,
+                &current.revision_id,
+                &operation_digest,
+                &evidence,
+                now,
+            )?;
+            let plan = plan_protected_change(
+                ProtectedChangePlanDraftV1 {
+                    plan_id,
+                    actor_id: actor.actor_id.clone(),
+                    base_revision_id: current.revision_id,
+                    resolved_scope_digest: evidence.resolved_scope_digest,
+                    membership_digest: evidence.membership_digest,
+                    authorization_policy_digest: evidence.authorization_policy_digest,
+                    policy_epoch: evidence.policy_epoch,
+                    created_at: now,
+                    expires_at: UtcMicros(now.0.saturating_add(300_000_000)),
+                    before_digest: Some(current.snapshot.effective_behavior_digest),
+                    after_digest: Some(operation_digest),
+                },
+                change.clone(),
+            )
             .map_err(ConfigurationError::validation)?;
-        change.validate().map_err(ConfigurationError::validation)?;
-        let current = self.store.current()?;
-        if current.revision_id != expected_revision {
-            return Err(ConfigurationError::RevisionConflict);
-        }
-        let current_authorization = self.authorize_mutation(
-            &authority,
-            ConfigurationMutationOperationV1::ProtectedDryRun,
-            &expected_revision,
-            ConfigurationMutationSinkV1::ConfigurationStore,
-            ConfigurationMutationEffectV1::CreateProtectedChangePlan,
-        )?;
-        let actor = authority.actor();
-        let evidence = self.scopes.resolve_protected_change(&actor, &change)?;
-        validate_authorization_evidence(&current_authorization, &evidence)?;
-        let now = self.clock.now();
-        let operation_digest = change
-            .compute_digest()
-            .map_err(ConfigurationError::validation)?;
-        let plan_id = derive_plan_id(
-            &actor,
-            &current.revision_id,
-            &operation_digest,
-            &evidence,
-            now,
-        )?;
-        let plan = plan_protected_change(
-            ProtectedChangePlanDraftV1 {
-                plan_id,
-                actor_id: actor.actor_id.clone(),
-                base_revision_id: current.revision_id,
-                resolved_scope_digest: evidence.resolved_scope_digest,
-                membership_digest: evidence.membership_digest,
-                authorization_policy_digest: evidence.authorization_policy_digest,
-                policy_epoch: evidence.policy_epoch,
-                created_at: now,
-                expires_at: UtcMicros(now.0.saturating_add(300_000_000)),
-                before_digest: Some(current.snapshot.effective_behavior_digest),
-                after_digest: Some(operation_digest),
-            },
-            change,
-        )
-        .map_err(ConfigurationError::validation)?;
-        self.store.save_plan(&plan)?;
-        Ok(plan)
+            self.store.save_plan(&plan, &change).await?;
+            Ok(plan)
+        })
     }
 
     fn apply_protected_change(
         &self,
         authority: ConfigurationMutationAuthority,
         request: ProtectedApplyRequest,
-    ) -> Result<ConfigurationMutationReceipt, ConfigurationError> {
-        let plan = self
-            .store
-            .load_plan(&request.plan_id)?
-            .ok_or(ConfigurationError::PlanStale)?;
-        self.apply_plan(&authority, &request, &plan, false)
+    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
+        Box::pin(async move {
+            let plan = self
+                .store
+                .load_plan(&request.plan_id)
+                .await?
+                .ok_or(ConfigurationError::PlanStale)?;
+            self.apply_plan(authority, request, plan, false).await
+        })
     }
 
     fn dry_run_rollback(
         &self,
         authority: ConfigurationMutationAuthority,
         rollback: ConfigurationRollbackRequest,
-    ) -> Result<ProtectedChangePlan, ConfigurationError> {
-        rollback
-            .target_revision_id
-            .validate()
-            .map_err(ConfigurationError::validation)?;
-        let expected_revision = authority.receipt.expected_configuration_revision.clone();
-        let current = self.store.current()?;
-        if current.revision_id != expected_revision {
-            return Err(ConfigurationError::RevisionConflict);
-        }
-        self.authorize_mutation(
-            &authority,
-            ConfigurationMutationOperationV1::RollbackDryRun,
-            &expected_revision,
-            ConfigurationMutationSinkV1::ConfigurationStore,
-            ConfigurationMutationEffectV1::CreateProtectedChangePlan,
-        )?;
-        self.store.dry_run_rollback(&authority, &rollback)
+    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
+        Box::pin(async move {
+            if rollback.mode == RollbackModeV1::Partial {
+                return Err(ConfigurationError::Unavailable);
+            }
+            rollback
+                .target_revision_id
+                .validate()
+                .map_err(ConfigurationError::validation)?;
+            let expected_revision = authority.receipt.expected_configuration_revision.clone();
+            let current = self.store.current().await?;
+            if current.revision_id != expected_revision {
+                return Err(ConfigurationError::RevisionConflict);
+            }
+            self.authorize_mutation(
+                &authority,
+                ConfigurationMutationOperationV1::RollbackDryRun,
+                &expected_revision,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+            )?;
+            self.store
+                .dry_run_rollback(&authority, &rollback, self.clock.now())
+                .await
+        })
     }
 
     fn apply_rollback(
         &self,
         authority: ConfigurationMutationAuthority,
         request: ProtectedApplyRequest,
-    ) -> Result<ConfigurationMutationReceipt, ConfigurationError> {
-        let plan = self
-            .store
-            .load_plan(&request.plan_id)?
-            .ok_or(ConfigurationError::PlanStale)?;
-        self.apply_plan(&authority, &request, &plan, true)
+    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
+        Box::pin(async move {
+            let plan = self
+                .store
+                .load_plan(&request.plan_id)
+                .await?
+                .ok_or(ConfigurationError::PlanStale)?;
+            self.apply_plan(authority, request, plan, true).await
+        })
     }
 
     fn audit(
         &self,
         actor: AuthorizedActor,
         query: ConfigurationAuditQuery,
-    ) -> Result<ConfigurationAuditPage, ConfigurationError> {
-        actor.validate()?;
-        if query.limit == 0 {
-            return Err(ConfigurationError::validation_message(
-                "configuration audit limit must be non-zero",
-            ));
-        }
-        self.store.audit(&actor, &query)
+    ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
+        Box::pin(async move {
+            actor.validate()?;
+            if query.limit == 0 || query.limit > CONFIGURATION_AUDIT_PAGE_LIMIT {
+                return Err(ConfigurationError::validation_message(
+                    "configuration audit limit must be between 1 and 1000",
+                ));
+            }
+            self.store.audit(&actor, &query).await
+        })
     }
 }
 
@@ -377,46 +418,50 @@ where
 {
     fn apply_plan(
         &self,
-        authority: &ConfigurationMutationAuthority,
-        request: &ProtectedApplyRequest,
-        plan: &ProtectedChangePlan,
+        authority: ConfigurationMutationAuthority,
+        request: ProtectedApplyRequest,
+        plan: ProtectedChangePlan,
         rollback: bool,
-    ) -> Result<ConfigurationMutationReceipt, ConfigurationError> {
-        let now = self.clock.now();
-        if plan.is_expired_at(now) {
-            return Err(ConfigurationError::PlanExpired);
-        }
-        validate_apply_binding(plan, request, now).map_err(|_| ConfigurationError::PlanStale)?;
-        let current = self.store.current()?;
-        if current.revision_id != plan.base_revision_id {
-            return Err(ConfigurationError::PlanStale);
-        }
-        let operation = if rollback {
-            ConfigurationMutationOperationV1::RollbackApply
-        } else {
-            ConfigurationMutationOperationV1::ProtectedApply
-        };
-        let current_authorization = self.authorize_mutation(
-            authority,
-            operation,
-            &plan.base_revision_id,
-            ConfigurationMutationSinkV1::ConfigurationStore,
-            ConfigurationMutationEffectV1::CommitConfigurationRevision,
-        )?;
-        let actor = authority.actor();
-        if request.actor_id != actor.actor_id {
-            return Err(ConfigurationError::MutationAuthorityRejected);
-        }
-        let evidence = self.scopes.revalidate_plan(&actor, plan)?;
-        validate_frozen_evidence(plan, &evidence)?;
-        validate_authorization_evidence(&current_authorization, &evidence)?;
-        if rollback {
-            self.store
-                .apply_rollback(authority, request, plan, &evidence)
-        } else {
-            self.store
-                .commit_protected(authority, request, plan, &evidence)
-        }
+    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
+        Box::pin(async move {
+            let now = self.clock.now();
+            if plan.is_expired_at(now) {
+                return Err(ConfigurationError::PlanExpired);
+            }
+            validate_apply_binding(&plan, &request, now)
+                .map_err(|_| ConfigurationError::PlanStale)?;
+            // Do not reject against an ambient current revision before the
+            // store can return an exact idempotent replay. The store performs
+            // replay-first CAS in the same write transaction.
+            let operation = if rollback {
+                ConfigurationMutationOperationV1::RollbackApply
+            } else {
+                ConfigurationMutationOperationV1::ProtectedApply
+            };
+            let current_authorization = self.authorize_mutation(
+                &authority,
+                operation,
+                &plan.base_revision_id,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+            )?;
+            let actor = authority.actor();
+            if request.actor_id != actor.actor_id {
+                return Err(ConfigurationError::MutationAuthorityRejected);
+            }
+            let evidence = self.scopes.revalidate_plan(&actor, &plan)?;
+            validate_frozen_evidence(&plan, &evidence)?;
+            validate_authorization_evidence(&current_authorization, &evidence)?;
+            if rollback {
+                self.store
+                    .apply_rollback(&authority, &request, &plan, &evidence)
+                    .await
+            } else {
+                self.store
+                    .commit_protected(&authority, &request, &plan, &evidence)
+                    .await
+            }
+        })
     }
 
     fn authorize_mutation(
@@ -463,7 +508,7 @@ fn validate_direct_mutation(
     mutation: &DirectConfigurationMutation,
 ) -> Result<(), ConfigurationError> {
     match mutation {
-        DirectConfigurationMutation::Set { key, value } => {
+        DirectConfigurationMutation::Set { layer, key, value } => {
             reject_protected_key(key)?;
             if matches!(value, ConfigurationValueV1::CredentialReference(_)) {
                 return Err(ConfigurationError::validation_message(
@@ -471,14 +516,16 @@ fn validate_direct_mutation(
                 ));
             }
             registry
+                .validate_layer(key, layer)
+                .map_err(ConfigurationError::validation)?;
+            registry
                 .validate_value(key, value)
                 .map_err(ConfigurationError::validation)
         }
-        DirectConfigurationMutation::Unset { key } => {
+        DirectConfigurationMutation::Unset { layer, key } => {
             reject_protected_key(key)?;
             registry
-                .definition(key)
-                .map(|_| ())
+                .validate_layer(key, layer)
                 .map_err(ConfigurationError::validation)
         }
         DirectConfigurationMutation::Batch { mutations } => {
@@ -559,10 +606,24 @@ fn derive_plan_id(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::config::registry::ConfigurationRegistry;
-    use tracedecay_domain::configuration::{AnalyzerSettingsV1, ConfigurationValueV1, SettingKey};
-    use tracedecay_domain::{AccessPolicyDigest, ManifestDigest};
+    use tracedecay_domain::configuration::{
+        AnalyzerSettingsV1, AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId,
+        ConfigurationLayerIdV1, ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1,
+        ConfigurationValueV1, CredentialReferenceMetadataV1, ProtectedChange, ScopeSourceBinding,
+        SettingKey, SourceBindingId, SourceKindV1,
+    };
+    use tracedecay_domain::{
+        AccessPolicyDigest, ActorId, LocatorDigest, ManifestDigest, ProjectId,
+    };
+
+    use super::super::ports::{
+        ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
+        CredentialWritePort,
+    };
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
@@ -572,12 +633,172 @@ mod tests {
         AccessPolicyDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
     }
 
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).unwrap()
+    }
+
+    struct Store {
+        current: ConfigurationCurrentStateV1,
+        saved: Mutex<Option<(ProtectedChangePlan, ProtectedChange)>>,
+    }
+
+    impl ConfigurationControlStore for Store {
+        fn current(&self) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
+            let current = self.current.clone();
+            Box::pin(async move { Ok(current) })
+        }
+
+        fn save_plan(
+            &self,
+            plan: &ProtectedChangePlan,
+            operation: &ProtectedChange,
+        ) -> ConfigurationOperationFuture<'_, ()> {
+            let plan = plan.clone();
+            let operation = operation.clone();
+            Box::pin(async move {
+                *self.saved.lock().unwrap() = Some((plan, operation));
+                Ok(())
+            })
+        }
+
+        fn load_plan(
+            &self,
+            _plan_id: &ChangePlanId,
+        ) -> ConfigurationOperationFuture<'_, Option<ProtectedChangePlan>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn commit_direct(
+            &self,
+            _authority: &ConfigurationMutationAuthority,
+            _mutation: &DirectConfigurationMutation,
+            _expected_revision: &ConfigurationRevisionId,
+        ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
+            Box::pin(async { Err(ConfigurationError::Unavailable) })
+        }
+
+        fn commit_protected(
+            &self,
+            _authority: &ConfigurationMutationAuthority,
+            _request: &ProtectedApplyRequest,
+            _plan: &ProtectedChangePlan,
+            _evidence: &ScopeRevalidationEvidenceV1,
+        ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
+            Box::pin(async { Err(ConfigurationError::Unavailable) })
+        }
+
+        fn dry_run_rollback(
+            &self,
+            _authority: &ConfigurationMutationAuthority,
+            _rollback: &ConfigurationRollbackRequest,
+            _now: UtcMicros,
+        ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
+            Box::pin(async { Err(ConfigurationError::Unavailable) })
+        }
+
+        fn apply_rollback(
+            &self,
+            _authority: &ConfigurationMutationAuthority,
+            _request: &ProtectedApplyRequest,
+            _plan: &ProtectedChangePlan,
+            _evidence: &ScopeRevalidationEvidenceV1,
+        ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
+            Box::pin(async { Err(ConfigurationError::Unavailable) })
+        }
+
+        fn audit(
+            &self,
+            _actor: &AuthorizedActor,
+            _query: &ConfigurationAuditQuery,
+        ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
+            Box::pin(async { Err(ConfigurationError::Unavailable) })
+        }
+
+        fn observed_state(
+            &self,
+            _actor: &AuthorizedActor,
+        ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    struct Scope {
+        evidence: ScopeRevalidationEvidenceV1,
+    }
+
+    impl ScopeResolutionPort for Scope {
+        fn resolve_protected_change(
+            &self,
+            _actor: &AuthorizedActor,
+            _change: &ProtectedChange,
+        ) -> Result<ScopeRevalidationEvidenceV1, ConfigurationError> {
+            Ok(self.evidence.clone())
+        }
+
+        fn revalidate_plan(
+            &self,
+            _actor: &AuthorizedActor,
+            _plan: &ProtectedChangePlan,
+        ) -> Result<ScopeRevalidationEvidenceV1, ConfigurationError> {
+            Ok(self.evidence.clone())
+        }
+    }
+
+    struct Credentials;
+
+    impl CredentialWritePort for Credentials {
+        fn write_reference(
+            &self,
+            _authority: &ConfigurationMutationAuthority,
+            _write: &WriteOnlyCredentialMutation,
+            _expected_revision: &ConfigurationRevisionId,
+        ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
+            Box::pin(async { Err(ConfigurationError::Unavailable) })
+        }
+    }
+
+    struct Authorization {
+        current: super::super::ports::CurrentConfigurationMutationAuthorizationV1,
+    }
+
+    impl ConfigurationMutationAuthorizationPort for Authorization {
+        fn recheck(
+            &self,
+            _receipt: &ConfigurationMutationGrantReceiptV1,
+            _operation: ConfigurationMutationOperationV1,
+            _expected_revision: &ConfigurationRevisionId,
+            _sink: ConfigurationMutationSinkV1,
+            _effect: ConfigurationMutationEffectV1,
+            _now: UtcMicros,
+        ) -> Result<
+            super::super::ports::CurrentConfigurationMutationAuthorizationV1,
+            ConfigurationError,
+        > {
+            Ok(self.current.clone())
+        }
+    }
+
+    struct Clock;
+
+    impl ConfigurationClock for Clock {
+        fn now(&self) -> UtcMicros {
+            UtcMicros(10)
+        }
+    }
+
     #[test]
     fn direct_mutation_rejects_protected_control_settings() {
         let registry = ConfigurationRegistry::core().unwrap();
         let result = validate_direct_mutation(
             &registry,
             &DirectConfigurationMutation::Set {
+                layer: ConfigurationLayerIdV1::Project {
+                    project_id: id::<ProjectId>("project.fixture"),
+                },
                 key: SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).unwrap(),
                 value: ConfigurationValueV1::SourceBindings(Vec::new()),
             },
@@ -591,6 +812,9 @@ mod tests {
         let result = validate_direct_mutation(
             &registry,
             &DirectConfigurationMutation::Set {
+                layer: ConfigurationLayerIdV1::Project {
+                    project_id: id::<ProjectId>("project.fixture"),
+                },
                 key: SettingKey::new("analyzer.settings.v1").unwrap(),
                 value: ConfigurationValueV1::AnalyzerSettings(AnalyzerSettingsV1::empty()),
             },
@@ -620,6 +844,84 @@ mod tests {
         assert_eq!(
             validate_authorization_evidence(&authorization, &stale),
             Err(ConfigurationError::MutationAuthorityRejected)
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_dry_run_persists_the_exact_operation_beside_its_redacted_plan() {
+        let revision_id: ConfigurationRevisionId = id("configuration.revision.fixture");
+        let scope_digest = digest('a');
+        let policy_digest = policy_digest('b');
+        let evidence = ScopeRevalidationEvidenceV1 {
+            resolved_scope_digest: scope_digest.clone(),
+            membership_digest: None,
+            authorization_policy_digest: policy_digest.clone(),
+            policy_epoch: 7,
+        };
+        let store = Store {
+            current: ConfigurationCurrentStateV1 {
+                revision_id: revision_id.clone(),
+                snapshot: ConfigurationSnapshotV1::new(Default::default(), Default::default())
+                    .unwrap(),
+            },
+            saved: Mutex::new(None),
+        };
+        let authorization = Authorization {
+            current: super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+                scope_digest: scope_digest.clone(),
+                policy_epoch: 7,
+                policy_digest: policy_digest.clone(),
+            },
+        };
+        let authority = ConfigurationMutationAuthority {
+            receipt: ConfigurationMutationGrantReceiptV1::issue(
+                id::<ConfigurationGrantReceiptId>("configuration.grant-receipt.fixture"),
+                id::<ConfigurationGrantId>("configuration.grant.fixture"),
+                id::<ActorId>("actor.configuration.fixture"),
+                ConfigurationMutationOperationV1::ProtectedDryRun,
+                scope_digest,
+                revision_id.clone(),
+                7,
+                policy_digest,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+                UtcMicros(1),
+                UtcMicros(100),
+            )
+            .unwrap(),
+        };
+        let change = ProtectedChange::BindSource(
+            ScopeSourceBinding::new(
+                id::<SourceBindingId>("binding.configuration.fixture"),
+                SourceKindV1::Cursor,
+                LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+                AuthorityRef::Project(id::<ProjectId>("project.configuration.fixture")),
+            )
+            .unwrap(),
+        );
+        let registry = ConfigurationRegistry::core().unwrap();
+        let scope = Scope { evidence };
+        let credentials = Credentials;
+        let clock = Clock;
+        let operations = ConfigurationControlPlaneOperations::new(
+            &registry,
+            &store,
+            &scope,
+            &credentials,
+            &authorization,
+            &clock,
+        );
+
+        let plan = operations
+            .dry_run_protected_change(authority, change.clone(), revision_id)
+            .await
+            .unwrap();
+        let (saved_plan, saved_operation) = store.saved.lock().unwrap().clone().unwrap();
+        assert_eq!(saved_plan, plan);
+        assert_eq!(saved_operation, change);
+        assert_eq!(
+            saved_plan.operation_digest,
+            saved_operation.compute_digest().unwrap()
         );
     }
 }

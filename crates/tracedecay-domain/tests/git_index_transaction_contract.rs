@@ -181,6 +181,86 @@ fn journal_never_skips_from_prepared_to_committed_or_replays_inspection() {
         !GitIndexJournalPhaseV1::NeedsInspection
             .permits_successor(GitIndexJournalPhaseV1::NativeApplyStarted)
     );
+
+    let snapshot = snapshot();
+    let snapshot_digest =
+        GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
+    let intent = commit_intent("phase evidence\n");
+    let preview = GitIndexPreviewV1::new_with_commit_intent(
+        GitIndexPreviewId::new("git-preview.phase-evidence").expect("preview id"),
+        GitIndexTransactionOperationV1::CommitIndex,
+        snapshot.clone(),
+        snapshot_digest,
+        Vec::new(),
+        snapshot.index.tree_id.clone(),
+        Some(&intent),
+        GitIndexPreviewDispositionV1::Applicable,
+        UtcMicros(10),
+        UtcMicros(20),
+    )
+    .expect("commit preview");
+    let mut forged = tracedecay_domain::GitIndexTransactionJournalV1::prepared(
+        GitIndexTransactionId::new("git-index-transaction.forged-phase").expect("transaction id"),
+        &preview,
+        UtcMicros(10),
+    )
+    .expect("prepared journal");
+    forged.phase = GitIndexJournalPhaseV1::RefCommitted;
+    assert!(
+        forged.validate().is_err(),
+        "a phase label without its complete durable epoch chain is not recovery evidence"
+    );
+}
+
+#[test]
+fn restart_recovery_requires_post_boundary_phase_evidence() {
+    for phase in [
+        GitIndexJournalPhaseV1::Prepared,
+        GitIndexJournalPhaseV1::NativeApplyStarted,
+    ] {
+        assert!(phase.permits_recovered_outcome(
+            GitIndexTransactionOperationV1::StageHunks,
+            GitIndexReceiptOutcomeV1::AbortedNoChange,
+        ));
+        assert!(phase.permits_recovered_outcome(
+            GitIndexTransactionOperationV1::StageHunks,
+            GitIndexReceiptOutcomeV1::NeedsInspection,
+        ));
+        assert!(
+            !phase.permits_recovered_outcome(
+                GitIndexTransactionOperationV1::StageHunks,
+                GitIndexReceiptOutcomeV1::Committed,
+            ),
+            "a candidate tree observed before a durable index phase is coincidence, not proof"
+        );
+    }
+
+    assert!(
+        GitIndexJournalPhaseV1::IndexCommitted.permits_recovered_outcome(
+            GitIndexTransactionOperationV1::StageHunks,
+            GitIndexReceiptOutcomeV1::Committed,
+        )
+    );
+    assert!(
+        !GitIndexJournalPhaseV1::IndexCommitted.permits_recovered_outcome(
+            GitIndexTransactionOperationV1::CommitIndex,
+            GitIndexReceiptOutcomeV1::Committed,
+        ),
+        "a commit recovery needs durable ref-boundary evidence"
+    );
+    assert!(
+        GitIndexJournalPhaseV1::RefCommitted.permits_recovered_outcome(
+            GitIndexTransactionOperationV1::CommitIndex,
+            GitIndexReceiptOutcomeV1::Committed,
+        )
+    );
+    assert!(
+        !GitIndexJournalPhaseV1::NeedsInspection.permits_recovered_outcome(
+            GitIndexTransactionOperationV1::CommitIndex,
+            GitIndexReceiptOutcomeV1::Committed,
+        ),
+        "inspection records must be reconciled under a separate proven-clear path"
+    );
 }
 
 #[test]
@@ -220,6 +300,63 @@ fn committed_receipt_is_integrity_bound_to_its_preview() {
     let decoded: GitIndexTransactionReceiptV1 =
         serde_json::from_str(&encoded).expect("deserialize receipt");
     assert_eq!(decoded.receipt_digest, receipt.receipt_digest);
+}
+
+#[test]
+fn unavailable_terminal_snapshot_is_explicit_and_cannot_claim_commit() {
+    let snapshot = snapshot();
+    let snapshot_digest =
+        GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
+    let preview_id = GitIndexPreviewId::new("git-preview.unobserved.fixture").expect("preview id");
+    let reference = hunk(&preview_id, snapshot_digest.clone());
+    let preview = GitIndexPreviewV1::new(
+        preview_id,
+        GitIndexTransactionOperationV1::StageHunks,
+        snapshot,
+        snapshot_digest,
+        vec![reference],
+        Some(oid('e')),
+        GitIndexPreviewDispositionV1::Applicable,
+        UtcMicros(10),
+        UtcMicros(20),
+    )
+    .expect("preview is valid");
+    let transaction_id =
+        GitIndexTransactionId::new("git-index-transaction.unobserved").expect("transaction id");
+
+    let receipt = GitIndexTransactionReceiptV1::new_with_final_snapshot(
+        GitIndexReceiptId::new("git-index-receipt.unobserved").expect("receipt id"),
+        transaction_id.clone(),
+        &preview,
+        None,
+        preview.repository_snapshot.index.tree_id.clone(),
+        preview.repository_snapshot.head.commit().cloned(),
+        None,
+        GitIndexReceiptOutcomeV1::NeedsInspection,
+        UtcMicros(11),
+    )
+    .expect("inspection receipt may report an unavailable final snapshot");
+    assert!(!receipt.final_snapshot_captured);
+    let decoded: GitIndexTransactionReceiptV1 =
+        serde_json::from_str(&serde_json::to_string(&receipt).expect("serialize receipt"))
+            .expect("deserialize receipt");
+    assert_eq!(decoded, receipt);
+
+    assert!(
+        GitIndexTransactionReceiptV1::new_with_final_snapshot(
+            GitIndexReceiptId::new("git-index-receipt.false-commit").expect("receipt id"),
+            transaction_id,
+            &preview,
+            None,
+            Some(oid('e')),
+            Some(oid('a')),
+            None,
+            GitIndexReceiptOutcomeV1::Committed,
+            UtcMicros(11),
+        )
+        .is_err(),
+        "a committed receipt must contain a captured final snapshot"
+    );
 }
 
 #[test]

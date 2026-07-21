@@ -1,5 +1,109 @@
 use crate::dashboard_api_support::*;
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tracedecay::application::configuration::DirectConfigurationMutation;
+use tracedecay::config::{
+    ConfigurationDaemonClient, PinnedRuntimeConfiguration, RuntimeConfigurationFuture,
+    RuntimeConfigurationTarget,
+};
+use tracedecay_domain::configuration::{
+    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
+};
+
+#[derive(Default)]
+struct InjectedConfigurationClient {
+    entries: Mutex<BTreeMap<String, BTreeMap<SettingKey, ConfigurationValueV1>>>,
+    sequence: AtomicU64,
+}
+
+impl ConfigurationDaemonClient for InjectedConfigurationClient {
+    fn mutate_direct(
+        &self,
+        target: RuntimeConfigurationTarget,
+        mutation: DirectConfigurationMutation,
+        _expected_revision: ConfigurationRevisionId,
+    ) -> RuntimeConfigurationFuture<'_, PinnedRuntimeConfiguration> {
+        let result =
+            (|| {
+                let mut by_project = self
+                    .entries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let entries = by_project
+                    .entry(target.project_id.as_str().to_owned())
+                    .or_default();
+
+                fn apply(
+                    entries: &mut BTreeMap<SettingKey, ConfigurationValueV1>,
+                    project_id: &tracedecay_domain::ProjectId,
+                    mutation: DirectConfigurationMutation,
+                ) -> tracedecay::errors::Result<()> {
+                    match mutation {
+                        DirectConfigurationMutation::Set { layer, key, value } => {
+                            if layer
+                                != (ConfigurationLayerIdV1::Project {
+                                    project_id: project_id.clone(),
+                                })
+                            {
+                                return Err(tracedecay::errors::TraceDecayError::Config {
+                                    message: "injected configuration target mismatch".to_owned(),
+                                });
+                            }
+                            entries.insert(key, value);
+                        }
+                        DirectConfigurationMutation::Unset { layer, key } => {
+                            if layer
+                                != (ConfigurationLayerIdV1::Project {
+                                    project_id: project_id.clone(),
+                                })
+                            {
+                                return Err(tracedecay::errors::TraceDecayError::Config {
+                                    message: "injected configuration target mismatch".to_owned(),
+                                });
+                            }
+                            entries.remove(&key);
+                        }
+                        DirectConfigurationMutation::Batch { mutations } => {
+                            for mutation in mutations {
+                                apply(entries, project_id, mutation)?;
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+
+                apply(entries, &target.project_id, mutation)?;
+                let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+                let revision_id = ConfigurationRevisionId::new(format!(
+                    "configuration.revision.dashboard-test-{sequence}"
+                ))
+                .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+                    message: error.to_string(),
+                })?;
+                let registry = tracedecay::config::registry::ConfigurationRegistry::core()
+                    .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+                        message: error.to_string(),
+                    })?;
+                let resolution = tracedecay::config::resolver::resolve_configuration(
+                    &registry,
+                    &[tracedecay::config::resolver::ConfigurationLayerV1 {
+                        layer: ConfigurationLayerIdV1::Project {
+                            project_id: target.project_id.clone(),
+                        },
+                        revision_id: revision_id.clone(),
+                        entries: entries.clone(),
+                    }],
+                )
+                .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+                    message: error.to_string(),
+                })?;
+                PinnedRuntimeConfiguration::new(target, revision_id, resolution.snapshot)
+            })();
+        Box::pin(async move { result })
+    }
+}
 
 #[test]
 fn settings_dashboard_api_aggregates_and_updates_config() {
@@ -8,6 +112,9 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
+        tracedecay::config::install_configuration_daemon_client(Arc::new(
+            InjectedConfigurationClient::default(),
+        ));
         let fixture = start_dashboard_fixture(false).await;
         let agent = http_agent();
         let url = format!("{}/api/settings", fixture.base_url);
@@ -32,6 +139,29 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 .unwrap_or_default()
                 .ends_with("config.json")
         );
+        assert_eq!(settings["project"]["legacy_config_read_only"], true);
+        assert!(
+            settings["project"]["configuration_snapshot_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "settings must expose the pinned resolved snapshot: {settings}"
+        );
+        assert!(
+            settings["project"]["configuration_revision_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "settings must expose the pinned configuration revision: {settings}"
+        );
+        let legacy_config_path = std::path::PathBuf::from(
+            settings["project"]["legacy_config_path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("missing legacy config path: {settings}")),
+        );
+        assert!(
+            !legacy_config_path.exists(),
+            "fresh initialization must not create a writable config.json"
+        );
+        let legacy_config_before = std::fs::read(&legacy_config_path).ok();
 
         assert_eq!(settings["user"]["upload_enabled"], false);
         assert_eq!(settings["user"]["watcher_debounce"], "2s");
@@ -87,6 +217,11 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert!(settings["environment"]["global_accounting_enabled"].is_boolean());
 
         let project_url = format!("{url}/project");
+        let (status, unchanged) =
+            patch_json_body(&agent, &project_url, &json!({ "max_file_size": 1_048_576 }));
+        assert_eq!(status, 200, "no-op project patch failed: {unchanged}");
+        assert_eq!(unchanged["resync_recommended"], false);
+
         let (status, patched) = patch_json_body(
             &agent,
             &project_url,
@@ -96,25 +231,20 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 "max_file_size": 2048
             }),
         );
-        assert_eq!(status, 200, "project patch failed: {patched}");
         assert_eq!(
-            patched["resync_recommended"], true,
-            "indexing changes must flag a re-sync: {patched}"
+            status, 200,
+            "project mutation through the injected control-plane client failed: {patched}"
         );
-        assert_eq!(patched["project"]["config"]["max_file_size"], 2048);
-        assert_eq!(patched["project"]["config"]["include"][0], ".github/**");
+        assert_eq!(patched["resync_recommended"], true);
         assert_eq!(
-            patched["project"]["config"]["exclude"]
-                .as_array()
-                .map(Vec::len),
-            Some(2)
+            patched["project"]["config"]["max_file_size"], 2048,
+            "the response must publish the daemon-returned snapshot: {patched}"
         );
-        assert_eq!(patched["project"]["config"]["git_ignore"], true);
-
-        let (status, unchanged) =
-            patch_json_body(&agent, &project_url, &json!({ "max_file_size": 2048 }));
-        assert_eq!(status, 200, "no-op project patch failed: {unchanged}");
-        assert_eq!(unchanged["resync_recommended"], false);
+        assert_eq!(
+            std::fs::read(&legacy_config_path).ok(),
+            legacy_config_before,
+            "a typed mutation must not fall back to config.json"
+        );
 
         let (status, invalid) =
             patch_json_body(&agent, &project_url, &json!({ "exclude": ["[invalid"] }));

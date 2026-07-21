@@ -1,10 +1,30 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::ProjectId;
+use tracedecay_domain::configuration::{
+    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
+    DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
+    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
+    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
+    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
+    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+    SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+    SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
+    TELEMETRY_TIMINGS_SETTING_KEY,
+};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -13,7 +33,9 @@ pub mod resolver;
 pub mod scope_control;
 pub mod topology;
 
-/// Name of the configuration file stored inside the data directory.
+/// Name of the legacy configuration migration input stored inside the data
+/// directory. It is not a runtime authority and production code must never
+/// rewrite it.
 pub const CONFIG_FILENAME: &str = "config.json";
 
 /// Name of the hidden directory used to store `TraceDecay` metadata.
@@ -116,11 +138,13 @@ fn default_exclude_patterns() -> Vec<String> {
     patterns
 }
 
-/// Configuration for a `TraceDecay` project.
+/// Legacy `config.json` representation and the materialized shape used by an
+/// already-pinned resolved configuration snapshot.
 ///
-/// Controls which files are indexed, size limits, and feature toggles.
-/// Language inclusion is derived automatically from the installed
-/// `LanguageExtractor` set — only exclude patterns live in the config.
+/// `version` and `root_dir` are legacy migration metadata only. Every runtime
+/// setting below is sourced from [`ConfigurationSnapshotV1`] before a project
+/// opens; serializing this type is retained solely for migration fixtures and
+/// backwards-compatible legacy input decoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceDecayConfig {
     /// Schema version of the configuration.
@@ -146,8 +170,8 @@ pub struct TraceDecayConfig {
     pub git_ignore: bool,
     /// Whether a cold `tracedecay_diagnostics` call prewarms in the background
     /// (detached dependency build + immediate `warming` status) instead of
-    /// blocking for minutes. `TRACEDECAY_DIAGNOSTICS_PREWARM` overrides when it
-    /// parses as a bool (env wins). Off by default.
+    /// blocking for minutes. Environment precedence is resolved into the
+    /// pinned snapshot during legacy migration, never during a tool call.
     #[serde(default)]
     pub diagnostics_prewarm: bool,
     /// Index-freshness auto-sync settings (git-metadata watcher, serve-stale,
@@ -235,9 +259,12 @@ impl Default for TelemetryConfig {
     }
 }
 
-/// Auto-sync / index-freshness knobs, exposed as the `[sync]` table in
-/// `config.json` and overridable via `TRACEDECAY_SYNC_*` environment
-/// variables (see [`SyncConfig::with_env_overrides`]).
+/// Auto-sync / index-freshness knobs in the legacy migration shape.
+///
+/// Runtime consumers receive these values only from a pinned resolved
+/// configuration snapshot. `TRACEDECAY_SYNC_*` values are decoded as an
+/// explicit legacy environment layer during migration, rather than being read
+/// independently by each adapter.
 ///
 /// Every field carries a `#[serde(default = ...)]` so that a partial JSON
 /// object (only some keys present) still deserializes, and a missing `sync`
@@ -354,8 +381,9 @@ fn env_parse<T: std::str::FromStr>(suffix: &str) -> Option<T> {
 }
 
 impl SyncConfig {
-    /// Applies `TRACEDECAY_SYNC_*` environment overrides on top of `self`,
-    /// leaving any field whose env var is unset or unparsable untouched.
+    /// Applies legacy `TRACEDECAY_SYNC_*` environment overrides on top of
+    /// `self`. This remains for pre-store/bootstrap compatibility only; live
+    /// runtime adapters must consume [`PinnedRuntimeConfiguration`] instead.
     #[must_use]
     pub fn with_env_overrides(mut self) -> Self {
         if let Some(value) = env_bool("SYNC_AUTO_WATCH") {
@@ -410,13 +438,12 @@ impl SyncConfig {
     }
 }
 
-/// Loads the `[sync]` config for a project (falling back to defaults on any
-/// load error) and applies `TRACEDECAY_SYNC_*` environment overrides.
-pub fn load_sync_config(project_root: &Path) -> SyncConfig {
-    load_config(project_root)
-        .map(|config| config.sync)
-        .unwrap_or_default()
-        .with_env_overrides()
+/// Reads the sync settings from the already-pinned runtime snapshot.
+///
+/// This compatibility name intentionally no longer reads `config.json`, opens
+/// a store, or applies an environment override at call time.
+pub fn load_sync_config(project_root: &Path) -> Result<SyncConfig> {
+    cached_sync_config(project_root)
 }
 
 impl Default for TraceDecayConfig {
@@ -437,8 +464,691 @@ impl Default for TraceDecayConfig {
     }
 }
 
-pub fn load_telemetry_config(project_root: &Path) -> TelemetryConfig {
-    load_config(project_root).map_or_else(|_| TelemetryConfig::default(), |config| config.telemetry)
+/// Reads telemetry settings from the already-pinned runtime snapshot.
+///
+/// This compatibility name intentionally performs no file, database, or IPC
+/// access. A missing authority is an error; hooks handle that by disabling
+/// optional telemetry rather than inventing a fallback value.
+pub fn load_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
+    cached_telemetry_config(project_root)
+}
+
+/// Typed project route for the configuration daemon boundary. The path is
+/// display/routing context only; [`ProjectId`] remains the authority key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeConfigurationTarget {
+    pub project_id: ProjectId,
+    pub project_root: PathBuf,
+}
+
+/// A complete resolved configuration pinned to one revision before a runtime
+/// component starts. No caller may re-read mutable legacy input after holding
+/// this value.
+#[derive(Clone, Debug)]
+pub struct PinnedRuntimeConfiguration {
+    pub target: RuntimeConfigurationTarget,
+    pub revision_id: ConfigurationRevisionId,
+    pub snapshot: ConfigurationSnapshotV1,
+    pub config: TraceDecayConfig,
+}
+
+impl PinnedRuntimeConfiguration {
+    /// Materializes the legacy runtime shape from a complete typed snapshot.
+    /// The conversion rejects missing or wrongly typed settings rather than
+    /// adding adapter-local defaults.
+    pub fn new(
+        target: RuntimeConfigurationTarget,
+        revision_id: ConfigurationRevisionId,
+        snapshot: ConfigurationSnapshotV1,
+    ) -> Result<Self> {
+        let config = runtime_config_from_snapshot(&target.project_root, &snapshot)?;
+        Ok(Self {
+            target,
+            revision_id,
+            snapshot,
+            config,
+        })
+    }
+
+    fn retarget(&self, target: RuntimeConfigurationTarget) -> Result<Self> {
+        Self::new(target, self.revision_id.clone(), self.snapshot.clone())
+    }
+}
+
+/// Narrow daemon/client seam for direct configuration mutations. The daemon
+/// implementation must authenticate the caller and invoke the Wave-1
+/// `ConfigurationControlPlane`; this adapter deliberately has no store handle
+/// and cannot infer authority from a path.
+pub trait ConfigurationDaemonClient: Send + Sync {
+    fn mutate_direct(
+        &self,
+        target: RuntimeConfigurationTarget,
+        mutation: crate::application::configuration::DirectConfigurationMutation,
+        expected_revision: ConfigurationRevisionId,
+    ) -> RuntimeConfigurationFuture<'_, PinnedRuntimeConfiguration>;
+}
+
+pub type RuntimeConfigurationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+
+/// Process-local, immutable-after-publication lookup cache. The daemon owns
+/// refreshing it when a configuration revision activates; hook paths only
+/// perform an in-memory lookup.
+#[derive(Default)]
+pub struct RuntimeConfigurationCache {
+    by_project: RwLock<BTreeMap<String, PinnedRuntimeConfiguration>>,
+    project_by_root: RwLock<BTreeMap<PathBuf, String>>,
+}
+
+impl RuntimeConfigurationCache {
+    pub fn insert(&self, configuration: PinnedRuntimeConfiguration) -> Result<()> {
+        let expected = runtime_config_from_snapshot(
+            &configuration.target.project_root,
+            &configuration.snapshot,
+        )?;
+        if expected != configuration.config {
+            return Err(config_error(
+                "pinned runtime configuration does not match its resolved snapshot",
+            ));
+        }
+
+        let project_id = configuration.target.project_id.as_str().to_owned();
+        let project_root = configuration.target.project_root.clone();
+        self.by_project
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_id.clone(), configuration);
+        self.project_by_root
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root, project_id);
+        Ok(())
+    }
+
+    pub fn for_project(&self, project_id: &ProjectId) -> Result<PinnedRuntimeConfiguration> {
+        self.by_project
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_id.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                config_error(format!(
+                    "configuration authority unavailable: no pinned resolved snapshot for project '{}'",
+                    project_id.as_str()
+                ))
+            })
+    }
+
+    pub fn for_root(&self, project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
+        let project_id = self
+            .project_by_root
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned()
+            .ok_or_else(|| {
+                config_error(format!(
+                    "configuration authority unavailable: no pinned resolved snapshot for '{}'",
+                    project_root.display()
+                ))
+            })?;
+        let configuration = self
+            .by_project
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_id)
+            .cloned()
+            .ok_or_else(|| {
+                config_error(
+                    "configuration authority unavailable: runtime snapshot cache is inconsistent",
+                )
+            })?;
+        configuration.retarget(RuntimeConfigurationTarget {
+            project_id: configuration.target.project_id.clone(),
+            project_root: project_root.to_path_buf(),
+        })
+    }
+}
+
+fn runtime_configuration_cache() -> &'static RuntimeConfigurationCache {
+    static CACHE: OnceLock<RuntimeConfigurationCache> = OnceLock::new();
+    CACHE.get_or_init(RuntimeConfigurationCache::default)
+}
+
+fn configuration_daemon_client_slot() -> &'static RwLock<Option<Arc<dyn ConfigurationDaemonClient>>>
+{
+    static CLIENT: OnceLock<RwLock<Option<Arc<dyn ConfigurationDaemonClient>>>> = OnceLock::new();
+    CLIENT.get_or_init(|| RwLock::new(None))
+}
+
+/// Installs the daemon-owned mutation client. This is intentionally an
+/// explicit composition root operation; HTTP/CLI/MCP handlers never open a
+/// configuration store directly.
+pub fn install_configuration_daemon_client(client: Arc<dyn ConfigurationDaemonClient>) {
+    *configuration_daemon_client_slot()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(client);
+}
+
+/// Publishes one daemon-resolved snapshot for runtime and hook consumers.
+pub fn install_pinned_runtime_configuration(
+    configuration: PinnedRuntimeConfiguration,
+) -> Result<()> {
+    runtime_configuration_cache().insert(configuration)
+}
+
+/// Builds a typed target from a resolved store layout. A missing project ID is
+/// never replaced by a path-derived identity.
+pub fn runtime_configuration_target_for_layout(
+    project_root: &Path,
+    layout: &crate::storage::StoreLayout,
+) -> Result<RuntimeConfigurationTarget> {
+    let project_id = layout.identity.project_id.as_deref().ok_or_else(|| {
+        config_error("configuration authority unavailable: store layout has no project id")
+    })?;
+    runtime_configuration_target_for_project_id(project_root, project_id)
+}
+
+/// Builds a typed configuration target from an already-authoritative project
+/// ID. The path remains non-authoritative routing context.
+pub fn runtime_configuration_target_for_project_id(
+    project_root: &Path,
+    project_id: &str,
+) -> Result<RuntimeConfigurationTarget> {
+    Ok(RuntimeConfigurationTarget {
+        project_id: ProjectId::new(project_id.to_owned()).map_err(|error| {
+            config_error(format!("invalid project id for configuration: {error}"))
+        })?,
+        project_root: project_root.to_path_buf(),
+    })
+}
+
+/// Returns the pinned configuration for an exact authoritative layout.
+pub fn runtime_configuration_for_layout(
+    project_root: &Path,
+    layout: &crate::storage::StoreLayout,
+) -> Result<PinnedRuntimeConfiguration> {
+    let target = runtime_configuration_target_for_layout(project_root, layout)?;
+    let configuration = runtime_configuration_cache()
+        .for_project(&target.project_id)?
+        .retarget(target)?;
+    runtime_configuration_cache().insert(configuration.clone())?;
+    Ok(configuration)
+}
+
+/// Returns a cached configuration without resolving a layout, opening a
+/// database, performing IPC, or reading a file. This is the hook-safe lookup.
+pub fn cached_runtime_configuration(project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
+    runtime_configuration_cache().for_root(project_root)
+}
+
+/// Looks up a daemon-published snapshot by an already-authoritative project
+/// ID. The supplied root is only used to materialize legacy display metadata;
+/// it never participates in authority resolution.
+pub fn cached_runtime_configuration_for_project_id(
+    project_root: &Path,
+    project_id: &str,
+) -> Result<PinnedRuntimeConfiguration> {
+    let target = runtime_configuration_target_for_project_id(project_root, project_id)?;
+    runtime_configuration_cache()
+        .for_project(&target.project_id)?
+        .retarget(target)
+}
+
+pub fn cached_sync_config(project_root: &Path) -> Result<SyncConfig> {
+    Ok(cached_runtime_configuration(project_root)?.config.sync)
+}
+
+pub fn cached_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
+    Ok(cached_runtime_configuration(project_root)?.config.telemetry)
+}
+
+/// Creates the only permitted pre-store runtime snapshot: registry defaults
+/// with a synthetic bootstrap revision. It does not read or write
+/// `config.json`, and a daemon must replace it with its migrated canonical
+/// snapshot before a subsequent process can serve the project.
+pub fn bootstrap_runtime_configuration(
+    project_root: &Path,
+    layout: &crate::storage::StoreLayout,
+) -> Result<PinnedRuntimeConfiguration> {
+    let target = runtime_configuration_target_for_layout(project_root, layout)?;
+    if let Ok(existing) = runtime_configuration_cache().for_project(&target.project_id) {
+        // One authoritative project can be opened through more than one
+        // non-authoritative root spelling (for example, a linked worktree).
+        // Publish the retargeted view too so its hook paths remain cache-only.
+        let configuration = existing.retarget(target)?;
+        runtime_configuration_cache().insert(configuration.clone())?;
+        return Ok(configuration);
+    }
+
+    let registry = registry::ConfigurationRegistry::core()
+        .map_err(|error| config_error(format!("configuration registry unavailable: {error}")))?;
+    let snapshot = resolver::resolve_configuration(&registry, &[])
+        .map_err(|error| {
+            config_error(format!(
+                "configuration bootstrap resolution failed: {error}"
+            ))
+        })?
+        .snapshot;
+    let revision_id =
+        ConfigurationRevisionId::new("configuration.bootstrap.default.v1").map_err(|error| {
+            config_error(format!("invalid bootstrap configuration revision: {error}"))
+        })?;
+    let configuration = PinnedRuntimeConfiguration::new(target, revision_id, snapshot)?;
+    runtime_configuration_cache().insert(configuration.clone())?;
+    Ok(configuration)
+}
+
+/// Applies the typed diff between two runtime materializations through the
+/// installed daemon client. Missing client authority fails closed and cannot
+/// fall back to a legacy file write.
+pub async fn mutate_pinned_runtime_configuration(
+    current: &PinnedRuntimeConfiguration,
+    updated: TraceDecayConfig,
+) -> Result<PinnedRuntimeConfiguration> {
+    let Some(mutation) = direct_mutation_for_runtime_config_diff(
+        &current.target.project_id,
+        &current.config,
+        &updated,
+    )?
+    else {
+        return Ok(current.clone());
+    };
+    let client = configuration_daemon_client_slot()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or_else(|| {
+            config_error(
+                "configuration authority unavailable: daemon control-plane client is not installed",
+            )
+        })?;
+    commit_runtime_configuration_mutation(client.as_ref(), current, mutation).await
+}
+
+/// Commits a precomputed typed mutation through the daemon control plane.
+/// Keeping this seam independent from the process-global client slot makes the
+/// response validation and publication rules testable without a local store.
+async fn commit_runtime_configuration_mutation(
+    client: &dyn ConfigurationDaemonClient,
+    current: &PinnedRuntimeConfiguration,
+    mutation: crate::application::configuration::DirectConfigurationMutation,
+) -> Result<PinnedRuntimeConfiguration> {
+    let next = client
+        .mutate_direct(
+            current.target.clone(),
+            mutation,
+            current.revision_id.clone(),
+        )
+        .await?;
+    if next.target.project_id != current.target.project_id {
+        return Err(config_error(
+            "configuration daemon returned a snapshot for a different project",
+        ));
+    }
+    if next.revision_id == current.revision_id {
+        return Err(config_error(
+            "configuration daemon returned the expected revision after a mutation",
+        ));
+    }
+    // The daemon's target path is non-authoritative routing metadata. Retarget
+    // the returned snapshot to the caller's already-authorized route before
+    // publishing it, which also re-materializes the legacy display fields from
+    // the validated snapshot rather than trusting an adapter-provided shape.
+    let next = next.retarget(current.target.clone())?;
+    runtime_configuration_cache().insert(next.clone())?;
+    Ok(next)
+}
+
+/// Decodes a legacy file only as migration input. This function never writes
+/// the file and callers must pass the already-authorized target layer/revision
+/// supplied by the control-plane migration.
+pub fn read_legacy_configuration_inputs(
+    config_path: &Path,
+    environment: &BTreeMap<String, String>,
+    target: &registry::legacy_decoder::LegacyConfigurationDecodeTargetV1,
+) -> Result<crate::global_db::configuration::migration::ReadonlyLegacyConfigurationInputsV1> {
+    let config_json = if config_path.exists() {
+        fs::read_to_string(config_path).map_err(|error| {
+            config_error(format!(
+                "failed to read legacy config input '{}': {error}",
+                config_path.display()
+            ))
+        })?
+    } else {
+        "{}".to_owned()
+    };
+    registry::legacy_decoder::decode_legacy_configuration_inputs(&config_json, environment, target)
+        .map_err(|error| config_error(format!("legacy configuration input is invalid: {error}")))
+}
+
+/// Converts a complete typed snapshot into the legacy runtime shape without
+/// defaults, file reads, or environment reads. This is intentionally public so
+/// daemon composition can validate snapshot-to-runtime parity before publish.
+pub fn runtime_config_from_snapshot(
+    project_root: &Path,
+    snapshot: &ConfigurationSnapshotV1,
+) -> Result<TraceDecayConfig> {
+    snapshot.validate().map_err(|error| {
+        config_error(format!("invalid resolved configuration snapshot: {error}"))
+    })?;
+
+    Ok(TraceDecayConfig {
+        version: 1,
+        root_dir: project_root.to_string_lossy().to_string(),
+        exclude: required_string_list(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
+        include: required_string_list(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
+        max_file_size: required_unsigned(snapshot, INDEX_MAX_FILE_SIZE_SETTING_KEY)?,
+        extract_docstrings: required_bool(snapshot, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY)?,
+        track_call_sites: required_bool(snapshot, INDEX_TRACK_CALL_SITES_SETTING_KEY)?,
+        git_ignore: required_bool(snapshot, INDEX_GIT_IGNORE_SETTING_KEY)?,
+        diagnostics_prewarm: required_bool(snapshot, DIAGNOSTICS_PREWARM_SETTING_KEY)?,
+        sync: SyncConfig {
+            auto_watch: required_bool(snapshot, SYNC_AUTO_WATCH_SETTING_KEY)?,
+            watch_debounce_ms: required_unsigned(snapshot, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY)?,
+            watch_max_delay_ms: required_unsigned(snapshot, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY)?,
+            watch_max_projects: required_usize(snapshot, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY)?,
+            read_refresh: required_bool(snapshot, SYNC_READ_REFRESH_SETTING_KEY)?,
+            read_cooldown_secs: required_unsigned(snapshot, SYNC_READ_COOLDOWN_SECS_SETTING_KEY)?,
+            session_start_sync: required_bool(snapshot, SYNC_SESSION_START_SYNC_SETTING_KEY)?,
+            session_start_stale_threshold_secs: required_unsigned(
+                snapshot,
+                SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+            )?,
+            backstop_interval_mins: required_unsigned(
+                snapshot,
+                SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+            )?,
+            full_sync_escalation_files: required_usize(
+                snapshot,
+                SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+            )?,
+            max_concurrent_syncs: required_usize(snapshot, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY)?,
+            branch_gc_days: required_unsigned(snapshot, SYNC_BRANCH_GC_DAYS_SETTING_KEY)?,
+            orphan_db_gc_days: required_unsigned(snapshot, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY)?,
+            auto_init: required_bool(snapshot, SYNC_AUTO_INIT_SETTING_KEY)?,
+            auto_track_pr_branches: required_bool(
+                snapshot,
+                SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+            )?,
+            auto_track_pr_poll_secs: required_unsigned(
+                snapshot,
+                SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+            )?,
+        },
+        telemetry: TelemetryConfig {
+            timings: required_bool(snapshot, TELEMETRY_TIMINGS_SETTING_KEY)?,
+        },
+    })
+}
+
+fn required_setting<'a>(
+    snapshot: &'a ConfigurationSnapshotV1,
+    key_name: &str,
+) -> Result<&'a ConfigurationValueV1> {
+    let key = SettingKey::new(key_name).map_err(|error| {
+        config_error(format!("invalid runtime setting key '{key_name}': {error}"))
+    })?;
+    snapshot.effective_values.get(&key).ok_or_else(|| {
+        config_error(format!(
+            "resolved configuration snapshot is missing required setting '{key_name}'",
+        ))
+    })
+}
+
+fn required_bool(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<bool> {
+    match required_setting(snapshot, key_name)? {
+        ConfigurationValueV1::Boolean(value) => Ok(*value),
+        value => Err(config_error(format!(
+            "resolved configuration setting '{key_name}' has wrong type: expected boolean, got {:?}",
+            value.kind()
+        ))),
+    }
+}
+
+fn required_unsigned(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<u64> {
+    match required_setting(snapshot, key_name)? {
+        ConfigurationValueV1::Unsigned(value) => Ok(*value),
+        value => Err(config_error(format!(
+            "resolved configuration setting '{key_name}' has wrong type: expected unsigned, got {:?}",
+            value.kind()
+        ))),
+    }
+}
+
+fn required_usize(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<usize> {
+    let value = required_unsigned(snapshot, key_name)?;
+    usize::try_from(value).map_err(|_| {
+        config_error(format!(
+            "resolved configuration setting '{key_name}' does not fit this platform",
+        ))
+    })
+}
+
+fn required_string_list(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<Vec<String>> {
+    match required_setting(snapshot, key_name)? {
+        ConfigurationValueV1::StringList(value) => Ok(value.clone()),
+        value => Err(config_error(format!(
+            "resolved configuration setting '{key_name}' has wrong type: expected string list, got {:?}",
+            value.kind()
+        ))),
+    }
+}
+
+fn direct_mutation_for_runtime_config_diff(
+    project_id: &ProjectId,
+    before: &TraceDecayConfig,
+    after: &TraceDecayConfig,
+) -> Result<Option<crate::application::configuration::DirectConfigurationMutation>> {
+    if before.version != after.version || before.root_dir != after.root_dir {
+        return Err(config_error(
+            "legacy configuration metadata cannot be mutated through the runtime control plane",
+        ));
+    }
+
+    let mut mutations = Vec::new();
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        INDEX_EXCLUDE_SETTING_KEY,
+        ConfigurationValueV1::StringList(before.exclude.clone()),
+        ConfigurationValueV1::StringList(after.exclude.clone()),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        INDEX_INCLUDE_SETTING_KEY,
+        ConfigurationValueV1::StringList(before.include.clone()),
+        ConfigurationValueV1::StringList(after.include.clone()),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        INDEX_MAX_FILE_SIZE_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.max_file_size),
+        ConfigurationValueV1::Unsigned(after.max_file_size),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
+        ConfigurationValueV1::Boolean(before.extract_docstrings),
+        ConfigurationValueV1::Boolean(after.extract_docstrings),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        INDEX_TRACK_CALL_SITES_SETTING_KEY,
+        ConfigurationValueV1::Boolean(before.track_call_sites),
+        ConfigurationValueV1::Boolean(after.track_call_sites),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        INDEX_GIT_IGNORE_SETTING_KEY,
+        ConfigurationValueV1::Boolean(before.git_ignore),
+        ConfigurationValueV1::Boolean(after.git_ignore),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        DIAGNOSTICS_PREWARM_SETTING_KEY,
+        ConfigurationValueV1::Boolean(before.diagnostics_prewarm),
+        ConfigurationValueV1::Boolean(after.diagnostics_prewarm),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_AUTO_WATCH_SETTING_KEY,
+        ConfigurationValueV1::Boolean(before.sync.auto_watch),
+        ConfigurationValueV1::Boolean(after.sync.auto_watch),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.watch_debounce_ms),
+        ConfigurationValueV1::Unsigned(after.sync.watch_debounce_ms),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.watch_max_delay_ms),
+        ConfigurationValueV1::Unsigned(after.sync.watch_max_delay_ms),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_WATCH_MAX_PROJECTS_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.watch_max_projects as u64),
+        ConfigurationValueV1::Unsigned(after.sync.watch_max_projects as u64),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_READ_REFRESH_SETTING_KEY,
+        ConfigurationValueV1::Boolean(before.sync.read_refresh),
+        ConfigurationValueV1::Boolean(after.sync.read_refresh),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.read_cooldown_secs),
+        ConfigurationValueV1::Unsigned(after.sync.read_cooldown_secs),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_SESSION_START_SYNC_SETTING_KEY,
+        ConfigurationValueV1::Boolean(before.sync.session_start_sync),
+        ConfigurationValueV1::Boolean(after.sync.session_start_sync),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.session_start_stale_threshold_secs),
+        ConfigurationValueV1::Unsigned(after.sync.session_start_stale_threshold_secs),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.backstop_interval_mins),
+        ConfigurationValueV1::Unsigned(after.sync.backstop_interval_mins),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.full_sync_escalation_files as u64),
+        ConfigurationValueV1::Unsigned(after.sync.full_sync_escalation_files as u64),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.max_concurrent_syncs as u64),
+        ConfigurationValueV1::Unsigned(after.sync.max_concurrent_syncs as u64),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_BRANCH_GC_DAYS_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.branch_gc_days),
+        ConfigurationValueV1::Unsigned(after.sync.branch_gc_days),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.orphan_db_gc_days),
+        ConfigurationValueV1::Unsigned(after.sync.orphan_db_gc_days),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_AUTO_INIT_SETTING_KEY,
+        ConfigurationValueV1::Boolean(before.sync.auto_init),
+        ConfigurationValueV1::Boolean(after.sync.auto_init),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+        ConfigurationValueV1::Boolean(before.sync.auto_track_pr_branches),
+        ConfigurationValueV1::Boolean(after.sync.auto_track_pr_branches),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+        ConfigurationValueV1::Unsigned(before.sync.auto_track_pr_poll_secs),
+        ConfigurationValueV1::Unsigned(after.sync.auto_track_pr_poll_secs),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        TELEMETRY_TIMINGS_SETTING_KEY,
+        ConfigurationValueV1::Boolean(before.telemetry.timings),
+        ConfigurationValueV1::Boolean(after.telemetry.timings),
+    )?;
+
+    Ok((!mutations.is_empty()).then_some(
+        crate::application::configuration::DirectConfigurationMutation::Batch { mutations },
+    ))
+}
+
+fn push_runtime_change(
+    mutations: &mut Vec<crate::application::configuration::DirectConfigurationMutation>,
+    project_id: &ProjectId,
+    key_name: &str,
+    before: ConfigurationValueV1,
+    after: ConfigurationValueV1,
+) -> Result<()> {
+    if before == after {
+        return Ok(());
+    }
+    let key = SettingKey::new(key_name).map_err(|error| {
+        config_error(format!("invalid runtime setting key '{key_name}': {error}"))
+    })?;
+    mutations.push(
+        crate::application::configuration::DirectConfigurationMutation::Set {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            key,
+            value: after,
+        },
+    );
+    Ok(())
+}
+
+fn config_error(message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: message.into(),
+    }
 }
 
 /// Returns the project marker directory for the given project root.
@@ -581,10 +1291,12 @@ pub async fn get_config_path_with_identity(project_root: &Path) -> PathBuf {
     get_config_path(project_root)
 }
 
-/// Loads the configuration from disk.
+/// Loads a legacy configuration input from disk.
 ///
-/// If the configuration file does not exist, returns a default configuration
-/// with `root_dir` set to the given project root.
+/// This compatibility reader is for migration and read-only diagnostics only;
+/// runtime consumers must use a pinned resolved snapshot. If the file does
+/// not exist, it returns the legacy defaults with `root_dir` set to the given
+/// project root.
 pub fn load_config(project_root: &Path) -> Result<TraceDecayConfig> {
     let config_path = get_config_path(project_root);
     load_config_from_path(project_root, &config_path)
@@ -625,10 +1337,11 @@ pub fn load_config_from_path(project_root: &Path, config_path: &Path) -> Result<
     Ok(config)
 }
 
-/// Saves the configuration to disk using an atomic write.
+/// Writes a legacy configuration fixture using an atomic write.
 ///
-/// Writes to a temporary file first and then renames it to the final location,
-/// ensuring that a partial write never corrupts the configuration.
+/// Production runtime code must use the daemon control plane instead of this
+/// compatibility helper. It remains for fixtures and legacy-input tests while
+/// callers complete their migration.
 pub fn save_config(project_root: &Path, config: &TraceDecayConfig) -> Result<()> {
     let config_path = get_config_path(project_root);
     save_config_to_path(&config_path, config)

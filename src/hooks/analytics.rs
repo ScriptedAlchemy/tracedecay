@@ -138,9 +138,12 @@ impl HookTimingSpan {
         prompt_category: Option<&'static str>,
         payload_bytes: Option<u64>,
     ) -> Self {
+        // Hooks must not synchronously open a store, contact the daemon, or
+        // parse legacy configuration. A daemon-published snapshot is the only
+        // source; absent authority disables optional telemetry fail-closed.
         let enabled = root
-            .map(crate::config::load_telemetry_config)
-            .is_none_or(|telemetry| telemetry.timings);
+            .and_then(|root| crate::config::cached_telemetry_config(root).ok())
+            .is_some_and(|telemetry| telemetry.timings);
         Self {
             root: root.map(Path::to_path_buf),
             agent: agent.as_key(),
@@ -681,6 +684,8 @@ mod tests {
         .unwrap();
         let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
         std::fs::create_dir_all(&layout.data_root).unwrap();
+        crate::config::bootstrap_runtime_configuration(project_root, &layout)
+            .expect("publish hook test runtime configuration");
         layout.data_root
     }
 
@@ -738,6 +743,24 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(untrusted.reason_code.as_deref(), Some("unclassified"));
+    }
+
+    #[test]
+    fn missing_runtime_configuration_disables_timing_span() {
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let span = HookTimingSpan::new(
+            Some(&project_root),
+            HintAgent::Claude,
+            "missingConfiguration",
+            None,
+            None,
+        );
+
+        assert!(
+            !span.enabled,
+            "hook timing must fail closed until the daemon publishes a snapshot"
+        );
     }
 
     #[test]

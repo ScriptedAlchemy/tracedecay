@@ -7,9 +7,9 @@ use tracedecay_application::{
     OperationTermination, ReconciliationState,
 };
 use tracedecay_domain::{
-    GitIndexJournalPhaseV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
-    GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    ManifestDigest, canonical_sha256,
+    GitIndexJournalPhaseV1, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionId, GitIndexTransactionJournalV1, GitIndexTransactionOperationV1,
+    GitIndexTransactionReceiptV1, ManifestDigest, canonical_sha256,
 };
 use tracedecay_policy::{
     GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassificationInputV1,
@@ -54,11 +54,24 @@ pub(crate) struct NativeGitIndexApplyResult {
     pub execution: OperationReceipt,
 }
 
+/// Classification emitted by the fixed native boundary after admission.
+///
+/// `ProvenNoMutation` is safe to turn into an `AbortedNoChange` receipt.
+/// `CommitBoundaryUnknown` means a durable index/ref boundary may have been
+/// crossed, so the coordinator must reconcile once and never replay apply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NativeGitIndexApplyOutcomeV1 {
+    ProvenNoMutation,
+    CommitBoundaryUnknown,
+    Completed(NativeGitIndexApplyResult),
+}
+
 /// Fixed native boundary used by the daemon transaction coordinator.
 ///
 /// Implementations may use only the internal PR11 stage/unstage/commit
-/// adapters. A native error represents an indeterminate post-admission state;
-/// the coordinator quarantines the repository instead of retrying it.
+/// adapters. Every post-admission result is classified so safe failures can
+/// receive an abort receipt while unknown commit-boundary state is reconciled
+/// exactly once rather than replayed.
 pub(crate) trait GitIndexNativeExecutor {
     fn preview(
         &self,
@@ -70,7 +83,12 @@ pub(crate) trait GitIndexNativeExecutor {
         transaction_id: &GitIndexTransactionId,
         preview: &GitIndexPreviewV1,
         request: &GitIndexApplyRequestV1,
-    ) -> Result<NativeGitIndexApplyResult, GitIndexTransactionPortError>;
+    ) -> Result<NativeGitIndexApplyOutcomeV1, GitIndexTransactionPortError>;
+
+    /// Forget process-local preview material without entering a native Git
+    /// boundary. In particular, commit messages, identities, and signing key
+    /// references must not outlive a rejected one-shot apply attempt.
+    fn discard_preview(&self, preview_id: &tracedecay_domain::GitIndexPreviewId);
 }
 
 /// One daemon instance owns the queue, journal transitions, policy recheck,
@@ -110,12 +128,14 @@ where
             .validate()
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
         let result = self.native.preview(request)?;
-        result
-            .validate_for(request)
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        self.store
-            .save_preview(result.preview.clone())
-            .map_err(map_store_error)?;
+        if result.validate_for(request).is_err() {
+            self.native.discard_preview(&result.preview.preview_id);
+            return Err(GitIndexTransactionPortError::StalePreview);
+        }
+        if let Err(error) = self.store.save_preview(result.preview.clone()) {
+            self.native.discard_preview(&result.preview.preview_id);
+            return Err(map_store_error(error));
+        }
         Ok(result)
     }
 
@@ -126,23 +146,30 @@ where
         request
             .validate()
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        let preview = self
-            .store
-            .read_preview(&request.preview_id)
-            .map_err(map_store_error)?
-            .ok_or(GitIndexTransactionPortError::StalePreview)?;
-        preview
-            .validate()
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        if preview.preview_digest != request.preview_digest
-            || preview.is_expired_at(request.observed_at)
-        {
+        let preview = match self.store.read_preview(&request.preview_id) {
+            Ok(Some(preview)) => preview,
+            Ok(None) => {
+                self.native.discard_preview(&request.preview_id);
+                return Err(GitIndexTransactionPortError::StalePreview);
+            }
+            Err(error) => {
+                self.native.discard_preview(&request.preview_id);
+                return Err(map_store_error(error));
+            }
+        };
+        if preview.validate().is_err() {
+            self.native.discard_preview(&request.preview_id);
             return Err(GitIndexTransactionPortError::StalePreview);
         }
         let repository_id = preview.repository_snapshot.repository_id.clone();
-        self.queue
+        let result = self
+            .queue
             .with_repository(&repository_id, || self.apply_serialized(request, &preview))
-            .map_err(map_queue_error)?
+            .map_err(map_queue_error);
+        if result.is_err() {
+            self.native.discard_preview(&request.preview_id);
+        }
+        result?
     }
 
     fn recover(
@@ -175,7 +202,7 @@ where
 impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A>
 where
     S: GitIndexTransactionStore,
-    N: GitIndexNativeExecutor,
+    N: GitIndexNativeExecutor + GitIndexRecoveryExecutor,
     C: GitEffectClassifier,
     A: GitIndexPolicyRecheckPort,
 {
@@ -184,7 +211,6 @@ where
         request: &GitIndexApplyRequestV1,
         preview: &GitIndexPreviewV1,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        self.recheck_policy(request, preview)?;
         let idempotency_key = request
             .native_idempotency_key()
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
@@ -204,62 +230,120 @@ where
             journal,
         };
         let durable = DurableGitIndexJournal::new(&self.store);
-        let record = match durable.begin_or_replay(begin).map_err(map_journal_error)? {
+        let begin = match durable.begin_or_replay(begin) {
+            Ok(begin) => begin,
+            Err(error) => {
+                self.native.discard_preview(&preview.preview_id);
+                return Err(map_journal_error(error));
+            }
+        };
+        let record = match begin {
             GitIndexTransactionBeginResultV1::Replay(receipt) => {
+                self.native.discard_preview(&preview.preview_id);
                 return replay_result(request, &receipt);
+            }
+            GitIndexTransactionBeginResultV1::RecoveryRequired(_) => {
+                self.native.discard_preview(&preview.preview_id);
+                return Err(GitIndexTransactionPortError::RecoveryRequired);
             }
             GitIndexTransactionBeginResultV1::Started(record) => record,
         };
-        let started = durable
-            .advance(
+        // Terminal replay has already returned above. All remaining paths
+        // have admitted a new durable record and therefore must end in an
+        // atomic terminal receipt or a durable quarantine.
+        if request.validate_for_preview(preview).is_err()
+            || self.recheck_policy(request, preview).is_err()
+        {
+            self.native.discard_preview(&preview.preview_id);
+            return finish_aborted_no_change(
+                &self.store,
+                &durable,
                 &idempotency_key,
                 &record.journal,
-                GitIndexJournalPhaseV1::NativeApplyStarted,
-                request.observed_at,
-            )
-            .map_err(map_journal_error)?;
-        let Ok(native) = self.native.apply(&transaction_id, preview, request) else {
-            self.store
-                .quarantine_repository(&preview.repository_snapshot.repository_id, &transaction_id)
-                .map_err(map_store_error)?;
-            return Err(GitIndexTransactionPortError::NeedsInspection);
-        };
-        native
-            .receipt
-            .validate()
-            .map_err(|_| GitIndexTransactionPortError::NeedsInspection)?;
-        if native.receipt.transaction_id != transaction_id
-            || native.receipt.preview_id != preview.preview_id
-            || native.receipt.operation != preview.operation
-        {
-            self.store
-                .quarantine_repository(&preview.repository_snapshot.repository_id, &transaction_id)
-                .map_err(map_store_error)?;
-            return Err(GitIndexTransactionPortError::NeedsInspection);
+                &transaction_id,
+                preview,
+                request,
+            );
         }
-
-        let final_journal = advance_for_native_outcome(
-            &durable,
+        let started = match durable.advance(
             &idempotency_key,
-            &started,
-            native.receipt.outcome,
+            &record.journal,
+            GitIndexJournalPhaseV1::NativeApplyStarted,
             request.observed_at,
-        )
-        .map_err(map_journal_error)?;
-        let receipt = durable
-            .write_terminal(
+        ) {
+            Ok(journal) => journal,
+            Err(_) => {
+                // No native boundary was entered. Prefer a durable no-change
+                // terminal receipt; quarantine only if that safe terminal
+                // write cannot be proven.
+                self.native.discard_preview(&preview.preview_id);
+                return finish_aborted_no_change(
+                    &self.store,
+                    &durable,
+                    &idempotency_key,
+                    &record.journal,
+                    &transaction_id,
+                    preview,
+                    request,
+                )
+                .inspect_err(|_| {
+                    let _ = quarantine_after_admission(&self.store, preview, &transaction_id);
+                });
+            }
+        };
+        match self.native.apply(&transaction_id, preview, request) {
+            Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation) => finish_aborted_no_change(
+                &self.store,
+                &durable,
                 &idempotency_key,
-                &final_journal,
-                native.receipt,
-                request.observed_at,
-            )
-            .map_err(map_journal_error)?;
-        result_from_receipt(
-            request,
-            deterministic_effect_id(&transaction_id)?,
-            receipt,
-            native.execution,
-        )
+                &started,
+                &transaction_id,
+                preview,
+                request,
+            ),
+            Ok(NativeGitIndexApplyOutcomeV1::Completed(native))
+                if native_result_binds_record(&native, &record, &transaction_id) =>
+            {
+                let receipt = terminalize_admitted_receipt(
+                    &self.store,
+                    &durable,
+                    &idempotency_key,
+                    &started,
+                    preview,
+                    &transaction_id,
+                    native.receipt,
+                    request.observed_at,
+                )?;
+                result_from_receipt(
+                    request,
+                    deterministic_effect_id(&transaction_id)?,
+                    receipt,
+                    native.execution,
+                )
+            }
+            Ok(NativeGitIndexApplyOutcomeV1::Completed(_)) => {
+                quarantine_after_admission(&self.store, preview, &transaction_id)?;
+                Err(GitIndexTransactionPortError::NeedsInspection)
+            }
+            Ok(NativeGitIndexApplyOutcomeV1::CommitBoundaryUnknown) | Err(_) => {
+                let mut recovery_record = (*record).clone();
+                recovery_record.journal = started;
+                let receipt = GitIndexRecoveryCoordinator::new(&self.store, &self.native)
+                    .recover_record(&recovery_record, request.observed_at)
+                    .map_err(|_| GitIndexTransactionPortError::NeedsInspection)?;
+                let termination = match receipt.outcome {
+                    GitIndexReceiptOutcomeV1::Committed => EffectTermination::Completed,
+                    GitIndexReceiptOutcomeV1::AbortedNoChange => EffectTermination::Failed,
+                    GitIndexReceiptOutcomeV1::NeedsInspection => EffectTermination::EffectUnknown,
+                };
+                result_from_receipt(
+                    request,
+                    deterministic_effect_id(&transaction_id)?,
+                    receipt,
+                    terminal_execution(request, termination),
+                )
+            }
+        }
     }
 
     fn recheck_policy(
@@ -307,8 +391,8 @@ where
     S: GitIndexTransactionStore,
     N: GitIndexRecoveryExecutor,
 {
-    /// Reconcile every non-terminal durable record before the daemon admits
-    /// any new transaction for the affected repositories.
+    /// Reconcile every unresolved durable record and active quarantine before
+    /// the daemon admits any new transaction for an affected repository.
     pub(crate) fn recover_startup(
         &self,
         observed_at: tracedecay_domain::UtcMicros,
@@ -331,6 +415,118 @@ where
         }
         Ok(receipts)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_aborted_no_change<S>(
+    store: &S,
+    durable: &DurableGitIndexJournal<'_, S>,
+    idempotency_key: &tracedecay_domain::GitIndexIdempotencyKey,
+    journal: &GitIndexTransactionJournalV1,
+    transaction_id: &GitIndexTransactionId,
+    preview: &GitIndexPreviewV1,
+    request: &GitIndexApplyRequestV1,
+) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError>
+where
+    S: GitIndexTransactionStore,
+{
+    let receipt = GitIndexTransactionReceiptV1::new_with_final_snapshot(
+        receipt_id(transaction_id)?,
+        transaction_id.clone(),
+        preview,
+        None,
+        preview.repository_snapshot.index.tree_id.clone(),
+        preview.repository_snapshot.head.commit().cloned(),
+        None,
+        GitIndexReceiptOutcomeV1::AbortedNoChange,
+        request.observed_at,
+    )
+    .map_err(|_| GitIndexTransactionPortError::NeedsInspection)?;
+    let receipt = terminalize_admitted_receipt(
+        store,
+        durable,
+        idempotency_key,
+        journal,
+        preview,
+        transaction_id,
+        receipt,
+        request.observed_at,
+    )?;
+    result_from_receipt(
+        request,
+        deterministic_effect_id(transaction_id)?,
+        receipt,
+        terminal_execution(request, EffectTermination::Failed),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn terminalize_admitted_receipt<S>(
+    store: &S,
+    durable: &DurableGitIndexJournal<'_, S>,
+    idempotency_key: &tracedecay_domain::GitIndexIdempotencyKey,
+    journal: &GitIndexTransactionJournalV1,
+    preview: &GitIndexPreviewV1,
+    transaction_id: &GitIndexTransactionId,
+    receipt: GitIndexTransactionReceiptV1,
+    observed_at: tracedecay_domain::UtcMicros,
+) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError>
+where
+    S: GitIndexTransactionStore,
+{
+    if receipt.outcome == GitIndexReceiptOutcomeV1::NeedsInspection {
+        quarantine_after_admission(store, preview, transaction_id)?;
+    }
+    let final_journal = match advance_for_native_outcome(
+        durable,
+        idempotency_key,
+        journal,
+        receipt.outcome,
+        observed_at,
+    ) {
+        Ok(journal) => journal,
+        Err(_) => {
+            quarantine_after_admission(store, preview, transaction_id)?;
+            return Err(GitIndexTransactionPortError::NeedsInspection);
+        }
+    };
+    match durable.write_terminal(idempotency_key, &final_journal, receipt, observed_at) {
+        Ok(receipt) => Ok(receipt),
+        Err(_) => {
+            quarantine_after_admission(store, preview, transaction_id)?;
+            Err(GitIndexTransactionPortError::NeedsInspection)
+        }
+    }
+}
+
+fn native_result_binds_record(
+    native: &NativeGitIndexApplyResult,
+    record: &tracedecay_store::GitIndexTransactionRecordV1,
+    transaction_id: &GitIndexTransactionId,
+) -> bool {
+    let receipt = &native.receipt;
+    let expected_termination = match receipt.outcome {
+        GitIndexReceiptOutcomeV1::Committed => EffectTermination::Completed,
+        GitIndexReceiptOutcomeV1::AbortedNoChange => EffectTermination::Failed,
+        GitIndexReceiptOutcomeV1::NeedsInspection => EffectTermination::EffectUnknown,
+    };
+    native.execution.validate().is_ok()
+        && native.execution.termination == operation_termination(expected_termination)
+        && receipt.transaction_id == *transaction_id
+        && record.receipt_binds_preview(receipt)
+}
+
+fn quarantine_after_admission<S>(
+    store: &S,
+    preview: &GitIndexPreviewV1,
+    transaction_id: &GitIndexTransactionId,
+) -> Result<(), GitIndexTransactionPortError>
+where
+    S: GitIndexTransactionStore,
+{
+    store
+        .quarantine_repository(&preview.repository_snapshot.repository_id, transaction_id)
+        .map_err(|_| GitIndexTransactionPortError::NeedsInspection)
 }
 
 fn transaction_id(
@@ -360,6 +556,13 @@ fn deterministic_effect_id(
 ) -> Result<EffectId, GitIndexTransactionPortError> {
     EffectId::new(format!("git-index-effect.v1.{}", transaction_id.as_str()))
         .map_err(|_| GitIndexTransactionPortError::StalePreview)
+}
+
+fn receipt_id(
+    transaction_id: &GitIndexTransactionId,
+) -> Result<GitIndexReceiptId, GitIndexTransactionPortError> {
+    GitIndexReceiptId::new(format!("git-index-receipt.v1.{}", transaction_id.as_str()))
+        .map_err(|_| GitIndexTransactionPortError::NeedsInspection)
 }
 
 fn advance_for_native_outcome<S>(

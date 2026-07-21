@@ -1064,7 +1064,7 @@ fn remove_worktree(repo_root: &Path, worktree: &Path) {
 // ---------------------------------------------------------------------------
 
 /// Spawns the PR-autotrack poll loop. Cheap and inert when no registered project
-/// has the feature enabled — each tick only reads per-project config.
+/// has the feature enabled — each tick consults only daemon-published snapshots.
 pub fn spawn(global_db_path: Option<PathBuf>) -> tokio::task::JoinHandle<()> {
     spawn_with_administration(global_db_path, StoreAdministration::default())
 }
@@ -1108,7 +1108,15 @@ async fn tick(
         if !root.is_dir() {
             continue;
         }
-        let cfg = crate::config::load_sync_config(&root);
+        // A poll loop has no right to turn an arbitrary project path into
+        // configuration authority. Missing/pending daemon snapshot means no
+        // poll and, critically, no destructive disabled-state teardown.
+        let Ok(cfg) =
+            crate::config::cached_runtime_configuration_for_project_id(&root, &record.project_id)
+                .map(|configuration| configuration.config.sync)
+        else {
+            continue;
+        };
         let interval = Duration::from_secs(cfg.effective_auto_track_pr_poll_secs());
         let due = last_poll.get(&root).is_none_or(|t| t.elapsed() >= interval);
         if !due {

@@ -6,8 +6,8 @@
 
 use thiserror::Error;
 use tracedecay_domain::{
-    DomainError, GitIndexJournalPhaseV1, GitIndexReceiptOutcomeV1, GitIndexTransactionJournalV1,
-    GitIndexTransactionReceiptV1, RepositoryId, UtcMicros,
+    DomainError, GitIndexJournalPhaseV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, RepositoryId, UtcMicros,
 };
 use tracedecay_store::{
     GitIndexTransactionRecordV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
@@ -56,49 +56,149 @@ where
         let records = self.store.recovery_candidates(repository_id)?;
         let mut receipts = Vec::with_capacity(records.len());
         for record in records {
-            record.validate()?;
-            if let Some(receipt) = &record.terminal_receipt {
-                receipts.push(receipt.clone());
-                continue;
-            }
-            let Ok(receipt) = self.native.reconcile(&record) else {
-                self.store
-                    .quarantine_repository(repository_id, &record.journal.transaction_id)?;
-                return Err(GitIndexRecoveryError::Indeterminate);
-            };
-            if receipt.validate().is_err() {
-                self.store
-                    .quarantine_repository(repository_id, &record.journal.transaction_id)?;
-                return Err(GitIndexRecoveryError::Indeterminate);
-            }
-            if receipt.transaction_id != record.journal.transaction_id
-                || receipt.preview_id != record.preview.preview_id
-                || receipt.operation != record.preview.operation
-            {
-                self.store
-                    .quarantine_repository(repository_id, &record.journal.transaction_id)?;
-                return Err(GitIndexRecoveryError::Indeterminate);
-            }
-            let Ok(preterminal_journal) =
-                advance_to_terminal(self.store, &record, receipt.outcome, observed_at)
-            else {
-                self.store
-                    .quarantine_repository(repository_id, &record.journal.transaction_id)?;
-                return Err(GitIndexRecoveryError::Indeterminate);
-            };
-            let mut terminal_journal = preterminal_journal;
-            terminal_journal.advance(terminal_phase(receipt.outcome), observed_at)?;
-            let write = GitIndexTransactionTerminalWriteV1 {
-                idempotency_key: record.idempotency_key.clone(),
-                expected_phase_epoch: terminal_journal.phase_epoch,
-                journal: terminal_journal,
-                receipt: receipt.clone(),
-            };
-            write.validate()?;
-            receipts.push(self.store.write_terminal(write)?);
+            receipts.push(self.recover_record(&record, observed_at)?);
         }
         Ok(receipts)
     }
+
+    /// Reconcile exactly one durable record. This is shared by startup and an
+    /// admitted transaction whose native boundary became ambiguous; neither
+    /// caller is allowed to invoke native apply a second time.
+    pub(crate) fn recover_record(
+        &self,
+        record: &GitIndexTransactionRecordV1,
+        observed_at: UtcMicros,
+    ) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError> {
+        record.validate()?;
+
+        if let Some(original_receipt) = &record.terminal_receipt {
+            if original_receipt.outcome != GitIndexReceiptOutcomeV1::NeedsInspection {
+                return Ok(original_receipt.clone());
+            }
+            let proof = self.reconcile_or_quarantine(record, observed_at)?;
+            // A terminal inspection receipt has no post-boundary phase that
+            // can distinguish a coincidental candidate from our mutation.
+            // Exact restoration to the old snapshot is the only automatic
+            // clear proof; any apparent commit remains quarantined for human
+            // inspection rather than overwriting immutable terminal truth.
+            if proof.outcome != GitIndexReceiptOutcomeV1::AbortedNoChange
+                || !receipt_binds_record(&proof, record)
+            {
+                quarantine(self.store, record)?;
+                return Err(GitIndexRecoveryError::Indeterminate);
+            }
+            let proof = recovery_proof_at(&proof, record, observed_at)?;
+            self.store.clear_repository_quarantine(
+                &record.journal.repository_id,
+                &record.journal.transaction_id,
+                proof.clone(),
+            )?;
+            return Ok(proof);
+        }
+
+        let receipt = self.reconcile_or_quarantine(record, observed_at)?;
+        if !receipt_binds_record(&receipt, record) {
+            quarantine(self.store, record)?;
+            return Err(GitIndexRecoveryError::Indeterminate);
+        }
+        let receipt = recovery_proof_at(&receipt, record, observed_at)?;
+
+        let preterminal =
+            match advance_to_terminal(self.store, record, receipt.outcome, observed_at) {
+                Ok(journal) => journal,
+                Err(_) => {
+                    quarantine(self.store, record)?;
+                    return Err(GitIndexRecoveryError::Indeterminate);
+                }
+            };
+        if receipt.outcome == GitIndexReceiptOutcomeV1::NeedsInspection {
+            // Persist the blocking truth first. If the subsequent atomic
+            // receipt write fails, the repository still remains fenced.
+            quarantine(self.store, record)?;
+        }
+        let mut terminal_journal = preterminal;
+        if terminal_journal
+            .advance(terminal_phase(receipt.outcome), observed_at)
+            .is_err()
+        {
+            quarantine(self.store, record)?;
+            return Err(GitIndexRecoveryError::Indeterminate);
+        }
+        let write = GitIndexTransactionTerminalWriteV1 {
+            idempotency_key: record.idempotency_key.clone(),
+            expected_phase_epoch: terminal_journal.phase_epoch,
+            journal: terminal_journal,
+            receipt: receipt.clone(),
+        };
+        if write.validate().is_err() {
+            quarantine(self.store, record)?;
+            return Err(GitIndexRecoveryError::Indeterminate);
+        }
+        match self.store.write_terminal(write) {
+            Ok(stored) => Ok(stored),
+            Err(_) => {
+                quarantine(self.store, record)?;
+                Err(GitIndexRecoveryError::Indeterminate)
+            }
+        }
+    }
+
+    fn reconcile_or_quarantine(
+        &self,
+        record: &GitIndexTransactionRecordV1,
+        observed_at: UtcMicros,
+    ) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError> {
+        match self.native.reconcile(record) {
+            Ok(receipt) => Ok(receipt),
+            Err(_) => {
+                quarantine(self.store, record)?;
+                unobserved_needs_inspection(record, observed_at)
+            }
+        }
+    }
+}
+
+fn recovery_proof_at(
+    proof: &GitIndexTransactionReceiptV1,
+    record: &GitIndexTransactionRecordV1,
+    observed_at: UtcMicros,
+) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError> {
+    GitIndexTransactionReceiptV1::new_with_final_snapshot(
+        proof.receipt_id.clone(),
+        record.journal.transaction_id.clone(),
+        &record.preview,
+        proof
+            .final_snapshot_captured
+            .then(|| proof.final_snapshot_digest.clone()),
+        proof.new_index_tree.clone(),
+        proof.new_head.clone(),
+        proof.created_commit.clone(),
+        proof.outcome,
+        observed_at,
+    )
+    .map_err(GitIndexRecoveryError::Domain)
+}
+
+fn unobserved_needs_inspection(
+    record: &GitIndexTransactionRecordV1,
+    observed_at: UtcMicros,
+) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError> {
+    let receipt_id = GitIndexReceiptId::new(format!(
+        "git-index-receipt.v1.{}",
+        record.journal.transaction_id.as_str()
+    ))?;
+    GitIndexTransactionReceiptV1::new_with_final_snapshot(
+        receipt_id,
+        record.journal.transaction_id.clone(),
+        &record.preview,
+        None,
+        record.preview.repository_snapshot.index.tree_id.clone(),
+        record.preview.repository_snapshot.head.commit().cloned(),
+        None,
+        GitIndexReceiptOutcomeV1::NeedsInspection,
+        observed_at,
+    )
+    .map_err(GitIndexRecoveryError::Domain)
 }
 
 fn advance_to_terminal<S>(
@@ -111,36 +211,17 @@ where
     S: GitIndexTransactionStore,
 {
     let mut journal = record.journal.clone();
+    if !journal
+        .phase
+        .permits_recovered_outcome(journal.operation, outcome)
+    {
+        return Err(GitIndexRecoveryError::Indeterminate);
+    }
     let phases: &[GitIndexJournalPhaseV1] = match outcome {
         GitIndexReceiptOutcomeV1::AbortedNoChange | GitIndexReceiptOutcomeV1::NeedsInspection => {
             &[]
         }
         GitIndexReceiptOutcomeV1::Committed => match journal.phase {
-            GitIndexJournalPhaseV1::NativeApplyStarted => {
-                if journal.operation
-                    == tracedecay_domain::GitIndexTransactionOperationV1::CommitIndex
-                {
-                    &[
-                        GitIndexJournalPhaseV1::IndexCommitted,
-                        GitIndexJournalPhaseV1::RefCommitted,
-                        GitIndexJournalPhaseV1::Verifying,
-                    ]
-                } else {
-                    &[
-                        GitIndexJournalPhaseV1::IndexCommitted,
-                        GitIndexJournalPhaseV1::Verifying,
-                    ]
-                }
-            }
-            GitIndexJournalPhaseV1::IndexCommitted
-                if journal.operation
-                    == tracedecay_domain::GitIndexTransactionOperationV1::CommitIndex =>
-            {
-                &[
-                    GitIndexJournalPhaseV1::RefCommitted,
-                    GitIndexJournalPhaseV1::Verifying,
-                ]
-            }
             GitIndexJournalPhaseV1::IndexCommitted | GitIndexJournalPhaseV1::RefCommitted => {
                 &[GitIndexJournalPhaseV1::Verifying]
             }
@@ -159,6 +240,27 @@ where
         )?;
     }
     Ok(journal)
+}
+
+fn receipt_binds_record(
+    receipt: &GitIndexTransactionReceiptV1,
+    record: &GitIndexTransactionRecordV1,
+) -> bool {
+    record.receipt_binds_preview(receipt)
+}
+
+fn quarantine<S>(
+    store: &S,
+    record: &GitIndexTransactionRecordV1,
+) -> Result<(), GitIndexRecoveryError>
+where
+    S: GitIndexTransactionStore,
+{
+    store.quarantine_repository(
+        &record.journal.repository_id,
+        &record.journal.transaction_id,
+    )?;
+    Ok(())
 }
 
 const fn terminal_phase(outcome: GitIndexReceiptOutcomeV1) -> GitIndexJournalPhaseV1 {

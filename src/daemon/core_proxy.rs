@@ -235,7 +235,12 @@ pub(crate) async fn resolve_daemon_initialize_route(
             });
         }
         if let Some(git_root) = crate::worktree::git_worktree_root(&root) {
-            let allow_init = crate::config::load_sync_config(&git_root).auto_init;
+            // An initialize route has no retained configuration authority.
+            // Never revive legacy-file fallback here: absent a published
+            // snapshot, auto-init stays disabled.
+            let allow_init = crate::config::cached_sync_config(&git_root)
+                .map(|config| config.auto_init)
+                .unwrap_or(false);
             return Some(InitializeRouteMetadata {
                 project_path: git_root,
                 allow_init,

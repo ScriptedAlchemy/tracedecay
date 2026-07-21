@@ -10,6 +10,7 @@ use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
+use super::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 #[cfg(unix)]
 use super::memory_repair_scheduler::MemoryRepairSchedulerHandle;
 use super::profile_host_admission_replay::ProfileHostAdmissionReplayRegistry;
@@ -277,6 +278,7 @@ pub(super) struct StoreAdministration {
     memory_repair_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, MemoryRepairSchedulerHandle>>>,
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
+    git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
     #[cfg(unix)]
     retirement_reapers: Arc<MaintenanceReaperRegistry>,
     #[cfg(test)]
@@ -298,6 +300,9 @@ impl Default for StoreAdministration {
             memory_repair_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             session_temporal_refresh_schedulers: Arc::new(
                 SessionTemporalRefreshSchedulerRegistry::default(),
+            ),
+            git_index_transaction_services: Arc::new(
+                DaemonGitIndexTransactionServiceRegistry::default(),
             ),
             #[cfg(unix)]
             retirement_reapers: Arc::new(MaintenanceReaperRegistry::default()),
@@ -491,6 +496,12 @@ impl StoreAdministration {
         &self,
     ) -> &Arc<SessionTemporalRefreshSchedulerRegistry> {
         &self.session_temporal_refresh_schedulers
+    }
+
+    pub(super) fn git_index_transaction_services(
+        &self,
+    ) -> &Arc<DaemonGitIndexTransactionServiceRegistry> {
+        &self.git_index_transaction_services
     }
 
     #[cfg(unix)]
@@ -714,7 +725,12 @@ impl StoreAdministration {
                 })?;
         let layout =
             crate::storage::resolve_layout(project_root, &handshake.client_identity.profile_root)?;
-        let config = crate::config::load_sync_config(project_root);
+        // Branch administration receives only a daemon-published pinned
+        // snapshot. A missing configuration authority fails before any
+        // destructive store action; it must not consult legacy config input.
+        let config = crate::config::runtime_configuration_for_layout(project_root, &layout)?
+            .config
+            .sync;
         self.execute_branch_admin_in_layout(
             project_root,
             &layout.data_root,

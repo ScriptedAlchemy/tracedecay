@@ -1,4 +1,4 @@
-//! Additive SQLite schema for the revisioned configuration control plane.
+//! Additive `SQLite` schema for the revisioned configuration control plane.
 
 use thiserror::Error;
 
@@ -18,7 +18,10 @@ const CONFIGURATION_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS configuration_revisions (
     revision_id TEXT PRIMARY KEY,
     parent_revision_id TEXT,
-    snapshot_id TEXT NOT NULL UNIQUE,
+    -- A forward rollback can intentionally reproduce a prior immutable
+    -- snapshot under a new revision, so snapshot identity is not revision
+    -- identity and must not be globally unique.
+    snapshot_id TEXT NOT NULL,
     effective_behavior_digest TEXT NOT NULL,
     resolution_provenance_digest TEXT NOT NULL,
     actor_id TEXT NOT NULL,
@@ -208,6 +211,14 @@ CREATE TABLE IF NOT EXISTS configuration_audit_events (
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 
+-- One store-local key makes event-scoped target commitments resistant to
+-- offline guessing. It is never returned by the configuration APIs.
+CREATE TABLE IF NOT EXISTS configuration_audit_redaction_keys (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    key_material BLOB NOT NULL CHECK (length(key_material) = 32),
+    created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS configuration_migration_quarantine (
     source_kind TEXT NOT NULL,
     source_key_digest TEXT NOT NULL,
@@ -234,6 +245,26 @@ CREATE TABLE IF NOT EXISTS configuration_credential_references (
     rotation INTEGER NOT NULL
 );
 
+-- Activation is append-only evidence. The latest row per component exposes
+-- desired versus observed state, while a failed activation keeps the prior
+-- last-working revision rather than rewriting runtime history.
+CREATE TABLE IF NOT EXISTS configuration_component_activation_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    component TEXT NOT NULL,
+    desired_revision_id TEXT NOT NULL,
+    observed_revision_id TEXT,
+    last_working_revision_id TEXT,
+    restart_required INTEGER NOT NULL CHECK (restart_required IN (0, 1)),
+    activation_error_code TEXT,
+    occurred_at INTEGER NOT NULL,
+    FOREIGN KEY(desired_revision_id) REFERENCES configuration_revisions(revision_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(observed_revision_id) REFERENCES configuration_revisions(revision_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(last_working_revision_id) REFERENCES configuration_revisions(revision_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+
 CREATE INDEX IF NOT EXISTS idx_configuration_revision_parent
     ON configuration_revisions(parent_revision_id);
 CREATE INDEX IF NOT EXISTS idx_configuration_entry_key
@@ -246,6 +277,8 @@ CREATE INDEX IF NOT EXISTS idx_configuration_topology_protected_ref
     ON configuration_topology_protected_refs(selector_digest);
 CREATE INDEX IF NOT EXISTS idx_configuration_audit_occurred_at
     ON configuration_audit_events(occurred_at, event_id);
+CREATE INDEX IF NOT EXISTS idx_configuration_component_activation_latest
+    ON configuration_component_activation_events(component, event_id DESC);
 
 CREATE TRIGGER IF NOT EXISTS configuration_revisions_immutable_update
 BEFORE UPDATE ON configuration_revisions
@@ -319,6 +352,12 @@ BEGIN SELECT RAISE(ABORT, 'configuration audit events are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_audit_events_immutable_delete
 BEFORE DELETE ON configuration_audit_events
 BEGIN SELECT RAISE(ABORT, 'configuration audit events are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_audit_redaction_keys_immutable_update
+BEFORE UPDATE ON configuration_audit_redaction_keys
+BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_audit_redaction_keys_immutable_delete
+BEFORE DELETE ON configuration_audit_redaction_keys
+BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_migration_quarantine_immutable_update
 BEFORE UPDATE ON configuration_migration_quarantine
 BEGIN SELECT RAISE(ABORT, 'configuration migration quarantine is immutable'); END;
@@ -337,6 +376,12 @@ BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); 
 CREATE TRIGGER IF NOT EXISTS configuration_credential_references_immutable_delete
 BEFORE DELETE ON configuration_credential_references
 BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_component_activation_events_immutable_update
+BEFORE UPDATE ON configuration_component_activation_events
+BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_component_activation_events_immutable_delete
+BEFORE DELETE ON configuration_component_activation_events
+BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutable'); END;
 ";
 
 pub async fn ensure_configuration_schema(
@@ -416,7 +461,9 @@ mod tests {
                  INSERT INTO configuration_audit_events VALUES
                     ('audit.1', 'actor.1', NULL, 'migration', 'revision.1', 'revision.1', NULL,
                      'sha256:7777777777777777777777777777777777777777777777777777777777777777',
-                     NULL, NULL, NULL, 1);
+                      NULL, NULL, NULL, 1);
+                  INSERT INTO configuration_audit_redaction_keys VALUES
+                     (1, zeroblob(32), 1);
                  INSERT INTO configuration_migration_quarantine VALUES
                     ('config_json',
                      'sha256:8888888888888888888888888888888888888888888888888888888888888888',
@@ -428,28 +475,30 @@ mod tests {
                      'revision.1', 'snapshot.1', 1);
                  INSERT INTO configuration_credential_references VALUES
                     ('credential.1', 'api_token',
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac', 1, 0);",
+                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac', 1, 0);
+                 INSERT INTO configuration_component_activation_events (
+                    component, desired_revision_id, observed_revision_id,
+                    last_working_revision_id, restart_required, activation_error_code, occurred_at
+                 ) VALUES ('gateway', 'revision.1', 'revision.1', 'revision.1', 0, NULL, 1);",
             )
             .await
             .unwrap();
 
-        let tables = [
-            "configuration_revisions",
-            "configuration_entries",
-            "configuration_topology_policies",
-            "configuration_topology_roots",
-            "configuration_topology_protected_refs",
-            "configuration_source_bindings",
-            "configuration_access_rules",
-            "configuration_change_plans",
-            "configuration_change_plan_operations",
-            "configuration_change_plan_events",
-            "configuration_mutation_receipts",
-            "configuration_audit_events",
-            "configuration_migration_quarantine",
-            "configuration_migration_receipts",
-            "configuration_credential_references",
-        ];
+        let mut rows = connection
+            .query(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name LIKE 'configuration_%'
+                 ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut tables = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            tables.push(row.get::<String>(0).unwrap());
+        }
+        drop(rows);
+        assert!(!tables.is_empty());
         for table in tables {
             assert!(
                 connection

@@ -482,10 +482,11 @@ impl McpServer {
             .flatten()
         };
 
-        // Resolve the [sync] config once (D1/D4/D7 all read it). Loading it
-        // here keeps the per-call read path free of config-file IO.
-        let sync_config = crate::config::load_sync_config(cg.project_root());
-        let telemetry_config = crate::config::load_telemetry_config(cg.project_root());
+        // `TraceDecay` materializes this from one resolved configuration
+        // snapshot when it opens. Copy it once so D1/D4/D7 and telemetry
+        // never re-read legacy input, a database, or IPC per call.
+        let sync_config = cg.get_config().sync.clone();
+        let telemetry_config = cg.get_config().telemetry.clone();
         let code_diagnostics_settings =
             crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
                 .await

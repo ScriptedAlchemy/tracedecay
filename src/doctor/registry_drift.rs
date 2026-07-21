@@ -59,9 +59,9 @@ pub(super) async fn registry_drift_findings(
                     field: "project_root",
                     registry_value: project.canonical_root.clone(),
                     manifest_value: manifest_project_root.display().to_string(),
-                    manifest_path,
-                    manifest,
-                    registry_path: Some(registry_project_root),
+                    manifest_path: manifest_path.clone(),
+                    manifest: manifest.clone(),
+                    registry_path: Some(registry_project_root.clone()),
                 });
             }
         }
@@ -138,55 +138,20 @@ fn reconcile_one_store_root(
         manifest_rewritten = true;
     }
 
-    let config_path = finding
-        .manifest_path
-        .parent()
-        .map(|parent| parent.join(crate::config::CONFIG_FILENAME));
-    let mut config_rewritten = None;
-    let mut warning = None;
-    if let Some(config_path) = config_path
-        && config_path.is_file()
-    {
-        match reconcile_config_root_dir(&config_path, canonical) {
-            Ok(true) => config_rewritten = Some(config_path),
-            Ok(false) => {}
-            Err(message) => {
-                if manifest_rewritten {
-                    warning = Some(message);
-                } else {
-                    return Err(message);
-                }
-            }
-        }
-    }
-
-    if !manifest_rewritten && config_rewritten.is_none() {
-        return Ok((None, warning));
+    if !manifest_rewritten {
+        return Ok((None, None));
     }
 
     Ok((
         Some(ReconciledStoreRoot {
             store_id: finding.store_id.clone(),
             manifest_path: finding.manifest_path.clone(),
-            config_path: config_rewritten,
+            // `config.json` is read-only legacy migration input. Its root
+            // metadata is neither drift authority nor a repair target.
+            config_path: None,
         }),
-        warning,
+        None,
     ))
-}
-
-fn reconcile_config_root_dir(
-    config_path: &Path,
-    canonical: &Path,
-) -> std::result::Result<bool, String> {
-    let mut config = crate::config::load_config_from_path(canonical, config_path)
-        .map_err(|e| format!("could not read config '{}': {e}", config_path.display()))?;
-    if Path::new(&config.root_dir) == canonical {
-        return Ok(false);
-    }
-    config.root_dir = canonical.display().to_string();
-    crate::config::save_config_to_path(config_path, &config)
-        .map_err(|e| format!("could not rewrite config '{}': {e}", config_path.display()))?;
-    Ok(true)
 }
 
 fn resolve_registry_manifest_path(
@@ -344,7 +309,6 @@ mod tests {
             .filter(|f| f.field == "project_root")
             .collect();
         assert_eq!(root_drift.len(), 1, "should detect project_root drift");
-
         assert_eq!(manifest_root(&fx.manifest_path), fx.stale_root);
         assert_eq!(
             config_root_dir(&fx.config_path),
@@ -356,21 +320,27 @@ mod tests {
     async fn reconcile_rewrites_then_is_idempotent() {
         let fx = build_fixture().await;
         let canonical = fx.current_root.canonicalize().unwrap();
+        let legacy_config_before = std::fs::read_to_string(&fx.config_path).unwrap();
 
         let (reconciled, warnings) =
             reconcile_drifted_store_roots(&fx.global_db, &fx.profile_root).await;
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert_eq!(reconciled.len(), 1, "one store should be reconciled");
         assert_eq!(reconciled[0].store_id, STORE_ID);
-        assert!(
-            reconciled[0].config_path.is_some(),
-            "stale config should be reconciled too"
+        assert_eq!(
+            reconciled[0].config_path, None,
+            "legacy config input must not be reconciled or rewritten"
         );
 
         assert_eq!(manifest_root(&fx.manifest_path), canonical);
         assert_eq!(
             config_root_dir(&fx.config_path),
-            canonical.to_string_lossy()
+            fx.stale_root.to_string_lossy()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&fx.config_path).unwrap(),
+            legacy_config_before,
+            "manifest reconciliation must not write config.json"
         );
 
         let healed = crate::storage::read_store_manifest(&fx.manifest_path).unwrap();
@@ -385,7 +355,6 @@ mod tests {
             post.iter().all(|f| f.field != "project_root"),
             "project_root drift should be resolved: {post:?}"
         );
-
         let (again, warnings) =
             reconcile_drifted_store_roots(&fx.global_db, &fx.profile_root).await;
         assert!(again.is_empty(), "second run must be a no-op: {again:?}");
@@ -396,7 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manifest_reconcile_is_reported_when_config_rewrite_fails() {
+    async fn manifest_reconcile_does_not_read_or_rewrite_legacy_config_input() {
         let fx = build_fixture().await;
         let canonical = fx.current_root.canonicalize().unwrap();
         std::fs::write(&fx.config_path, "{ not json").unwrap();
@@ -415,13 +384,16 @@ mod tests {
         );
         assert_eq!(
             reconciled[0].config_path, None,
-            "failed config rewrite must not be reported as reconciled"
+            "legacy config input must not be reported as reconciled"
         );
         assert_eq!(manifest_root(&fx.manifest_path), canonical);
-        assert_eq!(warnings.len(), 1, "config failure should still be surfaced");
         assert!(
-            warnings[0].contains("could not read config"),
-            "unexpected warning: {warnings:?}"
+            warnings.is_empty(),
+            "invalid read-only legacy input must not block manifest reconciliation: {warnings:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&fx.config_path).unwrap(),
+            "{ not json"
         );
     }
 

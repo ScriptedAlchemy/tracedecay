@@ -12,12 +12,13 @@ pub use authorization::{
 pub use operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
 pub use ports::{
     ConfigurationClock, ConfigurationControlStore, ConfigurationCurrentStateV1,
-    ConfigurationMutationAuthorizationPort, CredentialWritePort,
+    ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture, CredentialWritePort,
     CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
 pub use types::{
-    AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
-    ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
-    ConfigurationPlanContext, ConfigurationRollbackRequest, DirectConfigurationMutation,
+    AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
+    ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
+    ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationPlanContext,
+    ConfigurationRollbackRequest, CredentialWriteHandleV1, DirectConfigurationMutation,
     ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
 };

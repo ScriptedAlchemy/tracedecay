@@ -1,20 +1,39 @@
 mod common;
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::future::Future;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use tracedecay_application::feedback::{
-    FeedbackBudgetUsage, FeedbackCycleControl, FeedbackCycleDedupePort, FeedbackCycleDedupeState,
+    FeedbackBudgetUsage, FeedbackCompletedPublicationV1, FeedbackCycleControl,
+    FeedbackCycleDedupePort, FeedbackCycleDedupePublicationState, FeedbackCycleDedupeState,
     FeedbackCycleExecutionRequest, FeedbackCycleExecutionResult, FeedbackCycleService,
     FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
     FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
+    FeedbackRuntimeStatePort, FeedbackRuntimeStateV1, GenerationBoundFeedbackDiagnosticsAdapter,
+    GraphImpactFeedbackAdapter,
+};
+use tracedecay_application::retrieval::{
+    AffectedTestsRequest, AffectedTestsResult, AffectedTestsRetrievalPort, GraphImpactRequest,
+    GraphImpactResult, GraphImpactRetrievalPort, RetrievalPortContext, RetrievalPortOutcome,
 };
 use tracedecay_application::{
-    AuthorizationService, CancellationContext, Deadline, DiagnosticProviderDescriptor,
-    DiagnosticProviderIdentity, DiagnosticProviderIdentityParts, DiagnosticProviderResult,
-    DiagnosticProviderState, ProviderCoverage, ProviderDocumentIdentity, ProviderFreshness,
-    ProviderOrigin, ProviderProvenance, ProviderSourceIdentity, RequestContext, RevisionDigest,
+    AnalyzerAdmittedDiagnosticProviderV1, AuthorizationService, CancellationContext,
+    CurrentDiagnosticsRequest, Deadline, DiagnosticProviderDescriptor, DiagnosticProviderIdentity,
+    DiagnosticProviderIdentityParts, DiagnosticProviderPort, DiagnosticProviderResult,
+    DiagnosticProviderState, FreshnessState, GenerationDiagnosticHistoryPort,
+    GenerationDiagnosticHistoryRequest, ProviderCoverage, ProviderDocumentIdentity,
+    ProviderFreshness, ProviderOrigin, ProviderProvenance, ProviderSourceIdentity, RequestContext,
+    RevisionDigest,
+};
+use tracedecay_domain::configuration::{
+    AnalyzerExecutableId, AnalyzerExecutableReferenceV1, AnalyzerLanguageId,
+    AnalyzerLanguageSelectionV1, AnalyzerPrivacyClassV1, AnalyzerResourceLimitsV1,
+    AnalyzerRestartPolicyV1, AnalyzerSettingsV1,
 };
 use tracedecay_domain::feedback::{
     FeedbackActorContextV1, FeedbackAuthoritativeRuntimeStateV1, FeedbackBaselineHorizonV1,
@@ -33,12 +52,47 @@ use tracedecay_domain::{
     LanguageDescriptorRevision, LanguageId, ProviderId, RefId, RepositoryId, RetrievalAnchorId,
     SessionId, SourceSpan, SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
+use tracedecay_policy::analyzer::{
+    AnalyzerAdmissionEvaluatorV1, AnalyzerAdmissionInputV1, AnalyzerAvailabilityV1,
+    AnalyzerCandidateV1, AnalyzerExecutionLocationV1,
+};
 use tracedecay_policy::authorization::SourceAuthorizationEvaluatorV1;
 use tracedecay_tool_catalog::CapabilityId;
 
 const GENERATION: &str = "generation.v1.fixture.00000001";
 const FILE: &str = "file.feedback.fixture";
 const SYMBOL: &str = "symbol.feedback.fixture";
+
+#[allow(dead_code)]
+fn application_feedback_ports_are_object_safe(
+    runtime: &dyn FeedbackRuntimeStatePort,
+    diagnostics: &dyn FeedbackDiagnosticsPort,
+    impact: &dyn FeedbackImpactPort,
+    dedupe: &dyn FeedbackCycleDedupePort,
+    observations: &dyn FeedbackObservationPort,
+) {
+    let _ = (runtime, diagnostics, impact, dedupe, observations);
+}
+
+#[allow(dead_code)]
+fn application_feedback_evidence_ports_are_object_safe(
+    provider: &dyn DiagnosticProviderPort,
+    history: &dyn GenerationDiagnosticHistoryPort,
+    graph: &dyn GraphImpactRetrievalPort,
+    tests: &dyn AffectedTestsRetrievalPort,
+) {
+    let _ = (provider, history, graph, tests);
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = Box::pin(future);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("feedback fixture futures must complete immediately"),
+    }
+}
 
 #[derive(Clone)]
 struct DiagnosticsFixture {
@@ -47,23 +101,66 @@ struct DiagnosticsFixture {
 }
 
 impl FeedbackDiagnosticsPort for DiagnosticsFixture {
-    fn diagnostics(
-        &self,
-        _request: &FeedbackDiagnosticsRequest,
-    ) -> Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>> {
+    fn diagnostics<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a FeedbackDiagnosticsRequest,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<
+        'a,
+        Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>>,
+    > {
         self.calls.set(self.calls.get() + 1);
-        self.results.clone()
+        let results = self.results.clone();
+        Box::pin(async move { results })
     }
 
-    fn diagnostic_history(
-        &self,
-        request: &FeedbackDiagnosticsRequest,
-    ) -> Vec<FeedbackDiagnosticBaselineV1> {
-        request
+    fn diagnostic_history<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        request: &'a FeedbackDiagnosticsRequest,
+        _runtime: &'a FeedbackRuntimeStateV1,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, Vec<FeedbackDiagnosticBaselineV1>>
+    {
+        let baselines = request
             .providers
             .iter()
             .map(|provider| matching_baseline(&request.input, provider, Vec::new()))
-            .collect()
+            .collect();
+        Box::pin(async move { baselines })
+    }
+}
+
+#[derive(Clone)]
+struct GenerationDiagnosticsSourceFixture {
+    current_calls: Arc<AtomicUsize>,
+    history_calls: Arc<AtomicUsize>,
+    current: DiagnosticProviderResult<Vec<GenerationDiagnosticV1>>,
+    history: DiagnosticProviderResult<Vec<GenerationDiagnosticV1>>,
+}
+
+impl DiagnosticProviderPort for GenerationDiagnosticsSourceFixture {
+    fn current_diagnostics<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a CurrentDiagnosticsRequest,
+    ) -> tracedecay_application::DiagnosticProviderFuture<'a, Vec<GenerationDiagnosticV1>> {
+        Box::pin(async move {
+            self.current_calls.fetch_add(1, Ordering::Relaxed);
+            self.current.clone()
+        })
+    }
+}
+
+impl GenerationDiagnosticHistoryPort for GenerationDiagnosticsSourceFixture {
+    fn diagnostics_for_generation<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a GenerationDiagnosticHistoryRequest,
+    ) -> tracedecay_application::DiagnosticProviderFuture<'a, Vec<GenerationDiagnosticV1>> {
+        Box::pin(async move {
+            self.history_calls.fetch_add(1, Ordering::Relaxed);
+            self.history.clone()
+        })
     }
 }
 
@@ -76,20 +173,29 @@ struct HistoryDiagnosticsFixture {
 }
 
 impl FeedbackDiagnosticsPort for HistoryDiagnosticsFixture {
-    fn diagnostics(
-        &self,
-        _request: &FeedbackDiagnosticsRequest,
-    ) -> Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>> {
+    fn diagnostics<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a FeedbackDiagnosticsRequest,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<
+        'a,
+        Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>>,
+    > {
         self.calls.set(self.calls.get() + 1);
-        self.results.clone()
+        let results = self.results.clone();
+        Box::pin(async move { results })
     }
 
-    fn diagnostic_history(
-        &self,
-        _request: &FeedbackDiagnosticsRequest,
-    ) -> Vec<FeedbackDiagnosticBaselineV1> {
+    fn diagnostic_history<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a FeedbackDiagnosticsRequest,
+        _runtime: &'a FeedbackRuntimeStateV1,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, Vec<FeedbackDiagnosticBaselineV1>>
+    {
         self.history_calls.set(self.history_calls.get() + 1);
-        self.baselines.clone()
+        let baselines = self.baselines.clone();
+        Box::pin(async move { baselines })
     }
 }
 
@@ -100,8 +206,47 @@ struct ImpactFixture {
 }
 
 impl FeedbackImpactPort for ImpactFixture {
-    fn impact(&self, _request: &FeedbackImpactRequest) -> FeedbackImpactPortOutcome {
+    fn impact<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a FeedbackImpactRequest,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, FeedbackImpactPortOutcome> {
         self.calls.set(self.calls.get() + 1);
+        let outcome = self.outcome.clone();
+        Box::pin(async move { outcome })
+    }
+}
+
+#[derive(Clone)]
+struct GraphImpactSourceFixture {
+    calls: Arc<AtomicUsize>,
+    outcome: RetrievalPortOutcome<GraphImpactResult>,
+}
+
+impl GraphImpactRetrievalPort for GraphImpactSourceFixture {
+    fn graph_impact(
+        &self,
+        _context: &RetrievalPortContext<'_>,
+        _request: &GraphImpactRequest,
+    ) -> RetrievalPortOutcome<GraphImpactResult> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.outcome.clone()
+    }
+}
+
+#[derive(Clone)]
+struct AffectedTestsImpactSourceFixture {
+    calls: Arc<AtomicUsize>,
+    outcome: RetrievalPortOutcome<AffectedTestsResult>,
+}
+
+impl AffectedTestsRetrievalPort for AffectedTestsImpactSourceFixture {
+    fn affected_tests(
+        &self,
+        _context: &RetrievalPortContext<'_>,
+        _request: &AffectedTestsRequest,
+    ) -> RetrievalPortOutcome<AffectedTestsResult> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
         self.outcome.clone()
     }
 }
@@ -109,11 +254,22 @@ impl FeedbackImpactPort for ImpactFixture {
 struct DedupeFixture(FeedbackCycleDedupeState);
 
 impl FeedbackCycleDedupePort for DedupeFixture {
-    fn check(
-        &self,
-        _key: &tracedecay_domain::feedback::FeedbackDedupeKeyV1,
-    ) -> FeedbackCycleDedupeState {
-        self.0
+    fn lookup_completed<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _key: &'a tracedecay_domain::feedback::FeedbackDedupeKeyV1,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupeState> {
+        let state = self.0;
+        Box::pin(async move { state })
+    }
+
+    fn record_completed<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _publication: &'a FeedbackCompletedPublicationV1,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupePublicationState>
+    {
+        Box::pin(async { FeedbackCycleDedupePublicationState::Recorded })
     }
 }
 
@@ -124,12 +280,140 @@ struct RecordingDedupeFixture {
 }
 
 impl FeedbackCycleDedupePort for RecordingDedupeFixture {
-    fn check(
-        &self,
-        key: &tracedecay_domain::feedback::FeedbackDedupeKeyV1,
-    ) -> FeedbackCycleDedupeState {
+    fn lookup_completed<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        key: &'a tracedecay_domain::feedback::FeedbackDedupeKeyV1,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupeState> {
         self.keys.borrow_mut().push(key.clone());
-        self.state
+        let state = self.state;
+        Box::pin(async move { state })
+    }
+
+    fn record_completed<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _publication: &'a FeedbackCompletedPublicationV1,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupePublicationState>
+    {
+        Box::pin(async { FeedbackCycleDedupePublicationState::Recorded })
+    }
+}
+
+#[derive(Clone)]
+struct SerializedRaceDedupeFixture {
+    barrier: Arc<Barrier>,
+    completed: Arc<Mutex<BTreeSet<String>>>,
+    record_calls: Arc<AtomicUsize>,
+}
+
+impl FeedbackCycleDedupePort for SerializedRaceDedupeFixture {
+    fn lookup_completed<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _key: &'a tracedecay_domain::feedback::FeedbackDedupeKeyV1,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupeState> {
+        Box::pin(async { FeedbackCycleDedupeState::Unique })
+    }
+
+    fn record_completed<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        publication: &'a FeedbackCompletedPublicationV1,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupePublicationState>
+    {
+        let key = publication.dedupe_key.as_str().to_owned();
+        let barrier = self.barrier.clone();
+        let completed = self.completed.clone();
+        let record_calls = self.record_calls.clone();
+        Box::pin(async move {
+            barrier.wait();
+            record_calls.fetch_add(1, Ordering::Relaxed);
+            if completed
+                .lock()
+                .expect("serialized dedupe fixture lock is not poisoned")
+                .insert(key)
+            {
+                FeedbackCycleDedupePublicationState::Recorded
+            } else {
+                FeedbackCycleDedupePublicationState::Duplicate
+            }
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ConcurrentRuntimeFixture(FeedbackRuntimeStateV1);
+
+impl FeedbackRuntimeStatePort for ConcurrentRuntimeFixture {
+    fn resolve<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _input: &'a FeedbackEvaluationInputV1,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, Option<FeedbackRuntimeStateV1>>
+    {
+        let runtime = self.0.clone();
+        Box::pin(async move { Some(runtime) })
+    }
+}
+
+#[derive(Clone)]
+struct ConcurrentDiagnosticsFixture {
+    results: Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>>,
+}
+
+impl FeedbackDiagnosticsPort for ConcurrentDiagnosticsFixture {
+    fn diagnostics<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a FeedbackDiagnosticsRequest,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<
+        'a,
+        Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>>,
+    > {
+        let results = self.results.clone();
+        Box::pin(async move { results })
+    }
+
+    fn diagnostic_history<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        request: &'a FeedbackDiagnosticsRequest,
+        _runtime: &'a FeedbackRuntimeStateV1,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, Vec<FeedbackDiagnosticBaselineV1>>
+    {
+        let baselines = request
+            .providers
+            .iter()
+            .map(|provider| matching_baseline(&request.input, provider, Vec::new()))
+            .collect();
+        Box::pin(async move { baselines })
+    }
+}
+
+#[derive(Clone)]
+struct ConcurrentImpactFixture(FeedbackImpactPortOutcome);
+
+impl FeedbackImpactPort for ConcurrentImpactFixture {
+    fn impact<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a FeedbackImpactRequest,
+    ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, FeedbackImpactPortOutcome> {
+        let outcome = self.0.clone();
+        Box::pin(async move { outcome })
+    }
+}
+
+#[derive(Clone, Default)]
+struct NoopObservationFixture;
+
+impl FeedbackObservationPort for NoopObservationFixture {
+    fn observe(
+        &self,
+        _input: &FeedbackEvaluationInputV1,
+        _observation: FeedbackCycleObservationV1,
+    ) {
     }
 }
 
@@ -137,7 +421,7 @@ impl FeedbackCycleDedupePort for RecordingDedupeFixture {
 struct ObservationFixture(Rc<RefCell<Vec<FeedbackCycleObservationV1>>>);
 
 impl FeedbackObservationPort for ObservationFixture {
-    fn observe(&self, observation: FeedbackCycleObservationV1) {
+    fn observe(&self, _input: &FeedbackEvaluationInputV1, observation: FeedbackCycleObservationV1) {
         self.0.borrow_mut().push(observation);
     }
 }
@@ -291,6 +575,433 @@ fn provider_identity(input: &FeedbackEvaluationInputV1) -> DiagnosticProviderIde
     .unwrap()
 }
 
+fn admitted_provider(
+    provider: &DiagnosticProviderIdentity,
+    availability: AnalyzerAvailabilityV1,
+    scope_authorized: bool,
+) -> AnalyzerAdmittedDiagnosticProviderV1 {
+    let analyzer_language = common::id::<AnalyzerLanguageId>("rust");
+    let executable = common::id::<AnalyzerExecutableId>("analyzer.feedback.fixture");
+    let input = AnalyzerAdmissionInputV1 {
+        settings: AnalyzerSettingsV1 {
+            schema_version: AnalyzerSettingsV1::SCHEMA_VERSION,
+            selections: vec![AnalyzerLanguageSelectionV1 {
+                language_id: analyzer_language.clone(),
+                enabled: true,
+                executable: AnalyzerExecutableReferenceV1::BuiltIn {
+                    executable_id: executable.clone(),
+                },
+                arguments: Vec::new(),
+                initialization_options: BTreeMap::new(),
+                settings: BTreeMap::new(),
+                environment_allowlist: BTreeSet::new(),
+                privacy_class: AnalyzerPrivacyClassV1::NonSensitive,
+                resource_limits: AnalyzerResourceLimitsV1 {
+                    maximum_memory_mib: 256,
+                    startup_timeout_millis: 1_000,
+                    request_timeout_millis: 1_000,
+                },
+                restart_policy: AnalyzerRestartPolicyV1::RestartOnConfigurationChange,
+            }],
+        },
+        language_id: analyzer_language,
+        requested_capability: common::id::<tracedecay_domain::CapabilityId>(
+            provider.requested_capability.as_str(),
+        ),
+        candidates: vec![AnalyzerCandidateV1 {
+            executable_id: executable,
+            approved_external_digest: None,
+            language_id: common::id::<AnalyzerLanguageId>("rust"),
+            capability_id: common::id::<tracedecay_domain::CapabilityId>(
+                provider.requested_capability.as_str(),
+            ),
+            availability,
+            execution_location: AnalyzerExecutionLocationV1::Local,
+            scope_authorized,
+            available_memory_mib: 512,
+            catalog_digest: common::digest(common::SHA256_A),
+        }],
+        privacy_constraints: BTreeSet::new(),
+        configuration_digest: provider.configuration.digest.clone(),
+        policy_revision: provider.policy.revision,
+        policy_digest: provider.policy.digest.clone(),
+        evaluated_at: UtcMicros(2),
+    };
+    let snapshot = AnalyzerAdmissionEvaluatorV1::default().snapshot(&input);
+    AnalyzerAdmittedDiagnosticProviderV1::from_plan20_plan35_snapshot(
+        provider.clone(),
+        input,
+        snapshot,
+    )
+    .unwrap()
+}
+
+#[test]
+fn generation_bound_diagnostics_reuses_exact_current_and_previous_generations() {
+    let input = saved_input();
+    let provider = provider_identity(&input);
+    let runtime = runtime_state(&input);
+    let current_calls = Arc::new(AtomicUsize::new(0));
+    let history_calls = Arc::new(AtomicUsize::new(0));
+    let current = diagnostic(&input, "anchor.feedback.current");
+    let mut previous = diagnostic(&input, "anchor.feedback.previous");
+    previous.generation_id = runtime
+        .authoritative
+        .baseline_horizon
+        .as_ref()
+        .unwrap()
+        .comparison_generation_id
+        .clone();
+    let source = GenerationDiagnosticsSourceFixture {
+        current_calls: current_calls.clone(),
+        history_calls: history_calls.clone(),
+        current: DiagnosticProviderResult::new(
+            provider.clone(),
+            DiagnosticProviderState::SupportedComplete,
+            Some(vec![current]),
+        )
+        .unwrap(),
+        history: DiagnosticProviderResult::new(
+            provider.clone(),
+            DiagnosticProviderState::SupportedComplete,
+            Some(vec![previous]),
+        )
+        .unwrap(),
+    };
+    let adapter = GenerationBoundFeedbackDiagnosticsAdapter::new(
+        source,
+        vec![admitted_provider(
+            &provider,
+            AnalyzerAvailabilityV1::Available,
+            true,
+        )],
+    )
+    .unwrap();
+    let request = FeedbackDiagnosticsRequest {
+        input: input.clone(),
+        providers: vec![provider.clone()],
+    };
+
+    let context = common::context(&common::operation());
+    let current = block_on(adapter.diagnostics(&context, &request));
+    let baselines = block_on(adapter.diagnostic_history(&context, &request, &runtime));
+
+    assert_eq!(current_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(history_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(current[0].state, DiagnosticProviderState::SupportedComplete);
+    assert_eq!(baselines.len(), 1);
+    assert_eq!(baselines[0].state, FeedbackBaselineStateV1::Complete);
+    assert_eq!(
+        baselines[0].diagnostic_anchors,
+        vec![common::id::<RetrievalAnchorId>("anchor.feedback.previous")]
+    );
+}
+
+#[test]
+fn denied_analyzer_admission_suppresses_diagnostic_store_reads() {
+    let input = saved_input();
+    let provider = provider_identity(&input);
+    let current_calls = Arc::new(AtomicUsize::new(0));
+    let history_calls = Arc::new(AtomicUsize::new(0));
+    let source = GenerationDiagnosticsSourceFixture {
+        current_calls: current_calls.clone(),
+        history_calls: history_calls.clone(),
+        current: DiagnosticProviderResult::new(
+            provider.clone(),
+            DiagnosticProviderState::SupportedComplete,
+            Some(Vec::new()),
+        )
+        .unwrap(),
+        history: DiagnosticProviderResult::new(
+            provider.clone(),
+            DiagnosticProviderState::SupportedComplete,
+            Some(Vec::new()),
+        )
+        .unwrap(),
+    };
+    let adapter = GenerationBoundFeedbackDiagnosticsAdapter::new(
+        source,
+        vec![admitted_provider(
+            &provider,
+            AnalyzerAvailabilityV1::Available,
+            false,
+        )],
+    )
+    .unwrap();
+    let request = FeedbackDiagnosticsRequest {
+        input,
+        providers: vec![provider],
+    };
+
+    let diagnostics =
+        block_on(adapter.diagnostics(&common::context(&common::operation()), &request));
+
+    assert_eq!(current_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(history_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(diagnostics[0].state, DiagnosticProviderState::Unsupported);
+}
+
+#[test]
+fn stale_analyzer_admission_preserves_staleness_without_store_reads() {
+    let input = saved_input();
+    let mut provider = provider_identity(&input);
+    provider.freshness.state = FreshnessState::Stale;
+    let current_calls = Arc::new(AtomicUsize::new(0));
+    let history_calls = Arc::new(AtomicUsize::new(0));
+    let source = GenerationDiagnosticsSourceFixture {
+        current_calls: current_calls.clone(),
+        history_calls: history_calls.clone(),
+        current: DiagnosticProviderResult::new(
+            provider.clone(),
+            DiagnosticProviderState::Failed,
+            None,
+        )
+        .unwrap(),
+        history: DiagnosticProviderResult::new(
+            provider.clone(),
+            DiagnosticProviderState::Failed,
+            None,
+        )
+        .unwrap(),
+    };
+    let adapter = GenerationBoundFeedbackDiagnosticsAdapter::new(
+        source,
+        vec![admitted_provider(
+            &provider,
+            AnalyzerAvailabilityV1::Stale,
+            true,
+        )],
+    )
+    .unwrap();
+    let request = FeedbackDiagnosticsRequest {
+        input,
+        providers: vec![provider],
+    };
+
+    let diagnostics =
+        block_on(adapter.diagnostics(&common::context(&common::operation()), &request));
+
+    assert_eq!(current_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(history_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(diagnostics[0].state, DiagnosticProviderState::Stale);
+}
+
+#[test]
+fn partial_provider_coverage_is_not_promoted_by_analyzer_admission() {
+    let input = saved_input();
+    let mut provider = provider_identity(&input);
+    provider.coverage.completeness = tracedecay_application::CoverageCompleteness::Partial;
+    provider.coverage.returned = 0;
+    let current_calls = Arc::new(AtomicUsize::new(0));
+    let history_calls = Arc::new(AtomicUsize::new(0));
+    let source = GenerationDiagnosticsSourceFixture {
+        current_calls: current_calls.clone(),
+        history_calls: history_calls.clone(),
+        current: DiagnosticProviderResult::new(
+            provider.clone(),
+            DiagnosticProviderState::Partial,
+            Some(Vec::new()),
+        )
+        .unwrap(),
+        history: DiagnosticProviderResult::new(
+            provider.clone(),
+            DiagnosticProviderState::Partial,
+            Some(Vec::new()),
+        )
+        .unwrap(),
+    };
+    let adapter = GenerationBoundFeedbackDiagnosticsAdapter::new(
+        source,
+        vec![admitted_provider(
+            &provider,
+            AnalyzerAvailabilityV1::Available,
+            true,
+        )],
+    )
+    .unwrap();
+    let request = FeedbackDiagnosticsRequest {
+        input,
+        providers: vec![provider],
+    };
+
+    let diagnostics =
+        block_on(adapter.diagnostics(&common::context(&common::operation()), &request));
+
+    assert_eq!(current_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(history_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(diagnostics[0].state, DiagnosticProviderState::Partial);
+}
+
+#[test]
+fn adapters_short_circuit_cancellation_and_deadline_before_source_reads() {
+    let operation = common::operation();
+    let cancelled = common::context(&operation).with_cancellation(
+        CancellationContext::cancelled("cancel.feedback.adapter", UtcMicros(1)).unwrap(),
+    );
+    let timed_out = common::context(&operation).with_deadline(Deadline::new(UtcMicros(2)).unwrap());
+
+    for (context, expected_diagnostic_state, expected_impact) in [
+        (
+            cancelled,
+            DiagnosticProviderState::Cancelled,
+            FeedbackImpactPortOutcome::Cancelled,
+        ),
+        (
+            timed_out,
+            DiagnosticProviderState::TimedOut,
+            FeedbackImpactPortOutcome::TimedOut,
+        ),
+    ] {
+        let input = saved_input();
+        let runtime = runtime_state(&input);
+        let provider = provider_identity(&input);
+        let current_calls = Arc::new(AtomicUsize::new(0));
+        let history_calls = Arc::new(AtomicUsize::new(0));
+        let source = GenerationDiagnosticsSourceFixture {
+            current_calls: current_calls.clone(),
+            history_calls: history_calls.clone(),
+            current: DiagnosticProviderResult::new(
+                provider.clone(),
+                DiagnosticProviderState::SupportedComplete,
+                Some(Vec::new()),
+            )
+            .unwrap(),
+            history: DiagnosticProviderResult::new(
+                provider.clone(),
+                DiagnosticProviderState::SupportedComplete,
+                Some(Vec::new()),
+            )
+            .unwrap(),
+        };
+        let diagnostics = GenerationBoundFeedbackDiagnosticsAdapter::new(
+            source,
+            vec![admitted_provider(
+                &provider,
+                AnalyzerAvailabilityV1::Available,
+                true,
+            )],
+        )
+        .unwrap();
+        let diagnostics_request = FeedbackDiagnosticsRequest {
+            input: input.clone(),
+            providers: vec![provider],
+        };
+
+        let result = block_on(diagnostics.diagnostics(&context, &diagnostics_request));
+        let history =
+            block_on(diagnostics.diagnostic_history(&context, &diagnostics_request, &runtime));
+        assert_eq!(result[0].state, expected_diagnostic_state);
+        assert!(result[0].payload.is_none());
+        assert!(history.is_empty());
+        assert_eq!(current_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(history_calls.load(Ordering::Relaxed), 0);
+
+        let graph_calls = Arc::new(AtomicUsize::new(0));
+        let test_calls = Arc::new(AtomicUsize::new(0));
+        let impact = GraphImpactFeedbackAdapter::new(
+            GraphImpactSourceFixture {
+                calls: graph_calls.clone(),
+                outcome: RetrievalPortOutcome::Completed(common::evidence(GraphImpactResult {
+                    affected_files: Vec::new(),
+                    affected_callers: Vec::new(),
+                    evidence_anchors: Vec::new(),
+                })),
+            },
+            AffectedTestsImpactSourceFixture {
+                calls: test_calls.clone(),
+                outcome: RetrievalPortOutcome::Completed(common::evidence(AffectedTestsResult {
+                    tests: Vec::new(),
+                })),
+            },
+            common::operation(),
+            common::operation(),
+        );
+        assert_eq!(
+            block_on(impact.impact(&context, &FeedbackImpactRequest { input })),
+            expected_impact
+        );
+        assert_eq!(graph_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(test_calls.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn graph_impact_adapter_preserves_partial_graph_coverage_and_test_evidence() {
+    let input = saved_input();
+    let graph_calls = Arc::new(AtomicUsize::new(0));
+    let test_calls = Arc::new(AtomicUsize::new(0));
+    let graph = GraphImpactSourceFixture {
+        calls: graph_calls.clone(),
+        outcome: RetrievalPortOutcome::Partial(common::evidence(GraphImpactResult {
+            affected_files: vec![common::id::<FileOccurrenceId>("file.affected.feedback")],
+            affected_callers: vec![common::id::<SymbolOccurrenceId>("symbol.caller.feedback")],
+            evidence_anchors: vec![common::id::<RetrievalAnchorId>(
+                "anchor.impact.partial.feedback",
+            )],
+        })),
+    };
+    let tests = AffectedTestsImpactSourceFixture {
+        calls: test_calls.clone(),
+        outcome: RetrievalPortOutcome::Completed(common::evidence(AffectedTestsResult {
+            tests: vec![common::id::<SymbolOccurrenceId>("symbol.test.feedback")],
+        })),
+    };
+    let adapter =
+        GraphImpactFeedbackAdapter::new(graph, tests, common::operation(), common::operation());
+
+    let result = block_on(adapter.impact(
+        &common::context(&common::operation()),
+        &FeedbackImpactRequest {
+            input: input.clone(),
+        },
+    ));
+
+    assert_eq!(graph_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(test_calls.load(Ordering::Relaxed), 1);
+    let FeedbackImpactPortOutcome::Partial(impact) = result else {
+        panic!("partial graph coverage must remain partial feedback evidence");
+    };
+    assert_eq!(impact.target, input.target);
+    assert_eq!(impact.state, FeedbackImpactStateV1::Partial);
+    assert_eq!(impact.affected_tests_state, FeedbackImpactStateV1::Complete);
+    assert_eq!(
+        impact.affected_tests,
+        vec![common::id::<SymbolOccurrenceId>("symbol.test.feedback")]
+    );
+}
+
+#[test]
+fn failed_graph_outcome_cannot_promote_its_payload_to_partial_evidence() {
+    let input = saved_input();
+    let graph_calls = Arc::new(AtomicUsize::new(0));
+    let test_calls = Arc::new(AtomicUsize::new(0));
+    let graph = GraphImpactSourceFixture {
+        calls: graph_calls.clone(),
+        outcome: RetrievalPortOutcome::Failed(common::evidence(GraphImpactResult {
+            affected_files: vec![common::id::<FileOccurrenceId>("file.failed.feedback")],
+            affected_callers: Vec::new(),
+            evidence_anchors: Vec::new(),
+        })),
+    };
+    let tests = AffectedTestsImpactSourceFixture {
+        calls: test_calls.clone(),
+        outcome: RetrievalPortOutcome::Completed(common::evidence(AffectedTestsResult {
+            tests: Vec::new(),
+        })),
+    };
+    let adapter =
+        GraphImpactFeedbackAdapter::new(graph, tests, common::operation(), common::operation());
+
+    let result = block_on(adapter.impact(
+        &common::context(&common::operation()),
+        &FeedbackImpactRequest { input },
+    ));
+
+    assert_eq!(graph_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(test_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(result, FeedbackImpactPortOutcome::Unavailable);
+}
+
 fn matching_baseline(
     input: &FeedbackEvaluationInputV1,
     provider: &DiagnosticProviderIdentity,
@@ -401,31 +1112,34 @@ fn complete_impact(input: &FeedbackEvaluationInputV1) -> FeedbackImpactPortOutco
     })
 }
 
-fn runtime_state(input: &FeedbackEvaluationInputV1) -> FeedbackAuthoritativeRuntimeStateV1 {
-    FeedbackAuthoritativeRuntimeStateV1 {
-        snapshot: FeedbackCycleRuntimeSnapshotV1::from_request(&input.request),
-        baseline_horizon: matches!(
-            &input.request.content,
-            FeedbackContentIdentityV1::SavedContent { .. }
-        )
-        .then(baseline_horizon),
-        runtime_watermark: common::digest(common::SHA256_B),
-    }
+fn runtime_state(input: &FeedbackEvaluationInputV1) -> FeedbackRuntimeStateV1 {
+    FeedbackRuntimeStateV1::new(
+        FeedbackAuthoritativeRuntimeStateV1 {
+            snapshot: FeedbackCycleRuntimeSnapshotV1::from_request(&input.request),
+            baseline_horizon: matches!(
+                &input.request.content,
+                FeedbackContentIdentityV1::SavedContent { .. }
+            )
+            .then(baseline_horizon),
+            runtime_watermark: common::digest(common::SHA256_B),
+        },
+        input.target.generation_id.clone(),
+    )
+    .unwrap()
 }
 
 fn runtime_port(
     input: &FeedbackEvaluationInputV1,
-) -> impl Fn(&RequestContext, &FeedbackEvaluationInputV1) -> Option<FeedbackAuthoritativeRuntimeStateV1>
-+ use<> {
+) -> impl Fn(&RequestContext, &FeedbackEvaluationInputV1) -> Option<FeedbackRuntimeStateV1> + use<>
+{
     let state = runtime_state(input);
     move |_context, _input| Some(state.clone())
 }
 
 fn sequenced_runtime(
-    states: Vec<Option<FeedbackAuthoritativeRuntimeStateV1>>,
+    states: Vec<Option<FeedbackRuntimeStateV1>>,
     calls: Rc<Cell<usize>>,
-) -> impl Fn(&RequestContext, &FeedbackEvaluationInputV1) -> Option<FeedbackAuthoritativeRuntimeStateV1>
-{
+) -> impl Fn(&RequestContext, &FeedbackEvaluationInputV1) -> Option<FeedbackRuntimeStateV1> {
     let states = Rc::new(RefCell::new(states.into_iter().collect::<VecDeque<_>>()));
     move |_context, _input| {
         calls.set(calls.get() + 1);
@@ -451,6 +1165,33 @@ fn execution_request(
         },
         control: FeedbackCycleControl::Continue,
     }
+}
+
+fn execute_concurrent_cycle(
+    input: FeedbackEvaluationInputV1,
+    provider: DiagnosticProviderIdentity,
+    dedupe: SerializedRaceDedupeFixture,
+) -> FeedbackCycleExecutionResult {
+    let runtime = ConcurrentRuntimeFixture(runtime_state(&input));
+    let diagnostics = ConcurrentDiagnosticsFixture {
+        results: vec![complete_result(provider.clone(), Vec::new())],
+    };
+    let impact = ConcurrentImpactFixture(complete_impact(&input));
+    let operation = common::operation();
+    let context = common::context(&operation);
+    let service = FeedbackCycleService::new(
+        runtime,
+        diagnostics,
+        impact,
+        dedupe,
+        NoopObservationFixture,
+        AuthorizationService::new(
+            common::StaticAuthorizationPort::authorized(),
+            SourceAuthorizationEvaluatorV1::default(),
+        ),
+        operation,
+    );
+    block_on(service.execute(&context, execution_request(input, provider))).unwrap()
 }
 
 fn execute_before_provider_work(
@@ -482,7 +1223,7 @@ fn execute_before_provider_work(
     );
     let mut request = execution_request(input, provider);
     configure(&mut request);
-    let result = service.execute(context, request).unwrap();
+    let result = block_on(service.execute(context, request)).unwrap();
     assert_eq!(diagnostics_calls.get(), 0);
     assert_eq!(impact_calls.get(), 0);
     result
@@ -517,12 +1258,11 @@ fn cycle_runs_diagnostics_impact_and_tests_once_with_anchored_new_findings() {
         common::operation(),
     );
 
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert_eq!(diagnostics_calls.get(), 1);
     assert_eq!(impact_calls.get(), 1);
@@ -626,12 +1366,11 @@ fn authoritative_history_identity_drives_pre_existing_and_stale_classification()
         ),
         common::operation(),
     );
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input.clone(), provider.clone()),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input.clone(), provider.clone()),
+    ))
+    .unwrap();
     assert_eq!(history_calls.get(), 1);
     assert_eq!(
         result.cycle.findings[0].classification,
@@ -664,12 +1403,11 @@ fn authoritative_history_identity_drives_pre_existing_and_stale_classification()
         ),
         common::operation(),
     );
-    let stale = stale_service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let stale = block_on(stale_service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
     assert_eq!(
         stale.cycle.termination,
         FeedbackCycleTerminationV1::StaleReplanRequired
@@ -711,12 +1449,11 @@ fn dedupe_key_changes_when_authoritative_evidence_changes() {
             ),
             common::operation(),
         );
-        service
-            .execute(
-                &common::context(&common::operation()),
-                execution_request(input, provider),
-            )
-            .unwrap();
+        block_on(service.execute(
+            &common::context(&common::operation()),
+            execution_request(input, provider),
+        ))
+        .unwrap();
     }
 
     let keys = keys.borrow();
@@ -748,12 +1485,11 @@ fn unavailable_authoritative_baseline_cannot_produce_clean() {
         ),
         common::operation(),
     );
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert_eq!(
         result.cycle.termination,
@@ -775,7 +1511,7 @@ fn authoritative_no_prior_baseline_is_explicit_and_never_invented() {
     let provider = provider_identity(&input);
     let history_calls = Rc::new(Cell::new(0));
     let mut no_prior_runtime = runtime_state(&input);
-    no_prior_runtime.baseline_horizon = None;
+    no_prior_runtime.authoritative.baseline_horizon = None;
     let service = FeedbackCycleService::new(
         move |_context: &RequestContext, _input: &FeedbackEvaluationInputV1| {
             Some(no_prior_runtime.clone())
@@ -799,12 +1535,11 @@ fn authoritative_no_prior_baseline_is_explicit_and_never_invented() {
         common::operation(),
     );
 
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert_eq!(history_calls.get(), 0);
     assert_eq!(
@@ -836,12 +1571,11 @@ fn complete_zero_diagnostics_and_impact_are_clean() {
         ),
         common::operation(),
     );
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert_eq!(result.cycle.termination, FeedbackCycleTerminationV1::Clean);
     assert_eq!(result.cycle.total_findings, 0);
@@ -885,12 +1619,11 @@ fn duplicate_noop_is_decided_after_authoritative_evidence_is_read() {
         common::operation(),
     );
 
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert_eq!(diagnostics_calls.get(), 1);
     assert_eq!(impact_calls.get(), 1);
@@ -906,6 +1639,55 @@ fn duplicate_noop_is_decided_after_authoritative_evidence_is_read() {
             .borrow()
             .iter()
             .any(|event| event.kind == FeedbackObservationKindV1::DedupeSuppressed)
+    );
+}
+
+#[test]
+fn serialized_completed_publication_converges_concurrent_record_races() {
+    let input = saved_input();
+    let provider = provider_identity(&input);
+    let dedupe = SerializedRaceDedupeFixture {
+        barrier: Arc::new(Barrier::new(2)),
+        completed: Arc::new(Mutex::new(BTreeSet::new())),
+        record_calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let completed = dedupe.completed.clone();
+    let record_calls = dedupe.record_calls.clone();
+
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn({
+            let input = input.clone();
+            let provider = provider.clone();
+            let dedupe = dedupe.clone();
+            move || execute_concurrent_cycle(input, provider, dedupe)
+        });
+        let second = scope.spawn(move || execute_concurrent_cycle(input, provider, dedupe));
+        (
+            first.join().expect("first feedback cycle completes"),
+            second.join().expect("second feedback cycle completes"),
+        )
+    });
+
+    assert_eq!(record_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        completed
+            .lock()
+            .expect("serialized dedupe fixture lock is not poisoned")
+            .len(),
+        1
+    );
+    assert_eq!(first.dedupe_key, second.dedupe_key);
+    assert!(
+        matches!(first.cycle.termination, FeedbackCycleTerminationV1::Clean)
+            && matches!(
+                second.cycle.termination,
+                FeedbackCycleTerminationV1::DuplicateNoop
+            )
+            || matches!(second.cycle.termination, FeedbackCycleTerminationV1::Clean)
+                && matches!(
+                    first.cycle.termination,
+                    FeedbackCycleTerminationV1::DuplicateNoop
+                )
     );
 }
 
@@ -936,12 +1718,11 @@ fn duplicate_provider_diagnostics_collapse_to_one_finding() {
         common::operation(),
     );
 
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert_eq!(result.cycle.total_findings, 1);
     assert_eq!(result.cycle.findings.len(), 1);
@@ -972,12 +1753,11 @@ fn mismatched_diagnostic_address_is_failed_not_current_truth() {
         common::operation(),
     );
 
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert_eq!(
         result.cycle.provider_states,
@@ -1016,12 +1796,11 @@ fn bounded_preview_respects_its_byte_limit_for_unicode() {
         common::operation(),
     );
 
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert!(
         result.cycle.findings[0]
@@ -1071,12 +1850,11 @@ fn overlay_cycle_returns_session_only_truth_without_observations() {
         common::operation(),
     );
 
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert_eq!(result.cycle.durability, FeedbackDurabilityV1::SessionOnly);
     assert_eq!(
@@ -1134,12 +1912,11 @@ fn overlay_provider_client_must_match_the_authenticated_owner_binding() {
     );
 
     assert!(
-        service
-            .execute(
-                &common::context(&common::operation()),
-                execution_request(input, provider),
-            )
-            .is_err()
+        block_on(service.execute(
+            &common::context(&common::operation()),
+            execution_request(input, provider),
+        ))
+        .is_err()
     );
     assert_eq!(diagnostics_calls.get(), 0);
 }
@@ -1158,13 +1935,14 @@ fn every_post_port_runtime_drift_suppresses_evidence_and_later_reads() {
             let first = runtime_state(&input);
             let mut second = first.clone();
             if drift_snapshot {
-                second.snapshot.scope.head_commit_id =
+                second.authoritative.snapshot.scope.head_commit_id =
                     common::id::<CommitId>("commit.feedback.runtime-drift");
             } else {
-                second.runtime_watermark = common::digest(common::SHA256_A);
+                second.authoritative.runtime_watermark = common::digest(common::SHA256_A);
             }
             let runtime_calls = Rc::new(Cell::new(0));
             let mut runtime_states = vec![Some(first.clone()); drift_on_runtime_call - 1];
+            runtime_states.push(Some(second.clone()));
             runtime_states.push(Some(second));
             let service = FeedbackCycleService::new(
                 sequenced_runtime(runtime_states, runtime_calls.clone()),
@@ -1190,14 +1968,13 @@ fn every_post_port_runtime_drift_suppresses_evidence_and_later_reads() {
                 common::operation(),
             );
 
-            let result = service
-                .execute(
-                    &common::context(&common::operation()),
-                    execution_request(input, provider),
-                )
-                .unwrap();
+            let result = block_on(service.execute(
+                &common::context(&common::operation()),
+                execution_request(input, provider),
+            ))
+            .unwrap();
 
-            assert_eq!(runtime_calls.get(), drift_on_runtime_call);
+            assert_eq!(runtime_calls.get(), drift_on_runtime_call + 1);
             assert_eq!(history_calls.get(), 1);
             assert_eq!(
                 diagnostics_calls.get(),
@@ -1270,12 +2047,11 @@ fn partial_and_unavailable_impact_truth_never_becomes_clean() {
             common::operation(),
         );
 
-        let result = service
-            .execute(
-                &common::context(&common::operation()),
-                execution_request(input, provider),
-            )
-            .unwrap();
+        let result = block_on(service.execute(
+            &common::context(&common::operation()),
+            execution_request(input, provider),
+        ))
+        .unwrap();
 
         assert_eq!(
             result.cycle.termination,
@@ -1313,12 +2089,11 @@ fn partial_affected_test_coverage_never_becomes_clean() {
         ),
         common::operation(),
     );
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert_eq!(
         result.cycle.termination,
@@ -1387,12 +2162,11 @@ fn every_terminal_reason_is_exact_and_one_shot() {
         ),
         common::operation(),
     );
-    let unavailable = unavailable_service
-        .execute(
-            &context,
-            execution_request(unavailable_input, unavailable_provider),
-        )
-        .unwrap();
+    let unavailable = block_on(unavailable_service.execute(
+        &context,
+        execution_request(unavailable_input, unavailable_provider),
+    ))
+    .unwrap();
     assert_eq!(
         unavailable.cycle.termination,
         FeedbackCycleTerminationV1::DaemonUnavailable
@@ -1449,12 +2223,11 @@ fn post_read_authorization_is_rechecked_before_findings_publish() {
         common::operation(),
     );
 
-    let result = service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(input, provider),
-        )
-        .unwrap();
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
 
     assert_eq!(
         result.cycle.termination,
@@ -1477,10 +2250,7 @@ fn authorization_revocation_overrides_early_and_duplicate_terminal_outcomes() {
     let early_observations = ObservationFixture::default();
     let early_service = FeedbackCycleService::new(
         sequenced_runtime(
-            vec![
-                Some(runtime_state(&early_input)),
-                Some(runtime_state(&early_input)),
-            ],
+            vec![Some(runtime_state(&early_input))],
             early_runtime_calls.clone(),
         ),
         DiagnosticsFixture {
@@ -1506,15 +2276,14 @@ fn authorization_revocation_overrides_early_and_duplicate_terminal_outcomes() {
     );
     let mut early_request = execution_request(early_input, early_provider);
     early_request.usage.tokens_consumed = early_request.input.request.budget.maximum_tokens + 1;
-    let early = early_service
-        .execute(&common::context(&operation), early_request)
-        .unwrap();
+    let early =
+        block_on(early_service.execute(&common::context(&operation), early_request)).unwrap();
     assert_eq!(
         early.cycle.termination,
         FeedbackCycleTerminationV1::DaemonUnavailable
     );
     assert!(early.authority.is_none());
-    assert_eq!(early_runtime_calls.get(), 2);
+    assert_eq!(early_runtime_calls.get(), 1);
     assert_eq!(early_diagnostics_calls.get(), 0);
     assert!(early_observations.0.borrow().is_empty());
 
@@ -1554,12 +2323,11 @@ fn authorization_revocation_overrides_early_and_duplicate_terminal_outcomes() {
         ),
         operation,
     );
-    let duplicate = duplicate_service
-        .execute(
-            &common::context(&common::operation()),
-            execution_request(duplicate_input, duplicate_provider),
-        )
-        .unwrap();
+    let duplicate = block_on(duplicate_service.execute(
+        &common::context(&common::operation()),
+        execution_request(duplicate_input, duplicate_provider),
+    ))
+    .unwrap();
     assert_eq!(
         duplicate.cycle.termination,
         FeedbackCycleTerminationV1::DaemonUnavailable
@@ -1608,9 +2376,8 @@ fn cancellation_suppresses_findings_from_other_completed_providers() {
     let mut request = execution_request(input, provider);
     request.providers.push(cancelled_provider);
 
-    let result = service
-        .execute(&common::context(&common::operation()), request)
-        .unwrap();
+    let result =
+        block_on(service.execute(&common::context(&common::operation()), request)).unwrap();
 
     assert_eq!(
         result.cycle.termination,

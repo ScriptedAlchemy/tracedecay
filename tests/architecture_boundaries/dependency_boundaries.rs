@@ -254,6 +254,61 @@ fn store_session_contracts_are_adapter_free() {
 }
 
 #[test]
+fn git_index_transaction_store_contracts_are_adapter_and_runtime_free() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let sources = [PathBuf::from(
+        "crates/tracedecay-store/src/git_index_transactions.rs",
+    )]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let forbidden: &[&[&str]] = &[
+        &["tracedecay"],
+        &["libsql"],
+        &["rusqlite"],
+        &["sqlx"],
+        &["tokio"],
+        &["async_std"],
+        &["std", "fs"],
+        &["std", "net"],
+        &["std", "process"],
+        &["std", "thread"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect git index transaction store contract");
+    assert!(
+        violations.is_empty(),
+        "git index transaction store must remain DTO/contract-only:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
+fn git_index_transaction_daemon_adapter_has_no_side_file_authority() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = repository.join("src/daemon/git_transactions/store.rs");
+    let source = fs::read_to_string(&path).expect("read git transaction daemon adapter");
+    for forbidden in [
+        "std::fs",
+        "std::path",
+        "serde_json",
+        "journal.json",
+        "OpenOptions",
+        "File::open",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "{} must not retain JSON side-file authority token {forbidden:?}",
+            path.display()
+        );
+    }
+    assert!(
+        source.contains("GlobalDb"),
+        "{} must bridge the canonical GlobalDb adapter",
+        path.display()
+    );
+}
+
+#[test]
 fn code_index_is_filesystem_store_model_and_transport_free() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let roots = [PathBuf::from("src/code_index")]

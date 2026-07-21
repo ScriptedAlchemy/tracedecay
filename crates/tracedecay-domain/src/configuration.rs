@@ -29,6 +29,100 @@ pub const DEFAULT_COLLECTION_SETTING_KEY: &str = "query.default_collection.v1";
 pub const ANALYZER_SETTINGS_SETTING_KEY: &str = "analyzer.settings.v1";
 pub const WORK_TOPOLOGY_POLICY_SETTING_KEY: &str = "work.topology_policy.v1";
 
+/// Canonical project-scoped settings imported from the legacy `config.json`
+/// surface. These names deliberately describe behavior rather than a legacy
+/// file layout, so a later control-plane writer can use them without retaining
+/// `config.json` as authority.
+pub const INDEX_EXCLUDE_SETTING_KEY: &str = "index.exclude.v1";
+pub const INDEX_INCLUDE_SETTING_KEY: &str = "index.include.v1";
+pub const INDEX_MAX_FILE_SIZE_SETTING_KEY: &str = "index.max_file_size.v1";
+pub const INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY: &str = "index.extract_docstrings.v1";
+pub const INDEX_TRACK_CALL_SITES_SETTING_KEY: &str = "index.track_call_sites.v1";
+pub const INDEX_GIT_IGNORE_SETTING_KEY: &str = "index.git_ignore.v1";
+pub const DIAGNOSTICS_PREWARM_SETTING_KEY: &str = "diagnostics.prewarm.v1";
+pub const SYNC_AUTO_WATCH_SETTING_KEY: &str = "sync.auto_watch.v1";
+pub const SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY: &str = "sync.watch_debounce_ms.v1";
+pub const SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY: &str = "sync.watch_max_delay_ms.v1";
+pub const SYNC_WATCH_MAX_PROJECTS_SETTING_KEY: &str = "sync.watch_max_projects.v1";
+pub const SYNC_READ_REFRESH_SETTING_KEY: &str = "sync.read_refresh.v1";
+pub const SYNC_READ_COOLDOWN_SECS_SETTING_KEY: &str = "sync.read_cooldown_secs.v1";
+pub const SYNC_SESSION_START_SYNC_SETTING_KEY: &str = "sync.session_start_sync.v1";
+pub const SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY: &str =
+    "sync.session_start_stale_threshold_secs.v1";
+pub const SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY: &str = "sync.backstop_interval_mins.v1";
+pub const SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY: &str = "sync.full_sync_escalation_files.v1";
+pub const SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY: &str = "sync.max_concurrent_syncs.v1";
+pub const SYNC_BRANCH_GC_DAYS_SETTING_KEY: &str = "sync.branch_gc_days.v1";
+pub const SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY: &str = "sync.orphan_db_gc_days.v1";
+pub const SYNC_AUTO_INIT_SETTING_KEY: &str = "sync.auto_init.v1";
+pub const SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY: &str = "sync.auto_track_pr_branches.v1";
+pub const SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY: &str = "sync.auto_track_pr_poll_secs.v1";
+pub const TELEMETRY_TIMINGS_SETTING_KEY: &str = "telemetry.timings.v1";
+
+/// Exact PR11 registry inventory. Keeping this closed list in the domain
+/// contract prevents adapters and migrations from silently inventing keys.
+pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
+    SOURCE_BINDINGS_SETTING_KEY,
+    ACCESS_RULES_SETTING_KEY,
+    DEFAULT_COLLECTION_SETTING_KEY,
+    ANALYZER_SETTINGS_SETTING_KEY,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    INDEX_EXCLUDE_SETTING_KEY,
+    INDEX_INCLUDE_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    INDEX_GIT_IGNORE_SETTING_KEY,
+    DIAGNOSTICS_PREWARM_SETTING_KEY,
+    SYNC_AUTO_WATCH_SETTING_KEY,
+    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY,
+    SYNC_READ_REFRESH_SETTING_KEY,
+    SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+    SYNC_SESSION_START_SYNC_SETTING_KEY,
+    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
+    SYNC_BRANCH_GC_DAYS_SETTING_KEY,
+    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+    SYNC_AUTO_INIT_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+    TELEMETRY_TIMINGS_SETTING_KEY,
+];
+
+/// Complete inventory of scalar settings that have a legacy `config.json`
+/// counterpart. It excludes path-derived metadata such as `root_dir`, which
+/// cannot become durable configuration authority.
+pub const LEGACY_CONFIG_JSON_SETTING_KEYS_V1: &[&str] = &[
+    INDEX_EXCLUDE_SETTING_KEY,
+    INDEX_INCLUDE_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    INDEX_GIT_IGNORE_SETTING_KEY,
+    DIAGNOSTICS_PREWARM_SETTING_KEY,
+    SYNC_AUTO_WATCH_SETTING_KEY,
+    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY,
+    SYNC_READ_REFRESH_SETTING_KEY,
+    SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+    SYNC_SESSION_START_SYNC_SETTING_KEY,
+    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
+    SYNC_BRANCH_GC_DAYS_SETTING_KEY,
+    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+    SYNC_AUTO_INIT_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+    TELEMETRY_TIMINGS_SETTING_KEY,
+];
+
 macro_rules! configuration_string_id {
     ($($name:ident => $field:literal),+ $(,)?) => {$(
         #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1309,6 +1403,11 @@ impl ConfigurationSnapshotV1 {
         effective_values: BTreeMap<SettingKey, ConfigurationValueV1>,
         provenance: BTreeMap<SettingKey, Vec<ConfigurationCandidateV1>>,
     ) -> Result<Self, DomainError> {
+        if !effective_values.keys().eq(provenance.keys()) {
+            return Err(DomainError::SnapshotMismatch {
+                field: "configuration value/provenance key set",
+            });
+        }
         for (key, value) in &effective_values {
             key.validate()?;
             value.validate()?;

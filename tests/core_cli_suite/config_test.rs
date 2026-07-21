@@ -43,13 +43,17 @@ fn default_config_excludes_generated_vendor_cache_trees_and_gitignore_on() {
 }
 
 #[test]
-fn test_save_and_load_config() {
+fn legacy_config_fixture_load_does_not_rewrite_input() {
     let dir = TempDir::new().unwrap();
     let config = TraceDecayConfig::default();
-    save_config(dir.path(), &config).unwrap();
+    let config_path = get_config_path(dir.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let source = serde_json::to_string_pretty(&config).unwrap();
+    std::fs::write(&config_path, &source).unwrap();
     let loaded = load_config(dir.path()).unwrap();
     assert_eq!(config.version, loaded.version);
     assert_eq!(config.exclude, loaded.exclude);
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), source);
 }
 
 #[test]

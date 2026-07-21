@@ -757,8 +757,10 @@ impl McpServer {
             None
         };
 
-        let timings_active =
-            timings_enabled && crate::config::load_telemetry_config(cg.project_root()).timings;
+        // `timings_enabled` was initialized from the server's pinned resolved
+        // snapshot (or an explicit transport override). Do not synchronously
+        // re-read legacy configuration for every tool call.
+        let timings_active = timings_enabled;
         let handler_start = if timings_active {
             Some(std::time::Instant::now())
         } else {

@@ -1,12 +1,13 @@
 use std::collections::BTreeSet;
 
 use tracedecay_domain::configuration::{
-    AccessRuleId, AuthorityRef, CapabilityResolutionContextV1, ConfigurationGrantId,
-    ConfigurationGrantReceiptId, ConfigurationMutationEffectV1,
+    AccessRuleId, AuthorityRef, CONFIGURATION_SETTING_KEYS_V1, CapabilityResolutionContextV1,
+    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationMutationEffectV1,
     ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
-    ConfigurationMutationSinkV1, ConfigurationRevisionId, CredentialKindV1, CredentialReferenceId,
-    CredentialReferenceMetadataV1, RuleEffect, ScopeAccessRule, ScopeAccessSubjectV1,
-    ScopeSourceBinding, SourceBindingId, SourceKindV1, UserProfileId, WorktreePlacementModeV1,
+    ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1, CredentialKindV1,
+    CredentialReferenceId, CredentialReferenceMetadataV1, LEGACY_CONFIG_JSON_SETTING_KEYS_V1,
+    RuleEffect, ScopeAccessRule, ScopeAccessSubjectV1, ScopeSourceBinding, SettingKey,
+    SourceBindingId, SourceKindV1, UserProfileId, WorktreePlacementModeV1,
     resolve_restrictive_capabilities, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::{
@@ -133,6 +134,34 @@ fn credential_metadata_has_no_plaintext_value_surface() {
     assert!(encoded.get("plaintext").is_none());
     assert!(encoded.get("secret").is_none());
     assert!(encoded.get("reference_digest").is_some());
+}
+
+#[test]
+fn legacy_config_inventory_is_canonical_and_uses_existing_scalar_values() {
+    assert_eq!(CONFIGURATION_SETTING_KEYS_V1.len(), 29);
+    assert_eq!(
+        LEGACY_CONFIG_JSON_SETTING_KEYS_V1.len(),
+        CONFIGURATION_SETTING_KEYS_V1.len() - 5
+    );
+    let mut unique = BTreeSet::new();
+    for key in CONFIGURATION_SETTING_KEYS_V1 {
+        assert!(
+            unique.insert(*key),
+            "duplicate configuration setting key: {key}"
+        );
+        SettingKey::new(*key).expect("configuration key must be canonical");
+        assert_ne!(*key, "root_dir", "path metadata is not durable authority");
+    }
+
+    for value in [
+        ConfigurationValueV1::Boolean(true),
+        ConfigurationValueV1::Unsigned(1),
+        ConfigurationValueV1::StringList(vec!["src/**".to_owned()]),
+    ] {
+        value
+            .validate()
+            .expect("legacy scalar setting uses an existing canonical value form");
+    }
 }
 
 fn mutation_receipt() -> ConfigurationMutationGrantReceiptV1 {

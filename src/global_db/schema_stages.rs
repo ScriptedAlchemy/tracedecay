@@ -7,8 +7,8 @@ use super::schema_contract::{
 };
 use super::{
     GlobalDb, configuration, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
-    ensure_session_parent_columns, global_db_operation_error, observation, observation_projection,
-    session_temporal,
+    ensure_session_parent_columns, git_index_transactions, global_db_operation_error, observation,
+    observation_projection, session_temporal,
 };
 
 pub(super) async fn ensure_registry(db: &GlobalDb) -> crate::errors::Result<()> {
@@ -114,6 +114,22 @@ pub(super) async fn ensure_configuration(db: &GlobalDb) -> crate::errors::Result
         .commit()
         .await
         .map_err(|error| global_db_operation_error("commit configuration schema", error))
+}
+
+pub(super) async fn ensure_git_index_transactions(db: &GlobalDb) -> crate::errors::Result<()> {
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .map_err(|error| global_db_operation_error("begin git index transaction schema", error))?;
+    git_index_transactions::ensure_git_index_transaction_schema(&transaction)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("initialize git index transaction schema", error)
+        })?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| global_db_operation_error("commit git index transaction schema", error))
 }
 
 pub(super) async fn ensure_transcript(db: &GlobalDb) -> crate::errors::Result<()> {

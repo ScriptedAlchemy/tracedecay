@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
-use crate::config::{TraceDecayConfig, db_filename, load_config_from_path, save_config_to_path};
+use crate::config::{
+    bootstrap_runtime_configuration, db_filename, runtime_configuration_for_layout,
+};
 use crate::db::{Database, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::extraction::LanguageRegistry;
@@ -21,8 +23,9 @@ use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 impl TraceDecay {
     /// Initializes a new `TraceDecay` project at the given root.
     ///
-    /// Writes a default configuration to the resolved project store and
-    /// initializes a fresh `SQLite` database.
+    /// Pins registry defaults for the pre-store bootstrap and initializes a
+    /// fresh `SQLite` database. It never creates or rewrites legacy
+    /// `config.json`.
     pub async fn init(project_root: &Path) -> Result<Self> {
         Self::init_with_options(project_root, TraceDecayOpenOptions::default()).await
     }
@@ -34,11 +37,7 @@ impl TraceDecay {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let authority = DatabaseAuthority::for_runtime(&store_layout.graph_db_path, "init")?;
-        let config = TraceDecayConfig {
-            root_dir: project_root.to_string_lossy().to_string(),
-            ..TraceDecayConfig::default()
-        };
-        save_config_to_path(&store_layout.config_path, &config)?;
+        let config = bootstrap_runtime_configuration(project_root, &store_layout)?.config;
 
         let (db, _migrated) = Database::initialize(&store_layout.graph_db_path, &authority).await?;
         let active_graph_layout = active_graph_layout(&store_layout.graph_db_path);
@@ -345,7 +344,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
-        let config = load_config_from_path(project_root, &store_layout.config_path)?;
+        let config = runtime_configuration_for_layout(project_root, &store_layout)?.config;
         let active_branch = branch::current_branch(project_root);
         Self::auto_track_active_branch(
             project_root,
@@ -570,7 +569,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project_read_only(project_root, &open_options).await?;
-        let config = load_config_from_path(project_root, &store_layout.config_path)?;
+        let config = runtime_configuration_for_layout(project_root, &store_layout)?.config;
         let active_branch = branch::current_branch(project_root);
 
         let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
@@ -809,7 +808,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
-        let config = load_config_from_path(project_root, &store_layout.config_path)?;
+        let config = runtime_configuration_for_layout(project_root, &store_layout)?.config;
 
         let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
             TraceDecayError::Config {

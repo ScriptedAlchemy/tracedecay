@@ -190,15 +190,21 @@ fn proxy_serve_handshake(
     };
 
     let initialized = TraceDecay::is_initialized(&project_path);
-    let auto_init_root = (!initialized && crate::config::load_sync_config(&project_path).auto_init)
-        .then(|| crate::worktree::git_worktree_root(&project_path))
-        .flatten();
+    // `serve` is a database-free proxy. It may consult only an already-pinned
+    // in-memory snapshot; missing authority disables implicit auto-init rather
+    // than reading legacy `config.json` from the client process.
+    let auto_init_root = (!initialized
+        && crate::config::cached_sync_config(&project_path).is_ok_and(|config| config.auto_init))
+    .then(|| crate::worktree::git_worktree_root(&project_path))
+    .flatten();
     if let Some(root) = auto_init_root.as_ref() {
         project_path.clone_from(root);
     }
 
     let scope_prefix = serve_scope_prefix(original_cwd, &project_path);
-    let telemetry_timings = timings || crate::config::load_telemetry_config(&project_path).timings;
+    let telemetry_timings = timings
+        || crate::config::cached_telemetry_config(&project_path)
+            .is_ok_and(|telemetry| telemetry.timings);
     let mut handshake = crate::daemon::DaemonHandshake::for_current_client(
         Some(project_path),
         scope_prefix,

@@ -320,15 +320,13 @@ async fn handle_branch_autotrack_action(
     action: crate::cli::BranchAutotrackAction,
 ) -> tracedecay::errors::Result<()> {
     use crate::cli::BranchAutotrackAction;
-    use tracedecay::config::{
-        MIN_AUTO_TRACK_PR_POLL_SECS, load_config_with_identity, save_config_with_identity,
-    };
+    use tracedecay::config::MIN_AUTO_TRACK_PR_POLL_SECS;
 
     match action {
         BranchAutotrackAction::Status { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let config = load_config_with_identity(&project_path).await?;
-            let sync = &config.sync;
+            let configuration = tracedecay::config::cached_runtime_configuration(&project_path)?;
+            let sync = &configuration.config.sync;
             eprintln!(
                 "PR auto-tracking: {}",
                 if sync.auto_track_pr_branches {
@@ -344,7 +342,7 @@ async fn handle_branch_autotrack_action(
             );
             #[cfg(unix)]
             {
-                let data_root = resolve_branch_data_root(&project_path).await;
+                let data_root = resolve_branch_data_root(&project_path).await?;
                 let managed = tracedecay::daemon::pr_autotrack::managed_summary(&data_root);
                 if managed.is_empty() {
                     eprintln!("Tracked PR branches: none");
@@ -361,22 +359,25 @@ async fn handle_branch_autotrack_action(
         }
         BranchAutotrackAction::Enable { poll_secs, path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let mut config = load_config_with_identity(&project_path).await?;
+            let current = tracedecay::config::cached_runtime_configuration(&project_path)?;
+            let mut config = current.config.clone();
             config.sync.auto_track_pr_branches = true;
             if let Some(secs) = poll_secs {
                 config.sync.auto_track_pr_poll_secs = secs.max(MIN_AUTO_TRACK_PR_POLL_SECS);
             }
-            save_config_with_identity(&project_path, &config).await?;
+            let updated =
+                tracedecay::config::mutate_pinned_runtime_configuration(&current, config).await?;
             eprintln!(
                 "\x1b[32m✔\x1b[0m PR auto-tracking enabled (poll every {}s). Restart the daemon (`tracedecay daemon restart`) to apply.",
-                config.sync.effective_auto_track_pr_poll_secs()
+                updated.config.sync.effective_auto_track_pr_poll_secs()
             );
         }
         BranchAutotrackAction::Disable { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let mut config = load_config_with_identity(&project_path).await?;
+            let current = tracedecay::config::cached_runtime_configuration(&project_path)?;
+            let mut config = current.config.clone();
             config.sync.auto_track_pr_branches = false;
-            save_config_with_identity(&project_path, &config).await?;
+            tracedecay::config::mutate_pinned_runtime_configuration(&current, config).await?;
             eprintln!(
                 "\x1b[32m✔\x1b[0m PR auto-tracking disabled. The daemon tears down any managed PR worktrees, refs, synthetic branches and stores on its next poll cycle."
             );
@@ -386,15 +387,11 @@ async fn handle_branch_autotrack_action(
 }
 
 #[cfg(unix)]
-async fn resolve_branch_data_root(project_path: &Path) -> PathBuf {
-    fallback_branch_data_root(project_path)
-}
-
-#[cfg(unix)]
-fn fallback_branch_data_root(project_path: &Path) -> PathBuf {
-    tracedecay::storage::resolve_layout_for_current_profile(project_path).map_or_else(
-        |_| tracedecay::config::get_tracedecay_dir(project_path),
-        |layout| layout.data_root,
+async fn resolve_branch_data_root(project_path: &Path) -> tracedecay::errors::Result<PathBuf> {
+    Ok(
+        tracedecay::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_path)
+            .await?
+            .data_root,
     )
 }
 

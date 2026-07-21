@@ -507,6 +507,47 @@ struct DaemonEngine {
     pr_autotrack_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
+/// Retain one daemon-owned Git index transaction service for the project store
+/// and reconcile any durable records before the project server can advertise
+/// tools. The service owns the store actor; constructing a second service for
+/// the same database is rejected by the registry.
+async fn ensure_git_index_transactions_before_advertising(
+    store_administration: &StoreAdministration,
+    session_db: Arc<crate::global_db::GlobalDb>,
+    project_root: &Path,
+    project_id: Option<&str>,
+) -> Result<()> {
+    let Some(project_id) = project_id else {
+        // Linked/anonymous project opens without a durable project id cannot
+        // own index-mutation authority; skip rather than invent an identity.
+        return Ok(());
+    };
+    let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("git index transaction project identity is invalid: {error}"),
+        }
+    })?;
+    let repository_root = crate::worktree::git_worktree_root(project_root)
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let observed_at = tracedecay_domain::UtcMicros(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_micros())
+                .unwrap_or(0),
+        )
+        .unwrap_or(i64::MAX),
+    );
+    store_administration
+        .git_index_transaction_services()
+        .ensure(session_db, repository_root, project_id, observed_at)
+        .await
+        .map(|_| ())
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("git index transaction startup did not complete: {error}"),
+        })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ProjectServerKey {
     owner: StoreOwnerKey,
@@ -1423,6 +1464,13 @@ impl DaemonEngine {
             .store_administration
             .global_database(&cg.store_layout().sessions_db_path)
             .await?;
+        ensure_git_index_transactions_before_advertising(
+            &self.store_administration,
+            Arc::clone(&session_db),
+            cg.project_root(),
+            key.owner.project_id.as_deref(),
+        )
+        .await?;
         let host_admission_broker = self
             .store_administration
             .host_admission_broker(&session_db)
@@ -2283,6 +2331,13 @@ async fn portable_project_server(
     let session_db = store_administration
         .global_database(&cg.store_layout().sessions_db_path)
         .await?;
+    ensure_git_index_transactions_before_advertising(
+        &store_administration,
+        Arc::clone(&session_db),
+        cg.project_root(),
+        key.owner.project_id.as_deref(),
+    )
+    .await?;
     let host_admission_broker = store_administration
         .host_admission_broker(&session_db)
         .await?

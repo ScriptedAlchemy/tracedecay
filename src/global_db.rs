@@ -32,6 +32,7 @@ use crate::sessions::{
 };
 
 pub mod configuration;
+mod git_index_transactions;
 mod observation;
 mod observation_projection;
 mod observation_store;
@@ -539,6 +540,21 @@ impl GlobalDbWriteTransaction<'_> {
         let guard = inner_guard;
         let transaction = inner_transaction;
         let result = transaction.commit().await;
+        drop(guard);
+        result
+    }
+
+    /// Explicitly roll back a Git transaction adapter write before releasing
+    /// the shared writer lane. This mirrors `commit`'s cancellation-safe drop
+    /// ordering instead of relying on an implicit transaction drop.
+    pub(crate) async fn rollback(self) -> Result<(), libsql::Error> {
+        let Self {
+            transaction: inner_transaction,
+            _guard: inner_guard,
+        } = self;
+        let guard = inner_guard;
+        let transaction = inner_transaction;
+        let result = transaction.rollback().await;
         drop(guard);
         result
     }
@@ -1534,6 +1550,7 @@ impl GlobalDb {
 
         schema_stages::ensure_registry(&db).await?;
         schema_stages::ensure_configuration(&db).await?;
+        schema_stages::ensure_git_index_transactions(&db).await?;
         schema_stages::ensure_transcript(&db).await?;
         schema_stages::ensure_observation_authority(&db).await?;
         schema_stages::ensure_composed_context(&db).await?;
@@ -1613,6 +1630,14 @@ impl GlobalDb {
 
     pub(crate) fn read_connection(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Returns the typed PR11 transaction adapter for this already-open
+    /// canonical database. The adapter never opens a fallback store.
+    pub(crate) fn git_index_transaction_store(
+        &self,
+    ) -> git_index_transactions::GlobalDbGitIndexTransactionStore<'_> {
+        git_index_transactions::GlobalDbGitIndexTransactionStore::new(self)
     }
 
     pub(crate) async fn owned_read_connection(&self) -> Option<GlobalDbReadConnection> {

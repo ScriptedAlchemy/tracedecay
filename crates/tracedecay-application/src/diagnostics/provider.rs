@@ -1,9 +1,15 @@
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::pin::Pin;
 use tracedecay_domain::feedback::ProviderEvaluationStateV1;
 use tracedecay_domain::{
     CodeGenerationId, ComponentVersion, ContentDigest, FileOccurrenceId, GenerationDiagnosticV1,
     HostInstanceId, LanguageDescriptorRevision, LanguageId, ManifestDigest, ProviderId,
     RetrievalAnchorId, SessionId, UtcMicros, canonical_sha256,
+};
+use tracedecay_policy::analyzer::{
+    AnalyzerAdmissionDispositionV1, AnalyzerAdmissionInputV1, AnalyzerAdmissionReasonV1,
+    AnalyzerAdmissionSnapshotV1,
 };
 use tracedecay_tool_catalog::CapabilityId;
 
@@ -286,6 +292,113 @@ impl DiagnosticProviderIdentity {
     }
 }
 
+/// One provider identity pinned to the exact analyzer-policy snapshot that
+/// admitted (or declined) it. This is construction evidence only: it neither
+/// starts an analyzer nor changes its lifecycle.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyzerAdmittedDiagnosticProviderV1 {
+    identity: DiagnosticProviderIdentity,
+    admission_input: AnalyzerAdmissionInputV1,
+    admission_snapshot: AnalyzerAdmissionSnapshotV1,
+}
+
+impl AnalyzerAdmittedDiagnosticProviderV1 {
+    /// Constructs only from the immutable Plan-20 configuration and Plan-35
+    /// admission snapshot already selected by their owning daemon authorities.
+    /// This application contract never resolves configuration, selects an
+    /// executable, evaluates a fallback, starts an analyzer, or synthesizes a
+    /// replacement decision.
+    pub fn from_plan20_plan35_snapshot(
+        identity: DiagnosticProviderIdentity,
+        admission_input: AnalyzerAdmissionInputV1,
+        admission_snapshot: AnalyzerAdmissionSnapshotV1,
+    ) -> Result<Self, ApplicationContractError> {
+        let provider = Self {
+            identity,
+            admission_input,
+            admission_snapshot,
+        };
+        provider.validate()?;
+        Ok(provider)
+    }
+
+    pub fn identity(&self) -> &DiagnosticProviderIdentity {
+        &self.identity
+    }
+
+    pub fn admission_input(&self) -> &AnalyzerAdmissionInputV1 {
+        &self.admission_input
+    }
+
+    pub fn admission_snapshot(&self) -> &AnalyzerAdmissionSnapshotV1 {
+        &self.admission_snapshot
+    }
+
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.identity.validate()?;
+        if !self.admission_snapshot.is_bound_to(&self.admission_input)
+            || self.identity.requested_capability.as_str()
+                != self.admission_input.requested_capability.as_str()
+            || self.identity.producer.language.as_str() != self.admission_input.language_id.as_str()
+            || self.identity.configuration.digest != self.admission_input.configuration_digest
+            || self.identity.policy.revision != self.admission_input.policy_revision
+            || self.identity.policy.digest != self.admission_input.policy_digest
+            || self.identity.policy.revision != self.admission_snapshot.decision.policy_revision
+            || self.identity.policy.digest != self.admission_snapshot.decision.policy_digest
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "analyzer-admitted diagnostic provider",
+            });
+        }
+        let admission_reports_stale = self.admission_snapshot.decision.disposition
+            == AnalyzerAdmissionDispositionV1::Indeterminate
+            && self
+                .admission_snapshot
+                .decision
+                .ordered_reason_codes
+                .contains(&AnalyzerAdmissionReasonV1::CandidateStale);
+        if admission_reports_stale && self.identity.freshness.state != FreshnessState::Stale {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "analyzer-admitted diagnostic provider freshness",
+            });
+        }
+        Ok(())
+    }
+
+    /// Maps an immutable admission snapshot into the canonical provider-state
+    /// taxonomy without treating denial, stale availability, or uncertainty
+    /// as an empty clean result.
+    pub fn state(&self) -> DiagnosticProviderState {
+        debug_assert!(self.validate().is_ok());
+        match self.admission_snapshot.decision.disposition {
+            AnalyzerAdmissionDispositionV1::Allow
+                if self.identity.freshness.state == FreshnessState::Stale =>
+            {
+                DiagnosticProviderState::Stale
+            }
+            AnalyzerAdmissionDispositionV1::Allow
+                if self.identity.coverage.completeness != CoverageCompleteness::Complete =>
+            {
+                DiagnosticProviderState::Partial
+            }
+            AnalyzerAdmissionDispositionV1::Allow => DiagnosticProviderState::SupportedComplete,
+            AnalyzerAdmissionDispositionV1::Deny
+            | AnalyzerAdmissionDispositionV1::NotApplicable => DiagnosticProviderState::Unsupported,
+            AnalyzerAdmissionDispositionV1::Indeterminate
+                if self
+                    .admission_snapshot
+                    .decision
+                    .ordered_reason_codes
+                    .contains(&AnalyzerAdmissionReasonV1::CandidateStale) =>
+            {
+                DiagnosticProviderState::Stale
+            }
+            AnalyzerAdmissionDispositionV1::Indeterminate => DiagnosticProviderState::Unavailable,
+        }
+    }
+}
+
 /// Explicit provider completion state. Unsupported, absent, stale, and
 /// partial values cannot collapse into a clean empty diagnostic result.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -402,11 +515,52 @@ impl CurrentDiagnosticsRequest {
     }
 }
 
+/// Exact historical clean-generation read for baseline classification. The
+/// requested provider remains bound to the current generation while
+/// `generation` names the immutable comparison generation; overlays are
+/// structurally rejected before any durable history read.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationDiagnosticHistoryRequest {
+    pub identity: DiagnosticProviderIdentity,
+    pub generation: CodeGenerationId,
+    pub file: FileOccurrenceId,
+}
+
+impl GenerationDiagnosticHistoryRequest {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.identity.validate()?;
+        self.generation.validate()?;
+        self.file.validate()?;
+        if self.identity.is_overlay() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "overlay diagnostic history request",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Transport-neutral provider port. Implementations are owned by future
 /// analyzer/runtime packets and are not supplied by this crate.
+pub type DiagnosticProviderFuture<'a, T> =
+    Pin<Box<dyn Future<Output = DiagnosticProviderResult<T>> + Send + 'a>>;
+
 pub trait DiagnosticProviderPort {
-    fn current_diagnostics(
-        &self,
-        request: &CurrentDiagnosticsRequest,
-    ) -> DiagnosticProviderResult<Vec<GenerationDiagnosticV1>>;
+    fn current_diagnostics<'a>(
+        &'a self,
+        context: &'a crate::RequestContext,
+        request: &'a CurrentDiagnosticsRequest,
+    ) -> DiagnosticProviderFuture<'a, Vec<GenerationDiagnosticV1>>;
+}
+
+/// Read-only, generation-bound diagnostic history port. It is deliberately
+/// separate from current provider execution so a feedback adapter can reuse
+/// the diagnostic store without inventing a feedback-local history store.
+pub trait GenerationDiagnosticHistoryPort {
+    fn diagnostics_for_generation<'a>(
+        &'a self,
+        context: &'a crate::RequestContext,
+        request: &'a GenerationDiagnosticHistoryRequest,
+    ) -> DiagnosticProviderFuture<'a, Vec<GenerationDiagnosticV1>>;
 }

@@ -744,7 +744,9 @@ mod topology_resolution {
     use tracedecay_domain::{ManifestDigest, ProjectId, UserProfileId};
 
     use crate::config::registry::ConfigurationRegistry;
-    use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
+    use crate::config::resolver::{
+        ConfigurationLayerV1, registry_default_candidate, resolve_configuration,
+    };
     use crate::config::topology::{
         TopologyConfigurationError, resolved_work_topology_policy,
         safe_default_work_topology_policy,
@@ -919,7 +921,7 @@ mod topology_resolution {
                 topology_key(),
                 ConfigurationValueV1::Text("permissive".to_owned()),
             )]),
-            BTreeMap::new(),
+            BTreeMap::from([(topology_key(), vec![registry_default_candidate().unwrap()])]),
         )
         .unwrap();
         assert!(matches!(
@@ -936,5 +938,751 @@ mod topology_resolution {
             resolved_work_topology_policy(&snapshot),
             Err(TopologyConfigurationError::Domain(_))
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PR11 legacy configuration migration input
+//
+// The decoder is read-only: it receives raw JSON and an explicit environment
+// map, builds typed/redacted inputs, and lets the sole resolver apply the
+// documented source order. Runtime adapters consume published snapshots;
+// legacy reads remain migration/diagnostic inputs rather than a write path.
+// ---------------------------------------------------------------------------
+
+mod legacy_configuration_migration_input {
+    use std::collections::BTreeMap;
+
+    use tracedecay_domain::ProjectId;
+    use tracedecay_domain::configuration::{
+        ConfigurationLayerIdV1, ConfigurationValueKindV1, ConfigurationValueV1,
+        DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+        INDEX_MAX_FILE_SIZE_SETTING_KEY, LEGACY_CONFIG_JSON_SETTING_KEYS_V1,
+        SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
+        SettingScopeV1,
+    };
+
+    use crate::config::registry::ConfigurationRegistry;
+    use crate::config::registry::legacy_decoder::{
+        LegacyConfigurationDecodeTargetV1, decode_legacy_config_json,
+        decode_legacy_configuration_inputs, decode_legacy_environment_overrides,
+        resolve_legacy_configuration_inputs,
+    };
+    use crate::config::resolver::resolve_configuration;
+    use crate::global_db::configuration::migration::{
+        ConfigurationMigrationQuarantineReasonV1, ReadonlyLegacyConfigurationInputsV1,
+    };
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("fixture id is canonical")
+    }
+
+    fn target() -> LegacyConfigurationDecodeTargetV1 {
+        LegacyConfigurationDecodeTargetV1 {
+            target_layer: ConfigurationLayerIdV1::Project {
+                project_id: id::<ProjectId>("project.legacy-config"),
+            },
+            target_revision_id: id("revision.legacy-config"),
+        }
+    }
+
+    fn legacy_values(
+        config: &super::TraceDecayConfig,
+    ) -> BTreeMap<SettingKey, ConfigurationValueV1> {
+        let sync = &config.sync;
+        BTreeMap::from([
+            (
+                SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::StringList(config.exclude.clone()),
+            ),
+            (
+                SettingKey::new(INDEX_INCLUDE_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::StringList(config.include.clone()),
+            ),
+            (
+                SettingKey::new(INDEX_MAX_FILE_SIZE_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::Unsigned(config.max_file_size),
+            ),
+            (
+                SettingKey::new("index.extract_docstrings.v1").unwrap(),
+                ConfigurationValueV1::Boolean(config.extract_docstrings),
+            ),
+            (
+                SettingKey::new("index.track_call_sites.v1").unwrap(),
+                ConfigurationValueV1::Boolean(config.track_call_sites),
+            ),
+            (
+                SettingKey::new("index.git_ignore.v1").unwrap(),
+                ConfigurationValueV1::Boolean(config.git_ignore),
+            ),
+            (
+                SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::Boolean(config.diagnostics_prewarm),
+            ),
+            (
+                SettingKey::new("sync.auto_watch.v1").unwrap(),
+                ConfigurationValueV1::Boolean(sync.auto_watch),
+            ),
+            (
+                SettingKey::new("sync.watch_debounce_ms.v1").unwrap(),
+                ConfigurationValueV1::Unsigned(sync.watch_debounce_ms),
+            ),
+            (
+                SettingKey::new("sync.watch_max_delay_ms.v1").unwrap(),
+                ConfigurationValueV1::Unsigned(sync.watch_max_delay_ms),
+            ),
+            (
+                SettingKey::new("sync.watch_max_projects.v1").unwrap(),
+                ConfigurationValueV1::Unsigned(sync.watch_max_projects as u64),
+            ),
+            (
+                SettingKey::new("sync.read_refresh.v1").unwrap(),
+                ConfigurationValueV1::Boolean(sync.read_refresh),
+            ),
+            (
+                SettingKey::new("sync.read_cooldown_secs.v1").unwrap(),
+                ConfigurationValueV1::Unsigned(sync.read_cooldown_secs),
+            ),
+            (
+                SettingKey::new("sync.session_start_sync.v1").unwrap(),
+                ConfigurationValueV1::Boolean(sync.session_start_sync),
+            ),
+            (
+                SettingKey::new("sync.session_start_stale_threshold_secs.v1").unwrap(),
+                ConfigurationValueV1::Unsigned(sync.session_start_stale_threshold_secs),
+            ),
+            (
+                SettingKey::new("sync.backstop_interval_mins.v1").unwrap(),
+                ConfigurationValueV1::Unsigned(sync.backstop_interval_mins),
+            ),
+            (
+                SettingKey::new("sync.full_sync_escalation_files.v1").unwrap(),
+                ConfigurationValueV1::Unsigned(sync.full_sync_escalation_files as u64),
+            ),
+            (
+                SettingKey::new("sync.max_concurrent_syncs.v1").unwrap(),
+                ConfigurationValueV1::Unsigned(sync.max_concurrent_syncs as u64),
+            ),
+            (
+                SettingKey::new("sync.branch_gc_days.v1").unwrap(),
+                ConfigurationValueV1::Unsigned(sync.branch_gc_days),
+            ),
+            (
+                SettingKey::new("sync.orphan_db_gc_days.v1").unwrap(),
+                ConfigurationValueV1::Unsigned(sync.orphan_db_gc_days),
+            ),
+            (
+                SettingKey::new("sync.auto_init.v1").unwrap(),
+                ConfigurationValueV1::Boolean(sync.auto_init),
+            ),
+            (
+                SettingKey::new("sync.auto_track_pr_branches.v1").unwrap(),
+                ConfigurationValueV1::Boolean(sync.auto_track_pr_branches),
+            ),
+            (
+                SettingKey::new(SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::Unsigned(
+                    sync.auto_track_pr_poll_secs
+                        .max(crate::config::MIN_AUTO_TRACK_PR_POLL_SECS),
+                ),
+            ),
+            (
+                SettingKey::new("telemetry.timings.v1").unwrap(),
+                ConfigurationValueV1::Boolean(config.telemetry.timings),
+            ),
+        ])
+    }
+
+    #[test]
+    fn registry_has_every_legacy_scalar_definition_with_project_scope() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let config = super::TraceDecayConfig::default();
+        let values = legacy_values(&config);
+        assert_eq!(values.len(), LEGACY_CONFIG_JSON_SETTING_KEYS_V1.len());
+
+        for key in LEGACY_CONFIG_JSON_SETTING_KEYS_V1 {
+            let key = SettingKey::new(*key).unwrap();
+            let definition = registry.definition(&key).unwrap();
+            assert_eq!(definition.scope, SettingScopeV1::Project);
+            assert_eq!(definition.default_value, values[&key]);
+        }
+        assert_eq!(
+            registry
+                .definition(&SettingKey::new(INDEX_INCLUDE_SETTING_KEY).unwrap())
+                .unwrap()
+                .value_kind,
+            ConfigurationValueKindV1::StringList
+        );
+        assert_eq!(
+            registry
+                .definition(&SettingKey::new(INDEX_MAX_FILE_SIZE_SETTING_KEY).unwrap())
+                .unwrap()
+                .value_kind,
+            ConfigurationValueKindV1::Unsigned
+        );
+    }
+
+    #[test]
+    fn missing_legacy_fields_resolve_to_the_current_default_behavior_digest() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let inputs = decode_legacy_configuration_inputs("{}", &BTreeMap::new(), &target()).unwrap();
+        let migrated = resolve_legacy_configuration_inputs(&registry, &inputs).unwrap();
+        let baseline = resolve_configuration(&registry, &[]).unwrap();
+
+        assert_eq!(
+            migrated.snapshot.effective_behavior_digest,
+            baseline.snapshot.effective_behavior_digest,
+            "typed defaults must preserve the legacy behavior fixture"
+        );
+    }
+
+    #[test]
+    fn decoder_preserves_known_fields_and_quarantines_root_unknown_and_undecodable_values() {
+        let raw = r#"{
+            "root_dir": "/private/repo",
+            "exclude": ["src/generated/**"],
+            "max_file_size": "not-a-number",
+            "sync": { "auto_watch": "not-a-bool", "future_sync": true },
+            "telemetry": { "timings": "not-a-bool" },
+            "future_top_level": 1
+        }"#;
+        let input = decode_legacy_config_json(raw, &target()).unwrap();
+        let reasons: Vec<_> = input
+            .entries
+            .iter()
+            .filter_map(|entry| entry.quarantine_reason)
+            .collect();
+
+        assert_eq!(
+            input
+                .entries
+                .first()
+                .and_then(|entry| entry.quarantine_reason),
+            Some(ConfigurationMigrationQuarantineReasonV1::PathDerivedAuthority),
+            "root_dir must never become authority"
+        );
+        assert!(reasons.contains(&ConfigurationMigrationQuarantineReasonV1::Undecodable));
+        assert!(reasons.contains(&ConfigurationMigrationQuarantineReasonV1::UnknownKey));
+        assert!(input.entries.iter().any(|entry| {
+            entry
+                .setting_key
+                .as_ref()
+                .is_some_and(|key| key.as_str() == INDEX_EXCLUDE_SETTING_KEY)
+                && entry.value
+                    == Some(ConfigurationValueV1::StringList(vec![
+                        "src/generated/**".to_owned(),
+                    ]))
+        }));
+
+        let serialized = serde_json::to_string(&input).unwrap();
+        assert!(!serialized.contains("/private/repo"));
+        assert!(!serialized.contains("root_dir\""));
+    }
+
+    #[test]
+    fn environment_is_an_explicit_higher_precedence_resolution_input() {
+        let raw = r#"{
+            "diagnostics_prewarm": false,
+            "sync": { "auto_watch": true }
+        }"#;
+        let environment = BTreeMap::from([
+            (
+                "TRACEDECAY_DIAGNOSTICS_PREWARM".to_owned(),
+                "true".to_owned(),
+            ),
+            ("TRACEDECAY_SYNC_AUTO_WATCH".to_owned(), "false".to_owned()),
+        ]);
+        let registry = ConfigurationRegistry::core().unwrap();
+        let inputs = decode_legacy_configuration_inputs(raw, &environment, &target()).unwrap();
+        let resolution = resolve_legacy_configuration_inputs(&registry, &inputs).unwrap();
+
+        assert_eq!(
+            resolution
+                .settings
+                .get(&SettingKey::new(SYNC_AUTO_WATCH_SETTING_KEY).unwrap())
+                .unwrap()
+                .effective_value,
+            ConfigurationValueV1::Boolean(false)
+        );
+        assert_eq!(
+            resolution
+                .settings
+                .get(&SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap())
+                .unwrap()
+                .effective_value,
+            ConfigurationValueV1::Boolean(true)
+        );
+
+        let candidates = &resolution
+            .settings
+            .get(&SettingKey::new(SYNC_AUTO_WATCH_SETTING_KEY).unwrap())
+            .unwrap()
+            .candidates;
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(
+            candidates
+                .last()
+                .and_then(|candidate| candidate.safe_reason.as_deref()),
+            Some("highest_valid_legacy_environment")
+        );
+        assert_eq!(
+            candidates[1].safe_reason.as_deref(),
+            Some("higher_precedence_legacy_environment")
+        );
+    }
+
+    #[test]
+    fn input_digests_are_idempotent_and_source_order_is_enforced() {
+        let raw = r#"{"include":[".github/**"],"sync":{"auto_watch":false}}"#;
+        let environment =
+            BTreeMap::from([("TRACEDECAY_SYNC_AUTO_WATCH".to_owned(), "true".to_owned())]);
+        let first = decode_legacy_configuration_inputs(raw, &environment, &target()).unwrap();
+        let second = decode_legacy_configuration_inputs(raw, &environment, &target()).unwrap();
+        let reordered = decode_legacy_configuration_inputs(
+            r#"{"sync":{"auto_watch":false},"include":[".github/**"]}"#,
+            &environment,
+            &target(),
+        )
+        .unwrap();
+        assert_eq!(
+            first.snapshot_digest().unwrap(),
+            second.snapshot_digest().unwrap()
+        );
+        assert_eq!(
+            first.snapshot_digest().unwrap(),
+            reordered.snapshot_digest().unwrap(),
+            "JSON object ordering is not migration provenance"
+        );
+        assert_eq!(
+            first.inputs[0].snapshot_digest().unwrap(),
+            second.inputs[0].snapshot_digest().unwrap()
+        );
+        assert_eq!(
+            first.inputs[1].snapshot_digest().unwrap(),
+            second.inputs[1].snapshot_digest().unwrap()
+        );
+
+        let mut unordered = first.clone();
+        unordered.inputs.swap(0, 1);
+        assert!(unordered.validate().is_err());
+
+        let malformed = decode_legacy_environment_overrides(
+            &BTreeMap::from([
+                (
+                    "TRACEDECAY_SYNC_MAX_CONCURRENT_SYNCS".to_owned(),
+                    "bad".to_owned(),
+                ),
+                ("TRACEDECAY_FUTURE_CONFIG".to_owned(), "1".to_owned()),
+            ]),
+            &target(),
+        )
+        .unwrap();
+        assert!(malformed.entries.iter().all(|entry| entry.value.is_none()));
+        assert!(malformed.entries.iter().any(|entry| {
+            entry.quarantine_reason == Some(ConfigurationMigrationQuarantineReasonV1::Undecodable)
+        }));
+        assert!(malformed.entries.iter().any(|entry| {
+            entry.quarantine_reason == Some(ConfigurationMigrationQuarantineReasonV1::UnknownKey)
+        }));
+
+        let empty = ReadonlyLegacyConfigurationInputsV1 { inputs: Vec::new() };
+        assert!(empty.validate().is_err());
+    }
+}
+
+mod runtime_configuration_cutover {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use tempfile::TempDir;
+    use tracedecay_domain::ProjectId;
+    use tracedecay_domain::configuration::{
+        ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
+        SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
+    };
+
+    use crate::application::configuration::DirectConfigurationMutation;
+    use crate::config::registry::ConfigurationRegistry;
+    use crate::config::registry::legacy_decoder::{
+        LegacyConfigurationDecodeTargetV1, decode_legacy_configuration_inputs,
+        resolve_legacy_configuration_inputs,
+    };
+    use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
+    use crate::config::{
+        ConfigurationDaemonClient, PinnedRuntimeConfiguration, RuntimeConfigurationCache,
+        RuntimeConfigurationFuture, RuntimeConfigurationTarget, TraceDecayConfig,
+        cached_runtime_configuration, cached_sync_config, cached_telemetry_config,
+        commit_runtime_configuration_mutation, direct_mutation_for_runtime_config_diff,
+        install_pinned_runtime_configuration, mutate_pinned_runtime_configuration,
+    };
+
+    fn project_id(value: &str) -> ProjectId {
+        ProjectId::new(value.to_owned()).expect("fixture project id is canonical")
+    }
+
+    fn revision_id(value: &str) -> ConfigurationRevisionId {
+        ConfigurationRevisionId::new(value).expect("fixture revision id is canonical")
+    }
+
+    struct RecordingDaemonClient {
+        next: PinnedRuntimeConfiguration,
+        calls: Mutex<
+            Vec<(
+                RuntimeConfigurationTarget,
+                DirectConfigurationMutation,
+                ConfigurationRevisionId,
+            )>,
+        >,
+    }
+
+    impl ConfigurationDaemonClient for RecordingDaemonClient {
+        fn mutate_direct(
+            &self,
+            target: RuntimeConfigurationTarget,
+            mutation: DirectConfigurationMutation,
+            expected_revision: ConfigurationRevisionId,
+        ) -> RuntimeConfigurationFuture<'_, PinnedRuntimeConfiguration> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((target, mutation, expected_revision));
+            let next = self.next.clone();
+            Box::pin(async move { Ok(next) })
+        }
+    }
+
+    #[test]
+    fn pinned_runtime_materialization_preserves_explicit_environment_precedence() {
+        let project_id = project_id("project.runtime-env-precedence");
+        let revision_id = revision_id("revision.runtime-env-precedence");
+        let target = LegacyConfigurationDecodeTargetV1 {
+            target_layer: ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            target_revision_id: revision_id.clone(),
+        };
+        let inputs = decode_legacy_configuration_inputs(
+            r#"{
+                "root_dir": "/untrusted/legacy-root",
+                "diagnostics_prewarm": false,
+                "sync": { "auto_watch": true }
+            }"#,
+            &BTreeMap::from([
+                (
+                    "TRACEDECAY_DIAGNOSTICS_PREWARM".to_owned(),
+                    "true".to_owned(),
+                ),
+                ("TRACEDECAY_SYNC_AUTO_WATCH".to_owned(), "false".to_owned()),
+            ]),
+            &target,
+        )
+        .expect("legacy input decodes");
+        let resolution = resolve_legacy_configuration_inputs(
+            &ConfigurationRegistry::core().expect("registry is available"),
+            &inputs,
+        )
+        .expect("explicit environment layer resolves");
+        let root = TempDir::new().expect("temporary project root");
+        let pinned = PinnedRuntimeConfiguration::new(
+            RuntimeConfigurationTarget {
+                project_id: project_id.clone(),
+                project_root: root.path().to_path_buf(),
+            },
+            revision_id,
+            resolution.snapshot,
+        )
+        .expect("resolved snapshot materializes");
+
+        assert_eq!(pinned.target.project_id, project_id);
+        assert_eq!(
+            pinned.config.root_dir,
+            root.path().to_string_lossy().to_string()
+        );
+        assert_ne!(pinned.config.root_dir, "/untrusted/legacy-root");
+        assert!(pinned.config.diagnostics_prewarm);
+        assert!(!pinned.config.sync.auto_watch);
+    }
+
+    #[test]
+    fn runtime_configuration_diff_is_typed_and_rejects_legacy_metadata() {
+        let project_id = project_id("project.runtime-mutation");
+        let before = TraceDecayConfig::default();
+        let mut after = before.clone();
+        after.git_ignore = false;
+        after.sync.auto_watch = false;
+
+        let mutation = direct_mutation_for_runtime_config_diff(&project_id, &before, &after)
+            .expect("runtime fields have typed settings")
+            .expect("changed settings require a mutation");
+        let DirectConfigurationMutation::Batch { mutations } = mutation else {
+            panic!("runtime configuration changes must be batched typed mutations");
+        };
+        assert_eq!(mutations.len(), 2);
+        assert!(mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                DirectConfigurationMutation::Set {
+                    layer: ConfigurationLayerIdV1::Project { project_id: target },
+                    key,
+                    value: ConfigurationValueV1::Boolean(false),
+                } if target == &project_id && key.as_str() == "index.git_ignore.v1"
+            )
+        }));
+        assert!(mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                DirectConfigurationMutation::Set {
+                    layer: ConfigurationLayerIdV1::Project { project_id: target },
+                    key,
+                    value: ConfigurationValueV1::Boolean(false),
+                } if target == &project_id && key.as_str() == SYNC_AUTO_WATCH_SETTING_KEY
+            )
+        }));
+
+        let mut metadata_change = before;
+        metadata_change.root_dir = "/not-an-authority".to_owned();
+        assert!(
+            direct_mutation_for_runtime_config_diff(
+                &project_id,
+                &TraceDecayConfig::default(),
+                &metadata_change
+            )
+            .is_err(),
+            "root_dir is migration metadata and cannot enter the control plane"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_mutation_response_is_retargeted_and_published_without_legacy_write() {
+        let project_id = project_id("project.runtime-daemon-client");
+        let root = TempDir::new().expect("temporary project root");
+        let returned_root = TempDir::new().expect("temporary daemon response root");
+        let registry = ConfigurationRegistry::core().expect("registry is available");
+        let current_revision = revision_id("revision.runtime-daemon-client.current");
+        let next_revision = revision_id("revision.runtime-daemon-client.next");
+        let current = PinnedRuntimeConfiguration::new(
+            RuntimeConfigurationTarget {
+                project_id: project_id.clone(),
+                project_root: root.path().to_path_buf(),
+            },
+            current_revision.clone(),
+            resolve_configuration(&registry, &[])
+                .expect("defaults resolve")
+                .snapshot,
+        )
+        .expect("default snapshot materializes");
+        let mut updated = current.config.clone();
+        updated.git_ignore = false;
+        let mutation =
+            direct_mutation_for_runtime_config_diff(&project_id, &current.config, &updated)
+                .expect("runtime fields have typed settings")
+                .expect("gitignore update requires a mutation");
+        let expected_mutation = mutation.clone();
+        let next = PinnedRuntimeConfiguration::new(
+            RuntimeConfigurationTarget {
+                project_id: project_id.clone(),
+                project_root: returned_root.path().to_path_buf(),
+            },
+            next_revision.clone(),
+            resolve_configuration(
+                &registry,
+                &[ConfigurationLayerV1 {
+                    layer: ConfigurationLayerIdV1::Project {
+                        project_id: project_id.clone(),
+                    },
+                    revision_id: next_revision.clone(),
+                    entries: BTreeMap::from([(
+                        SettingKey::new("index.git_ignore.v1").expect("known setting key"),
+                        ConfigurationValueV1::Boolean(false),
+                    )]),
+                }],
+            )
+            .expect("updated project layer resolves")
+            .snapshot,
+        )
+        .expect("updated snapshot materializes");
+        let client = RecordingDaemonClient {
+            next,
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let published = commit_runtime_configuration_mutation(&client, &current, mutation)
+            .await
+            .expect("daemon response is accepted");
+
+        let calls = client
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, current.target);
+        assert_eq!(calls[0].1, expected_mutation);
+        assert_eq!(calls[0].2, current_revision);
+        assert_eq!(published.revision_id, next_revision);
+        assert_eq!(published.target.project_root, root.path().to_path_buf());
+        assert_eq!(
+            published.config.root_dir,
+            root.path().to_string_lossy().to_string(),
+            "the daemon response root is non-authoritative"
+        );
+        assert!(!published.config.git_ignore);
+        assert_eq!(
+            cached_runtime_configuration(root.path())
+                .expect("published cache entry")
+                .revision_id,
+            next_revision
+        );
+        assert!(
+            !root.path().join(".tracedecay").join("config.json").exists(),
+            "typed daemon mutation must not write config.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_daemon_client_fails_closed_without_legacy_file_fallback() {
+        let project_id = project_id("project.runtime-fail-closed");
+        let root = TempDir::new().expect("temporary project root");
+        let legacy_path = root.path().join("config.json");
+        let legacy_contents = r#"{"git_ignore":false,"root_dir":"/legacy"}"#;
+        std::fs::write(&legacy_path, legacy_contents).expect("write legacy fixture");
+        let snapshot = resolve_configuration(
+            &ConfigurationRegistry::core().expect("registry is available"),
+            &[],
+        )
+        .expect("defaults resolve")
+        .snapshot;
+        let current = PinnedRuntimeConfiguration::new(
+            RuntimeConfigurationTarget {
+                project_id,
+                project_root: root.path().to_path_buf(),
+            },
+            revision_id("revision.runtime-fail-closed"),
+            snapshot,
+        )
+        .expect("default snapshot materializes");
+        let mut updated = current.config.clone();
+        updated.git_ignore = !updated.git_ignore;
+
+        let error = mutate_pinned_runtime_configuration(&current, updated)
+            .await
+            .expect_err("missing control-plane client must reject mutation");
+        assert!(
+            error
+                .to_string()
+                .contains("daemon control-plane client is not installed"),
+            "unexpected mutation error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&legacy_path).expect("legacy fixture remains readable"),
+            legacy_contents,
+            "missing authority must never fall back to config.json"
+        );
+    }
+
+    #[test]
+    fn cached_runtime_reads_ignore_legacy_input_after_publication() {
+        let project_id = project_id("project.runtime-cache-only");
+        let root = TempDir::new().expect("temporary project root");
+        let snapshot = resolve_configuration(
+            &ConfigurationRegistry::core().expect("registry is available"),
+            &[],
+        )
+        .expect("defaults resolve")
+        .snapshot;
+        let pinned = PinnedRuntimeConfiguration::new(
+            RuntimeConfigurationTarget {
+                project_id,
+                project_root: root.path().to_path_buf(),
+            },
+            revision_id("revision.runtime-cache-only"),
+            snapshot,
+        )
+        .expect("default snapshot materializes");
+        install_pinned_runtime_configuration(pinned).expect("publish pinned snapshot");
+
+        let legacy_dir = root.path().join(".tracedecay");
+        std::fs::create_dir_all(&legacy_dir).expect("create legacy fixture directory");
+        std::fs::write(
+            legacy_dir.join("config.json"),
+            r#"{"root_dir":"/legacy","telemetry":{"timings":false},"sync":{"auto_watch":false}}"#,
+        )
+        .expect("write conflicting legacy input");
+
+        assert!(
+            cached_telemetry_config(root.path())
+                .expect("cache lookup")
+                .timings,
+            "hook-safe telemetry lookup must use the published snapshot"
+        );
+        assert!(
+            cached_sync_config(root.path())
+                .expect("cache lookup")
+                .auto_watch,
+            "hook-safe sync lookup must use the published snapshot"
+        );
+        assert_eq!(
+            cached_runtime_configuration(root.path())
+                .expect("cache lookup")
+                .config
+                .root_dir,
+            root.path().to_string_lossy().to_string(),
+            "root metadata comes from the non-authoritative published route"
+        );
+    }
+
+    #[test]
+    fn runtime_cache_retargets_legacy_root_metadata_per_cached_root() {
+        let project_id = project_id("project.runtime-cache-retarget");
+        let root = TempDir::new().expect("temporary project root");
+        let first_root = root.path().join("first-worktree");
+        let second_root = root.path().join("second-worktree");
+        std::fs::create_dir_all(&first_root).expect("create first root");
+        std::fs::create_dir_all(&second_root).expect("create second root");
+        let snapshot = resolve_configuration(
+            &ConfigurationRegistry::core().expect("registry is available"),
+            &[],
+        )
+        .expect("defaults resolve")
+        .snapshot;
+        let revision_id = revision_id("revision.runtime-cache-retarget");
+        let cache = RuntimeConfigurationCache::default();
+        cache
+            .insert(
+                PinnedRuntimeConfiguration::new(
+                    RuntimeConfigurationTarget {
+                        project_id: project_id.clone(),
+                        project_root: first_root.clone(),
+                    },
+                    revision_id.clone(),
+                    snapshot.clone(),
+                )
+                .expect("first snapshot materializes"),
+            )
+            .expect("publish first root");
+        cache
+            .insert(
+                PinnedRuntimeConfiguration::new(
+                    RuntimeConfigurationTarget {
+                        project_id: project_id.clone(),
+                        project_root: second_root.clone(),
+                    },
+                    revision_id,
+                    snapshot,
+                )
+                .expect("second snapshot materializes"),
+            )
+            .expect("publish second root");
+
+        let first = cache.for_root(&first_root).expect("first root lookup");
+        let second = cache.for_root(&second_root).expect("second root lookup");
+        assert_eq!(first.target.project_id, project_id);
+        assert_eq!(second.target.project_id, project_id);
+        assert_eq!(first.target.project_root, first_root);
+        assert_eq!(second.target.project_root, second_root);
+        assert_ne!(first.config.root_dir, second.config.root_dir);
     }
 }

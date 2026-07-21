@@ -3,15 +3,19 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use serde::Serialize;
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
-    ConfigurationMutationGrantReceiptV1, ConfigurationReceiptId, ConfigurationRevisionId,
-    ConfigurationSnapshotId, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
-    ProtectedChange, RedactedConfigurationChangeV1, RestartRequirementV1, RollbackModeV1,
-    SettingKey, SettingSensitivityV1,
+    ConfigurationLayerIdV1, ConfigurationMutationGrantReceiptV1, ConfigurationReceiptId,
+    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, CredentialKindV1,
+    CredentialReferenceId, ProtectedChange, RedactedConfigurationChangeV1, RestartRequirementV1,
+    RollbackModeV1, SettingKey, SettingSensitivityV1,
 };
-use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros};
+use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros, canonical_sha256};
+use zeroize::Zeroizing;
+
+pub const CONFIGURATION_AUDIT_PAGE_LIMIT: usize = 1_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedActor {
@@ -65,13 +69,15 @@ pub struct ResolvedSetting {
     pub candidates: Vec<ConfigurationCandidateV1>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum DirectConfigurationMutation {
     Set {
+        layer: ConfigurationLayerIdV1,
         key: SettingKey,
         value: ConfigurationValueV1,
     },
     Unset {
+        layer: ConfigurationLayerIdV1,
         key: SettingKey,
     },
     Batch {
@@ -82,7 +88,8 @@ pub enum DirectConfigurationMutation {
 impl DirectConfigurationMutation {
     pub fn touched_keys(&self) -> Result<BTreeSet<SettingKey>, ConfigurationError> {
         match self {
-            Self::Set { key, .. } | Self::Unset { key } => {
+            Self::Set { layer, key, .. } | Self::Unset { layer, key } => {
+                layer.validate().map_err(ConfigurationError::validation)?;
                 key.validate().map_err(ConfigurationError::validation)?;
                 Ok(BTreeSet::from([key.clone()]))
             }
@@ -106,13 +113,49 @@ impl DirectConfigurationMutation {
             }
         }
     }
+
+    pub fn target_layer(&self) -> Result<&ConfigurationLayerIdV1, ConfigurationError> {
+        match self {
+            Self::Set { layer, .. } | Self::Unset { layer, .. } => Ok(layer),
+            Self::Batch { mutations } => {
+                let first = mutations.first().ok_or_else(|| {
+                    ConfigurationError::validation_message(
+                        "direct configuration batch must be non-empty",
+                    )
+                })?;
+                let layer = first.target_layer()?;
+                for mutation in &mutations[1..] {
+                    if mutation.target_layer()? != layer {
+                        return Err(ConfigurationError::validation_message(
+                            "direct configuration batch must target one layer",
+                        ));
+                    }
+                }
+                Ok(layer)
+            }
+        }
+    }
+
+    pub fn target_scope_digest(&self) -> Result<ManifestDigest, ConfigurationError> {
+        canonical_sha256(&(
+            "tracedecay.configuration.direct-target-layer.v1",
+            self.target_layer()?,
+        ))
+        .map_err(ConfigurationError::validation)
+    }
 }
 
 /// Opaque write-handle returned by a secret-safe adapter. The secret material
 /// is never present in the application DTO, request logs, receipts, audit, or
 /// configuration read path.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CredentialWriteHandleV1(String);
+#[derive(Clone, PartialEq, Eq)]
+pub struct CredentialWriteHandleV1(Zeroizing<String>);
+
+impl fmt::Debug for CredentialWriteHandleV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CredentialWriteHandleV1([redacted])")
+    }
+}
 
 impl CredentialWriteHandleV1 {
     pub fn new(value: impl Into<String>) -> Result<Self, ConfigurationError> {
@@ -126,11 +169,11 @@ impl CredentialWriteHandleV1 {
                 "credential write handle is not canonical",
             ));
         }
-        Ok(Self(value))
+        Ok(Self(Zeroizing::new(value)))
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -238,5 +281,6 @@ mod tests {
         let debug = format!("{mutation:?}");
         assert!(!debug.contains("plaintext"));
         assert!(!debug.contains("secret_value"));
+        assert!(!debug.contains("credential-write.fixture"));
     }
 }

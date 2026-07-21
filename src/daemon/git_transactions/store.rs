@@ -1,15 +1,19 @@
-//! Durable, daemon-owned persistence for Git index transactions.
+//! Bounded synchronous bridge to canonical `GlobalDb` transaction storage.
+//!
+//! The application Git port is deliberately synchronous because its native
+//! executor is synchronous.  Calling an async database through `block_on` on
+//! a Tokio worker would pin that worker while an `IMMEDIATE` writer waits. This
+//! adapter instead owns one bounded actor thread; the actor owns the async
+//! `GlobalDb` calls and every synchronous port call receives exactly one reply.
+//! It has no filesystem path and cannot create a JSON side-file authority.
 
-use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewV1, GitIndexTransactionId,
-    RepositoryId,
+    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, RepositoryId,
 };
 use tracedecay_store::{
     GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,
@@ -17,283 +21,172 @@ use tracedecay_store::{
     GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
 };
 
-pub(crate) const GIT_INDEX_TRANSACTION_STORE_SCHEMA_VERSION: u16 = 1;
+use crate::global_db::GlobalDb;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct QuarantineRecordV1 {
-    repository_id: RepositoryId,
-    transaction_id: GitIndexTransactionId,
+/// The actor queue is intentionally finite: saturation fails closed instead of
+/// accumulating unbounded mutation work while a durable writer is stalled.
+const GIT_INDEX_TRANSACTION_STORE_ACTOR_CAPACITY: usize = 64;
+// Keep the sync port bounded by the same five-second writer wait used by
+// `GlobalDb`; callers can reconcile durable state after an unavailable result
+// instead of pinning a daemon worker forever.
+const GIT_INDEX_TRANSACTION_STORE_ACTOR_TIMEOUT: Duration = Duration::from_secs(5);
+
+type Reply<T> = SyncSender<GitIndexTransactionStoreResult<T>>;
+
+enum StoreCommand {
+    SavePreview(GitIndexPreviewV1, Reply<()>),
+    ReadPreview(GitIndexPreviewId, Reply<Option<GitIndexPreviewV1>>),
+    BeginOrReplay(
+        GitIndexTransactionBeginRequestV1,
+        Reply<GitIndexTransactionBeginResultV1>,
+    ),
+    CompareAndSwapJournal(
+        GitIndexIdempotencyKey,
+        u64,
+        GitIndexTransactionJournalV1,
+        Reply<GitIndexTransactionJournalV1>,
+    ),
+    WriteTerminal(
+        GitIndexTransactionTerminalWriteV1,
+        Reply<GitIndexTransactionReceiptV1>,
+    ),
+    RecoveryCandidates(RepositoryId, Reply<Vec<GitIndexTransactionRecordV1>>),
+    RecoveryRepositories(Reply<Vec<RepositoryId>>),
+    QuarantineRepository(RepositoryId, GitIndexTransactionId, Reply<()>),
+    ClearRepositoryQuarantine(
+        RepositoryId,
+        GitIndexTransactionId,
+        GitIndexTransactionReceiptV1,
+        Reply<()>,
+    ),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct PersistentStateV1 {
-    schema_version: u16,
-    previews: Vec<GitIndexPreviewV1>,
-    records: Vec<GitIndexTransactionRecordV1>,
-    quarantines: Vec<QuarantineRecordV1>,
-}
-
-impl Default for PersistentStateV1 {
-    fn default() -> Self {
-        Self {
-            schema_version: GIT_INDEX_TRANSACTION_STORE_SCHEMA_VERSION,
-            previews: Vec::new(),
-            records: Vec::new(),
-            quarantines: Vec::new(),
-        }
-    }
-}
-
-/// One process-local handle to the daemon's fsync-backed transaction journal.
+/// Synchronous `tracedecay-store` contract adapter over one already-open,
+/// canonical project `GlobalDb`.
 ///
-/// The daemon is the sole writer. Every mutation is validated under one mutex
-/// and replaces the complete versioned state file with an fsync + rename, so a
-/// crash exposes either the old state or the complete new state.
-pub(crate) struct PersistentGitIndexTransactionStore {
-    path: PathBuf,
-    state: Mutex<PersistentStateV1>,
+/// Dropping the last adapter closes the command channel and lets the dedicated
+/// actor exit. It intentionally has no `Clone` implementation: one daemon
+/// service owns one bounded queue and actor for its transaction authority.
+pub(crate) struct DaemonGitIndexTransactionStore {
+    commands: SyncSender<StoreCommand>,
 }
 
-impl PersistentGitIndexTransactionStore {
-    pub(crate) fn open(path: impl Into<PathBuf>) -> GitIndexTransactionStoreResult<Self> {
-        let path = path.into();
-        let state = read_or_initialize(&path)?;
-        let store = Self {
-            path,
-            state: Mutex::new(state),
-        };
-        store.persist_current()?;
-        Ok(store)
-    }
-
-    fn persist_current(&self) -> GitIndexTransactionStoreResult<()> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-        persist_state(&self.path, &state)
-    }
-
-    fn mutate<T>(
-        &self,
-        mutation: impl FnOnce(&mut PersistentStateV1) -> GitIndexTransactionStoreResult<T>,
-    ) -> GitIndexTransactionStoreResult<T> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-        let result = mutation(&mut state)?;
-        persist_state(&self.path, &state)?;
-        Ok(result)
-    }
-}
-
-impl GitIndexTransactionStore for PersistentGitIndexTransactionStore {
-    fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
-        preview.validate()?;
-        self.mutate(|state| {
-            match state
-                .previews
-                .iter()
-                .find(|stored| stored.preview_id == preview.preview_id)
-            {
-                Some(stored) if stored != &preview => {
-                    return Err(GitIndexTransactionStoreError::PreviewConflict);
+impl DaemonGitIndexTransactionStore {
+    pub(crate) fn open(database: Arc<GlobalDb>) -> GitIndexTransactionStoreResult<Self> {
+        let (commands, receiver) = sync_channel(GIT_INDEX_TRANSACTION_STORE_ACTOR_CAPACITY);
+        let (ready, started) = sync_channel::<GitIndexTransactionStoreResult<()>>(1);
+        std::thread::Builder::new()
+            .name("tracedecay-git-index-store".to_owned())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                let Ok(runtime) = runtime else {
+                    let _ = ready.send(Err(GitIndexTransactionStoreError::Unavailable));
+                    return;
+                };
+                if ready.send(Ok(())).is_err() {
+                    return;
                 }
-                Some(_) => return Ok(()),
-                None => {}
-            }
-            state.previews.push(preview);
-            state
-                .previews
-                .sort_by(|left, right| left.preview_id.cmp(&right.preview_id));
-            Ok(())
-        })
+                run_store_actor(runtime, database, receiver);
+            })
+            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+        started
+            .recv_timeout(GIT_INDEX_TRANSACTION_STORE_ACTOR_TIMEOUT)
+            .map_err(|_| GitIndexTransactionStoreError::Unavailable)??;
+        Ok(Self { commands })
+    }
+
+    fn submit(&self, command: StoreCommand) -> GitIndexTransactionStoreResult<()> {
+        self.commands
+            .try_send(command)
+            .map_err(|error| match error {
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    GitIndexTransactionStoreError::Unavailable
+                }
+            })
+    }
+
+    fn await_reply<T>(
+        &self,
+        receiver: Receiver<GitIndexTransactionStoreResult<T>>,
+    ) -> GitIndexTransactionStoreResult<T> {
+        receiver
+            .recv_timeout(GIT_INDEX_TRANSACTION_STORE_ACTOR_TIMEOUT)
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected => {
+                    GitIndexTransactionStoreError::Unavailable
+                }
+            })?
+    }
+}
+
+impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
+    fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::SavePreview(preview, reply))?;
+        self.await_reply(receiver)
     }
 
     fn read_preview(
         &self,
         preview_id: &GitIndexPreviewId,
     ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-        Ok(state
-            .previews
-            .iter()
-            .find(|preview| &preview.preview_id == preview_id)
-            .cloned())
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::ReadPreview(preview_id.clone(), reply))?;
+        self.await_reply(receiver)
     }
 
     fn begin_or_replay(
         &self,
         request: GitIndexTransactionBeginRequestV1,
     ) -> GitIndexTransactionStoreResult<GitIndexTransactionBeginResultV1> {
-        request.validate()?;
-        self.mutate(|state| {
-            let repository_id = &request.preview.repository_snapshot.repository_id;
-            if state
-                .quarantines
-                .iter()
-                .any(|entry| &entry.repository_id == repository_id)
-            {
-                return Err(GitIndexTransactionStoreError::RepositoryQuarantined);
-            }
-            if let Some(existing) = state
-                .records
-                .iter()
-                .find(|record| record.idempotency_key == request.idempotency_key)
-            {
-                if existing.input_digest != request.input_digest
-                    || existing.preview != request.preview
-                    || existing.journal.transaction_id != request.journal.transaction_id
-                {
-                    return Err(GitIndexTransactionStoreError::IdempotencyConflict);
-                }
-                return Ok(match &existing.terminal_receipt {
-                    Some(receipt) => {
-                        GitIndexTransactionBeginResultV1::Replay(Box::new(receipt.clone()))
-                    }
-                    None => GitIndexTransactionBeginResultV1::Started(Box::new(existing.clone())),
-                });
-            }
-            if state.previews.iter().any(|preview| {
-                preview.preview_id == request.preview.preview_id && preview != &request.preview
-            }) {
-                return Err(GitIndexTransactionStoreError::PreviewConflict);
-            }
-            if !state
-                .previews
-                .iter()
-                .any(|preview| preview.preview_id == request.preview.preview_id)
-            {
-                state.previews.push(request.preview.clone());
-                state
-                    .previews
-                    .sort_by(|left, right| left.preview_id.cmp(&right.preview_id));
-            }
-            let record = GitIndexTransactionRecordV1 {
-                idempotency_key: request.idempotency_key,
-                input_digest: request.input_digest,
-                preview: request.preview,
-                journal: request.journal,
-                terminal_receipt: None,
-            };
-            record.validate()?;
-            state.records.push(record.clone());
-            state
-                .records
-                .sort_by(|left, right| left.idempotency_key.cmp(&right.idempotency_key));
-            Ok(GitIndexTransactionBeginResultV1::Started(Box::new(record)))
-        })
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::BeginOrReplay(request, reply))?;
+        self.await_reply(receiver)
     }
 
     fn compare_and_swap_journal(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
         expected_phase_epoch: u64,
-        replacement: tracedecay_domain::GitIndexTransactionJournalV1,
-    ) -> GitIndexTransactionStoreResult<tracedecay_domain::GitIndexTransactionJournalV1> {
-        replacement.validate()?;
-        if replacement.phase.is_terminal() {
-            return Err(GitIndexTransactionStoreError::JournalConflict);
-        }
-        self.mutate(|state| {
-            let record = state
-                .records
-                .iter_mut()
-                .find(|record| &record.idempotency_key == idempotency_key)
-                .ok_or(GitIndexTransactionStoreError::JournalConflict)?;
-            let current = &record.journal;
-            if current.phase_epoch != expected_phase_epoch
-                || replacement.phase_epoch != expected_phase_epoch.saturating_add(1)
-                || !current.phase.permits_successor(replacement.phase)
-                || current.transaction_id != replacement.transaction_id
-                || current.preview_id != replacement.preview_id
-                || current.preview_digest != replacement.preview_digest
-                || current.repository_id != replacement.repository_id
-                || current.worktree_id != replacement.worktree_id
-                || current.operation != replacement.operation
-                || current.expected_snapshot_digest != replacement.expected_snapshot_digest
-                || current.started_at != replacement.started_at
-            {
-                return Err(GitIndexTransactionStoreError::JournalConflict);
-            }
-            record.journal = replacement.clone();
-            Ok(replacement)
-        })
+        replacement: GitIndexTransactionJournalV1,
+    ) -> GitIndexTransactionStoreResult<GitIndexTransactionJournalV1> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::CompareAndSwapJournal(
+            idempotency_key.clone(),
+            expected_phase_epoch,
+            replacement,
+            reply,
+        ))?;
+        self.await_reply(receiver)
     }
 
     fn write_terminal(
         &self,
         write: GitIndexTransactionTerminalWriteV1,
-    ) -> GitIndexTransactionStoreResult<tracedecay_domain::GitIndexTransactionReceiptV1> {
-        write.validate()?;
-        self.mutate(|state| {
-            let record = state
-                .records
-                .iter_mut()
-                .find(|record| record.idempotency_key == write.idempotency_key)
-                .ok_or(GitIndexTransactionStoreError::ReceiptConflict)?;
-            if let Some(existing) = &record.terminal_receipt {
-                return if existing == &write.receipt {
-                    Ok(existing.clone())
-                } else {
-                    Err(GitIndexTransactionStoreError::ReceiptConflict)
-                };
-            }
-            let current = &record.journal;
-            if write.expected_phase_epoch != current.phase_epoch.saturating_add(1)
-                || !current.phase.permits_successor(write.journal.phase)
-                || current.transaction_id != write.journal.transaction_id
-                || current.preview_id != write.journal.preview_id
-                || current.preview_digest != write.journal.preview_digest
-                || current.repository_id != write.journal.repository_id
-                || current.worktree_id != write.journal.worktree_id
-                || current.operation != write.journal.operation
-                || current.expected_snapshot_digest != write.journal.expected_snapshot_digest
-                || current.started_at != write.journal.started_at
-            {
-                return Err(GitIndexTransactionStoreError::JournalConflict);
-            }
-            record.journal = write.journal;
-            record.terminal_receipt = Some(write.receipt.clone());
-            record.validate()?;
-            Ok(write.receipt)
-        })
+    ) -> GitIndexTransactionStoreResult<GitIndexTransactionReceiptV1> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::WriteTerminal(write, reply))?;
+        self.await_reply(receiver)
     }
 
     fn recovery_candidates(
         &self,
         repository_id: &RepositoryId,
     ) -> GitIndexTransactionStoreResult<Vec<GitIndexTransactionRecordV1>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-        Ok(state
-            .records
-            .iter()
-            .filter(|record| {
-                &record.journal.repository_id == repository_id && record.journal.requires_recovery()
-            })
-            .cloned()
-            .collect())
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::RecoveryCandidates(
+            repository_id.clone(),
+            reply,
+        ))?;
+        self.await_reply(receiver)
     }
 
     fn recovery_repositories(&self) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-        let repositories = state
-            .records
-            .iter()
-            .filter(|record| record.journal.requires_recovery())
-            .map(|record| record.journal.repository_id.clone())
-            .collect::<BTreeSet<_>>();
-        Ok(repositories.into_iter().collect())
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::RecoveryRepositories(reply))?;
+        self.await_reply(receiver)
     }
 
     fn quarantine_repository(
@@ -301,321 +194,193 @@ impl GitIndexTransactionStore for PersistentGitIndexTransactionStore {
         repository_id: &RepositoryId,
         transaction_id: &GitIndexTransactionId,
     ) -> GitIndexTransactionStoreResult<()> {
-        repository_id.validate()?;
-        transaction_id.validate()?;
-        self.mutate(|state| {
-            if !state.quarantines.iter().any(|entry| {
-                &entry.repository_id == repository_id && &entry.transaction_id == transaction_id
-            }) {
-                state.quarantines.push(QuarantineRecordV1 {
-                    repository_id: repository_id.clone(),
-                    transaction_id: transaction_id.clone(),
-                });
-                state.quarantines.sort_by(|left, right| {
-                    (&left.repository_id, &left.transaction_id)
-                        .cmp(&(&right.repository_id, &right.transaction_id))
-                });
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::QuarantineRepository(
+            repository_id.clone(),
+            transaction_id.clone(),
+            reply,
+        ))?;
+        self.await_reply(receiver)
+    }
+
+    fn clear_repository_quarantine(
+        &self,
+        repository_id: &RepositoryId,
+        transaction_id: &GitIndexTransactionId,
+        recovery_receipt: GitIndexTransactionReceiptV1,
+    ) -> GitIndexTransactionStoreResult<()> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::ClearRepositoryQuarantine(
+            repository_id.clone(),
+            transaction_id.clone(),
+            recovery_receipt,
+            reply,
+        ))?;
+        self.await_reply(receiver)
+    }
+}
+
+fn run_store_actor(
+    runtime: tokio::runtime::Runtime,
+    database: Arc<GlobalDb>,
+    receiver: Receiver<StoreCommand>,
+) {
+    while let Ok(command) = receiver.recv() {
+        match command {
+            StoreCommand::SavePreview(preview, reply) => {
+                let result =
+                    runtime.block_on(database.git_index_transaction_store().save_preview(preview));
+                let _ = reply.send(result);
             }
-            Ok(())
-        })
-    }
-}
-
-fn read_or_initialize(path: &Path) -> GitIndexTransactionStoreResult<PersistentStateV1> {
-    let Some(parent) = path.parent() else {
-        return Err(GitIndexTransactionStoreError::Unavailable);
-    };
-    fs::create_dir_all(parent).map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-    if !path.exists() {
-        return Ok(PersistentStateV1::default());
-    }
-    let mut bytes = Vec::new();
-    File::open(path)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
-        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-    let state: PersistentStateV1 = serde_json::from_slice(&bytes)
-        .map_err(|error| GitIndexTransactionStoreError::InvalidData(error.to_string()))?;
-    if state.schema_version != GIT_INDEX_TRANSACTION_STORE_SCHEMA_VERSION {
-        return Err(GitIndexTransactionStoreError::InvalidData(format!(
-            "unsupported git index transaction store schema version {}",
-            state.schema_version
-        )));
-    }
-    for preview in &state.previews {
-        preview.validate()?;
-    }
-    for record in &state.records {
-        record.validate()?;
-    }
-    Ok(state)
-}
-
-fn persist_state(path: &Path, state: &PersistentStateV1) -> GitIndexTransactionStoreResult<()> {
-    let parent = path
-        .parent()
-        .ok_or(GitIndexTransactionStoreError::Unavailable)?;
-    fs::create_dir_all(parent).map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-    let bytes = serde_json::to_vec(state)
-        .map_err(|error| GitIndexTransactionStoreError::InvalidData(error.to_string()))?;
-    let temporary = temporary_path(path);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-    drop(file);
-    fs::rename(&temporary, path).map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| GitIndexTransactionStoreError::Unavailable)
-}
-
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    path.with_file_name(name)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tracedecay_domain::{
-        GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitIndexCommitIntentV1,
-        GitIndexPreviewDispositionV1, GitIndexSigningPolicyV1, GitIndexTransactionJournalV1,
-        GitIndexTransactionOperationV1, GitObjectFormatV1, GitOidV1, ManifestDigest, ProjectId,
-        RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
-        RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
-    };
-
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-            .expect("valid digest")
-    }
-
-    fn oid(byte: char) -> GitOidV1 {
-        GitOidV1::new(byte.to_string().repeat(40)).expect("valid object id")
-    }
-
-    fn preview() -> GitIndexPreviewV1 {
-        let snapshot = RepositoryStateSnapshotV1::new(
-            ProjectId::new("project.fixture").expect("project id"),
-            RepositoryId::new("repository.fixture").expect("repository id"),
-            Some(WorktreeId::new("worktree.fixture").expect("worktree id")),
-            1,
-            GitObjectFormatV1::Sha1,
-            GitHeadStateV1::Attached {
-                branch: "main".to_owned(),
-                commit: oid('a'),
-            },
-            RepositoryIndexSnapshotV1 {
-                checksum: digest('b'),
-                tree_id: Some(oid('c')),
-                state: RepositoryIndexStateV1::Clean,
-                unmerged_stage_digest: None,
-            },
-            RepositoryWorkingTreeSnapshotV1 {
-                state: RepositoryWorkingTreeStateV1::Clean,
-                tracked_digest: digest('d'),
-                untracked_name_digest: None,
-                ignored_collision_digest: None,
-            },
-            tracedecay_domain::GitOperationStateV1::None,
-            Some(digest('1')),
-            Some(digest('2')),
-            Some(digest('3')),
-            Some(digest('4')),
-            UtcMicros(1),
-            GitCoverageV1::complete(),
-        )
-        .expect("repository snapshot")
-        .with_native_identity(
-            "git version fixture".to_owned(),
-            "tracedecay.git-index-adapter.v1".to_owned(),
-            digest('5'),
-        )
-        .expect("native repository snapshot");
-        let snapshot_digest =
-            GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
-        let author = GitCommitIdentityV1 {
-            name: "Persisted Sensitive Author".to_owned(),
-            email: "persisted-sensitive@example.com".to_owned(),
-            at: UtcMicros(1_000_000),
-        };
-        let intent = GitIndexCommitIntentV1::new(
-            "persisted sensitive message\n".to_owned(),
-            author.clone(),
-            author,
-            GitIndexSigningPolicyV1::SignatureRequired {
-                key_reference: "persisted-sensitive-key".to_owned(),
-            },
-        )
-        .expect("commit intent");
-        GitIndexPreviewV1::new_with_commit_intent(
-            GitIndexPreviewId::new("preview.fixture").expect("preview id"),
-            GitIndexTransactionOperationV1::CommitIndex,
-            snapshot,
-            snapshot_digest,
-            Vec::new(),
-            Some(oid('c')),
-            Some(&intent),
-            GitIndexPreviewDispositionV1::Applicable,
-            UtcMicros(1),
-            UtcMicros(10),
-        )
-        .expect("preview")
-    }
-
-    fn begin_request(preview: &GitIndexPreviewV1) -> GitIndexTransactionBeginRequestV1 {
-        GitIndexTransactionBeginRequestV1 {
-            idempotency_key: GitIndexIdempotencyKey::new("idempotency.fixture")
-                .expect("idempotency key"),
-            input_digest: digest('e'),
-            preview: preview.clone(),
-            journal: GitIndexTransactionJournalV1::prepared(
-                GitIndexTransactionId::new("transaction.fixture").expect("transaction id"),
-                preview,
-                UtcMicros(1),
-            )
-            .expect("prepared journal"),
+            StoreCommand::ReadPreview(preview_id, reply) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .read_preview(&preview_id),
+                );
+                let _ = reply.send(result);
+            }
+            StoreCommand::BeginOrReplay(request, reply) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .begin_or_replay(request),
+                );
+                let _ = reply.send(result);
+            }
+            StoreCommand::CompareAndSwapJournal(key, epoch, replacement, reply) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .compare_and_swap_journal(&key, epoch, replacement),
+                );
+                let _ = reply.send(result);
+            }
+            StoreCommand::WriteTerminal(write, reply) => {
+                let result =
+                    runtime.block_on(database.git_index_transaction_store().write_terminal(write));
+                let _ = reply.send(result);
+            }
+            StoreCommand::RecoveryCandidates(repository_id, reply) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .recovery_candidates(&repository_id),
+                );
+                let _ = reply.send(result);
+            }
+            StoreCommand::RecoveryRepositories(reply) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .recovery_repositories(),
+                );
+                let _ = reply.send(result);
+            }
+            StoreCommand::QuarantineRepository(repository_id, transaction_id, reply) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .quarantine_repository(&repository_id, &transaction_id),
+                );
+                let _ = reply.send(result);
+            }
+            StoreCommand::ClearRepositoryQuarantine(
+                repository_id,
+                transaction_id,
+                receipt,
+                reply,
+            ) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .clear_repository_quarantine(&repository_id, &transaction_id, receipt),
+                );
+                let _ = reply.send(result);
+            }
         }
     }
+}
 
-    #[test]
-    fn store_schema_is_registered_durably_and_reopens() {
-        let directory = tempfile::tempdir().expect("temporary store directory");
-        let path = directory.path().join("git-index-transactions.json");
+/// Shared handle to the one daemon-owned store actor for a project database.
+///
+/// This local newtype exists so the foreign `GitIndexTransactionStore` trait
+/// can be implemented for a shareable handle without violating orphan rules
+/// around `Arc<T>`.
+#[derive(Clone)]
+pub(crate) struct SharedDaemonGitIndexTransactionStore {
+    inner: Arc<DaemonGitIndexTransactionStore>,
+}
 
-        let store = PersistentGitIndexTransactionStore::open(&path).expect("create store");
-        drop(store);
-        let reopened = PersistentGitIndexTransactionStore::open(&path).expect("reopen store");
-        drop(reopened);
+impl SharedDaemonGitIndexTransactionStore {
+    pub(crate) fn from_arc(inner: Arc<DaemonGitIndexTransactionStore>) -> Self {
+        Self { inner }
+    }
+}
 
-        let state: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).expect("read state")).expect("valid JSON");
-        assert_eq!(
-            state["schema_version"],
-            GIT_INDEX_TRANSACTION_STORE_SCHEMA_VERSION
-        );
+impl GitIndexTransactionStore for SharedDaemonGitIndexTransactionStore {
+    fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
+        self.inner.save_preview(preview)
     }
 
-    #[test]
-    fn persisted_commit_preview_contains_only_the_intent_digest() {
-        let directory = tempfile::tempdir().expect("temporary store directory");
-        let path = directory.path().join("git-index-transactions.json");
-        let store = PersistentGitIndexTransactionStore::open(&path).expect("create store");
-        store.save_preview(preview()).expect("persist preview");
-        drop(store);
-
-        let encoded = std::fs::read_to_string(path).expect("read persisted state");
-        assert!(encoded.contains("commit_intent_digest"));
-        for sensitive in [
-            "persisted sensitive message",
-            "Persisted Sensitive Author",
-            "persisted-sensitive@example.com",
-            "persisted-sensitive-key",
-        ] {
-            assert!(
-                !encoded.contains(sensitive),
-                "persistent state leaked {sensitive:?}"
-            );
-        }
+    fn read_preview(
+        &self,
+        preview_id: &GitIndexPreviewId,
+    ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
+        self.inner.read_preview(preview_id)
     }
 
-    #[test]
-    fn store_refuses_unknown_future_schema() {
-        let directory = tempfile::tempdir().expect("temporary store directory");
-        let path = directory.path().join("git-index-transactions.json");
-        std::fs::write(
-            &path,
-            br#"{"schema_version":2,"previews":[],"records":[],"quarantines":[]}"#,
-        )
-        .expect("write future schema");
-
-        assert!(matches!(
-            PersistentGitIndexTransactionStore::open(path),
-            Err(GitIndexTransactionStoreError::InvalidData(_))
-        ));
+    fn begin_or_replay(
+        &self,
+        request: GitIndexTransactionBeginRequestV1,
+    ) -> GitIndexTransactionStoreResult<GitIndexTransactionBeginResultV1> {
+        self.inner.begin_or_replay(request)
     }
 
-    #[test]
-    fn terminal_receipt_and_phase_commit_atomically_and_replay_after_reopen() {
-        let directory = tempfile::tempdir().expect("temporary store directory");
-        let path = directory.path().join("git-index-transactions.json");
-        let preview = preview();
-        let request = begin_request(&preview);
-        let store = PersistentGitIndexTransactionStore::open(&path).expect("create store");
-        assert!(matches!(
-            store.begin_or_replay(request.clone()),
-            Ok(GitIndexTransactionBeginResultV1::Started(_))
-        ));
-
-        let receipt = tracedecay_domain::GitIndexTransactionReceiptV1::new(
-            tracedecay_domain::GitIndexReceiptId::new("receipt.fixture").expect("receipt id"),
-            request.journal.transaction_id.clone(),
-            &preview,
-            preview.repository_snapshot_digest.clone(),
-            preview.repository_snapshot.index.tree_id.clone(),
-            preview.repository_snapshot.head.commit().cloned(),
-            None,
-            tracedecay_domain::GitIndexReceiptOutcomeV1::AbortedNoChange,
-            UtcMicros(2),
-        )
-        .expect("terminal receipt");
-        let mut terminal_journal = request.journal.clone();
-        terminal_journal
-            .advance(
-                tracedecay_domain::GitIndexJournalPhaseV1::AbortedNoChange,
-                UtcMicros(2),
-            )
-            .expect("terminal transition");
-        store
-            .write_terminal(GitIndexTransactionTerminalWriteV1 {
-                idempotency_key: request.idempotency_key.clone(),
-                expected_phase_epoch: terminal_journal.phase_epoch,
-                journal: terminal_journal,
-                receipt: receipt.clone(),
-            })
-            .expect("atomic terminal write");
-        drop(store);
-
-        let reopened = PersistentGitIndexTransactionStore::open(path).expect("reopen store");
-        assert!(matches!(
-            reopened.begin_or_replay(request),
-            Ok(GitIndexTransactionBeginResultV1::Replay(stored)) if *stored == receipt
-        ));
-        assert!(
-            reopened
-                .recovery_repositories()
-                .expect("recovery repositories")
-                .is_empty()
-        );
+    fn compare_and_swap_journal(
+        &self,
+        idempotency_key: &GitIndexIdempotencyKey,
+        expected_phase_epoch: u64,
+        replacement: GitIndexTransactionJournalV1,
+    ) -> GitIndexTransactionStoreResult<GitIndexTransactionJournalV1> {
+        self.inner
+            .compare_and_swap_journal(idempotency_key, expected_phase_epoch, replacement)
     }
 
-    #[test]
-    fn journal_cas_cannot_persist_a_terminal_phase_without_its_receipt() {
-        let directory = tempfile::tempdir().expect("temporary store directory");
-        let path = directory.path().join("git-index-transactions.json");
-        let preview = preview();
-        let request = begin_request(&preview);
-        let store = PersistentGitIndexTransactionStore::open(path).expect("create store");
-        store
-            .begin_or_replay(request.clone())
-            .expect("begin transaction");
-        let mut terminal = request.journal;
-        terminal
-            .advance(
-                tracedecay_domain::GitIndexJournalPhaseV1::AbortedNoChange,
-                UtcMicros(2),
-            )
-            .expect("terminal transition");
+    fn write_terminal(
+        &self,
+        write: GitIndexTransactionTerminalWriteV1,
+    ) -> GitIndexTransactionStoreResult<GitIndexTransactionReceiptV1> {
+        self.inner.write_terminal(write)
+    }
 
-        assert_eq!(
-            store.compare_and_swap_journal(&request.idempotency_key, 1, terminal),
-            Err(GitIndexTransactionStoreError::JournalConflict)
-        );
+    fn recovery_candidates(
+        &self,
+        repository_id: &RepositoryId,
+    ) -> GitIndexTransactionStoreResult<Vec<GitIndexTransactionRecordV1>> {
+        self.inner.recovery_candidates(repository_id)
+    }
+
+    fn recovery_repositories(&self) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
+        self.inner.recovery_repositories()
+    }
+
+    fn quarantine_repository(
+        &self,
+        repository_id: &RepositoryId,
+        transaction_id: &GitIndexTransactionId,
+    ) -> GitIndexTransactionStoreResult<()> {
+        self.inner
+            .quarantine_repository(repository_id, transaction_id)
+    }
+
+    fn clear_repository_quarantine(
+        &self,
+        repository_id: &RepositoryId,
+        transaction_id: &GitIndexTransactionId,
+        recovery_receipt: GitIndexTransactionReceiptV1,
+    ) -> GitIndexTransactionStoreResult<()> {
+        self.inner
+            .clear_repository_quarantine(repository_id, transaction_id, recovery_receipt)
     }
 }
