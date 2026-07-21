@@ -107,7 +107,10 @@ jobs:
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Build release binary
-        run: cargo build --release --all-features --target ${{ matrix.target }}
+        # Default features only (`full` + `token-counting`). Do not pass
+        # `--all-features`: that enables `test-transport`, which can fall back
+        # to project_for_test paths unsuitable for production binaries.
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Get version
         id: version

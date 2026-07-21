@@ -18,3 +18,4 @@ mod hook_lifecycle_lease_test;
 mod hook_replay_test;
 mod hooks_test;
 mod lsp_code_diagnostics_test;
+mod lsp_gateway_protocol_test;

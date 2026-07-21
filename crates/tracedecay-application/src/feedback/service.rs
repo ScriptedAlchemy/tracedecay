@@ -115,6 +115,75 @@ impl FeedbackCycleExecutionRequest {
     }
 }
 
+/// Accumulated state carried between typed feedback-cycle stages.
+struct FeedbackCycleProgress {
+    admission: AuthorizationAdmission,
+    runtime: Option<FeedbackRuntimeStateV1>,
+    completed_stages: Vec<FeedbackEvaluationStageV1>,
+    baselines: Vec<FeedbackDiagnosticBaselineV1>,
+    diagnostics: Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>>,
+    provider_states: Vec<ProviderEvaluationStateV1>,
+    baseline_states: Vec<FeedbackBaselineStateV1>,
+    impact: Option<FeedbackImpactV1>,
+    impact_state: Option<FeedbackImpactStateV1>,
+    findings: Vec<FeedbackFindingV1>,
+    dedupe_key: Option<FeedbackDedupeKeyV1>,
+}
+
+/// One step in the feedback-cycle state machine.
+enum FeedbackCycleStage {
+    ValidateAndScope,
+    Admit,
+    CheckInterruption,
+    ResolveRuntime,
+    ValidateRuntime,
+    CheckUserStop,
+    CheckBudgetAndProviders,
+    LoadBaselines,
+    LoadDiagnostics,
+    ClassifyDiagnostics,
+    ResolveImpact,
+    LookupDedupe,
+    AssembleResult,
+}
+
+/// Whether stage observations should be emitted on terminal completion.
+enum FeedbackCycleStageEmission {
+    /// Runtime override mid-pipeline suppresses staged observations.
+    Suppressed,
+    FromProgress,
+}
+
+/// Terminal payload routed to the existing finish helpers.
+struct FeedbackCycleTerminal {
+    termination: FeedbackCycleTerminationV1,
+    provider_states: Vec<ProviderEvaluationStateV1>,
+    baseline_states: Vec<FeedbackBaselineStateV1>,
+    impact: Option<FeedbackImpactV1>,
+    impact_state: Option<FeedbackImpactStateV1>,
+    findings: Vec<FeedbackFindingV1>,
+    dedupe_key: Option<FeedbackDedupeKeyV1>,
+    finish_path: FeedbackCycleFinishPath,
+}
+
+enum FeedbackCycleFinishPath {
+    Immediate,
+    AfterRuntime {
+        runtime: Option<FeedbackRuntimeStateV1>,
+        stage_emission: FeedbackCycleStageEmission,
+    },
+    AfterCheckedRuntime {
+        runtime: Option<FeedbackRuntimeStateV1>,
+        stage_emission: FeedbackCycleStageEmission,
+    },
+}
+
+enum FeedbackCycleStep {
+    Continue(FeedbackCycleStage),
+    Terminal(FeedbackCycleTerminal),
+    Complete(FeedbackCycleExecutionResult),
+}
+
 /// One terminal application result. It contains references to authoritative
 /// diagnostics and graph/test evidence, not a second durable finding store.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,488 +245,559 @@ where
         request: FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleExecutionResult, ApplicationContractError> {
         request.validate()?;
-        if !scope_matches(context, &request.input) {
-            return self.finish(
-                &request,
-                None,
-                FeedbackCycleTerminationV1::Blocked,
-                Vec::new(),
-                Vec::new(),
-                None,
-                None,
-                Vec::new(),
-                None,
-            );
-        }
-
-        let admission =
+        let mut stage = FeedbackCycleStage::ValidateAndScope;
+        let mut progress = None::<FeedbackCycleProgress>;
+        loop {
             match self
+                .advance_feedback_cycle_stage(context, &mut progress, request.clone(), stage)
+                .await?
+            {
+                FeedbackCycleStep::Continue(next) => stage = next,
+                FeedbackCycleStep::Terminal(terminal) => {
+                    let Some(progress) = progress else {
+                        return self.finish_terminal(context, &request, None, terminal).await;
+                    };
+                    return self
+                        .finish_terminal(context, &request, Some(&progress), terminal)
+                        .await;
+                }
+                FeedbackCycleStep::Complete(result) => return Ok(result),
+            }
+        }
+    }
+
+    async fn advance_feedback_cycle_stage(
+        &self,
+        context: &RequestContext,
+        progress: &mut Option<FeedbackCycleProgress>,
+        request: FeedbackCycleExecutionRequest,
+        stage: FeedbackCycleStage,
+    ) -> Result<FeedbackCycleStep, ApplicationContractError> {
+        match stage {
+            FeedbackCycleStage::ValidateAndScope => {
+                if !scope_matches(context, &request.input) {
+                    return Ok(FeedbackCycleStep::Terminal(FeedbackCycleTerminal {
+                        termination: FeedbackCycleTerminationV1::Blocked,
+                        provider_states: Vec::new(),
+                        baseline_states: Vec::new(),
+                        impact: None,
+                        impact_state: None,
+                        findings: Vec::new(),
+                        dedupe_key: None,
+                        finish_path: FeedbackCycleFinishPath::Immediate,
+                    }));
+                }
+                Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::Admit))
+            }
+            FeedbackCycleStage::Admit => match self
                 .authorization
                 .admit(context, &self.operation, request.input.observed_at)
             {
-                Ok(admission) => admission,
+                Ok(admission) => {
+                    *progress = Some(FeedbackCycleProgress {
+                        admission,
+                        runtime: None,
+                        completed_stages: Vec::new(),
+                        baselines: Vec::new(),
+                        diagnostics: Vec::new(),
+                        provider_states: Vec::new(),
+                        baseline_states: Vec::new(),
+                        impact: None,
+                        impact_state: None,
+                        findings: Vec::new(),
+                        dedupe_key: None,
+                    });
+                    Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::CheckInterruption))
+                }
                 Err(problem) => {
                     let (termination, states) = terminal_for_problem(&problem);
-                    return self.finish(
-                        &request,
-                        None,
+                    Ok(FeedbackCycleStep::Terminal(FeedbackCycleTerminal {
                         termination,
-                        states,
-                        Vec::new(),
-                        None,
-                        None,
-                        Vec::new(),
-                        None,
-                    );
+                        provider_states: states,
+                        baseline_states: Vec::new(),
+                        impact: None,
+                        impact_state: None,
+                        findings: Vec::new(),
+                        dedupe_key: None,
+                        finish_path: FeedbackCycleFinishPath::Immediate,
+                    }))
                 }
-            };
-
-        if let Some((termination, states)) = request_interruption(context, &request) {
-            return self
-                .finish_after_runtime(
-                    context,
-                    &request,
-                    &admission,
-                    None,
-                    None,
-                    termination,
-                    states,
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    &[],
-                )
-                .await;
-        }
-
-        let initial_runtime = match self.runtime.resolve(context, &request.input).await {
-            Some(runtime) => runtime,
-            None => {
-                return self
-                    .finish_after_runtime(
-                        context,
-                        &request,
-                        &admission,
-                        None,
-                        None,
+            },
+            FeedbackCycleStage::CheckInterruption => {
+                if let Some((termination, states)) = request_interruption(context, &request) {
+                    return Ok(FeedbackCycleStep::Terminal(FeedbackCycleTerminal {
+                        termination,
+                        provider_states: states,
+                        baseline_states: Vec::new(),
+                        impact: None,
+                        impact_state: None,
+                        findings: Vec::new(),
+                        dedupe_key: None,
+                        finish_path: FeedbackCycleFinishPath::AfterRuntime {
+                            runtime: None,
+                            stage_emission: FeedbackCycleStageEmission::FromProgress,
+                        },
+                    }));
+                }
+                Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::ResolveRuntime))
+            }
+            FeedbackCycleStage::ResolveRuntime => {
+                let initial_runtime = match self.runtime.resolve(context, &request.input).await {
+                    Some(runtime) => runtime,
+                    None => {
+                        return Ok(FeedbackCycleStep::Terminal(FeedbackCycleTerminal {
+                            termination: FeedbackCycleTerminationV1::DaemonUnavailable,
+                            provider_states: vec![ProviderEvaluationStateV1::Unavailable],
+                            baseline_states: Vec::new(),
+                            impact: None,
+                            impact_state: None,
+                            findings: Vec::new(),
+                            dedupe_key: None,
+                            finish_path: FeedbackCycleFinishPath::AfterRuntime {
+                                runtime: None,
+                                stage_emission: FeedbackCycleStageEmission::FromProgress,
+                            },
+                        }));
+                    }
+                };
+                progress.as_mut().expect("admitted").runtime = Some(initial_runtime);
+                Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::ValidateRuntime))
+            }
+            FeedbackCycleStage::ValidateRuntime => {
+                let progress = progress.as_mut().expect("admitted");
+                let runtime = progress
+                    .runtime
+                    .as_ref()
+                    .expect("runtime resolved before validation");
+                if runtime.validate_for(&request.input).is_err() {
+                    return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
                         FeedbackCycleTerminationV1::DaemonUnavailable,
                         vec![ProviderEvaluationStateV1::Unavailable],
+                        progress.runtime.clone(),
+                        FeedbackCycleStageEmission::FromProgress,
+                    )));
+                }
+                if !runtime.has_same_root(&request.input) {
+                    return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
+                        FeedbackCycleTerminationV1::Blocked,
                         Vec::new(),
-                        None,
-                        None,
-                        Vec::new(),
-                        &[],
-                    )
-                    .await;
+                        progress.runtime.clone(),
+                        FeedbackCycleStageEmission::FromProgress,
+                    )));
+                }
+                if !runtime.is_current_for(&request.input) {
+                    return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
+                        FeedbackCycleTerminationV1::StaleReplanRequired,
+                        vec![ProviderEvaluationStateV1::Stale],
+                        progress.runtime.clone(),
+                        FeedbackCycleStageEmission::FromProgress,
+                    )));
+                }
+                Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::CheckUserStop))
             }
-        };
-        if initial_runtime.validate_for(&request.input).is_err() {
-            return self
-                .finish_after_runtime(
-                    context,
-                    &request,
-                    &admission,
-                    Some(&initial_runtime),
-                    None,
-                    FeedbackCycleTerminationV1::DaemonUnavailable,
-                    vec![ProviderEvaluationStateV1::Unavailable],
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    &[],
-                )
-                .await;
-        }
-        if !initial_runtime.has_same_root(&request.input) {
-            return self
-                .finish_after_runtime(
-                    context,
-                    &request,
-                    &admission,
-                    Some(&initial_runtime),
-                    None,
-                    FeedbackCycleTerminationV1::Blocked,
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    &[],
-                )
-                .await;
-        }
-        if !initial_runtime.is_current_for(&request.input) {
-            return self
-                .finish_after_runtime(
-                    context,
-                    &request,
-                    &admission,
-                    Some(&initial_runtime),
-                    None,
-                    FeedbackCycleTerminationV1::StaleReplanRequired,
-                    vec![ProviderEvaluationStateV1::Stale],
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    &[],
-                )
-                .await;
-        }
-
-        if request.control == FeedbackCycleControl::UserStop {
-            return self
-                .finish_after_runtime(
-                    context,
-                    &request,
-                    &admission,
-                    Some(&initial_runtime),
-                    None,
-                    FeedbackCycleTerminationV1::UserStop,
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    &[],
-                )
-                .await;
-        }
-
-        let mut completed_stages = vec![FeedbackEvaluationStageV1::Admission];
-        if request.usage.exceeds(&request.input) {
-            return self
-                .finish_after_runtime(
-                    context,
-                    &request,
-                    &admission,
-                    Some(&initial_runtime),
-                    None,
-                    FeedbackCycleTerminationV1::BudgetExceeded,
-                    vec![ProviderEvaluationStateV1::TimedOut],
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    &completed_stages,
-                )
-                .await;
-        }
-        if request.providers.is_empty() {
-            return self
-                .finish_after_runtime(
-                    context,
-                    &request,
-                    &admission,
-                    Some(&initial_runtime),
-                    None,
-                    FeedbackCycleTerminationV1::Blocked,
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    &completed_stages,
-                )
-                .await;
-        }
-
-        completed_stages.push(FeedbackEvaluationStageV1::Diagnostics);
-        let diagnostics_request = FeedbackDiagnosticsRequest {
-            input: request.input.clone(),
-            providers: request.providers.clone(),
-        };
-        // Resolve authoritative history before asking providers for current
-        // diagnostics. A known absence of prior history stays explicit and does
-        // not manufacture a comparison horizon.
-        let baselines = if request.input.request.durability() == FeedbackDurabilityV1::Durable
-            && initial_runtime.authoritative.baseline_horizon.is_some()
-        {
-            let baselines = self
-                .diagnostics
-                .diagnostic_history(context, &diagnostics_request, &initial_runtime)
-                .await;
-            if let Some((termination, states)) = self
-                .runtime_override(context, &request, Some(&initial_runtime))
-                .await
-            {
-                return self
-                    .finish_after_checked_runtime(
-                        context,
-                        &request,
-                        &admission,
-                        Some(&initial_runtime),
-                        None,
-                        termination,
-                        states,
+            FeedbackCycleStage::CheckUserStop => {
+                if request.control == FeedbackCycleControl::UserStop {
+                    let runtime = progress
+                        .as_ref()
+                        .expect("admitted")
+                        .runtime
+                        .clone();
+                    return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
+                        FeedbackCycleTerminationV1::UserStop,
                         Vec::new(),
-                        None,
-                        None,
-                        Vec::new(),
-                        &[],
-                    )
-                    .await;
+                        runtime,
+                        FeedbackCycleStageEmission::FromProgress,
+                    )));
+                }
+                Ok(FeedbackCycleStep::Continue(
+                    FeedbackCycleStage::CheckBudgetAndProviders,
+                ))
             }
-            baselines
-        } else {
-            Vec::new()
-        };
-        let diagnostics = self
-            .diagnostics
-            .diagnostics(context, &diagnostics_request)
-            .await;
-        if let Some((termination, states)) = self
-            .runtime_override(context, &request, Some(&initial_runtime))
-            .await
-        {
-            return self
-                .finish_after_checked_runtime(
-                    context,
-                    &request,
-                    &admission,
-                    Some(&initial_runtime),
-                    None,
-                    termination,
-                    states,
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    &[],
-                )
-                .await;
-        }
-        let resolved_baselines = resolve_baselines(&request, &initial_runtime, &baselines)?;
-        let baseline_states = resolved_baselines
-            .iter()
-            .map(|resolved| resolved.state)
-            .collect::<Vec<_>>();
-        let (provider_states, findings) =
-            collect_diagnostics(&request, &diagnostics, &resolved_baselines)?;
-        if let Some(termination) = terminal_before_impact(&provider_states, &baseline_states) {
-            return self
-                .finish_after_checked_runtime(
-                    context,
-                    &request,
-                    &admission,
-                    Some(&initial_runtime),
-                    None,
-                    termination,
-                    provider_states,
-                    baseline_states,
-                    None,
-                    None,
-                    Vec::new(),
-                    &completed_stages,
-                )
-                .await;
-        }
-
-        completed_stages.push(FeedbackEvaluationStageV1::BaselineClassification);
-        completed_stages.push(FeedbackEvaluationStageV1::Impact);
-        let (impact, impact_state) = match self.resolve_impact(context, &request.input).await {
-            FeedbackImpactResolution::Evidence(impact, state) => (*impact, state),
-            FeedbackImpactResolution::Cancelled => {
-                return self
-                    .finish_after_checked_runtime(
-                        context,
-                        &request,
-                        &admission,
-                        Some(&initial_runtime),
-                        None,
-                        FeedbackCycleTerminationV1::Cancelled,
-                        vec![ProviderEvaluationStateV1::Cancelled],
-                        Vec::new(),
-                        None,
-                        None,
-                        Vec::new(),
-                        &completed_stages,
-                    )
-                    .await;
-            }
-            FeedbackImpactResolution::TimedOut => {
-                return self
-                    .finish_after_checked_runtime(
-                        context,
-                        &request,
-                        &admission,
-                        Some(&initial_runtime),
-                        None,
+            FeedbackCycleStage::CheckBudgetAndProviders => {
+                let progress = progress.as_mut().expect("runtime resolved");
+                progress.completed_stages = vec![FeedbackEvaluationStageV1::Admission];
+                if request.usage.exceeds(&request.input) {
+                    return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
                         FeedbackCycleTerminationV1::BudgetExceeded,
                         vec![ProviderEvaluationStateV1::TimedOut],
+                        progress.runtime.clone(),
+                        FeedbackCycleStageEmission::FromProgress,
+                    )));
+                }
+                if request.providers.is_empty() {
+                    return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
+                        FeedbackCycleTerminationV1::Blocked,
                         Vec::new(),
-                        None,
-                        None,
-                        Vec::new(),
-                        &completed_stages,
-                    )
-                    .await;
+                        progress.runtime.clone(),
+                        FeedbackCycleStageEmission::FromProgress,
+                    )));
+                }
+                progress
+                    .completed_stages
+                    .push(FeedbackEvaluationStageV1::Diagnostics);
+                Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::LoadBaselines))
             }
-        };
-        if let Some((termination, states)) = self
-            .runtime_override(context, &request, Some(&initial_runtime))
-            .await
-        {
-            return self
-                .finish_after_checked_runtime(
-                    context,
-                    &request,
-                    &admission,
-                    Some(&initial_runtime),
-                    None,
-                    termination,
-                    states,
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    &[],
-                )
-                .await;
-        }
-        let affected_tests_state = impact
-            .as_ref()
-            .map(|impact| impact.affected_tests_state)
-            .unwrap_or(impact_state);
-        completed_stages.push(FeedbackEvaluationStageV1::AffectedTests);
-        completed_stages.push(FeedbackEvaluationStageV1::ResultAssembly);
-
-        let dedupe_key = if request.input.request.durability() == FeedbackDurabilityV1::Durable {
-            let evidence_identity = canonical_sha256(&(
-                "tracedecay.feedback.evidence-identity.v1",
-                &initial_runtime,
-                &diagnostics,
-                &baselines,
-                &impact,
-                impact_state,
-            ))?;
-            let key = request.input.dedupe_key(&evidence_identity)?;
-            let dedupe_state = self.dedupe.lookup_completed(context, &key).await;
-            if let Some((termination, states)) = self
-                .runtime_override(context, &request, Some(&initial_runtime))
-                .await
-            {
-                return self
-                    .finish_after_checked_runtime(
-                        context,
-                        &request,
-                        &admission,
-                        Some(&initial_runtime),
-                        None,
+            FeedbackCycleStage::LoadBaselines => {
+                let progress = progress.as_mut().expect("runtime resolved");
+                let runtime = progress
+                    .runtime
+                    .as_ref()
+                    .expect("runtime resolved before baselines");
+                let diagnostics_request = FeedbackDiagnosticsRequest {
+                    input: request.input.clone(),
+                    providers: request.providers.clone(),
+                };
+                // Resolve authoritative history before asking providers for current
+                // diagnostics. A known absence of prior history stays explicit and does
+                // not manufacture a comparison horizon.
+                progress.baselines = if request.input.request.durability()
+                    == FeedbackDurabilityV1::Durable
+                    && runtime.authoritative.baseline_horizon.is_some()
+                {
+                    let baselines = self
+                        .diagnostics
+                        .diagnostic_history(context, &diagnostics_request, runtime)
+                        .await;
+                    if let Some((termination, states)) = self
+                        .runtime_override(context, &request, progress.runtime.as_ref())
+                        .await
+                    {
+                        return Ok(FeedbackCycleStep::Terminal(
+                            after_checked_runtime_terminal(
+                                termination,
+                                states,
+                                Vec::new(),
+                                progress.runtime.clone(),
+                                FeedbackCycleStageEmission::Suppressed,
+                            ),
+                        ));
+                    }
+                    baselines
+                } else {
+                    Vec::new()
+                };
+                Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::LoadDiagnostics))
+            }
+            FeedbackCycleStage::LoadDiagnostics => {
+                let progress = progress.as_mut().expect("runtime resolved");
+                let diagnostics_request = FeedbackDiagnosticsRequest {
+                    input: request.input.clone(),
+                    providers: request.providers.clone(),
+                };
+                progress.diagnostics = self
+                    .diagnostics
+                    .diagnostics(context, &diagnostics_request)
+                    .await;
+                if let Some((termination, states)) = self
+                    .runtime_override(context, &request, progress.runtime.as_ref())
+                    .await
+                {
+                    return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
                         termination,
                         states,
                         Vec::new(),
-                        None,
-                        None,
-                        Vec::new(),
-                        &[],
-                    )
-                    .await;
+                        progress.runtime.clone(),
+                        FeedbackCycleStageEmission::Suppressed,
+                    )));
+                }
+                Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::ClassifyDiagnostics))
             }
-            match dedupe_state {
-                FeedbackCycleDedupeState::Duplicate => {
-                    return self
-                        .finish_after_checked_runtime(
-                            context,
-                            &request,
-                            &admission,
-                            Some(&initial_runtime),
-                            Some(key),
-                            FeedbackCycleTerminationV1::DuplicateNoop,
-                            Vec::new(),
-                            Vec::new(),
-                            None,
-                            None,
-                            Vec::new(),
-                            &completed_stages,
-                        )
-                        .await;
+            FeedbackCycleStage::ClassifyDiagnostics => {
+                let progress = progress.as_mut().expect("runtime resolved");
+                let runtime = progress
+                    .runtime
+                    .as_ref()
+                    .expect("runtime resolved before classification");
+                let resolved_baselines =
+                    resolve_baselines(&request, runtime, &progress.baselines)?;
+                progress.baseline_states = resolved_baselines
+                    .iter()
+                    .map(|resolved| resolved.state)
+                    .collect();
+                let (provider_states, findings) = collect_diagnostics(
+                    &request,
+                    &progress.diagnostics,
+                    &resolved_baselines,
+                )?;
+                progress.provider_states = provider_states.clone();
+                progress.findings = findings;
+                if let Some(termination) =
+                    terminal_before_impact(&provider_states, &progress.baseline_states)
+                {
+                    return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+                        termination,
+                        provider_states,
+                        progress.baseline_states.clone(),
+                        progress.runtime.clone(),
+                        FeedbackCycleStageEmission::FromProgress,
+                    )));
                 }
-                FeedbackCycleDedupeState::Unavailable => {
-                    return self
-                        .finish_after_checked_runtime(
-                            context,
-                            &request,
-                            &admission,
-                            Some(&initial_runtime),
-                            Some(key),
-                            FeedbackCycleTerminationV1::DaemonUnavailable,
-                            vec![ProviderEvaluationStateV1::Unavailable],
-                            Vec::new(),
-                            None,
-                            None,
-                            Vec::new(),
-                            &completed_stages,
-                        )
-                        .await;
-                }
-                FeedbackCycleDedupeState::Cancelled => {
-                    return self
-                        .finish_after_checked_runtime(
-                            context,
-                            &request,
-                            &admission,
-                            Some(&initial_runtime),
-                            None,
+                progress
+                    .completed_stages
+                    .push(FeedbackEvaluationStageV1::BaselineClassification);
+                progress
+                    .completed_stages
+                    .push(FeedbackEvaluationStageV1::Impact);
+                Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::ResolveImpact))
+            }
+            FeedbackCycleStage::ResolveImpact => {
+                let progress = progress.as_mut().expect("runtime resolved");
+                match self.resolve_impact(context, &request.input).await {
+                    FeedbackImpactResolution::Evidence(impact, state) => {
+                        progress.impact = *impact;
+                        progress.impact_state = Some(state);
+                    }
+                    FeedbackImpactResolution::Cancelled => {
+                        return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
                             FeedbackCycleTerminationV1::Cancelled,
                             vec![ProviderEvaluationStateV1::Cancelled],
                             Vec::new(),
-                            None,
-                            None,
-                            Vec::new(),
-                            &completed_stages,
-                        )
-                        .await;
-                }
-                FeedbackCycleDedupeState::TimedOut => {
-                    return self
-                        .finish_after_checked_runtime(
-                            context,
-                            &request,
-                            &admission,
-                            Some(&initial_runtime),
-                            None,
+                            progress.runtime.clone(),
+                            FeedbackCycleStageEmission::FromProgress,
+                        )));
+                    }
+                    FeedbackImpactResolution::TimedOut => {
+                        return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
                             FeedbackCycleTerminationV1::BudgetExceeded,
                             vec![ProviderEvaluationStateV1::TimedOut],
                             Vec::new(),
-                            None,
-                            None,
-                            Vec::new(),
-                            &completed_stages,
-                        )
-                        .await;
+                            progress.runtime.clone(),
+                            FeedbackCycleStageEmission::FromProgress,
+                        )));
+                    }
                 }
-                FeedbackCycleDedupeState::Unique => Some(key),
+                if let Some((termination, states)) = self
+                    .runtime_override(context, &request, progress.runtime.as_ref())
+                    .await
+                {
+                    return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+                        termination,
+                        states,
+                        Vec::new(),
+                        progress.runtime.clone(),
+                        FeedbackCycleStageEmission::Suppressed,
+                    )));
+                }
+                progress
+                    .completed_stages
+                    .push(FeedbackEvaluationStageV1::AffectedTests);
+                progress
+                    .completed_stages
+                    .push(FeedbackEvaluationStageV1::ResultAssembly);
+                Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::LookupDedupe))
             }
-        } else {
-            None
+            FeedbackCycleStage::LookupDedupe => {
+                let progress = progress.as_mut().expect("runtime resolved");
+                let impact_state = progress
+                    .impact_state
+                    .expect("impact resolved before dedupe");
+                progress.dedupe_key = if request.input.request.durability()
+                    == FeedbackDurabilityV1::Durable
+                {
+                    let runtime = progress
+                        .runtime
+                        .as_ref()
+                        .expect("runtime resolved before dedupe");
+                    let evidence_identity = canonical_sha256(&(
+                        "tracedecay.feedback.evidence-identity.v1",
+                        runtime,
+                        &progress.diagnostics,
+                        &progress.baselines,
+                        &progress.impact,
+                        impact_state,
+                    ))?;
+                    let key = request.input.dedupe_key(&evidence_identity)?;
+                    let dedupe_state = self.dedupe.lookup_completed(context, &key).await;
+                    if let Some((termination, states)) = self
+                        .runtime_override(context, &request, progress.runtime.as_ref())
+                        .await
+                    {
+                        return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+                            termination,
+                            states,
+                            Vec::new(),
+                            progress.runtime.clone(),
+                            FeedbackCycleStageEmission::Suppressed,
+                        )));
+                    }
+                    match dedupe_state {
+                        FeedbackCycleDedupeState::Duplicate => {
+                            return Ok(FeedbackCycleStep::Terminal(
+                                after_checked_runtime_terminal_with_dedupe(
+                                    FeedbackCycleTerminationV1::DuplicateNoop,
+                                    Vec::new(),
+                                    Some(key),
+                                    progress.runtime.clone(),
+                                    FeedbackCycleStageEmission::FromProgress,
+                                ),
+                            ));
+                        }
+                        FeedbackCycleDedupeState::Unavailable => {
+                            return Ok(FeedbackCycleStep::Terminal(
+                                after_checked_runtime_terminal_with_dedupe(
+                                    FeedbackCycleTerminationV1::DaemonUnavailable,
+                                    vec![ProviderEvaluationStateV1::Unavailable],
+                                    Some(key),
+                                    progress.runtime.clone(),
+                                    FeedbackCycleStageEmission::FromProgress,
+                                ),
+                            ));
+                        }
+                        FeedbackCycleDedupeState::Cancelled => {
+                            return Ok(FeedbackCycleStep::Terminal(
+                                after_checked_runtime_terminal(
+                                    FeedbackCycleTerminationV1::Cancelled,
+                                    vec![ProviderEvaluationStateV1::Cancelled],
+                                    Vec::new(),
+                                    progress.runtime.clone(),
+                                    FeedbackCycleStageEmission::FromProgress,
+                                ),
+                            ));
+                        }
+                        FeedbackCycleDedupeState::TimedOut => {
+                            return Ok(FeedbackCycleStep::Terminal(
+                                after_checked_runtime_terminal(
+                                    FeedbackCycleTerminationV1::BudgetExceeded,
+                                    vec![ProviderEvaluationStateV1::TimedOut],
+                                    Vec::new(),
+                                    progress.runtime.clone(),
+                                    FeedbackCycleStageEmission::FromProgress,
+                                ),
+                            ));
+                        }
+                        FeedbackCycleDedupeState::Unique => Some(key),
+                    }
+                } else {
+                    None
+                };
+                Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::AssembleResult))
+            }
+            FeedbackCycleStage::AssembleResult => {
+                let progress = progress.as_mut().expect("runtime resolved");
+                let impact_state = progress
+                    .impact_state
+                    .expect("impact resolved before assembly");
+                let affected_tests_state = progress
+                    .impact
+                    .as_ref()
+                    .map(|impact| impact.affected_tests_state)
+                    .unwrap_or(impact_state);
+                let termination = determine_termination(
+                    &progress.provider_states,
+                    &progress.baseline_states,
+                    &progress.findings,
+                    impact_state,
+                    affected_tests_state,
+                    request.input.request.durability(),
+                );
+                let result = self
+                    .finish_after_checked_runtime(
+                        context,
+                        &request,
+                        &progress.admission,
+                        progress.runtime.as_ref(),
+                        progress.dedupe_key.clone(),
+                        termination,
+                        progress.provider_states.clone(),
+                        progress.baseline_states.clone(),
+                        progress.impact.clone(),
+                        Some(impact_state),
+                        progress.findings.clone(),
+                        &progress.completed_stages,
+                    )
+                    .await?;
+                Ok(FeedbackCycleStep::Complete(result))
+            }
+        }
+    }
+
+    async fn finish_terminal(
+        &self,
+        context: &RequestContext,
+        request: &FeedbackCycleExecutionRequest,
+        progress: Option<&FeedbackCycleProgress>,
+        terminal: FeedbackCycleTerminal,
+    ) -> Result<FeedbackCycleExecutionResult, ApplicationContractError> {
+        let completed_stages = match (&terminal.finish_path, progress) {
+            (FeedbackCycleFinishPath::Immediate, _) => &[][..],
+            (
+                FeedbackCycleFinishPath::AfterRuntime {
+                    stage_emission: FeedbackCycleStageEmission::Suppressed,
+                    ..
+                }
+                | FeedbackCycleFinishPath::AfterCheckedRuntime {
+                    stage_emission: FeedbackCycleStageEmission::Suppressed,
+                    ..
+                },
+                _,
+            ) => &[][..],
+            (
+                FeedbackCycleFinishPath::AfterRuntime {
+                    stage_emission: FeedbackCycleStageEmission::FromProgress,
+                    ..
+                }
+                | FeedbackCycleFinishPath::AfterCheckedRuntime {
+                    stage_emission: FeedbackCycleStageEmission::FromProgress,
+                    ..
+                },
+                Some(progress),
+            ) => progress.completed_stages.as_slice(),
+            (
+                FeedbackCycleFinishPath::AfterRuntime { .. }
+                | FeedbackCycleFinishPath::AfterCheckedRuntime { .. },
+                None,
+            ) => &[][..],
         };
 
-        let termination = determine_termination(
-            &provider_states,
-            &baseline_states,
-            &findings,
-            impact_state,
-            affected_tests_state,
-            request.input.request.durability(),
-        );
-        self.finish_after_checked_runtime(
-            context,
-            &request,
-            &admission,
-            Some(&initial_runtime),
-            dedupe_key,
-            termination,
-            provider_states,
-            baseline_states,
-            impact,
-            Some(impact_state),
-            findings,
-            &completed_stages,
-        )
-        .await
+        match terminal.finish_path {
+            FeedbackCycleFinishPath::Immediate => self.finish(
+                request,
+                terminal.dedupe_key,
+                terminal.termination,
+                terminal.provider_states,
+                terminal.baseline_states,
+                terminal.impact,
+                terminal.impact_state,
+                terminal.findings,
+                None,
+            ),
+            FeedbackCycleFinishPath::AfterRuntime { runtime, .. } => {
+                let admission = &progress.expect("admitted").admission;
+                self.finish_after_runtime(
+                    context,
+                    request,
+                    admission,
+                    runtime.as_ref(),
+                    terminal.dedupe_key,
+                    terminal.termination,
+                    terminal.provider_states,
+                    terminal.baseline_states,
+                    terminal.impact,
+                    terminal.impact_state,
+                    terminal.findings,
+                    completed_stages,
+                )
+                .await
+            }
+            FeedbackCycleFinishPath::AfterCheckedRuntime { runtime, .. } => {
+                let admission = &progress.expect("admitted").admission;
+                self.finish_after_checked_runtime(
+                    context,
+                    request,
+                    admission,
+                    runtime.as_ref(),
+                    terminal.dedupe_key,
+                    terminal.termination,
+                    terminal.provider_states,
+                    terminal.baseline_states,
+                    terminal.impact,
+                    terminal.impact_state,
+                    terminal.findings,
+                    completed_stages,
+                )
+                .await
+            }
+        }
     }
 
     async fn resolve_impact(
@@ -1542,6 +1682,71 @@ fn terminal_before_impact(
         Some(FeedbackCycleTerminationV1::BudgetExceeded)
     } else {
         None
+    }
+}
+
+fn after_runtime_terminal(
+    termination: FeedbackCycleTerminationV1,
+    provider_states: Vec<ProviderEvaluationStateV1>,
+    runtime: Option<FeedbackRuntimeStateV1>,
+    stage_emission: FeedbackCycleStageEmission,
+) -> FeedbackCycleTerminal {
+    FeedbackCycleTerminal {
+        termination,
+        provider_states,
+        baseline_states: Vec::new(),
+        impact: None,
+        impact_state: None,
+        findings: Vec::new(),
+        dedupe_key: None,
+        finish_path: FeedbackCycleFinishPath::AfterRuntime {
+            runtime,
+            stage_emission,
+        },
+    }
+}
+
+fn after_checked_runtime_terminal(
+    termination: FeedbackCycleTerminationV1,
+    provider_states: Vec<ProviderEvaluationStateV1>,
+    baseline_states: Vec<FeedbackBaselineStateV1>,
+    runtime: Option<FeedbackRuntimeStateV1>,
+    stage_emission: FeedbackCycleStageEmission,
+) -> FeedbackCycleTerminal {
+    FeedbackCycleTerminal {
+        termination,
+        provider_states,
+        baseline_states,
+        impact: None,
+        impact_state: None,
+        findings: Vec::new(),
+        dedupe_key: None,
+        finish_path: FeedbackCycleFinishPath::AfterCheckedRuntime {
+            runtime,
+            stage_emission,
+        },
+    }
+}
+
+fn after_checked_runtime_terminal_with_dedupe(
+    termination: FeedbackCycleTerminationV1,
+    provider_states: Vec<ProviderEvaluationStateV1>,
+    dedupe_key: Option<FeedbackDedupeKeyV1>,
+    runtime: Option<FeedbackRuntimeStateV1>,
+    stage_emission: FeedbackCycleStageEmission,
+) -> FeedbackCycleTerminal {
+    FeedbackCycleTerminal {
+        termination,
+        provider_states,
+        baseline_states: Vec::new(),
+        impact: None,
+        impact_state: None,
+        findings: Vec::new(),
+        dedupe_key,
+        finish_path: FeedbackCycleFinishPath::AfterCheckedRuntime {
+            runtime,
+            stage_emission,
+        },
     }
 }
 

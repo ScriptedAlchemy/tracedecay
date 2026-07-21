@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use thiserror::Error;
 
 use crate::research::{
     AccessPolicyDigest, ActorId, CapabilityId, DomainError, LocatorDigest, ManifestDigest,
@@ -1184,6 +1185,16 @@ impl ProtectedChange {
     }
 }
 
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ProtectedChangeSnapshotError {
+    #[error("protected change does not apply to the current snapshot")]
+    Stale,
+    #[error("protected change contains an invalid domain value: {0}")]
+    Domain(#[from] DomainError),
+    #[error("{0}")]
+    IncompatibleValue(&'static str),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RedactedConfigurationChangeV1 {
@@ -1452,6 +1463,180 @@ impl ConfigurationSnapshotV1 {
         }
         Ok(())
     }
+
+    /// Apply one protected scope/topology change to a snapshot copy.
+    ///
+    /// This is pure snapshot transition logic: source bindings, access rules,
+    /// topology policy, provenance, and staleness checks. Persistence and CAS
+    /// belong to the store adapter.
+    pub fn apply_protected_change(
+        &self,
+        change: &ProtectedChange,
+        revision_id: &ConfigurationRevisionId,
+    ) -> Result<Self, ProtectedChangeSnapshotError> {
+        change.validate()?;
+        let mut effective_values = self.effective_values.clone();
+        let mut provenance = self.provenance.clone();
+        match change {
+            ProtectedChange::BindSource(binding) => {
+                let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)?;
+                let mut bindings = match effective_values.get(&key) {
+                    Some(ConfigurationValueV1::SourceBindings(bindings)) => bindings.clone(),
+                    Some(_) => {
+                        return Err(ProtectedChangeSnapshotError::IncompatibleValue(
+                            "source bindings setting has an incompatible typed value",
+                        ));
+                    }
+                    None => Vec::new(),
+                };
+                if bindings.iter().any(|candidate| {
+                    candidate.binding_id == binding.binding_id
+                        || (candidate.source_kind == binding.source_kind
+                            && candidate.source_locator_digest == binding.source_locator_digest)
+                }) {
+                    return Err(ProtectedChangeSnapshotError::Stale);
+                }
+                bindings.push(binding.clone());
+                replace_protected_effective_value(
+                    &mut effective_values,
+                    &mut provenance,
+                    key,
+                    ConfigurationValueV1::SourceBindings(bindings),
+                    revision_id,
+                );
+            }
+            ProtectedChange::RebindSource(binding) => {
+                let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)?;
+                let mut bindings = match effective_values.get(&key) {
+                    Some(ConfigurationValueV1::SourceBindings(bindings)) => bindings.clone(),
+                    _ => return Err(ProtectedChangeSnapshotError::Stale),
+                };
+                let Some(index) = bindings
+                    .iter()
+                    .position(|candidate| candidate.binding_id == binding.binding_id)
+                else {
+                    return Err(ProtectedChangeSnapshotError::Stale);
+                };
+                if bindings
+                    .iter()
+                    .enumerate()
+                    .any(|(candidate_index, candidate)| {
+                        candidate_index != index
+                            && candidate.source_kind == binding.source_kind
+                            && candidate.source_locator_digest == binding.source_locator_digest
+                    })
+                {
+                    return Err(ProtectedChangeSnapshotError::Stale);
+                }
+                bindings[index] = binding.clone();
+                replace_protected_effective_value(
+                    &mut effective_values,
+                    &mut provenance,
+                    key,
+                    ConfigurationValueV1::SourceBindings(bindings),
+                    revision_id,
+                );
+            }
+            ProtectedChange::UnbindSource { binding_id } => {
+                let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)?;
+                let mut bindings = match effective_values.get(&key) {
+                    Some(ConfigurationValueV1::SourceBindings(bindings)) => bindings.clone(),
+                    _ => return Err(ProtectedChangeSnapshotError::Stale),
+                };
+                let before = bindings.len();
+                bindings.retain(|binding| &binding.binding_id != binding_id);
+                if bindings.len() == before {
+                    return Err(ProtectedChangeSnapshotError::Stale);
+                }
+                replace_protected_effective_value(
+                    &mut effective_values,
+                    &mut provenance,
+                    key,
+                    ConfigurationValueV1::SourceBindings(bindings),
+                    revision_id,
+                );
+            }
+            ProtectedChange::UpsertAccessRule(rule) => {
+                let key = SettingKey::new(ACCESS_RULES_SETTING_KEY)?;
+                let mut rules = match effective_values.get(&key) {
+                    Some(ConfigurationValueV1::AccessRules(rules)) => rules.clone(),
+                    Some(_) => {
+                        return Err(ProtectedChangeSnapshotError::IncompatibleValue(
+                            "access rules setting has an incompatible typed value",
+                        ));
+                    }
+                    None => Vec::new(),
+                };
+                if let Some(index) = rules
+                    .iter()
+                    .position(|candidate| candidate.rule_id == rule.rule_id)
+                {
+                    rules[index] = rule.clone();
+                } else {
+                    rules.push(rule.clone());
+                }
+                replace_protected_effective_value(
+                    &mut effective_values,
+                    &mut provenance,
+                    key,
+                    ConfigurationValueV1::AccessRules(rules),
+                    revision_id,
+                );
+            }
+            ProtectedChange::RemoveAccessRule { rule_id } => {
+                let key = SettingKey::new(ACCESS_RULES_SETTING_KEY)?;
+                let mut rules = match effective_values.get(&key) {
+                    Some(ConfigurationValueV1::AccessRules(rules)) => rules.clone(),
+                    _ => return Err(ProtectedChangeSnapshotError::Stale),
+                };
+                let before = rules.len();
+                rules.retain(|rule| &rule.rule_id != rule_id);
+                if rules.len() == before {
+                    return Err(ProtectedChangeSnapshotError::Stale);
+                }
+                replace_protected_effective_value(
+                    &mut effective_values,
+                    &mut provenance,
+                    key,
+                    ConfigurationValueV1::AccessRules(rules),
+                    revision_id,
+                );
+            }
+            ProtectedChange::ReplaceWorkTopologyPolicy(policy) => {
+                let key = SettingKey::new(WORK_TOPOLOGY_POLICY_SETTING_KEY)?;
+                replace_protected_effective_value(
+                    &mut effective_values,
+                    &mut provenance,
+                    key,
+                    ConfigurationValueV1::WorkTopologyPolicy(Box::new(policy.clone())),
+                    revision_id,
+                );
+            }
+        }
+        Self::new(effective_values, provenance).map_err(ProtectedChangeSnapshotError::Domain)
+    }
+}
+
+fn protected_mutation_provenance(
+    revision_id: &ConfigurationRevisionId,
+) -> Vec<ConfigurationCandidateV1> {
+    vec![ConfigurationCandidateV1 {
+        layer: ConfigurationLayerIdV1::Default,
+        revision_id: revision_id.clone(),
+        disposition: CandidateDispositionV1::Winning,
+        safe_reason: None,
+    }]
+}
+
+fn replace_protected_effective_value(
+    effective_values: &mut BTreeMap<SettingKey, ConfigurationValueV1>,
+    provenance: &mut BTreeMap<SettingKey, Vec<ConfigurationCandidateV1>>,
+    key: SettingKey,
+    value: ConfigurationValueV1,
+    revision_id: &ConfigurationRevisionId,
+) {
+    effective_values.insert(key.clone(), value);
+    provenance.insert(key, protected_mutation_provenance(revision_id));
 }
 
 fn derive_configuration_snapshot_id(

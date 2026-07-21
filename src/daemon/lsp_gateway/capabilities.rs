@@ -7,6 +7,8 @@
 
 use std::collections::BTreeSet;
 
+use serde_json::{Value, json};
+
 /// The protocol version implemented by the gateway contract.
 pub const LSP_PROTOCOL_VERSION: &str = "3.17";
 
@@ -77,6 +79,9 @@ impl SemanticCapability {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ClientCapabilities {
     pub position_encodings: BTreeSet<PositionEncoding>,
+    /// Distinguishes an omitted field (implicit UTF-16 in LSP 3.17) from an
+    /// explicitly empty or unsupported encoding list.
+    pub position_encodings_declared: bool,
     pub supports_versioned_publish_diagnostics: bool,
     pub publish_diagnostics_related_information: bool,
     pub publish_diagnostics_code_description: bool,
@@ -85,13 +90,114 @@ pub struct ClientCapabilities {
     pub document_diagnostics_related_information: bool,
     pub document_diagnostics_code_description: bool,
     pub document_diagnostics_data: bool,
+    pub workspace_diagnostic_refresh_support: bool,
     pub semantic: BTreeSet<SemanticCapability>,
 }
 
 impl ClientCapabilities {
     pub fn supports_position_encoding(&self, encoding: PositionEncoding) -> bool {
-        self.position_encodings.is_empty() || self.position_encodings.contains(&encoding)
+        (!self.position_encodings_declared && self.position_encodings.is_empty())
+            || self.position_encodings.contains(&encoding)
     }
+
+    /// Parses only the LSP capability fields PR12 actually uses. Unknown
+    /// fields are intentionally ignored rather than becoming accidental
+    /// capability authority.
+    pub fn from_initialize_capabilities(value: &Value) -> Result<Self, CapabilityParseError> {
+        let Some(root) = value.as_object() else {
+            return Err(CapabilityParseError::ExpectedObject);
+        };
+        let mut capabilities = Self::default();
+        if let Some(encodings) = root
+            .get("general")
+            .and_then(Value::as_object)
+            .and_then(|general| general.get("positionEncodings"))
+        {
+            capabilities.position_encodings_declared = true;
+            let encodings = encodings
+                .as_array()
+                .ok_or(CapabilityParseError::InvalidPositionEncodings)?;
+            capabilities.position_encodings = encodings
+                .iter()
+                .map(|encoding| {
+                    encoding
+                        .as_str()
+                        .ok_or(CapabilityParseError::InvalidPositionEncodings)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter_map(|encoding| match encoding {
+                    "utf-16" => Some(PositionEncoding::Utf16),
+                    "utf-8" => Some(PositionEncoding::Utf8),
+                    "utf-32" => Some(PositionEncoding::Utf32),
+                    _ => None,
+                })
+                .collect();
+        }
+        let text_document = root.get("textDocument").and_then(Value::as_object);
+        let publish = text_document
+            .and_then(|text_document| text_document.get("publishDiagnostics"))
+            .and_then(Value::as_object);
+        capabilities.supports_versioned_publish_diagnostics = bool_at(publish, "versionSupport");
+        capabilities.publish_diagnostics_related_information =
+            bool_at(publish, "relatedInformation");
+        capabilities.publish_diagnostics_code_description =
+            bool_at(publish, "codeDescriptionSupport");
+        capabilities.publish_diagnostics_data = bool_at(publish, "dataSupport");
+
+        let diagnostic = text_document
+            .and_then(|text_document| text_document.get("diagnostic"))
+            .and_then(Value::as_object);
+        capabilities.supports_document_diagnostics = diagnostic.is_some();
+        capabilities.document_diagnostics_related_information =
+            bool_at(diagnostic, "relatedInformation");
+        capabilities.document_diagnostics_code_description =
+            bool_at(diagnostic, "codeDescriptionSupport");
+        capabilities.document_diagnostics_data = bool_at(diagnostic, "dataSupport");
+        capabilities.workspace_diagnostic_refresh_support = root
+            .get("workspace")
+            .and_then(Value::as_object)
+            .and_then(|workspace| workspace.get("diagnostic"))
+            .and_then(Value::as_object)
+            .is_some_and(|diagnostic| bool_at(Some(diagnostic), "refreshSupport"));
+
+        for (key, capability) in [
+            ("declaration", SemanticCapability::Declaration),
+            ("definition", SemanticCapability::Definition),
+            ("typeDefinition", SemanticCapability::TypeDefinition),
+            ("implementation", SemanticCapability::Implementation),
+            ("references", SemanticCapability::References),
+            ("hover", SemanticCapability::Hover),
+            ("documentSymbol", SemanticCapability::DocumentSymbol),
+            ("signatureHelp", SemanticCapability::SignatureHelp),
+            ("callHierarchy", SemanticCapability::CallHierarchy),
+            ("typeHierarchy", SemanticCapability::TypeHierarchy),
+        ] {
+            if text_document
+                .and_then(|text_document| text_document.get(key))
+                .is_some_and(capability_declared)
+            {
+                capabilities.semantic.insert(capability);
+            }
+        }
+        if root
+            .get("workspace")
+            .and_then(Value::as_object)
+            .and_then(|workspace| workspace.get("symbol"))
+            .is_some_and(capability_declared)
+        {
+            capabilities
+                .semantic
+                .insert(SemanticCapability::WorkspaceSymbol);
+        }
+        Ok(capabilities)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapabilityParseError {
+    ExpectedObject,
+    InvalidPositionEncodings,
 }
 
 /// Capabilities the daemon can safely guarantee for the admitted session.
@@ -136,6 +242,7 @@ pub struct EffectiveCapabilities {
     pub text_document_sync: TextDocumentSync,
     pub supports_publish_diagnostics: bool,
     pub supports_document_diagnostics: bool,
+    pub supports_workspace_diagnostic_refresh: bool,
     pub semantic: BTreeSet<SemanticCapability>,
     pub workspace_folders_supported: bool,
     pub workspace_diagnostics_supported: bool,
@@ -158,6 +265,96 @@ impl EffectiveCapabilities {
                 reason: CapabilityUnavailableReason::ClientCapabilityMissing,
             })
         }
+    }
+
+    /// Exact PR12 server capability projection. Deferred features are absent,
+    /// never advertised as `false` options that a client may still invoke.
+    pub fn to_lsp_server_capabilities(&self) -> Value {
+        let mut capabilities = serde_json::Map::new();
+        capabilities.insert("positionEncoding".into(), Value::String("utf-16".into()));
+        capabilities.insert(
+            "textDocumentSync".into(),
+            json!({
+                "openClose": self.text_document_sync.open_close,
+                "change": if self.text_document_sync.incremental { 2 } else { 0 },
+                "save": self.text_document_sync.save,
+            }),
+        );
+        capabilities.insert(
+            "workspace".into(),
+            json!({ "workspaceFolders": { "supported": false } }),
+        );
+        if self.supports_document_diagnostics {
+            capabilities.insert(
+                "diagnosticProvider".into(),
+                json!({
+                    "interFileDependencies": true,
+                    "workspaceDiagnostics": false,
+                }),
+            );
+        }
+        for (capability, key, value) in [
+            (
+                SemanticCapability::Declaration,
+                "declarationProvider",
+                Value::Bool(true),
+            ),
+            (
+                SemanticCapability::Definition,
+                "definitionProvider",
+                Value::Bool(true),
+            ),
+            (
+                SemanticCapability::TypeDefinition,
+                "typeDefinitionProvider",
+                Value::Bool(true),
+            ),
+            (
+                SemanticCapability::Implementation,
+                "implementationProvider",
+                Value::Bool(true),
+            ),
+            (
+                SemanticCapability::References,
+                "referencesProvider",
+                Value::Bool(true),
+            ),
+            (
+                SemanticCapability::Hover,
+                "hoverProvider",
+                Value::Bool(true),
+            ),
+            (
+                SemanticCapability::DocumentSymbol,
+                "documentSymbolProvider",
+                Value::Bool(true),
+            ),
+            (
+                SemanticCapability::WorkspaceSymbol,
+                "workspaceSymbolProvider",
+                json!({ "resolveProvider": false }),
+            ),
+            (
+                SemanticCapability::CallHierarchy,
+                "callHierarchyProvider",
+                Value::Bool(true),
+            ),
+            (
+                SemanticCapability::SignatureHelp,
+                "signatureHelpProvider",
+                Value::Bool(true),
+            ),
+            (
+                SemanticCapability::TypeHierarchy,
+                "typeHierarchyProvider",
+                Value::Bool(true),
+            ),
+        ] {
+            if self.supports_semantic(capability) {
+                capabilities.insert(key.into(), value);
+            }
+        }
+        Value::Object(capabilities)
     }
 }
 
@@ -228,6 +425,10 @@ pub fn negotiate_capabilities(
         supports_document_diagnostics: diagnostics_supported
             && pull_client_supported
             && gateway.supports_document_diagnostics,
+        supports_workspace_diagnostic_refresh: diagnostics_supported
+            && pull_client_supported
+            && gateway.supports_document_diagnostics
+            && client.workspace_diagnostic_refresh_support,
         semantic,
         workspace_folders_supported: false,
         workspace_diagnostics_supported: false,
@@ -235,6 +436,17 @@ pub fn negotiate_capabilities(
         general_code_actions_supported: false,
         execute_command_supported: false,
     }
+}
+
+fn bool_at(object: Option<&serde_json::Map<String, Value>>, key: &str) -> bool {
+    object
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn capability_declared(value: &Value) -> bool {
+    value.as_bool().unwrap_or_else(|| value.is_object())
 }
 
 #[cfg(test)]
@@ -315,6 +527,7 @@ mod tests {
     fn explicit_non_utf16_client_fails_closed() {
         let mut client = full_client();
         client.position_encodings = [PositionEncoding::Utf8].into_iter().collect();
+        client.position_encodings_declared = true;
         let upstream = UpstreamCapabilities {
             supports_diagnostics: true,
             semantic: SemanticCapability::ALL.into_iter().collect(),
@@ -330,5 +543,80 @@ mod tests {
         );
         assert!(effective.semantic.is_empty());
         assert!(!effective.supports_publish_diagnostics);
+    }
+
+    #[test]
+    fn parses_only_pr12_client_fields_and_omits_deferred_server_methods() {
+        let client = ClientCapabilities::from_initialize_capabilities(&json!({
+            "general": { "positionEncodings": ["utf-16"] },
+            "textDocument": {
+                "publishDiagnostics": {
+                    "versionSupport": true,
+                    "relatedInformation": true,
+                    "codeDescriptionSupport": true,
+                    "dataSupport": true
+                },
+                "diagnostic": {
+                    "relatedInformation": true,
+                    "codeDescriptionSupport": true,
+                    "dataSupport": true
+                },
+                "definition": {},
+                "hover": {}
+            },
+            "workspace": {
+                "symbol": {},
+                "diagnostic": { "refreshSupport": true }
+            }
+        }))
+        .unwrap();
+        let effective = negotiate_capabilities(
+            &client,
+            &GatewayCapabilities::default(),
+            &UpstreamCapabilities {
+                supports_diagnostics: true,
+                semantic: [
+                    SemanticCapability::Definition,
+                    SemanticCapability::Hover,
+                    SemanticCapability::WorkspaceSymbol,
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
+        let advertised = effective.to_lsp_server_capabilities();
+        assert_eq!(advertised["positionEncoding"], "utf-16");
+        assert_eq!(
+            advertised["workspace"]["workspaceFolders"]["supported"],
+            false
+        );
+        assert!(advertised.get("definitionProvider").is_some());
+        assert!(advertised.get("renameProvider").is_none());
+        assert!(advertised.get("codeActionProvider").is_none());
+        assert!(advertised.get("executeCommandProvider").is_none());
+    }
+
+    #[test]
+    fn explicit_empty_unknown_or_malformed_position_encodings_never_gain_implicit_utf16() {
+        for capabilities in [
+            json!({ "general": { "positionEncodings": [] } }),
+            json!({ "general": { "positionEncodings": ["future-encoding"] } }),
+        ] {
+            let client = ClientCapabilities::from_initialize_capabilities(&capabilities).unwrap();
+            assert!(!client.supports_position_encoding(PositionEncoding::Utf16));
+        }
+
+        assert_eq!(
+            ClientCapabilities::from_initialize_capabilities(&json!({
+                "general": { "positionEncodings": "utf-16" }
+            })),
+            Err(CapabilityParseError::InvalidPositionEncodings)
+        );
+        assert_eq!(
+            ClientCapabilities::from_initialize_capabilities(&json!({
+                "general": { "positionEncodings": ["utf-16", 16] }
+            })),
+            Err(CapabilityParseError::InvalidPositionEncodings)
+        );
     }
 }

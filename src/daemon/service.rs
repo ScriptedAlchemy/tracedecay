@@ -10,6 +10,7 @@ use super::SOCKET_ENV;
 mod probe;
 mod runner;
 mod unit_file;
+pub(crate) mod invocation;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

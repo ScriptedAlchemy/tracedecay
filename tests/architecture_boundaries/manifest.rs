@@ -1,8 +1,8 @@
 //! Cargo manifest contract guards.
 //!
-//! Validates the PR8 workspace shape (exact package set, dependency aliases,
-//! target snapshot), classifies physical Cargo manifests without name
-//! heuristics, and enumerates git-tracked Rust sources.
+//! Validates the approved workspace shape through PR13 (exact package set,
+//! dependency aliases, and target snapshot), classifies physical Cargo
+//! manifests without name heuristics, and enumerates git-tracked Rust sources.
 
 use crate::module_scanner::{normalize_identifier, normalize_relative, resolve_reachable_sources};
 use crate::query_kernel::query_kernel_violations;
@@ -52,6 +52,7 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-application|feedback_cycle|test|crates/tracedecay-application/tests/feedback_cycle.rs",
     "tracedecay-application|four_pillar_milestone|test|crates/tracedecay-application/tests/four_pillar_milestone.rs",
     "tracedecay-application|planner_boundary|test|crates/tracedecay-application/tests/planner_boundary.rs",
+    "tracedecay-application|pr13_advisory_runtime|test|crates/tracedecay-application/tests/pr13_advisory_runtime.rs",
     "tracedecay-application|surface_binding_parity|test|crates/tracedecay-application/tests/surface_binding_parity.rs",
     "tracedecay-application|retrieval_primitives|test|crates/tracedecay-application/tests/retrieval_primitives.rs",
     "tracedecay-application|stream_contract|test|crates/tracedecay-application/tests/stream_contract.rs",
@@ -409,9 +410,9 @@ fn validate_contract_package_dependencies(
     for dependency in dependencies {
         let alias = dependency.rename.as_deref().unwrap_or(&dependency.name);
         let normalized_alias = normalize_identifier(alias);
-        let package_allowed = allowed_packages.iter().any(|allowed| {
-            normalize_identifier(allowed) == normalize_identifier(&dependency.name)
-        });
+        let package_allowed = allowed_packages
+            .iter()
+            .any(|allowed| normalize_identifier(allowed) == normalize_identifier(&dependency.name));
         let alias_matches_package = allowed_packages.iter().any(|allowed| {
             normalize_identifier(allowed) == normalized_alias
                 && normalize_identifier(allowed) == normalize_identifier(&dependency.name)
@@ -428,16 +429,14 @@ fn validate_contract_package_dependencies(
 
 fn contract_allowed_packages(manifest_path: &Path) -> &'static [&'static str] {
     match manifest_path.to_str() {
-        Some("crates/tracedecay-api/Cargo.toml") | Some("crates/tracedecay-hooks/Cargo.toml") => {
-            &[
-                "serde",
-                "serde_json",
-                "thiserror",
-                "tracedecay-application",
-                "tracedecay-domain",
-                "tracedecay-tool-catalog",
-            ]
-        }
+        Some("crates/tracedecay-api/Cargo.toml") | Some("crates/tracedecay-hooks/Cargo.toml") => &[
+            "serde",
+            "serde_json",
+            "thiserror",
+            "tracedecay-application",
+            "tracedecay-domain",
+            "tracedecay-tool-catalog",
+        ],
         _ => QUERY_ALLOWED_PACKAGES,
     }
 }

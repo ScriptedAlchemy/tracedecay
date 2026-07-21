@@ -163,35 +163,15 @@ pub enum PositionError {
     InsideSurrogatePair,
     ByteOutOfBounds,
     NotUtf8Boundary,
+    InsideLineEnding,
 }
 
 pub fn utf16_position_to_byte_offset(
     text: &str,
     position: LspPosition,
 ) -> Result<usize, PositionError> {
-    let mut line = 0_u32;
-    let mut line_start = 0_usize;
-    for (offset, character) in text.char_indices() {
-        if line == position.line {
-            let line_end = text[offset..]
-                .find('\n')
-                .map_or(text.len(), |relative| offset + relative);
-            return utf16_column_to_byte_offset(
-                &text[line_start..line_end],
-                line_start,
-                position.character,
-            );
-        }
-        if character == '\n' {
-            line += 1;
-            line_start = offset + character.len_utf8();
-        }
-    }
-
-    if line == position.line {
-        return utf16_column_to_byte_offset(&text[line_start..], line_start, position.character);
-    }
-    Err(PositionError::LineOutOfBounds)
+    let (line_start, line_end) = line_bounds(text, position.line)?;
+    utf16_column_to_byte_offset(&text[line_start..line_end], line_start, position.character)
 }
 
 pub fn byte_offset_to_utf16_position(
@@ -206,16 +186,63 @@ pub fn byte_offset_to_utf16_position(
     }
 
     let mut line = 0_u32;
-    let mut character = 0_u32;
-    for value in text[..offset].chars() {
-        if value == '\n' {
-            line += 1;
-            character = 0;
-        } else {
-            character += value.len_utf16() as u32;
+    let mut line_start = 0_usize;
+    loop {
+        let (line_end, next_line_start) = next_line_bounds(text, line_start);
+        if offset <= line_end {
+            let character = text[line_start..offset]
+                .chars()
+                .map(|value| value.len_utf16() as u32)
+                .sum();
+            return Ok(LspPosition { line, character });
+        }
+        let Some(next_line_start) = next_line_start else {
+            return Err(PositionError::ByteOutOfBounds);
+        };
+        if offset < next_line_start {
+            return Err(PositionError::InsideLineEnding);
+        }
+        line = line.saturating_add(1);
+        line_start = next_line_start;
+    }
+}
+
+fn line_bounds(text: &str, target_line: u32) -> Result<(usize, usize), PositionError> {
+    let mut line = 0_u32;
+    let mut line_start = 0_usize;
+    loop {
+        let (line_end, next_line_start) = next_line_bounds(text, line_start);
+        if line == target_line {
+            return Ok((line_start, line_end));
+        }
+        let Some(next_line_start) = next_line_start else {
+            return Err(PositionError::LineOutOfBounds);
+        };
+        line = line.saturating_add(1);
+        line_start = next_line_start;
+    }
+}
+
+/// Returns the content end and the byte after the line terminator. LSP treats
+/// CRLF as one line ending and also permits lone CR and LF endings.
+fn next_line_bounds(text: &str, line_start: usize) -> (usize, Option<usize>) {
+    let bytes = text.as_bytes();
+    let mut index = line_start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\n' => return (index, Some(index + 1)),
+            b'\r' => {
+                let next = if bytes.get(index + 1) == Some(&b'\n') {
+                    index + 2
+                } else {
+                    index + 1
+                };
+                return (index, Some(next));
+            }
+            _ => index += 1,
         }
     }
-    Ok(LspPosition { line, character })
+    (bytes.len(), None)
 }
 
 fn utf16_column_to_byte_offset(
@@ -360,6 +387,49 @@ mod tests {
                 line: 1,
                 character: 1,
             })
+        );
+    }
+
+    #[test]
+    fn utf16_positions_treat_crlf_and_lone_cr_as_line_endings() {
+        let text = "a🦀\r\nλ\rz";
+        let first_end = utf16_position_to_byte_offset(
+            text,
+            LspPosition {
+                line: 0,
+                character: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(&text[first_end..], "\r\nλ\rz");
+        assert_eq!(
+            byte_offset_to_utf16_position(text, first_end),
+            Ok(LspPosition {
+                line: 0,
+                character: 3,
+            })
+        );
+        assert_eq!(
+            byte_offset_to_utf16_position(text, first_end + 1),
+            Err(PositionError::InsideLineEnding)
+        );
+        let third_line = text.find('z').unwrap();
+        assert_eq!(
+            byte_offset_to_utf16_position(text, third_line),
+            Ok(LspPosition {
+                line: 2,
+                character: 0,
+            })
+        );
+        assert_eq!(
+            utf16_position_to_byte_offset(
+                text,
+                LspPosition {
+                    line: 1,
+                    character: 1,
+                }
+            ),
+            Ok(text.find('\r').unwrap() + "\r\n".len() + 'λ'.len_utf8())
         );
     }
 }

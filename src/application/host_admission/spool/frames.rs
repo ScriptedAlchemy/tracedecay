@@ -1,11 +1,11 @@
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
+use tracedecay_domain::framed_log::{self, checksum};
 
 use super::bounds::{SpoolBounds, SpoolOverflowDisposition};
-use super::fs_ops::{file_len, io_error, sync_parent_directory, tighten_existing_file};
+use super::fs_ops::{self, file_len, io_error};
 use super::meta::SpoolMetaV1;
 use super::quarantine::TerminalQuarantine;
 use super::types::{SpoolError, SpoolIntegrity, SpoolRecord};
@@ -16,7 +16,7 @@ pub(crate) const FORMAT_VERSION: u16 = 1;
 
 pub(crate) const FRAME_HEADER_BYTES: usize = 20;
 
-pub(crate) const CHECKSUM_BYTES: usize = 32;
+pub(crate) use framed_log::CHECKSUM_BYTES;
 
 pub(crate) struct ParsedHeader {
     pub(crate) seq: u64,
@@ -87,9 +87,11 @@ pub(crate) fn encode_frame(seq: u64, source: &[u8], payload: &[u8]) -> Result<Ve
     frame.extend_from_slice(&seq.to_le_bytes());
     frame.extend_from_slice(source);
     frame.extend_from_slice(payload);
-    frame.extend_from_slice(&Sha256::digest(&frame));
+    frame.extend_from_slice(&checksum(&frame));
     Ok(frame)
 }
+
+pub(crate) use fs_ops::append_frame_durable;
 
 pub(crate) struct ScanResult {
     pub(crate) records: Vec<SpoolRecord>,
@@ -136,7 +138,7 @@ pub(crate) fn validate_quarantined_active_frame(
         return false;
     }
     let checksum_at = frame.len() - CHECKSUM_BYTES;
-    if Sha256::digest(&frame[..checksum_at]).as_slice() != &frame[checksum_at..] {
+    if checksum(&frame[..checksum_at]) != frame[checksum_at..] {
         return false;
     }
     let source_end = FRAME_HEADER_BYTES + parsed.source_len;
@@ -207,16 +209,21 @@ pub(crate) fn scan_records(
 
         let mut source = vec![0u8; parsed.source_len];
         let mut payload = vec![0u8; parsed.payload_len];
-        let mut checksum = [0u8; CHECKSUM_BYTES];
+        let mut stored_checksum = [0u8; CHECKSUM_BYTES];
         input.read_exact(&mut source).map_err(io_error)?;
         input.read_exact(&mut payload).map_err(io_error)?;
-        input.read_exact(&mut checksum).map_err(io_error)?;
+        input.read_exact(&mut stored_checksum).map_err(io_error)?;
 
-        let mut hasher = Sha256::new();
-        hasher.update(header);
-        hasher.update(&source);
-        hasher.update(&payload);
-        if hasher.finalize().as_slice() != checksum {
+        let mut body = Vec::with_capacity(
+            FRAME_HEADER_BYTES
+                .checked_add(parsed.source_len)
+                .and_then(|len| len.checked_add(parsed.payload_len))
+                .unwrap_or(FRAME_HEADER_BYTES),
+        );
+        body.extend_from_slice(&header);
+        body.extend_from_slice(&source);
+        body.extend_from_slice(&payload);
+        if checksum(&body) != stored_checksum {
             return Ok(corrupted_prefix(records, offset, file_len));
         }
         let Ok(source) = String::from_utf8(source) else {
@@ -302,21 +309,4 @@ pub(crate) fn is_proven_unpublished_active_tail(
         return Ok(false);
     }
     Ok(true)
-}
-
-pub(crate) fn append_frame_durable(path: &Path, frame: &[u8]) -> Result<u64, SpoolError> {
-    tighten_existing_file(path)?;
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut output = options.open(path).map_err(io_error)?;
-    let offset = output.seek(SeekFrom::End(0)).map_err(io_error)?;
-    output.write_all(frame).map_err(io_error)?;
-    output.sync_all().map_err(io_error)?;
-    sync_parent_directory(path)?;
-    Ok(offset)
 }

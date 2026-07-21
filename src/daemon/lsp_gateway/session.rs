@@ -4,6 +4,10 @@
 use std::collections::BTreeMap;
 
 pub const MAX_PENDING_REQUESTS: usize = 64;
+/// A single `publishDiagnostics` JSON-RPC publication is bounded separately
+/// from the four-MiB transport frame limit so noisy documents cannot starve
+/// unrelated interactive requests.
+pub const MAX_PUBLICATION_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum LspRequestId {
@@ -35,12 +39,14 @@ enum PendingState {
     Active,
     Cancelled,
     ContentModified,
+    TimedOut,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingRequest {
     document: Option<(String, i64)>,
     state: PendingState,
+    deadline_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,7 +69,24 @@ pub enum CompletionDisposition {
     Publish,
     SuppressCancelled,
     SuppressContentModified,
+    SuppressTimedOut,
     UnknownRequest,
+}
+
+impl CompletionDisposition {
+    /// Maps a suppressed request completion to the standard JSON-RPC/LSP
+    /// error that a protocol adapter must return instead of publishing a stale
+    /// result.
+    pub const fn failure(self) -> Option<LspRequestFailure> {
+        match self {
+            Self::Publish | Self::UnknownRequest => None,
+            Self::SuppressCancelled => Some(LspRequestFailure::RequestCancelled),
+            Self::SuppressContentModified => Some(LspRequestFailure::ContentModified),
+            Self::SuppressTimedOut => Some(LspRequestFailure::ServerCancelled {
+                retrigger_request: true,
+            }),
+        }
+    }
 }
 
 /// Standard LSP request failure codes used by the protocol adapter.
@@ -97,6 +120,7 @@ pub enum PublicationDelivery {
 pub struct PublicationState {
     pub document_version: i64,
     pub generation: u64,
+    pub payload_bytes: usize,
     pub delivery: PublicationDelivery,
 }
 
@@ -105,10 +129,12 @@ pub enum PublicationAdmission {
     Accepted,
     Duplicate,
     Stale,
+    TooLarge { size: usize, limit: usize },
     SessionUnavailable,
 }
 
 /// Mutable control state owned and serialized by one daemon session actor.
+#[derive(Debug)]
 pub struct LspSessionControl {
     lifecycle: SessionLifecycle,
     detached_from: Option<SessionLifecycle>,
@@ -215,6 +241,18 @@ impl LspSessionControl {
         id: LspRequestId,
         document: Option<(String, i64)>,
     ) -> RequestAdmission {
+        self.admit_request_with_deadline(id, document, None)
+    }
+
+    /// Admits a request with a daemon-supplied monotonic deadline. The session
+    /// owns cancellation and response suppression even when an upstream
+    /// analyzer cannot stop a request immediately.
+    pub fn admit_request_with_deadline(
+        &mut self,
+        id: LspRequestId,
+        document: Option<(String, i64)>,
+        deadline_at_ms: Option<u64>,
+    ) -> RequestAdmission {
         if self.lifecycle != SessionLifecycle::Ready {
             return RequestAdmission::SessionUnavailable;
         }
@@ -231,6 +269,7 @@ impl LspSessionControl {
             PendingRequest {
                 document,
                 state: PendingState::Active,
+                deadline_at_ms,
             },
         );
         RequestAdmission::Accepted
@@ -259,11 +298,31 @@ impl LspSessionControl {
         }
     }
 
+    /// Marks active requests whose deadline passed. It returns the request ids
+    /// so the daemon's protocol actor can send a standard `ServerCancelled`
+    /// error when that request has a response id. No wall-clock source lives
+    /// in this state machine; callers pass their monotonic timestamp.
+    pub fn expire_deadlines(&mut self, now_ms: u64) -> Vec<LspRequestId> {
+        let mut expired = Vec::new();
+        for (id, request) in &mut self.pending {
+            if request.state == PendingState::Active
+                && request
+                    .deadline_at_ms
+                    .is_some_and(|deadline| deadline <= now_ms)
+            {
+                request.state = PendingState::TimedOut;
+                expired.push(id.clone());
+            }
+        }
+        expired
+    }
+
     pub fn complete_request(&mut self, id: &LspRequestId) -> CompletionDisposition {
         match self.pending.remove(id).map(|request| request.state) {
             Some(PendingState::Active) => CompletionDisposition::Publish,
             Some(PendingState::Cancelled) => CompletionDisposition::SuppressCancelled,
             Some(PendingState::ContentModified) => CompletionDisposition::SuppressContentModified,
+            Some(PendingState::TimedOut) => CompletionDisposition::SuppressTimedOut,
             None => CompletionDisposition::UnknownRequest,
         }
     }
@@ -274,8 +333,28 @@ impl LspSessionControl {
         document_version: i64,
         generation: u64,
     ) -> PublicationAdmission {
+        self.admit_sized_publication(document_uri, document_version, generation, 0)
+    }
+
+    /// Records an outbound publication only if it fits the PR12 publication
+    /// budget. This is deliberately independent of the outer LSP framing
+    /// limit: a valid four-MiB request must never imply a four-MiB diagnostic
+    /// notification is permitted.
+    pub fn admit_sized_publication(
+        &mut self,
+        document_uri: impl Into<String>,
+        document_version: i64,
+        generation: u64,
+        payload_bytes: usize,
+    ) -> PublicationAdmission {
         if self.lifecycle != SessionLifecycle::Ready {
             return PublicationAdmission::SessionUnavailable;
+        }
+        if payload_bytes > MAX_PUBLICATION_BYTES {
+            return PublicationAdmission::TooLarge {
+                size: payload_bytes,
+                limit: MAX_PUBLICATION_BYTES,
+            };
         }
         let document_uri = document_uri.into();
         if let Some(current) = self.publications.get(&document_uri) {
@@ -293,6 +372,7 @@ impl LspSessionControl {
             PublicationState {
                 document_version,
                 generation,
+                payload_bytes,
                 delivery: PublicationDelivery::Produced,
             },
         );
@@ -307,8 +387,29 @@ impl LspSessionControl {
         self.set_publication_delivery(document_uri, PublicationDelivery::BridgeAcknowledged)
     }
 
+    pub fn acknowledge_publication_version(
+        &mut self,
+        document_uri: &str,
+        document_version: i64,
+        generation: u64,
+    ) -> bool {
+        let Some(publication) = self.publications.get_mut(document_uri) else {
+            return false;
+        };
+        if (publication.document_version, publication.generation) != (document_version, generation)
+        {
+            return false;
+        }
+        publication.delivery = PublicationDelivery::BridgeAcknowledged;
+        true
+    }
+
     pub fn publication(&self, document_uri: &str) -> Option<&PublicationState> {
         self.publications.get(document_uri)
+    }
+
+    pub fn remove_publication(&mut self, document_uri: &str) -> Option<PublicationState> {
+        self.publications.remove(document_uri)
     }
 
     fn transition(
@@ -435,5 +536,34 @@ mod tests {
         session.exit().unwrap();
         assert_eq!(session.lifecycle(), SessionLifecycle::Exited);
         assert!(session.publication(uri).is_none());
+    }
+
+    #[test]
+    fn deadlines_suppress_late_responses_and_publications_are_size_bounded() {
+        let mut session = ready(2);
+        let id = LspRequestId::String("deadline".into());
+        assert_eq!(
+            session.admit_request_with_deadline(id.clone(), None, Some(100)),
+            RequestAdmission::Accepted
+        );
+        assert_eq!(session.expire_deadlines(99), Vec::<LspRequestId>::new());
+        assert_eq!(session.expire_deadlines(100), vec![id.clone()]);
+        assert_eq!(
+            session.complete_request(&id),
+            CompletionDisposition::SuppressTimedOut
+        );
+        assert_eq!(
+            CompletionDisposition::SuppressTimedOut.failure(),
+            Some(LspRequestFailure::ServerCancelled {
+                retrigger_request: true
+            })
+        );
+        assert_eq!(
+            session.admit_sized_publication("file:///root/a.rs", 1, 1, MAX_PUBLICATION_BYTES + 1,),
+            PublicationAdmission::TooLarge {
+                size: MAX_PUBLICATION_BYTES + 1,
+                limit: MAX_PUBLICATION_BYTES,
+            }
+        );
     }
 }

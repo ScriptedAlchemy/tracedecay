@@ -1038,7 +1038,7 @@ assert_boundary old_binary_policy forbidden
 assert_no_temporary_install_files
 
 grep -Fq \
-  'dogfood = "run --quiet --release --all-features --bin tracedecay -- dogfood"' \
+  'dogfood = "run --quiet --release --bin tracedecay -- dogfood"' \
   "$repo_root/.cargo/config.toml"
 
 echo 'dogfood command contract passed'

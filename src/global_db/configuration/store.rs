@@ -21,8 +21,9 @@ use tracedecay_domain::configuration::{
     ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotId,
     ConfigurationSnapshotV1, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
     CredentialReferenceMetadataV1, ProtectedChange, ProtectedChangePlan,
-    RedactedConfigurationChangeV1, RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY,
-    ScopeControlOperationV1, SettingKey, SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ProtectedChangeSnapshotError, RedactedConfigurationChangeV1, RollbackModeV1, RuleEffect,
+    SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1, SettingKey, SourceKindV1,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_store::configuration::{
@@ -451,7 +452,7 @@ impl From<&ConfigurationProtectedOperationV1> for StoredConfigurationProtectedOp
                 mode,
             } => Self::Rollback {
                 target_revision_id: target_revision_id.clone(),
-                mode: mode.clone(),
+                mode: *mode,
             },
         }
     }
@@ -1046,7 +1047,7 @@ async fn insert_configuration_projections(
             let capabilities = rule
                 .capabilities
                 .iter()
-                .map(|capability| capability.as_str())
+                .map(tracedecay_domain::CapabilityId::as_str)
                 .collect::<Vec<_>>()
                 .join(",");
             transaction
@@ -1336,7 +1337,7 @@ fn decode_plan_row(row: &Row) -> ConfigurationStoreResult<ConfigurationProtected
             .plan
             .membership_digest
             .as_ref()
-            .map(|value| value.as_str())
+            .map(ManifestDigest::as_str)
             != stored_membership_digest.as_deref()
         || record.plan.authorization_policy_digest.as_str() != stored_policy_digest
         || record.plan.policy_epoch != stored_policy_epoch
@@ -1490,7 +1491,7 @@ async fn insert_dry_run_audit_event(
     };
     let event_id = derived_identifier(
         "configuration.audit.v1",
-        canonical_sha256(&(
+        &canonical_sha256(&(
             "tracedecay.configuration.dry-run-audit-event.v1",
             &record.plan.plan_id,
             event_kind,
@@ -1705,13 +1706,16 @@ fn decode_audit_row(
     let event = payload.event;
     if event.event_id.as_str() != stored_event_id
         || event.actor_id.as_str() != stored_actor_id
-        || event.idempotency_key.as_ref().map(|value| value.as_str())
+        || event
+            .idempotency_key
+            .as_ref()
+            .map(ConfigurationIdempotencyKey::as_str)
             != stored_idempotency_key.as_deref()
         || event.base_revision_id.as_str() != stored_base_revision_id
         || event
             .result_revision_id
             .as_ref()
-            .map(|value| value.as_str())
+            .map(ConfigurationRevisionId::as_str)
             != stored_result_revision_id.as_deref()
         || event.target_commitment.as_str() != stored_target_commitment
         || event.receipt_id.is_some() != stored_receipt_digest.is_some()
@@ -2025,11 +2029,10 @@ async fn receipt_for_idempotency_from_transaction(
 }
 
 fn authorization_policy_digest_for_commit(commit: &ConfigurationCommitV1) -> String {
-    commit
-        .change_plan
-        .as_ref()
-        .map(|plan| plan.authorization_policy_digest.as_str().to_owned())
-        .unwrap_or_else(|| CONFIGURATION_AUTHORIZATION_NOT_RECORDED.to_owned())
+    commit.change_plan.as_ref().map_or_else(
+        || CONFIGURATION_AUTHORIZATION_NOT_RECORDED.to_owned(),
+        |plan| plan.authorization_policy_digest.as_str().to_owned(),
+    )
 }
 
 async fn insert_mutation_receipt(
@@ -2554,7 +2557,7 @@ impl ConfigurationSqlStore<'_> {
             Ok(receipt) => transaction
                 .commit()
                 .await
-                .map(|_| receipt)
+                .map(|()| receipt)
                 .map_err(unavailable_store),
             Err(error) => {
                 let _ = transaction.rollback().await;
@@ -2643,48 +2646,54 @@ impl ConfigurationSqlStore<'_> {
 
 #[cfg(test)]
 impl ConfigurationRevisionStore for ConfigurationSqlStore<'_> {
-    fn current_revision(
-        &self,
-    ) -> impl Future<Output = ConfigurationStoreResult<ConfigurationRevisionRecordV1>> + Send {
-        async move { ConfigurationSqlStore::current_revision(self).await }
+    async fn current_revision(&self) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
+        ConfigurationSqlStore::current_revision(self).await
     }
 
-    fn read_revision(
+    async fn read_revision(
         &self,
         revision_id: &ConfigurationRevisionId,
-    ) -> impl Future<Output = ConfigurationStoreResult<Option<ConfigurationRevisionRecordV1>>> + Send
-    {
-        async move { ConfigurationSqlStore::read_revision(self, revision_id).await }
+    ) -> ConfigurationStoreResult<Option<ConfigurationRevisionRecordV1>> {
+        ConfigurationSqlStore::read_revision(self, revision_id).await
     }
 
-    fn save_change_plan(
+    async fn save_change_plan(
         &self,
         plan: &ConfigurationProtectedPlanRecordV1,
-    ) -> impl Future<Output = ConfigurationStoreResult<()>> + Send {
-        async move { ConfigurationSqlStore::save_change_plan(self, plan).await }
+    ) -> ConfigurationStoreResult<()> {
+        ConfigurationSqlStore::save_change_plan(self, plan).await
     }
 
-    fn read_change_plan(
+    async fn read_change_plan(
         &self,
         plan_id: &ChangePlanId,
-    ) -> impl Future<Output = ConfigurationStoreResult<Option<ConfigurationProtectedPlanRecordV1>>> + Send
-    {
-        async move { ConfigurationSqlStore::read_change_plan(self, plan_id).await }
+    ) -> ConfigurationStoreResult<Option<ConfigurationProtectedPlanRecordV1>> {
+        ConfigurationSqlStore::read_change_plan(self, plan_id).await
     }
 
-    fn commit(
+    async fn commit(
         &self,
         commit: ConfigurationCommitV1,
-    ) -> impl Future<Output = ConfigurationStoreResult<ConfigurationMutationReceiptV1>> + Send {
-        async move { ConfigurationSqlStore::commit(self, commit).await }
+    ) -> ConfigurationStoreResult<ConfigurationMutationReceiptV1> {
+        ConfigurationSqlStore::commit(self, commit).await
     }
 
-    fn audit(
+    async fn audit(
         &self,
         after: Option<&ConfigurationAuditEventId>,
         limit: usize,
-    ) -> impl Future<Output = ConfigurationStoreResult<Vec<ConfigurationAuditEvent>>> + Send {
-        async move { ConfigurationSqlStore::audit(self, after, limit).await }
+    ) -> ConfigurationStoreResult<Vec<ConfigurationAuditEvent>> {
+        ConfigurationSqlStore::audit(self, after, limit).await
+    }
+}
+
+fn map_protected_change_snapshot_error(error: ProtectedChangeSnapshotError) -> ConfigurationError {
+    match error {
+        ProtectedChangeSnapshotError::Stale => ConfigurationError::PlanStale,
+        ProtectedChangeSnapshotError::Domain(error) => ConfigurationError::validation(error),
+        ProtectedChangeSnapshotError::IncompatibleValue(message) => {
+            ConfigurationError::validation_message(message)
+        }
     }
 }
 
@@ -2703,7 +2712,7 @@ fn map_store_error(error: ConfigurationStoreError) -> ConfigurationError {
 
 fn derived_identifier<T>(
     prefix: &str,
-    digest: ManifestDigest,
+    digest: &ManifestDigest,
     field: &'static str,
 ) -> Result<T, ConfigurationError>
 where
@@ -2737,7 +2746,7 @@ fn direct_idempotency_key(
     .map_err(ConfigurationError::validation)?;
     derived_identifier(
         "configuration.idempotency.direct.v1",
-        digest,
+        &digest,
         "direct idempotency key",
     )
 }
@@ -2756,7 +2765,7 @@ fn result_revision_id(
     .map_err(ConfigurationError::validation)?;
     derived_identifier(
         "configuration.revision.v1",
-        digest,
+        &digest,
         "configuration result revision id",
     )
 }
@@ -2771,20 +2780,6 @@ fn mutation_provenance(
         disposition: CandidateDispositionV1::Winning,
         safe_reason: None,
     }]
-}
-
-fn replace_effective_value(
-    effective_values: &mut BTreeMap<SettingKey, ConfigurationValueV1>,
-    provenance: &mut BTreeMap<SettingKey, Vec<ConfigurationCandidateV1>>,
-    key: SettingKey,
-    value: ConfigurationValueV1,
-    revision_id: &ConfigurationRevisionId,
-) {
-    effective_values.insert(key.clone(), value);
-    provenance.insert(
-        key,
-        mutation_provenance(&ConfigurationLayerIdV1::Default, revision_id),
-    );
 }
 
 fn replace_direct_effective_value(
@@ -2805,10 +2800,6 @@ fn apply_direct_mutation_to_snapshot(
     revision_id: &ConfigurationRevisionId,
     registry: &ConfigurationRegistry,
 ) -> Result<ConfigurationSnapshotV1, ConfigurationError> {
-    mutation.touched_keys()?;
-    let mut effective_values = current.effective_values.clone();
-    let mut provenance = current.provenance.clone();
-
     fn apply(
         effective_values: &mut BTreeMap<SettingKey, ConfigurationValueV1>,
         provenance: &mut BTreeMap<SettingKey, Vec<ConfigurationCandidateV1>>,
@@ -2861,6 +2852,9 @@ fn apply_direct_mutation_to_snapshot(
         Ok(())
     }
 
+    mutation.touched_keys()?;
+    let mut effective_values = current.effective_values.clone();
+    let mut provenance = current.provenance.clone();
     apply(
         &mut effective_values,
         &mut provenance,
@@ -2917,160 +2911,6 @@ fn validate_direct_control_mutation(
     }
 }
 
-fn apply_protected_change_to_snapshot(
-    current: &ConfigurationSnapshotV1,
-    change: &ProtectedChange,
-    revision_id: &ConfigurationRevisionId,
-) -> Result<ConfigurationSnapshotV1, ConfigurationError> {
-    change.validate().map_err(ConfigurationError::validation)?;
-    let mut effective_values = current.effective_values.clone();
-    let mut provenance = current.provenance.clone();
-    match change {
-        ProtectedChange::BindSource(binding) => {
-            let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
-                .map_err(ConfigurationError::validation)?;
-            let mut bindings = match effective_values.get(&key) {
-                Some(ConfigurationValueV1::SourceBindings(bindings)) => bindings.clone(),
-                Some(_) => {
-                    return Err(ConfigurationError::validation_message(
-                        "source bindings setting has an incompatible typed value",
-                    ));
-                }
-                None => Vec::new(),
-            };
-            if bindings.iter().any(|candidate| {
-                candidate.binding_id == binding.binding_id
-                    || (candidate.source_kind == binding.source_kind
-                        && candidate.source_locator_digest == binding.source_locator_digest)
-            }) {
-                return Err(ConfigurationError::PlanStale);
-            }
-            bindings.push(binding.clone());
-            replace_effective_value(
-                &mut effective_values,
-                &mut provenance,
-                key,
-                ConfigurationValueV1::SourceBindings(bindings),
-                revision_id,
-            );
-        }
-        ProtectedChange::RebindSource(binding) => {
-            let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
-                .map_err(ConfigurationError::validation)?;
-            let mut bindings = match effective_values.get(&key) {
-                Some(ConfigurationValueV1::SourceBindings(bindings)) => bindings.clone(),
-                _ => return Err(ConfigurationError::PlanStale),
-            };
-            let Some(index) = bindings
-                .iter()
-                .position(|candidate| candidate.binding_id == binding.binding_id)
-            else {
-                return Err(ConfigurationError::PlanStale);
-            };
-            if bindings
-                .iter()
-                .enumerate()
-                .any(|(candidate_index, candidate)| {
-                    candidate_index != index
-                        && candidate.source_kind == binding.source_kind
-                        && candidate.source_locator_digest == binding.source_locator_digest
-                })
-            {
-                return Err(ConfigurationError::PlanStale);
-            }
-            bindings[index] = binding.clone();
-            replace_effective_value(
-                &mut effective_values,
-                &mut provenance,
-                key,
-                ConfigurationValueV1::SourceBindings(bindings),
-                revision_id,
-            );
-        }
-        ProtectedChange::UnbindSource { binding_id } => {
-            let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
-                .map_err(ConfigurationError::validation)?;
-            let mut bindings = match effective_values.get(&key) {
-                Some(ConfigurationValueV1::SourceBindings(bindings)) => bindings.clone(),
-                _ => return Err(ConfigurationError::PlanStale),
-            };
-            let before = bindings.len();
-            bindings.retain(|binding| &binding.binding_id != binding_id);
-            if bindings.len() == before {
-                return Err(ConfigurationError::PlanStale);
-            }
-            replace_effective_value(
-                &mut effective_values,
-                &mut provenance,
-                key,
-                ConfigurationValueV1::SourceBindings(bindings),
-                revision_id,
-            );
-        }
-        ProtectedChange::UpsertAccessRule(rule) => {
-            let key = SettingKey::new(ACCESS_RULES_SETTING_KEY)
-                .map_err(ConfigurationError::validation)?;
-            let mut rules = match effective_values.get(&key) {
-                Some(ConfigurationValueV1::AccessRules(rules)) => rules.clone(),
-                Some(_) => {
-                    return Err(ConfigurationError::validation_message(
-                        "access rules setting has an incompatible typed value",
-                    ));
-                }
-                None => Vec::new(),
-            };
-            if let Some(index) = rules
-                .iter()
-                .position(|candidate| candidate.rule_id == rule.rule_id)
-            {
-                rules[index] = rule.clone();
-            } else {
-                rules.push(rule.clone());
-            }
-            replace_effective_value(
-                &mut effective_values,
-                &mut provenance,
-                key,
-                ConfigurationValueV1::AccessRules(rules),
-                revision_id,
-            );
-        }
-        ProtectedChange::RemoveAccessRule { rule_id } => {
-            let key = SettingKey::new(ACCESS_RULES_SETTING_KEY)
-                .map_err(ConfigurationError::validation)?;
-            let mut rules = match effective_values.get(&key) {
-                Some(ConfigurationValueV1::AccessRules(rules)) => rules.clone(),
-                _ => return Err(ConfigurationError::PlanStale),
-            };
-            let before = rules.len();
-            rules.retain(|rule| &rule.rule_id != rule_id);
-            if rules.len() == before {
-                return Err(ConfigurationError::PlanStale);
-            }
-            replace_effective_value(
-                &mut effective_values,
-                &mut provenance,
-                key,
-                ConfigurationValueV1::AccessRules(rules),
-                revision_id,
-            );
-        }
-        ProtectedChange::ReplaceWorkTopologyPolicy(policy) => {
-            let key = SettingKey::new(WORK_TOPOLOGY_POLICY_SETTING_KEY)
-                .map_err(ConfigurationError::validation)?;
-            replace_effective_value(
-                &mut effective_values,
-                &mut provenance,
-                key,
-                ConfigurationValueV1::WorkTopologyPolicy(Box::new(policy.clone())),
-                revision_id,
-            );
-        }
-    }
-    ConfigurationSnapshotV1::new(effective_values, provenance)
-        .map_err(ConfigurationError::validation)
-}
-
 struct ConfigurationCommitDraft<'a, T> {
     expected_base_revision_id: &'a ConfigurationRevisionId,
     next_revision_id: ConfigurationRevisionId,
@@ -3104,7 +2944,7 @@ async fn build_configuration_commit<T: Serialize>(
     } = draft;
     let receipt_id: ConfigurationReceiptId = derived_identifier(
         "configuration.receipt.v1",
-        canonical_sha256(&(
+        &canonical_sha256(&(
             "tracedecay.configuration.receipt.v1",
             actor_id,
             &idempotency_key,
@@ -3138,7 +2978,7 @@ async fn build_configuration_commit<T: Serialize>(
     };
     let event_id = derived_identifier(
         "configuration.audit.v1",
-        canonical_sha256(&(
+        &canonical_sha256(&(
             "tracedecay.configuration.audit-event.v1",
             &receipt_id,
             &event_kind,
@@ -3480,14 +3320,13 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .map_err(|_| ConfigurationError::Unavailable)?;
             let outcome = async {
                 let current = current_state_from_transaction(&transaction).await?;
-                if let Some(observed_revision_id) = &observed_revision_id {
-                    if read_revision_from_transaction(&transaction, observed_revision_id)
+                if let Some(observed_revision_id) = &observed_revision_id
+                    && read_revision_from_transaction(&transaction, observed_revision_id)
                         .await
                         .map_err(map_store_error)?
                         .is_none()
-                    {
-                        return Err(ConfigurationError::PlanStale);
-                    }
+                {
+                    return Err(ConfigurationError::PlanStale);
                 }
                 let prior = latest_component_activation_state(&transaction, &component)
                     .await
@@ -3710,7 +3549,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 Ok(receipt) => transaction
                     .commit()
                     .await
-                    .map(|_| receipt)
+                    .map(|()| receipt)
                     .map_err(|_| ConfigurationError::Unavailable),
                 Err(error) => Err(error),
             }
@@ -3784,11 +3623,10 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                     &request.idempotency_key,
                     &request.operation_digest,
                 )?;
-                let snapshot = apply_protected_change_to_snapshot(
-                    &current.snapshot,
-                    change,
-                    &next_revision_id,
-                )?;
+                let snapshot = current
+                    .snapshot
+                    .apply_protected_change(change, &next_revision_id)
+                    .map_err(map_protected_change_snapshot_error)?;
                 let sealed_target =
                     StoredConfigurationProtectedOperationV1::from(&record.operation);
                 let (commit, sealed_target_reference) = build_configuration_commit(
@@ -3830,7 +3668,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 Ok(receipt) => transaction
                     .commit()
                     .await
-                    .map(|_| receipt)
+                    .map(|()| receipt)
                     .map_err(|_| ConfigurationError::Unavailable),
                 Err(error) => Err(error),
             }
@@ -3871,14 +3709,14 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                         .ok_or(ConfigurationError::PlanStale)?;
                 let operation = ConfigurationProtectedOperationV1::Rollback {
                     target_revision_id: rollback.target_revision_id.clone(),
-                    mode: rollback.mode.clone(),
+                    mode: rollback.mode,
                 };
                 let operation_digest = operation
                     .operation_digest()
                     .map_err(ConfigurationError::validation)?;
                 let plan_id = derived_identifier(
                     "configuration.plan.rollback.v1",
-                    canonical_sha256(&(
+                    &canonical_sha256(&(
                         "tracedecay.configuration.rollback-plan.v1",
                         &authority.receipt.actor_id,
                         &current.revision_id,
@@ -3935,7 +3773,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 Ok(plan) => transaction
                     .commit()
                     .await
-                    .map(|_| plan)
+                    .map(|()| plan)
                     .map_err(|_| ConfigurationError::Unavailable),
                 Err(error) => Err(error),
             }
@@ -4061,7 +3899,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 Ok(receipt) => transaction
                     .commit()
                     .await
-                    .map(|_| receipt)
+                    .map(|()| receipt)
                     .map_err(|_| ConfigurationError::Unavailable),
                 Err(error) => Err(error),
             }
@@ -4214,7 +4052,7 @@ impl CredentialWritePort for GlobalDbConfigurationControlStore<'_> {
                 .map_err(ConfigurationError::validation)?;
                 let idempotency_key: ConfigurationIdempotencyKey = derived_identifier(
                     "configuration.idempotency.credential-write.v1",
-                    canonical_sha256(&(
+                    &canonical_sha256(&(
                         "tracedecay.configuration.credential-write-idempotency.v1",
                         &authority.receipt.receipt_id,
                         &operation_digest,
@@ -4224,7 +4062,7 @@ impl CredentialWritePort for GlobalDbConfigurationControlStore<'_> {
                 )?;
                 let reference_id: CredentialReferenceId = derived_identifier(
                     "credential.reference.v1",
-                    canonical_sha256(&(
+                    &canonical_sha256(&(
                         "tracedecay.configuration.credential-reference-id.v1",
                         &authority.receipt.receipt_id,
                         &reference_digest,
@@ -4265,7 +4103,7 @@ impl CredentialWritePort for GlobalDbConfigurationControlStore<'_> {
                             .map_err(|_| ConfigurationError::Unavailable)?;
                         let event_id: ConfigurationAuditEventId = derived_identifier(
                             "configuration.audit.v1",
-                            canonical_sha256(&(
+                            &canonical_sha256(&(
                                 "tracedecay.configuration.credential-write-audit.v1",
                                 &authority.receipt.actor_id,
                                 &idempotency_key,
@@ -4312,7 +4150,7 @@ impl CredentialWritePort for GlobalDbConfigurationControlStore<'_> {
                 Ok(metadata) => transaction
                     .commit()
                     .await
-                    .map(|_| metadata)
+                    .map(|()| metadata)
                     .map_err(|_| ConfigurationError::Unavailable),
                 Err(error) => Err(error),
             }
@@ -4321,16 +4159,12 @@ impl CredentialWritePort for GlobalDbConfigurationControlStore<'_> {
 }
 
 impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
-    fn current_revision(
-        &self,
-    ) -> impl Future<Output = ConfigurationStoreResult<ConfigurationRevisionRecordV1>> + Send {
-        async move {
-            let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
-            let revision_id = current_revision_id_from_transaction(&read).await?;
-            read_revision_from_transaction(&read, &revision_id)
-                .await?
-                .ok_or_else(|| invalid_store_data("current configuration revision disappeared"))
-        }
+    async fn current_revision(&self) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
+        let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
+        let revision_id = current_revision_id_from_transaction(&read).await?;
+        read_revision_from_transaction(&read, &revision_id)
+            .await?
+            .ok_or_else(|| invalid_store_data("current configuration revision disappeared"))
     }
 
     fn read_revision(
@@ -4387,27 +4221,24 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
         }
     }
 
-    fn commit(
+    async fn commit(
         &self,
         commit: ConfigurationCommitV1,
-    ) -> impl Future<Output = ConfigurationStoreResult<ConfigurationMutationReceiptV1>> + Send {
-        async move {
-            validate_commit_bindings(&commit)?;
-            let transaction = self
-                .db
-                .begin_write_transaction()
+    ) -> ConfigurationStoreResult<ConfigurationMutationReceiptV1> {
+        validate_commit_bindings(&commit)?;
+        let transaction = self
+            .db
+            .begin_write_transaction()
+            .await
+            .map_err(unavailable_store)?;
+        let outcome = commit_configuration_transaction(&transaction, &commit, false, None).await;
+        match outcome {
+            Ok(receipt) => transaction
+                .commit()
                 .await
-                .map_err(unavailable_store)?;
-            let outcome =
-                commit_configuration_transaction(&transaction, &commit, false, None).await;
-            match outcome {
-                Ok(receipt) => transaction
-                    .commit()
-                    .await
-                    .map(|_| receipt)
-                    .map_err(unavailable_store),
-                Err(error) => Err(error),
-            }
+                .map(|()| receipt)
+                .map_err(unavailable_store),
+            Err(error) => Err(error),
         }
     }
 

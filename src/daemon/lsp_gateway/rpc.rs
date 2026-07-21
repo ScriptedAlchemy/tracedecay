@@ -1,0 +1,508 @@
+//! JSON-RPC 2.0 framing helpers, parameter parsing, and gateway response encoding.
+
+use serde_json::{Map, Value, json};
+
+use super::diagnostics::{
+    DiagnosticSeverity, DocumentDiagnosticReport, GatewayDiagnostic, LspPosition, LspRange,
+};
+use super::gateway::{
+    CallHierarchyItem, DocumentSymbol, GatewayDocumentDiagnostics, GatewayResponse, Hover,
+    IncomingCall, LspLocation, MethodUnavailableReason, OutgoingCall, SignatureHelp,
+    TypeHierarchyItem, WorkspaceSymbol,
+};
+use super::overlay::{OverlayChange, OverlayError};
+use super::session::{LspRequestFailure, LspRequestId};
+
+#[derive(Clone, Debug)]
+pub(super) struct RpcFailure {
+    pub code: i64,
+    pub message: &'static str,
+    pub data: Value,
+}
+
+impl RpcFailure {
+    pub fn invalid_params(message: &'static str) -> Self {
+        Self {
+            code: -32602,
+            message: "Invalid params",
+            data: json!({ "detail": message }),
+        }
+    }
+
+    pub fn unavailable(method: &str, reason: MethodUnavailableReason) -> Self {
+        Self {
+            code: super::gateway::MethodUnavailable::JSON_RPC_METHOD_NOT_FOUND,
+            message: "Method unavailable",
+            data: json!({
+                "method": method,
+                "reason": unavailable_reason(reason),
+            }),
+        }
+    }
+
+    pub fn request_failure(failure: LspRequestFailure) -> Self {
+        let data = match failure {
+            LspRequestFailure::RequestCancelled => json!({ "retriggerRequest": false }),
+            LspRequestFailure::ContentModified => json!({ "retriggerRequest": true }),
+            LspRequestFailure::ServerCancelled { retrigger_request } => {
+                json!({ "retriggerRequest": retrigger_request })
+            }
+        };
+        Self {
+            code: failure.code(),
+            message: match failure {
+                LspRequestFailure::RequestCancelled => "Request cancelled",
+                LspRequestFailure::ContentModified => "Content modified",
+                LspRequestFailure::ServerCancelled { .. } => "Server cancelled request",
+            },
+            data,
+        }
+    }
+}
+
+pub(super) fn response_value<T>(
+    response: GatewayResponse<T>,
+    project: impl FnOnce(T) -> Value,
+) -> Result<Value, RpcFailure> {
+    match response {
+        GatewayResponse::Value(value) => Ok(project(value)),
+        GatewayResponse::Partial { coverage, .. } => Err(RpcFailure {
+            code: -32802,
+            message: "Server cancelled request",
+            data: json!({ "retriggerRequest": true, "coverage": coverage }),
+        }),
+        GatewayResponse::Unavailable(unavailable) => Err(RpcFailure::unavailable(
+            unavailable.method.as_lsp_method(),
+            unavailable.reason,
+        )),
+        GatewayResponse::RequestFailed(failure) => Err(RpcFailure::request_failure(failure)),
+    }
+}
+
+pub(super) fn gateway_diagnostic_value(value: GatewayDocumentDiagnostics) -> Value {
+    document_diagnostic_report_value(value.report)
+}
+
+pub(super) fn document_diagnostic_report_value(report: DocumentDiagnosticReport) -> Value {
+    match report {
+        DocumentDiagnosticReport::Full { result_id, items } => json!({
+            "kind": "full",
+            "resultId": result_id,
+            "items": items.into_iter().map(diagnostic_value).collect::<Vec<_>>(),
+        }),
+        DocumentDiagnosticReport::Unchanged { result_id } => json!({
+            "kind": "unchanged",
+            "resultId": result_id,
+        }),
+    }
+}
+
+pub(super) fn diagnostic_value(diagnostic: GatewayDiagnostic) -> Value {
+    json!({
+        "range": range_value(diagnostic.range),
+        "severity": diagnostic.severity.map(severity_value),
+        "code": diagnostic.code,
+        "source": match diagnostic.source {
+            super::diagnostics::DiagnosticSource::Upstream => "upstream",
+            super::diagnostics::DiagnosticSource::TraceDecay => "tracedecay",
+        },
+        "message": diagnostic.message,
+    })
+}
+
+fn severity_value(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Error => 1,
+        DiagnosticSeverity::Warning => 2,
+        DiagnosticSeverity::Information => 3,
+        DiagnosticSeverity::Hint => 4,
+    }
+}
+
+pub(super) fn locations_value(locations: Vec<LspLocation>) -> Value {
+    Value::Array(locations.into_iter().map(location_value).collect())
+}
+
+pub(super) fn location_value(location: LspLocation) -> Value {
+    json!({ "uri": location.uri, "range": range_value(location.range) })
+}
+
+pub(super) fn hover_value(hover: Option<Hover>) -> Value {
+    hover.map_or(Value::Null, |hover| {
+        json!({
+            "contents": hover.contents,
+            "range": hover.range.map(range_value),
+        })
+    })
+}
+
+pub(super) fn document_symbols_value(symbols: Vec<DocumentSymbol>) -> Value {
+    Value::Array(symbols.into_iter().map(document_symbol_value).collect())
+}
+
+fn document_symbol_value(symbol: DocumentSymbol) -> Value {
+    json!({
+        "name": symbol.name,
+        "kind": symbol.kind,
+        "range": range_value(symbol.range),
+        "selectionRange": range_value(symbol.selection_range),
+        "children": symbol.children.into_iter().map(document_symbol_value).collect::<Vec<_>>(),
+    })
+}
+
+pub(super) fn workspace_symbols_value(symbols: Vec<WorkspaceSymbol>) -> Value {
+    Value::Array(
+        symbols
+            .into_iter()
+            .map(|symbol| {
+                json!({
+                    "name": symbol.name,
+                    "kind": symbol.kind,
+                    "location": location_value(symbol.location),
+                })
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn call_items_value(items: Vec<CallHierarchyItem>) -> Value {
+    Value::Array(items.into_iter().map(call_item_value).collect())
+}
+
+pub(super) fn call_item_value(item: CallHierarchyItem) -> Value {
+    json!({
+        "name": item.name,
+        "kind": item.kind,
+        "uri": item.uri,
+        "range": range_value(item.range),
+        "selectionRange": range_value(item.selection_range),
+    })
+}
+
+pub(super) fn incoming_calls_value(calls: Vec<IncomingCall>) -> Value {
+    Value::Array(
+        calls
+            .into_iter()
+            .map(|call| {
+                json!({
+                    "from": call_item_value(call.from),
+                    "fromRanges": call.from_ranges.into_iter().map(range_value).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn outgoing_calls_value(calls: Vec<OutgoingCall>) -> Value {
+    Value::Array(
+        calls
+            .into_iter()
+            .map(|call| {
+                json!({
+                    "to": call_item_value(call.to),
+                    "fromRanges": call.from_ranges.into_iter().map(range_value).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn signature_help_value(help: Option<SignatureHelp>) -> Value {
+    help.map_or(Value::Null, |help| {
+        json!({
+            "signatures": help
+                .signatures
+                .into_iter()
+                .map(|label| json!({ "label": label }))
+                .collect::<Vec<_>>(),
+            "activeSignature": help.active_signature,
+            "activeParameter": help.active_parameter,
+        })
+    })
+}
+
+pub(super) fn type_items_value(items: Vec<TypeHierarchyItem>) -> Value {
+    Value::Array(
+        items
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "name": item.name,
+                    "kind": item.kind,
+                    "uri": item.uri,
+                    "range": range_value(item.range),
+                    "selectionRange": range_value(item.selection_range),
+                })
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn range_value(range: LspRange) -> Value {
+    json!({ "start": position_value(range.start), "end": position_value(range.end) })
+}
+
+pub(super) fn position_value(position: LspPosition) -> Value {
+    json!({ "line": position.line, "character": position.character })
+}
+
+pub(super) fn success_response(id: Value, result: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+pub(super) fn error_response(id: Value, failure: RpcFailure) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": failure.code,
+            "message": failure.message,
+            "data": failure.data,
+        },
+    })
+}
+
+pub(super) fn request_id(value: &Value) -> Option<LspRequestId> {
+    value.as_i64().map(LspRequestId::Number).or_else(|| {
+        value
+            .as_str()
+            .map(|value| LspRequestId::String(value.to_owned()))
+    })
+}
+
+pub(super) fn request_id_value(id: LspRequestId) -> Value {
+    match id {
+        LspRequestId::Number(value) => json!(value),
+        LspRequestId::String(value) => json!(value),
+    }
+}
+
+pub(super) fn unavailable_reason(reason: MethodUnavailableReason) -> &'static str {
+    match reason {
+        MethodUnavailableReason::ExplicitlyUnavailable => "explicitlyUnavailable",
+        MethodUnavailableReason::CapabilityNotNegotiated => "capabilityNotNegotiated",
+        MethodUnavailableReason::OutsideAdmittedRoot => "outsideAdmittedRoot",
+        MethodUnavailableReason::ProviderUnavailable => "providerUnavailable",
+    }
+}
+
+pub(super) fn deferred_method_reason(method: &str) -> MethodUnavailableReason {
+    match method {
+        "textDocument/prepareRename"
+        | "textDocument/rename"
+        | "textDocument/codeAction"
+        | "workspace/diagnostic"
+        | "workspace/executeCommand"
+        | "workspace/didChangeWorkspaceFolders" => MethodUnavailableReason::ExplicitlyUnavailable,
+        _ => MethodUnavailableReason::CapabilityNotNegotiated,
+    }
+}
+
+pub(super) fn initialized_root_uri(params: &Value) -> Result<String, RpcFailure> {
+    let folders = params.get("workspaceFolders");
+    let folder_uri = match folders {
+        Some(Value::Array(folders)) if folders.len() > 1 => {
+            return Err(RpcFailure::invalid_params(
+                "multiple workspace folders are unsupported",
+            ));
+        }
+        Some(Value::Array(folders)) if folders.len() == 1 => folders[0]
+            .get("uri")
+            .and_then(Value::as_str)
+            .filter(|uri| !uri.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| RpcFailure::invalid_params("workspace folder uri is required"))?,
+        Some(Value::Array(_) | Value::Null) | None => String::new(),
+        Some(_) => {
+            return Err(RpcFailure::invalid_params(
+                "workspaceFolders must be an array",
+            ));
+        }
+    };
+    let root_uri = match params.get("rootUri") {
+        Some(Value::String(root_uri)) if !root_uri.is_empty() => Some(root_uri.clone()),
+        Some(Value::Null) | None => None,
+        Some(_) => {
+            return Err(RpcFailure::invalid_params(
+                "rootUri must be a non-empty string",
+            ));
+        }
+    };
+    if folder_uri.is_empty() {
+        root_uri.ok_or_else(|| RpcFailure::invalid_params("one explicit rootUri is required"))
+    } else {
+        if let Some(root_uri) = root_uri
+            && root_uri != folder_uri
+        {
+            return Err(RpcFailure::invalid_params(
+                "rootUri and workspace folder differ",
+            ));
+        }
+        Ok(folder_uri)
+    }
+}
+
+pub(super) fn text_document(params: &Value) -> Result<&Map<String, Value>, RpcFailure> {
+    params
+        .get("textDocument")
+        .and_then(Value::as_object)
+        .ok_or_else(|| RpcFailure::invalid_params("textDocument is required"))
+}
+
+pub(super) fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, RpcFailure> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| RpcFailure::invalid_params("required string is missing"))
+}
+
+pub(super) fn required_nonempty_string(
+    object: &Map<String, Value>,
+    key: &str,
+) -> Result<String, RpcFailure> {
+    required_string(object, key).and_then(|value| {
+        (!value.is_empty())
+            .then_some(value)
+            .ok_or_else(|| RpcFailure::invalid_params("required string is missing"))
+    })
+}
+
+pub(super) fn required_i64(object: &Map<String, Value>, key: &str) -> Result<i64, RpcFailure> {
+    object
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| RpcFailure::invalid_params("required integer is missing"))
+}
+
+pub(super) fn required_u32(object: &Map<String, Value>, key: &str) -> Result<u32, RpcFailure> {
+    object
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| RpcFailure::invalid_params("required unsigned integer is missing"))
+}
+
+pub(super) fn document_uri(params: &Value) -> Result<String, RpcFailure> {
+    required_nonempty_string(text_document(params)?, "uri")
+}
+
+pub(super) fn document_position(params: &Value) -> Result<(String, LspPosition), RpcFailure> {
+    let uri = document_uri(params)?;
+    let position = parse_position(
+        params
+            .get("position")
+            .ok_or_else(|| RpcFailure::invalid_params("position is required"))?,
+    )?;
+    Ok((uri, position))
+}
+
+pub(super) fn parse_position(value: &Value) -> Result<LspPosition, RpcFailure> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| RpcFailure::invalid_params("position must be an object"))?;
+    let line = object
+        .get("line")
+        .and_then(Value::as_u64)
+        .and_then(|line| u32::try_from(line).ok())
+        .ok_or_else(|| RpcFailure::invalid_params("position line is invalid"))?;
+    let character = object
+        .get("character")
+        .and_then(Value::as_u64)
+        .and_then(|character| u32::try_from(character).ok())
+        .ok_or_else(|| RpcFailure::invalid_params("position character is invalid"))?;
+    Ok(LspPosition { line, character })
+}
+
+pub(super) fn parse_range(value: &Value) -> Result<LspRange, RpcFailure> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| RpcFailure::invalid_params("range must be an object"))?;
+    let start = parse_position(
+        object
+            .get("start")
+            .ok_or_else(|| RpcFailure::invalid_params("range start is required"))?,
+    )?;
+    let end = parse_position(
+        object
+            .get("end")
+            .ok_or_else(|| RpcFailure::invalid_params("range end is required"))?,
+    )?;
+    Ok(LspRange { start, end })
+}
+
+pub(super) fn parse_overlay_change(value: &Value) -> Result<OverlayChange, RpcFailure> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| RpcFailure::invalid_params("content change must be an object"))?;
+    let range = object.get("range").map(parse_range).transpose()?;
+    let range_length = object
+        .get("rangeLength")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| RpcFailure::invalid_params("rangeLength is invalid"))
+        })
+        .transpose()?;
+    let text = required_string(object, "text")?;
+    Ok(OverlayChange {
+        range,
+        range_length,
+        text,
+    })
+}
+
+pub(super) fn parse_call_item(value: &Value) -> Result<CallHierarchyItem, RpcFailure> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| RpcFailure::invalid_params("call hierarchy item must be an object"))?;
+    Ok(CallHierarchyItem {
+        name: required_nonempty_string(object, "name")?,
+        kind: required_u32(object, "kind")?,
+        uri: required_nonempty_string(object, "uri")?,
+        range: parse_range(
+            object
+                .get("range")
+                .ok_or_else(|| RpcFailure::invalid_params("range is required"))?,
+        )?,
+        selection_range: parse_range(
+            object
+                .get("selectionRange")
+                .ok_or_else(|| RpcFailure::invalid_params("selectionRange is required"))?,
+        )?,
+    })
+}
+
+pub(super) fn parse_type_item(value: &Value) -> Result<TypeHierarchyItem, RpcFailure> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| RpcFailure::invalid_params("type hierarchy item must be an object"))?;
+    Ok(TypeHierarchyItem {
+        name: required_nonempty_string(object, "name")?,
+        kind: required_u32(object, "kind")?,
+        uri: required_nonempty_string(object, "uri")?,
+        range: parse_range(
+            object
+                .get("range")
+                .ok_or_else(|| RpcFailure::invalid_params("range is required"))?,
+        )?,
+        selection_range: parse_range(
+            object
+                .get("selectionRange")
+                .ok_or_else(|| RpcFailure::invalid_params("selectionRange is required"))?,
+        )?,
+    })
+}
+
+pub(super) fn overlay_failure(error: OverlayError) -> RpcFailure {
+    RpcFailure {
+        code: -32602,
+        message: "Invalid params",
+        data: json!({ "overlay": format!("{error:?}") }),
+    }
+}
+
+pub(super) fn diagnostic_result_id(generation: u64, version: i64) -> String {
+    format!("generation:{generation}:version:{version}")
+}

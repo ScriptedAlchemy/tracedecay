@@ -34,7 +34,8 @@ flock -x "$dogfood_lock_fd"
 
 cd "$repo_root"
 if [[ -z "${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-}" ]]; then
-  cargo build --release --all-features --bin tracedecay
+  # Default features only — never `--all-features` (enables test-transport).
+  cargo build --release --bin tracedecay
 fi
 
 if [[ ! -x "$source_binary" ]]; then

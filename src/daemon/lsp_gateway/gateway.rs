@@ -185,6 +185,8 @@ pub struct Hover {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentSymbol {
     pub name: String,
+    /// LSP `SymbolKind` supplied by the admitted provider.
+    pub kind: u32,
     pub range: LspRange,
     pub selection_range: LspRange,
     pub children: Vec<DocumentSymbol>,
@@ -195,6 +197,8 @@ pub struct DocumentSymbol {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceSymbol {
     pub name: String,
+    /// LSP `SymbolKind` supplied by the admitted provider.
+    pub kind: u32,
     pub location: LspLocation,
 }
 
@@ -202,6 +206,8 @@ pub struct WorkspaceSymbol {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallHierarchyItem {
     pub name: String,
+    /// LSP `SymbolKind` supplied by the admitted provider.
+    pub kind: u32,
     pub uri: String,
     pub range: LspRange,
     pub selection_range: LspRange,
@@ -233,6 +239,8 @@ pub struct SignatureHelp {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypeHierarchyItem {
     pub name: String,
+    /// LSP `SymbolKind` supplied by the admitted provider.
+    pub kind: u32,
     pub uri: String,
     pub range: LspRange,
     pub selection_range: LspRange,
@@ -439,6 +447,14 @@ where
 
     pub fn capabilities(&self) -> &EffectiveCapabilities {
         &self.capabilities
+    }
+
+    /// Binds the capability intersection negotiated during this authenticated
+    /// session's `initialize` request. The protocol actor invokes this before
+    /// transitioning the session to `Ready`; clients cannot dynamically widen
+    /// the gateway's capabilities afterward.
+    pub fn bind_initialized_capabilities(&mut self, capabilities: EffectiveCapabilities) {
+        self.capabilities = capabilities;
     }
 
     pub fn initialization_availability(&self) -> CapabilityAvailability {

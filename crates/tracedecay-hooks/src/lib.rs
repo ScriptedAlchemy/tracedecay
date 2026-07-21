@@ -8,6 +8,27 @@
 
 #![forbid(unsafe_code)]
 
+pub mod config;
+pub mod native;
+pub mod spool;
+
+pub use config::{
+    HOOK_CONFIGURATION_SCHEMA_VERSION, HookConfigurationIntegrityVerifierV1,
+    HookConfigurationPublicationError, HookConfigurationPublicationOutcomeV1,
+    HookConfigurationPublicationStoreV1, HookConfigurationPublicationV1,
+    HookConfigurationPublisherV1, HookConfigurationReadOutcomeV1, HookConfigurationSnapshotV1,
+    HookConfigurationSubscriberV1, MAX_HOOK_CONFIGURATION_INTEGRITY_BYTES,
+};
+pub use native::{
+    DecodedNativeHookEventV1, NativeEnvelopeMaterialV1, NativeHookDecodeError, NativeHookSignalV1,
+    decode_bound_native_hook_event, decode_native_hook_event,
+};
+pub use spool::{
+    HookReplayBatchV1, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
+    HookSpoolError, HookSpoolLimitsV1, HookSpoolOpenReportV1, HookSpoolRecordV1, HookSpoolV1,
+    HookSpoolWriterLeaseV1, hook_spool_checksum,
+};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::UtcMicros;
@@ -68,19 +89,22 @@ pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> H
     use HookEventSupportV1::{Native, ReceiptDerived, Unavailable};
 
     match (host, family) {
-        (HookHostV1::ClaudeCode | HookHostV1::Codex, SessionBoundary | ToolLifecycle) => Native,
+        (HookHostV1::ClaudeCode | HookHostV1::Codex, SessionBoundary) => Native,
         (HookHostV1::ClaudeCode | HookHostV1::Codex, SavedEdit | TestLifecycle) => ReceiptDerived,
-        (HookHostV1::ClaudeCode | HookHostV1::Codex, PromptBoundary) => Unavailable,
-        (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, SessionBoundary)
-        | (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, ToolLifecycle)
-        | (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, SavedEdit) => Native,
+        (HookHostV1::ClaudeCode | HookHostV1::Codex, PromptBoundary | ToolLifecycle) => Unavailable,
+        (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, SessionBoundary) => Native,
         (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, TestLifecycle) => ReceiptDerived,
-        (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, PromptBoundary) => Unavailable,
-        (HookHostV1::Hermes, SessionBoundary | ToolLifecycle) => Native,
+        (
+            HookHostV1::CursorDesktop | HookHostV1::CursorCloud,
+            PromptBoundary | ToolLifecycle | SavedEdit,
+        ) => Unavailable,
+        (HookHostV1::Hermes, SessionBoundary) => Native,
         (HookHostV1::Hermes, SavedEdit | TestLifecycle) => ReceiptDerived,
-        (HookHostV1::Hermes, PromptBoundary) => Unavailable,
-        (HookHostV1::Kiro, SessionBoundary | PromptBoundary) => Native,
-        (HookHostV1::Kiro, ToolLifecycle | SavedEdit | TestLifecycle) => Unavailable,
+        (HookHostV1::Hermes, PromptBoundary | ToolLifecycle) => Unavailable,
+        (HookHostV1::Kiro, PromptBoundary) => Native,
+        (HookHostV1::Kiro, SessionBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
+            Unavailable
+        }
     }
 }
 
@@ -434,7 +458,12 @@ pub fn render_approved_guidance(approved: bool, text: &str) -> Result<String, Ho
     if !approved {
         return Err(HookContractError::GuidanceNotApproved);
     }
-    if text.len() > MAX_SUGGESTION_BYTES {
+    if text.trim().is_empty()
+        || text.len() > MAX_SUGGESTION_BYTES
+        || text
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
         return Err(HookContractError::GuidanceBudgetExceeded);
     }
     Ok(text.to_owned())
@@ -455,7 +484,7 @@ mod tests {
             capability_revision: 6,
             binding_token: [7; 32],
             capabilities: vec![HookCapabilityV1 {
-                family: HookEventFamily::SavedEdit,
+                family: HookEventFamily::SessionBoundary,
                 support: HookEventSupportV1::Native,
             }],
         }
@@ -476,10 +505,8 @@ mod tests {
             binding_token: [7; 32],
             ordering: HookOrderingV1::Unknown,
             observed_at: UtcMicros(10),
-            event: HookEventV2::SavedEdit {
-                file_id: [11; 16],
-                content_digest: [12; 32],
-                changed_range_count: 1,
+            event: HookEventV2::SessionBoundary {
+                boundary: HookBoundaryV1::Start,
             },
             payload_digest: [13; 32],
         }
@@ -518,6 +545,11 @@ mod tests {
         assert_eq!(
             stock_event_support(HookHostV1::Hermes, HookEventFamily::TestLifecycle),
             HookEventSupportV1::ReceiptDerived
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::CursorDesktop, HookEventFamily::SavedEdit),
+            HookEventSupportV1::Unavailable,
+            "no checked-in real Cursor saved-edit fixture currently proves this native family"
         );
     }
 

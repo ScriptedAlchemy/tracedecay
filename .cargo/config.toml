@@ -35,4 +35,4 @@ TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false
 # https://nexte.st/docs/installation/pre-built-binaries/
 test-all = "nextest run --workspace --all-features --no-fail-fast"
 test-ci = "nextest run --workspace --all-features --no-fail-fast"
-dogfood = "run --quiet --release --all-features --bin tracedecay -- dogfood"
+dogfood = "run --quiet --release --bin tracedecay -- dogfood"

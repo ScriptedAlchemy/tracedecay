@@ -10,6 +10,7 @@ pub mod authorization;
 pub mod context;
 pub mod diagnostics;
 pub mod feedback;
+pub mod framed_log;
 pub mod git;
 pub mod handlers;
 pub mod result;
@@ -38,6 +39,11 @@ pub use diagnostics::{
 };
 pub use error::ApplicationContractError;
 pub use feedback::{feedback_surface_catalog_contribution, feedback_surface_handler_descriptors};
+pub use framed_log::{
+    DirectorySyncPolicy, append_durable, atomic_write, file_len, io_error, read_bounded,
+    replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
+    truncate_file, validate_regular_or_missing, with_owned_temp_publish,
+};
 pub use git::{
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
     GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,

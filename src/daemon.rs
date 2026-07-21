@@ -88,6 +88,11 @@ mod scheduler;
 mod service;
 pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod transport;
+pub(crate) use service::invocation::{
+    DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
+    DaemonInvocationResponse, DaemonInvocationService, DaemonLspSessionAccess,
+    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, parse_daemon_invocation_request,
+};
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
     default_socket_path, enforce_forward_only_service_recovery, install_service,
@@ -464,6 +469,15 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
 #[derive(Clone, Default)]
 struct DaemonEngine {
     lifecycle: DaemonLifecycle,
+    /// Daemon-generation-local registry for authenticated, single-root LSP
+    /// sessions. It is intentionally ephemeral: protocol actors own overlays,
+    /// and daemon shutdown expires every registry entry instead of preserving
+    /// client document state or creating a bridge-local fallback.
+    lsp_session_registry: Arc<tokio::sync::Mutex<lsp_gateway::LspSessionRegistry>>,
+    /// Closed post-handshake operations backed by daemon-owned session actors.
+    /// Git and feedback remain unavailable until their authoritative request
+    /// owners register daemon-minted handles; no client-side fallback exists.
+    invocation_service: DaemonInvocationService,
     /// Lightweight per-proxy leases keep one reconnecting client from
     /// consuming every bulk slot while preserving reserved control capacity.
     per_client_admission: DaemonPerClientAdmission,
@@ -1794,6 +1808,8 @@ impl DaemonEngine {
 
     async fn shutdown_background_tasks(&self) {
         self.shutdown_project_open_tasks().await;
+        self.lsp_session_registry.lock().await.expire_at(u64::MAX);
+        self.invocation_service.expire_all().await;
         self.store_administration
             .session_temporal_refresh_schedulers()
             .shutdown()
@@ -2532,6 +2548,15 @@ async fn serve_broker_socket_client(
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
     }
+    if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
+        let response = match invocation {
+            Ok(request) => execute_daemon_invocation(&engine, &handshake, request).await,
+            Err(response) => response,
+        };
+        drop(setup_activity);
+        write_daemon_invocation_response(&mut transport, &response).await?;
+        return Ok(());
+    }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let project_node_count =
             if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
@@ -3057,6 +3082,60 @@ async fn write_json_rpc_response(
     transport.write_line("\n").await?;
     transport.flush().await?;
     Ok(())
+}
+
+async fn write_daemon_invocation_response(
+    transport: &mut impl McpTransport,
+    response: &DaemonInvocationResponse,
+) -> Result<()> {
+    transport
+        .write_line(&serde_json::to_string(response)?)
+        .await?;
+    transport.write_line("\n").await?;
+    transport.flush().await?;
+    Ok(())
+}
+
+fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<lsp_gateway::AdmittedRoot> {
+    url::Url::from_file_path(project_path)
+        .ok()
+        .map(|uri| lsp_gateway::AdmittedRoot::new(uri.to_string()))
+}
+
+#[cfg(unix)]
+async fn execute_daemon_invocation(
+    engine: &DaemonEngine,
+    handshake: &DaemonHandshake,
+    request: DaemonInvocationRequest,
+) -> DaemonInvocationResponse {
+    let request_id = request.request_id.clone();
+    let root = if request.requires_project() {
+        if engine.project_server_for_request(handshake).await.is_err() {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::Unavailable,
+            );
+        }
+        let Ok((project_path, _)) = DaemonEngine::project_route(handshake) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        };
+        let Some(root) = admitted_lsp_root_for_project_path(&project_path) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::Unavailable,
+            );
+        };
+        Some(root)
+    } else {
+        None
+    };
+    engine
+        .invocation_service
+        .invoke(&engine.lsp_session_registry, root, request)
+        .await
 }
 
 /// Read one newline-delimited frame. Oversized input gets a typed non-durable
