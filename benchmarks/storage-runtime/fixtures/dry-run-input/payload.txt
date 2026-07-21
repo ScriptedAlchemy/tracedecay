@@ -1,0 +1,1 @@
+tracedecay storage-runtime S0 dry-run fixture payload (synthetic, non-product)

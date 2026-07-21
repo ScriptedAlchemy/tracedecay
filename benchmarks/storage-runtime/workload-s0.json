@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "workload_id": "storage-runtime-s0-baseline-v1",
+  "evidence_eligible": true,
+  "description": "Phase S0 frozen baseline definition for the SQLite storage runtime plan. Freezes the last released schema/binary identity and defines current, 10x, open-loop overload, crash, recovery, FTS, backup/restore, and A/A noise-floor workloads across the supported store families. Product command templates are intentionally null (pending) until the S0 evidence campaign wires the released binary's explicit commands; the runner fails closed on pending steps unless --allow-pending is passed. This file defines the contract; it is not yet evidence.",
+  "store_families": ["graph", "profile", "project", "session"],
+  "binary": null,
+  "frozen_identity": {
+    "artifact": "frozen-identity-v2.json",
+    "required_for_evidence": true,
+    "capture": "python3 run_storage_baseline.py freeze --binary <released-tracedecay> --schema-manifest <released-schema-file> --workload workload-s0.json --corpus <isolated-store-corpus> --config <released-runtime-config> --output frozen-identity-v2.json",
+    "notes": "The schema manifest/config are operator-supplied released artifacts. The freeze binds binary, schema, workload, corpus, and config hashes; it never derives identity from a live profile."
+  },
+  "environment": {
+    "version_commands": {
+      "python3": ["__PYTHON__", "--version"]
+    }
+  },
+  "safety": {
+    "env": {},
+    "env_path_keys": [],
+    "notes": "The runner, not the workload, creates and sets TRACEDECAY_DATA_DIR/TRACEDECAY_GLOBAL_DB under each fresh runner-owned store copy. Protected child roots cannot be overridden; child processes never inherit TRACEDECAY_* implicitly."
+  },
+  "defaults": {
+    "warmup": 3,
+    "repetitions": 30,
+    "timeout_seconds": 120
+  },
+  "metrics": {
+    "latency": {
+      "source": "monotonic_clock",
+      "unit": "nanoseconds",
+      "percentiles": [50, 95, 99],
+      "percentile_method": "nearest_rank",
+      "dispersion": "sample_stddev",
+      "coordinated_omission": "open-loop latency is measured from the scheduled issue time; closed-loop issues strictly sequentially"
+    },
+    "counts": ["offered", "admitted", "completed", "failed", "retried", "shed.runner_in_flight_cap", "shed.command_saturation"],
+    "count_invariants": [
+      "offered == admitted + shed.runner_in_flight_cap",
+      "admitted == completed + failed + shed.command_saturation"
+    ]
+  },
+  "phases": [
+    {
+      "name": "current",
+      "kind": "closed_loop",
+      "families": ["graph", "profile", "project", "session"],
+      "scale_factor": 1,
+      "pending_reason": "wire the released binary's explicit write/read mix commands against the isolated store copy",
+      "setup": {"argv": null},
+      "work": {"argv": null},
+      "repetitions": 30,
+      "warmup": 3,
+      "evidence": [
+        {"name": "store_state", "capture": "sqlite_logical", "path": null, "tables": []}
+      ]
+    },
+    {
+      "name": "ten_x",
+      "kind": "closed_loop",
+      "families": ["graph", "profile", "project", "session"],
+      "scale_factor": 10,
+      "pending_reason": "same mix as current at 10x record volume",
+      "setup": {"argv": null},
+      "work": {"argv": null},
+      "repetitions": 30,
+      "warmup": 3,
+      "evidence": [
+        {"name": "store_state", "capture": "sqlite_logical", "path": null, "tables": []}
+      ]
+    },
+    {
+      "name": "overload",
+      "kind": "open_loop",
+      "families": ["graph", "profile", "project", "session"],
+      "pending_reason": "wire offered-rate writes above sustainable throughput against the isolated copy",
+      "work": {"argv": null},
+      "offered_rate_per_second": null,
+      "operation_count": null,
+      "max_in_flight": null,
+      "max_retries": 1,
+      "retryable_outcomes": ["shed"],
+      "outcome_map": {"0": "completed"},
+      "notes": "offered/admitted/completed/shed/retried are recorded per family; latency is measured from scheduled issue time so queueing is included"
+    },
+    {
+      "name": "crash",
+      "kind": "crash",
+      "families": ["graph", "profile", "project", "session"],
+      "pending_reason": "wire long-running writer plus kill trigger and post-crash integrity evidence",
+      "setup": {"argv": null},
+      "work": {"argv": null},
+      "wait_for_file": null,
+      "post_crash_evidence": [
+        {"name": "store_state", "capture": "sqlite_logical", "path": null, "tables": []}
+      ]
+    },
+    {
+      "name": "recovery",
+      "kind": "recovery",
+      "families": ["graph", "profile", "project", "session"],
+      "depends_on": "crash",
+      "pending_reason": "wire reopen/verify command against the crashed store copy",
+      "recover": {"argv": null},
+      "evidence": [
+        {"name": "store_state", "capture": "sqlite_logical", "path": null, "tables": []}
+      ],
+      "compare": [
+        {"a": "crash:store_state", "b": "store_state", "expect": "equal"}
+      ]
+    },
+    {
+      "name": "fts",
+      "kind": "closed_loop",
+      "families": ["graph", "session"],
+      "pending_reason": "wire FTS MATCH/rank/snippet probe commands against the isolated copies of FTS-bearing families",
+      "work": {"argv": null},
+      "repetitions": 30,
+      "warmup": 3,
+      "evidence": [
+        {"name": "fts_state", "capture": "sqlite_logical", "path": null, "tables": [], "fts_probes": [], "require_fts_probes": true}
+      ]
+    },
+    {
+      "name": "backup_restore",
+      "kind": "backup_restore",
+      "families": ["graph", "profile", "project", "session"],
+      "pending_reason": "wire backup-to-staging, manifest verification, and restore commands",
+      "setup": {"argv": null},
+      "steps": [
+        {"name": "backup", "argv": null},
+        {"name": "verify_backup", "argv": null},
+        {"name": "restore", "argv": null}
+      ],
+      "evidence": [
+        {"name": "original_state", "capture": "sqlite_logical", "path": null, "tables": []},
+        {"name": "restored_state", "capture": "sqlite_logical", "path": null, "tables": []}
+      ],
+      "compare": [
+        {"a": "original_state", "b": "restored_state", "expect": "equal"}
+      ]
+    },
+    {
+      "name": "aa_noise",
+      "kind": "aa_pairs",
+      "families": ["graph", "profile", "project", "session"],
+      "target_phase": "current",
+      "pairs": 10,
+      "margin_multiplier": 2.0,
+      "notes": "A/A pairs establish the per-platform noise floor; regression margins for current and 10x are noise_floor * margin_multiplier and must be re-recorded on Linux, Windows, and macOS"
+    }
+  ],
+  "platforms": {
+    "required": ["linux", "windows", "macos"],
+    "status": {
+      "linux": "pending_execution",
+      "windows": "pending_execution",
+      "macos": "pending_execution"
+    }
+  },
+  "limitations": [
+    "all product command templates are pending; this file is the S0 contract, not evidence",
+    "A/A noise floors are per-machine and must be re-baselined per platform",
+    "network filesystems are out of scope per the plan's fail-closed policy"
+  ]
+}
