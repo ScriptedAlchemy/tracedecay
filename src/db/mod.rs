@@ -13,6 +13,7 @@ mod nodes;
 mod redundancy_pairs;
 pub(crate) mod retrieval_anchor_schema;
 mod rows;
+pub(crate) mod runtime_compat;
 mod search;
 mod sql;
 mod stats;

@@ -16,6 +16,7 @@ pub mod memory;
 mod memory_benchmark;
 pub mod observation;
 pub mod session;
+pub(crate) mod sqlite_runtime;
 
 pub use global_db::GlobalDbTranscriptStore;
 pub use memory::DatabaseFactStore;

@@ -92,6 +92,18 @@ fn dependency_closure(metadata: &CargoMetadata, package_name: &str) -> BTreeSet<
     names
 }
 
+fn direct_dependencies(metadata: &CargoMetadata, package_name: &str) -> BTreeSet<String> {
+    metadata
+        .packages
+        .iter()
+        .find(|package| package.name == package_name)
+        .unwrap_or_else(|| panic!("workspace package {package_name}"))
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.name.clone())
+        .collect()
+}
+
 #[test]
 fn non_indexing_packages_exclude_grammars_structural_search_and_root_indexer() {
     let metadata = cargo_metadata();
@@ -145,5 +157,19 @@ fn policy_package_has_only_pure_value_dependencies() {
     assert_eq!(
         actual, expected,
         "policy must not depend on I/O, stores, transports, models, or configuration resolution"
+    );
+}
+
+#[test]
+fn store_dependencies_are_exactly_the_contract_allowlist() {
+    let metadata = cargo_metadata();
+    let direct = direct_dependencies(&metadata, "tracedecay-store");
+    let expected_direct = ["serde", "serde_json", "thiserror", "tracedecay-domain"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        direct, expected_direct,
+        "tracedecay-store dependencies must remain exactly contract-only"
     );
 }
