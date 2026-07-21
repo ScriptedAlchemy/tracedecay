@@ -584,6 +584,22 @@ class CheckedInWorkloadTests(unittest.TestCase):
                 f"S0 phase {phase['name']!r} must remain pending until wired",
             )
 
+    def test_s0_pending_reasons_name_executable_prerequisites(self):
+        workload = rsb.load_workload(self.HERE / "workload-s0.json")
+        reasons = {
+            phase["name"]: rsb.phase_pending_reason(phase) or ""
+            for phase in workload["phases"]
+            if phase["kind"] != "aa_pairs"
+        }
+        self.assertIn("explicit fixture paths", reasons["current"])
+        self.assertIn("documented saturation outcomes", reasons["overload"])
+        self.assertIn("ready file before SIGKILL", reasons["crash"])
+        self.assertIn("reopen/integrity command", reasons["recovery"])
+        self.assertIn("storage-runtime-fixture-v1.json", reasons["fts"])
+        self.assertIn(
+            "backup, manifest-verification, and restore", reasons["backup_restore"]
+        )
+
     def test_dry_run_workload_has_no_pending_phases(self):
         workload = rsb.load_workload(self.HERE / "workload-dry-run.json")
         self.assertFalse(workload["evidence_eligible"])

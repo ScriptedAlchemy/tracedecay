@@ -20,6 +20,12 @@ below.
 ## Layout
 
 - `run_storage_baseline.py` — the runner. Python 3.10+, standard library only.
+- `product_adapter.py` — stdlib-only, fail-closed construction of the real
+  `tracedecay tool --project <explicit-copy> search|message_search --args <json>`
+  FTS probes. It accepts only an explicit binary, fixture, sandbox, and family;
+  validates the source fixture, makes a fresh private copy beneath the sandbox
+  for every invocation, and replaces inherited HOME/profile roots before
+  invoking the product.
 - `workload-s0.json` — workload schema v1: the frozen S0 baseline definition
   (families, phases, counts invariants, A/A policy, platform matrix). All
   product steps are pending; this file is the contract, not evidence.
@@ -30,6 +36,40 @@ below.
 - `tests/test_run_storage_baseline.py` — stdlib `unittest` suite covering
   recursive filesystem safety, identity binding, result lifecycle, output
   atomicity, process trees, platform/network guards, and redaction.
+- `tests/test_product_adapter.py` — exact argv/environment construction and
+  fail-closed adapter tests; product execution is mocked and never dogfoods a
+  profile. Standalone adapter results are explicitly marked `not_evidence`.
+
+## Product command audit
+
+The checked-in CLI has real JSON MCP-tool entry points for graph text search
+(`search`) and stored session-message search (`message_search`).
+`product_adapter.py` constructs those exact commands without provider fields or
+implicit profile discovery. A qualifying isolated input copy must contain
+`storage-runtime-fixture-v1.json`:
+
+```json
+{
+  "schema_version": 1,
+  "project_root": "project",
+  "profile_root": "profile",
+  "fts_queries": {"graph": "fixture-owned query", "session": "fixture-owned query"}
+}
+```
+
+Both relative roots must stay inside the copy. Query text is deliberately
+fixture-owned: the adapter does not fabricate session/provider protocol. The
+repository currently has real provider-native transcript JSON fixtures and
+synthetic runner fixtures, but no released graph/session database fixture
+satisfying this manifest. Therefore the FTS workload template remains pending
+even though its adapter command construction is real and tested.
+
+The CLI has no standalone explicit-store interfaces for the frozen four-family
+write/read mix, offered-rate writes with documented saturation, a ready-signaled
+crashable writer, four-family reopen verification, or store
+backup/verify/restore. Those phases remain pending with executable
+prerequisites in `workload-s0.json`; unrelated config-file recovery backups are
+not treated as store backup coverage.
 
 ## Safety contract (fail closed)
 
@@ -76,6 +116,12 @@ The runner never discovers or touches the live TraceDecay profile implicitly:
   stdout/stderr and FTS probe text are represented only by redacted size/line
   metadata and hashes. The hostname is redacted unless `--record-hostname` is
   passed.
+- `product_adapter.py` applies the same boundary before its real FTS command:
+  it refuses fixture/sandbox overlap and live/default/custom profile roots,
+  recursively `lstat`s the source fixture (including hardlink and replacement
+  checks), then invokes the CLI only against a fresh copied fixture and a
+  runner-owned CWD/HOME/config/cache/temp environment. Its private JSON output
+  is published with the runner's create-new/no-follow atomic writer.
 
 The JSON result is redacted, but the mode-0700 output tree intentionally holds
 private working copies of the supplied stores. Treat the whole output directory
@@ -214,9 +260,9 @@ bound, validation-clean run with supported process-tree verification can be
 ## Evidence status
 
 - Runner machinery, safety guards, counts invariants, latency recording,
-  crash/recovery orchestration, backup/restore comparison, and A/A analysis:
-  verified by `self-test` and the 63-test unittest suite on the development
-  host (Linux, CPython 3.12).
+  crash/recovery orchestration, backup/restore comparison, A/A analysis, and
+  copied-fixture product-adapter boundary: verified by `self-test` and the
+  unittest suite on the development host (Linux, CPython 3.12).
 - Still requiring execution before S0 checkpoint acceptance:
   - wiring the released binary's explicit commands into `workload-s0.json`
     (all product steps are pending by design),

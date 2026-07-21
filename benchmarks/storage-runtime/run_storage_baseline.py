@@ -249,48 +249,134 @@ def assert_safe_path_components(
     return path
 
 
-def validate_safe_tree(root_like: str | Path, role: str) -> Path:
-    """Recursively lstat a tree before it becomes a benchmark input.
+NodeIdentity = tuple[int, int, int, int]
+TreeSnapshot = dict[Path, NodeIdentity]
 
-    os.walk's default non-following mode is insufficient because it silently
-    skips links and accepts special nodes.  The explicit lstat recursion makes
-    every accepted object an ordinary directory or a single-link regular file.
+
+def _node_identity(info: os.stat_result) -> NodeIdentity:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(stat.S_IFMT(info.st_mode)),
+        int(getattr(info, "st_nlink", 1)),
+    )
+
+
+def _require_snapshot_identity(
+    path: Path, info: os.stat_result, expected: NodeIdentity, role: str
+) -> None:
+    if _node_identity(info) != expected:
+        raise SafetyError(f"{role} entry changed after validation: {path}")
+
+
+def _scan_safe_directory(
+    directory: Path, role: str, expected: NodeIdentity | None = None
+) -> tuple[os.stat_result, list[os.DirEntry]]:
+    """Read one directory without accepting a replacement during the scan."""
+    assert_safe_path_components(directory, role, require_directory=True)
+    try:
+        before = os.lstat(directory)
+        _reject_unsafe_node(directory, before, role)
+        if expected is not None:
+            _require_snapshot_identity(directory, before, expected, role)
+        with os.scandir(directory) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name)
+        after = os.lstat(directory)
+    except OSError as exc:
+        raise SafetyError(f"cannot scan {role} directory {directory}: {exc}") from exc
+    _reject_unsafe_node(directory, after, role)
+    _require_snapshot_identity(directory, after, expected or _node_identity(before), role)
+    return after, entries
+
+
+def _require_snapshot_children(
+    directory: Path,
+    entries: list[os.DirEntry],
+    expected: dict[str, NodeIdentity],
+    role: str,
+) -> None:
+    if {entry.name for entry in entries} != expected.keys():
+        raise SafetyError(f"{role} directory changed: {directory}")
+    for name, identity in expected.items():
+        child = directory / name
+        try:
+            info = os.lstat(child)
+        except OSError as exc:
+            raise SafetyError(f"cannot recheck {role} entry {child}: {exc}") from exc
+        _reject_unsafe_node(child, info, role)
+        _require_snapshot_identity(child, info, identity, role)
+
+
+def snapshot_safe_tree(root_like: str | Path, role: str) -> tuple[Path, TreeSnapshot]:
+    """Recursively lstat a tree and retain every accepted object's identity.
+
+    ``os.walk`` is insufficient because it silently skips links and accepts
+    special nodes. A snapshot lets a later copy reject an inode replacement,
+    rather than treating a safe-looking replacement as the original fixture.
     """
     root = assert_safe_path_components(root_like, role, require_directory=True)
+    snapshot: TreeSnapshot = {}
 
-    def visit(directory: Path) -> None:
-        assert_safe_path_components(directory, role, require_directory=True)
-        before = os.lstat(directory)
-        try:
-            with os.scandir(directory) as iterator:
-                entries = sorted(iterator, key=lambda entry: entry.name)
-        except OSError as exc:
-            raise SafetyError(f"cannot scan {role} directory {directory}: {exc}") from exc
-        try:
-            after = os.lstat(directory)
-        except OSError as exc:
-            raise SafetyError(f"cannot recheck {role} directory {directory}: {exc}") from exc
-        _reject_unsafe_node(directory, after, role)
-        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-            raise SafetyError(f"{role} directory changed while scanning: {directory}")
+    def remember(relative: Path, info: os.stat_result, path: Path) -> None:
+        identity = _node_identity(info)
+        existing = snapshot.get(relative)
+        if existing is not None and existing != identity:
+            raise SafetyError(f"{role} entry changed while scanning: {path}")
+        snapshot[relative] = identity
+
+    def visit(directory: Path, relative: Path) -> None:
+        info, entries = _scan_safe_directory(directory, role)
+        remember(relative, info, directory)
         for entry in entries:
             child = directory / entry.name
+            child_relative = relative / entry.name
             try:
                 info = os.lstat(child)
             except OSError as exc:
                 raise SafetyError(f"cannot lstat {role} entry {child}: {exc}") from exc
             _reject_unsafe_node(child, info, role)
+            remember(child_relative, info, child)
             if stat.S_ISDIR(info.st_mode):
-                visit(child)
+                visit(child, child_relative)
+        _final, final_entries = _scan_safe_directory(directory, role, snapshot[relative])
+        _require_snapshot_children(
+            directory,
+            final_entries,
+            {entry.name: snapshot[relative / entry.name] for entry in entries},
+            role,
+        )
 
-    visit(root)
+    visit(root, Path("."))
+    return root, snapshot
+
+
+def assert_safe_tree_snapshot(
+    root_like: str | Path, expected: TreeSnapshot, role: str
+) -> Path:
+    """Refuse a tree whose nodes differ from a previously accepted snapshot."""
+    root, current = snapshot_safe_tree(root_like, role)
+    if current != expected:
+        raise SafetyError(f"{role} changed after validation")
     return root
 
 
-def _open_read_no_follow(path: Path, role: str) -> int:
+def validate_safe_tree(root_like: str | Path, role: str) -> Path:
+    """Recursively lstat a tree before it becomes a benchmark input."""
+    root, _snapshot = snapshot_safe_tree(root_like, role)
+    return root
+
+
+def _open_read_no_follow(
+    path: Path,
+    role: str,
+    expected_identity: NodeIdentity | None = None,
+) -> int:
     """Open one validated regular file and re-check identity after open."""
     assert_safe_path_components(path, role, require_directory=False)
     before = os.lstat(path)
+    _reject_unsafe_node(path, before, role)
+    if expected_identity is not None:
+        _require_snapshot_identity(path, before, expected_identity, role)
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -302,8 +388,10 @@ def _open_read_no_follow(path: Path, role: str) -> int:
         after = os.fstat(descriptor)
         if not stat.S_ISREG(after.st_mode) or getattr(after, "st_nlink", 1) != 1:
             raise SafetyError(f"{role} file changed to an unsafe type while opening: {path}")
-        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        if _node_identity(before) != _node_identity(after):
             raise SafetyError(f"{role} file changed while opening: {path}")
+        if expected_identity is not None:
+            _require_snapshot_identity(path, after, expected_identity, role)
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -462,9 +550,14 @@ def atomic_write_new(path_like: str | Path, data: str, role: str) -> Path:
     return path
 
 
-def copy_safe_file(source: Path, destination: Path, role: str) -> None:
+def copy_safe_file(
+    source: Path,
+    destination: Path,
+    role: str,
+    expected_identity: NodeIdentity | None = None,
+) -> None:
     """Copy a single validated regular file into a fresh no-follow destination."""
-    source_descriptor = _open_read_no_follow(source, role)
+    source_descriptor = _open_read_no_follow(source, role, expected_identity)
     try:
         destination_descriptor = _open_create_new(destination, role)
     except BaseException:
@@ -485,26 +578,58 @@ def copy_safe_file(source: Path, destination: Path, role: str) -> None:
         raise
 
 
-def copy_safe_tree(source_like: str | Path, destination_like: str | Path, role: str) -> Path:
-    """Make a fully independent, runner-owned store copy for exactly one run."""
-    source = validate_safe_tree(source_like, f"{role} source")
-    destination = create_fresh_directory(destination_like, f"{role} destination")
+def copy_safe_tree(
+    source_like: str | Path,
+    destination_like: str | Path,
+    role: str,
+    *,
+    source_snapshot: TreeSnapshot | None = None,
+) -> Path:
+    """Make a fully independent, runner-owned store copy for exactly one run.
 
-    def copy_directory(source_dir: Path, destination_dir: Path) -> None:
-        with os.scandir(source_dir) as iterator:
-            entries = sorted(iterator, key=lambda entry: entry.name)
+    Copy only objects that still match the lstat snapshot.  This closes the
+    preflight-to-copy replacement window that would otherwise allow a fixture
+    directory to be swapped for another tree after validation.
+    """
+    source_role = f"{role} source"
+    if source_snapshot is None:
+        source, source_snapshot = snapshot_safe_tree(source_like, source_role)
+    else:
+        source = assert_safe_tree_snapshot(source_like, source_snapshot, source_role)
+    destination = create_fresh_directory(destination_like, f"{role} destination")
+    children_by_parent: dict[Path, dict[str, NodeIdentity]] = {}
+    for child, identity in source_snapshot.items():
+        if child != Path("."):
+            children_by_parent.setdefault(child.parent, {})[child.name] = identity
+
+    def copy_directory(source_dir: Path, destination_dir: Path, relative: Path) -> None:
+        expected = source_snapshot.get(relative)
+        if expected is None:
+            raise SafetyError(f"{role} source is missing snapshot identity: {source_dir}")
+        _info, entries = _scan_safe_directory(source_dir, source_role, expected)
+        expected_children = children_by_parent.get(relative, {})
+        _require_snapshot_children(source_dir, entries, expected_children, source_role)
         for entry in entries:
             source_child = source_dir / entry.name
             destination_child = destination_dir / entry.name
-            info = os.lstat(source_child)
+            child_relative = relative / entry.name
+            expected_child = source_snapshot.get(child_relative)
+            if expected_child is None:
+                raise SafetyError(f"{role} source is missing snapshot identity: {source_child}")
+            try:
+                info = os.lstat(source_child)
+            except OSError as exc:
+                raise SafetyError(f"cannot lstat {role} source entry {source_child}: {exc}") from exc
             _reject_unsafe_node(source_child, info, role)
+            _require_snapshot_identity(source_child, info, expected_child, role)
             if stat.S_ISDIR(info.st_mode):
                 child_dir = create_fresh_directory(destination_child, f"{role} copy")
-                copy_directory(source_child, child_dir)
+                copy_directory(source_child, child_dir, child_relative)
             else:
-                copy_safe_file(source_child, destination_child, role)
+                copy_safe_file(source_child, destination_child, role, expected_child)
 
-    copy_directory(source, destination)
+    copy_directory(source, destination, Path("."))
+    assert_safe_tree_snapshot(source, source_snapshot, source_role)
     validate_safe_tree(destination, f"{role} copied store")
     return destination
 
