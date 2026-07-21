@@ -32,6 +32,18 @@ fn default_format_is_markdown() {
 }
 
 #[test]
+fn concealed_problem_value_does_not_disclose_binding_or_resource_state() {
+    let value = concealed_problem_value().expect("serialize concealed problem");
+
+    assert_eq!(value["kind"], "not_found_or_not_authorized");
+    assert_eq!(value["retry"], "never");
+    assert_eq!(value["legal_actions"], json!([]));
+    assert!(value.get("diagnostic").is_none());
+    assert!(value.get("binding_id").is_none());
+    assert!(value.get("resource").is_none());
+}
+
+#[test]
 fn json_format_is_compact() {
     let value = json!({"a": 1, "b": [1, 2]});
     let out = finalize(None, &json!({"format": "json"}), &value, || {
