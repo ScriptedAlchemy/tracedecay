@@ -1,15 +1,15 @@
 use tracedecay_domain::feedback::{
-    FeedbackActorContextV1, FeedbackBaselineStateV1, FeedbackBudgetV1, FeedbackContentIdentityV1,
-    FeedbackCycleId, FeedbackCycleObservationV1, FeedbackCycleRequestV1, FeedbackCycleResultV1,
-    FeedbackCycleRuntimeSnapshotV1, FeedbackCycleTerminationV1,
-    FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
+    FeedbackActorContextV1, FeedbackBaselineHorizonV1, FeedbackBaselineStateV1, FeedbackBudgetV1,
+    FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleObservationV1, FeedbackCycleRequestV1,
+    FeedbackCycleResultV1, FeedbackCycleRuntimeSnapshotV1, FeedbackCycleTerminationV1,
+    FeedbackDedupeKeyV1, FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
     FeedbackDiagnosticClassificationV1, FeedbackDurabilityV1, FeedbackEvaluationInputV1,
     FeedbackEvidencePacketV1, FeedbackImpactStateV1, FeedbackImpactV1, FeedbackScopeV1,
     FeedbackTargetV1, FeedbackTriggerV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    AgentInstanceId, CodeGenerationId, CommitId, FileOccurrenceId, ManifestDigest, ProjectId,
-    RepositoryId, RetrievalAnchorId, SessionId, UtcMicros, WorktreeId,
+    AgentInstanceId, CodeGenerationId, CommitId, FileOccurrenceId, HostInstanceId, ManifestDigest,
+    ProjectId, RepositoryId, RetrievalAnchorId, SessionId, UtcMicros, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -37,11 +37,18 @@ fn scope() -> FeedbackScopeV1 {
 
 fn baseline_identity() -> FeedbackDiagnosticBaselineIdentityV1 {
     FeedbackDiagnosticBaselineIdentityV1 {
-        generation_id: id::<CodeGenerationId>("generation.v1.fixture.00000001"),
-        generation_digest: digest('1'),
-        head_commit_id: id::<CommitId>("commit.fixture"),
-        content_digest: digest('2'),
+        current_generation_id: id::<CodeGenerationId>("generation.v1.fixture.00000001"),
+        current_generation_digest: digest('1'),
+        current_head_commit_id: id::<CommitId>("commit.fixture"),
+        current_content_digest: digest('2'),
         provider_identity_digest: digest('3'),
+        horizon: FeedbackBaselineHorizonV1 {
+            comparison_generation_id: id::<CodeGenerationId>("generation.v1.fixture.00000000"),
+            comparison_generation_digest: digest('4'),
+            comparison_head_commit_id: id::<CommitId>("commit.previous.fixture"),
+            comparison_content_digest: digest('5'),
+            watermark: digest('6'),
+        },
     }
 }
 
@@ -64,11 +71,13 @@ fn complete_impact() -> FeedbackImpactV1 {
 
 #[test]
 fn dirty_overlay_feedback_is_session_only_and_cannot_form_a_packet() {
+    let owner_client_id = id::<HostInstanceId>("client.fixture");
     let request = FeedbackCycleRequestV1::new(
         id::<FeedbackCycleId>("cycle.overlay"),
         scope(),
         FeedbackContentIdentityV1::EphemeralOverlay {
             session_id: id::<SessionId>("session.fixture"),
+            owner_client_id: owner_client_id.clone(),
             agent_id: Some(id::<AgentInstanceId>("agent.fixture")),
             document_version: 7,
             overlay_digest: digest('a'),
@@ -91,6 +100,7 @@ fn dirty_overlay_feedback_is_session_only_and_cannot_form_a_packet() {
         },
         actor: FeedbackActorContextV1 {
             session_id: Some(id::<SessionId>("session.fixture")),
+            client_id: Some(owner_client_id),
             agent_id: Some(id::<AgentInstanceId>("agent.fixture")),
             turn_id: None,
         },
@@ -186,6 +196,16 @@ fn saved_feedback_binds_generation_address_and_durable_observation() {
 }
 
 #[test]
+fn cycle_dedupe_key_validates_canonical_labels() {
+    let key = FeedbackDedupeKeyV1::new("feedback.dedupe.v1.fixture").unwrap();
+
+    assert_eq!(key.as_str(), "feedback.dedupe.v1.fixture");
+    assert!(key.validate().is_ok());
+    assert!(FeedbackDedupeKeyV1::new("").is_err());
+    assert!(FeedbackDedupeKeyV1::new(" feedback.dedupe.v1.fixture").is_err());
+}
+
+#[test]
 fn partial_baseline_never_classifies_unseen_diagnostics_as_new() {
     let baseline = FeedbackDiagnosticBaselineV1 {
         identity: baseline_identity(),
@@ -214,7 +234,7 @@ fn new_and_pre_existing_require_an_exact_authoritative_baseline_identity() {
     );
 
     let mut wrong_head = baseline_identity();
-    wrong_head.head_commit_id = id::<CommitId>("commit.other.fixture");
+    wrong_head.current_head_commit_id = id::<CommitId>("commit.other.fixture");
     assert_eq!(
         complete_empty.classify(&wrong_head, &anchor),
         FeedbackDiagnosticClassificationV1::Unknown

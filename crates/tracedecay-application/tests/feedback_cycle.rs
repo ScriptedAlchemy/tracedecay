@@ -16,10 +16,10 @@ use tracedecay_application::{
     ProviderOrigin, ProviderProvenance, ProviderSourceIdentity, RequestContext, RevisionDigest,
 };
 use tracedecay_domain::feedback::{
-    FeedbackActorContextV1, FeedbackBaselineStateV1, FeedbackBudgetV1, FeedbackContentIdentityV1,
-    FeedbackCycleId, FeedbackCycleObservationV1, FeedbackCycleRequestV1,
-    FeedbackCycleRuntimeSnapshotV1, FeedbackCycleTerminationV1,
-    FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
+    FeedbackActorContextV1, FeedbackAuthoritativeRuntimeStateV1, FeedbackBaselineHorizonV1,
+    FeedbackBaselineStateV1, FeedbackBudgetV1, FeedbackContentIdentityV1, FeedbackCycleId,
+    FeedbackCycleObservationV1, FeedbackCycleRequestV1, FeedbackCycleRuntimeSnapshotV1,
+    FeedbackCycleTerminationV1, FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
     FeedbackDiagnosticClassificationV1, FeedbackDiagnosticV1, FeedbackDurabilityV1,
     FeedbackEvaluationInputV1, FeedbackEvaluationStageV1, FeedbackImpactStateV1, FeedbackImpactV1,
     FeedbackObservationKindV1, FeedbackScopeV1, FeedbackSessionDiagnosticV1, FeedbackTargetV1,
@@ -151,6 +151,16 @@ fn scope() -> FeedbackScopeV1 {
     }
 }
 
+fn baseline_horizon() -> FeedbackBaselineHorizonV1 {
+    FeedbackBaselineHorizonV1 {
+        comparison_generation_id: common::id::<CodeGenerationId>("generation.v1.feedback.previous"),
+        comparison_generation_digest: common::digest(common::SHA256_B),
+        comparison_head_commit_id: common::id::<CommitId>("commit.previous.fixture"),
+        comparison_content_digest: common::digest(common::SHA256_B),
+        watermark: common::digest(common::SHA256_B),
+    }
+}
+
 fn saved_input() -> FeedbackEvaluationInputV1 {
     let request = FeedbackCycleRequestV1::new(
         common::id::<FeedbackCycleId>("cycle.feedback.fixture"),
@@ -183,11 +193,13 @@ fn saved_input() -> FeedbackEvaluationInputV1 {
 
 fn overlay_input() -> FeedbackEvaluationInputV1 {
     let session_id = common::id::<SessionId>("session.feedback.fixture");
+    let owner_client_id = common::id::<HostInstanceId>("client.feedback.fixture");
     let request = FeedbackCycleRequestV1::new(
         common::id::<FeedbackCycleId>("cycle.feedback.overlay"),
         scope(),
         FeedbackContentIdentityV1::EphemeralOverlay {
             session_id: session_id.clone(),
+            owner_client_id: owner_client_id.clone(),
             agent_id: None,
             document_version: 7,
             overlay_digest: common::digest(common::SHA256_A),
@@ -211,6 +223,7 @@ fn overlay_input() -> FeedbackEvaluationInputV1 {
         },
         actor: FeedbackActorContextV1 {
             session_id: Some(session_id),
+            client_id: Some(owner_client_id),
             agent_id: None,
             turn_id: None,
         },
@@ -290,11 +303,12 @@ fn matching_baseline(
     };
     FeedbackDiagnosticBaselineV1 {
         identity: FeedbackDiagnosticBaselineIdentityV1 {
-            generation_id: input.target.generation_id.clone().unwrap(),
-            generation_digest: generation_digest.clone(),
-            head_commit_id: input.request.scope.head_commit_id.clone(),
-            content_digest: file_digest.clone(),
+            current_generation_id: input.target.generation_id.clone().unwrap(),
+            current_generation_digest: generation_digest.clone(),
+            current_head_commit_id: input.request.scope.head_commit_id.clone(),
+            current_content_digest: file_digest.clone(),
             provider_identity_digest: provider.compute_digest().unwrap(),
+            horizon: baseline_horizon(),
         },
         diagnostic_anchors,
         state: FeedbackBaselineStateV1::Complete,
@@ -389,8 +403,17 @@ fn execution_request(
     input: FeedbackEvaluationInputV1,
     provider: DiagnosticProviderIdentity,
 ) -> FeedbackCycleExecutionRequest {
+    let baseline_horizon = matches!(
+        &input.request.content,
+        FeedbackContentIdentityV1::SavedContent { .. }
+    )
+    .then(baseline_horizon);
     FeedbackCycleExecutionRequest {
-        runtime: FeedbackCycleRuntimeSnapshotV1::from_request(&input.request),
+        runtime: FeedbackAuthoritativeRuntimeStateV1 {
+            snapshot: FeedbackCycleRuntimeSnapshotV1::from_request(&input.request),
+            baseline_horizon,
+            runtime_watermark: common::digest(common::SHA256_B),
+        },
         input,
         providers: vec![provider],
         maximum_returned_findings: 10,
@@ -590,7 +613,7 @@ fn authoritative_history_identity_drives_pre_existing_and_stale_classification()
     );
 
     let mut wrong_identity = matching_baseline(&input, &provider, Vec::new());
-    wrong_identity.identity.head_commit_id = common::id::<CommitId>("commit.history.stale");
+    wrong_identity.identity.current_head_commit_id = common::id::<CommitId>("commit.history.stale");
     let stale_service = FeedbackCycleService::new(
         HistoryDiagnosticsFixture {
             calls: Rc::new(Cell::new(0)),
@@ -1130,7 +1153,7 @@ fn every_terminal_reason_is_exact_and_one_shot() {
 
     let stale =
         execute_before_provider_work(&context, FeedbackCycleDedupeState::Unique, |request| {
-            request.runtime.scope.head_commit_id =
+            request.runtime.snapshot.scope.head_commit_id =
                 common::id::<CommitId>("commit.feedback.changed");
         });
     assert_eq!(

@@ -75,6 +75,7 @@ macro_rules! feedback_id {
 feedback_id!(FeedbackCycleId, "feedback cycle id");
 feedback_id!(FeedbackResultId, "feedback result id");
 feedback_id!(FeedbackFindingId, "feedback finding id");
+feedback_id!(FeedbackDedupeKeyV1, "feedback dedupe key");
 feedback_id!(FeedbackSavedDedupeKeyV1, "saved feedback dedupe key");
 feedback_id!(FeedbackDedupeClaimId, "feedback dedupe claim id");
 
@@ -462,6 +463,14 @@ impl FeedbackEvaluationInputV1 {
             observed_at: self.observed_at,
         })
     }
+
+    pub fn dedupe_key(
+        &self,
+        evidence_identity: &ManifestDigest,
+    ) -> Result<FeedbackDedupeKeyV1, DomainError> {
+        let saved_key = self.saved()?.dedupe_key(evidence_identity)?;
+        FeedbackDedupeKeyV1::new(saved_key.as_str())
+    }
 }
 
 /// Saved-content-only input for durable observations and dedupe. Semantic
@@ -736,9 +745,13 @@ impl FeedbackAuthoritativeRuntimeStateV1 {
                 },
                 Some(horizon),
             ) => horizon.validate_for(
-                input.target.generation_id.as_ref().ok_or(DomainError::NonCanonical {
-                    field: "feedback runtime generation",
-                })?,
+                input
+                    .target
+                    .generation_id
+                    .as_ref()
+                    .ok_or(DomainError::NonCanonical {
+                        field: "feedback runtime generation",
+                    })?,
                 generation_digest,
                 &input.request.scope.head_commit_id,
                 file_digest,
@@ -1459,6 +1472,7 @@ mod tests {
     fn overlay_requests_are_session_only() {
         let request = request(FeedbackContentIdentityV1::EphemeralOverlay {
             session_id: id("session.fixture"),
+            owner_client_id: id("client.fixture"),
             agent_id: None,
             document_version: 1,
             overlay_digest: digest('c'),

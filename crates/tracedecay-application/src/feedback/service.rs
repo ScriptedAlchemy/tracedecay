@@ -1,6 +1,6 @@
 use tracedecay_domain::feedback::{
-    FeedbackBaselineStateV1, FeedbackContentIdentityV1, FeedbackCycleObservationV1,
-    FeedbackCycleResultV1, FeedbackCycleRuntimeSnapshotV1, FeedbackCycleTerminationV1,
+    FeedbackAuthoritativeRuntimeStateV1, FeedbackBaselineStateV1, FeedbackContentIdentityV1,
+    FeedbackCycleObservationV1, FeedbackCycleResultV1, FeedbackCycleTerminationV1,
     FeedbackDedupeKeyV1, FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
     FeedbackDiagnosticClassificationV1, FeedbackDiagnosticV1, FeedbackDurabilityV1,
     FeedbackEvaluationInputV1, FeedbackEvaluationStageV1, FeedbackFindingLifecycleV1,
@@ -77,7 +77,7 @@ pub enum FeedbackCycleControl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeedbackCycleExecutionRequest {
     pub input: FeedbackEvaluationInputV1,
-    pub runtime: FeedbackCycleRuntimeSnapshotV1,
+    pub runtime: FeedbackAuthoritativeRuntimeStateV1,
     pub providers: Vec<DiagnosticProviderIdentity>,
     pub maximum_returned_findings: u64,
     pub usage: FeedbackBudgetUsage,
@@ -87,7 +87,7 @@ pub struct FeedbackCycleExecutionRequest {
 impl FeedbackCycleExecutionRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.input.validate()?;
-        self.runtime.validate()?;
+        self.runtime.validate_for(&self.input)?;
         self.usage.validate_for(&self.input)?;
         if self.maximum_returned_findings == 0 {
             return Err(ApplicationContractError::ZeroValue {
@@ -185,7 +185,11 @@ where
                 None,
             );
         }
-        if !request.runtime.has_same_root(&request.input.request) {
+        if !request
+            .runtime
+            .snapshot
+            .has_same_root(&request.input.request)
+        {
             return self.finish(
                 &request,
                 None,
@@ -233,7 +237,11 @@ where
                     );
                 }
             };
-        if !request.runtime.is_current_for(&request.input.request) {
+        if !request
+            .runtime
+            .snapshot
+            .is_current_for(&request.input.request)
+        {
             return self.finish(
                 &request,
                 None,
@@ -620,9 +628,10 @@ struct ResolvedBaseline<'a> {
 }
 
 fn expected_baseline_identity(
-    input: &FeedbackEvaluationInputV1,
+    request: &FeedbackCycleExecutionRequest,
     provider: &DiagnosticProviderIdentity,
 ) -> Result<FeedbackDiagnosticBaselineIdentityV1, ApplicationContractError> {
+    let input = &request.input;
     let FeedbackContentIdentityV1::SavedContent {
         generation_digest,
         file_digest,
@@ -633,15 +642,20 @@ fn expected_baseline_identity(
         });
     };
     Ok(FeedbackDiagnosticBaselineIdentityV1 {
-        generation_id: input.target.generation_id.clone().ok_or(
+        current_generation_id: input.target.generation_id.clone().ok_or(
             ApplicationContractError::Inconsistent {
                 field: "feedback baseline generation",
             },
         )?,
-        generation_digest: generation_digest.clone(),
-        head_commit_id: input.request.scope.head_commit_id.clone(),
-        content_digest: file_digest.clone(),
+        current_generation_digest: generation_digest.clone(),
+        current_head_commit_id: input.request.scope.head_commit_id.clone(),
+        current_content_digest: file_digest.clone(),
         provider_identity_digest: provider.compute_digest()?,
+        horizon: request.runtime.baseline_horizon.clone().ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "feedback baseline horizon",
+            },
+        )?,
     })
 }
 
@@ -656,7 +670,7 @@ fn resolve_baselines<'a>(
     let mut resolved = Vec::with_capacity(request.providers.len());
     let mut expected_provider_digests = Vec::with_capacity(request.providers.len());
     for provider in &request.providers {
-        let expected = expected_baseline_identity(&request.input, provider)?;
+        let expected = expected_baseline_identity(request, provider)?;
         expected_provider_digests.push(expected.provider_identity_digest.clone());
         let exact = baselines
             .iter()
