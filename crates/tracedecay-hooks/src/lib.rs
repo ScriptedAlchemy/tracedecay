@@ -10,18 +10,32 @@
 
 pub mod config;
 pub mod native;
+pub mod runtime;
 pub mod spool;
 
 pub use config::{
-    HOOK_CONFIGURATION_SCHEMA_VERSION, HookConfigurationIntegrityVerifierV1,
-    HookConfigurationPublicationError, HookConfigurationPublicationOutcomeV1,
-    HookConfigurationPublicationStoreV1, HookConfigurationPublicationV1,
-    HookConfigurationPublisherV1, HookConfigurationReadOutcomeV1, HookConfigurationSnapshotV1,
-    HookConfigurationSubscriberV1, MAX_HOOK_CONFIGURATION_INTEGRITY_BYTES,
+    HOOK_CONFIGURATION_SCHEMA_VERSION, HookConfigurationFileReaderV1,
+    HookConfigurationFileWriterV1, HookConfigurationPublicationError,
+    HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationStoreV1,
+    HookConfigurationPublicationV1, HookConfigurationPublisherV1, HookConfigurationReadOutcomeV1,
+    HookConfigurationReadStoreV1, HookConfigurationSnapshotV1, HookConfigurationSubscriberV1,
+    MAX_HOOK_CONFIGURATION_BYTES,
 };
 pub use native::{
     DecodedNativeHookEventV1, NativeEnvelopeMaterialV1, NativeHookDecodeError, NativeHookSignalV1,
-    decode_bound_native_hook_event, decode_native_hook_event,
+    OpenCodePluginSurfaceV1, decode_bound_native_hook_event, decode_native_hook_event,
+    decode_opencode_plugin_event,
+};
+pub use runtime::{
+    AsyncHookAdmissionPortV1, HOOK_SYNCHRONOUS_BUDGET_MICROS, HookAdmissionFutureV1,
+    HookAdmissionPortV1, HookAdmissionReceiptV1, HookFeedbackDeliveryOutcomeV1,
+    HookFeedbackDeliveryPortV1, HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1,
+    HookGuidanceDispositionV1, HookGuidanceLookupOutcomeV1, HookGuidanceLookupPortV1,
+    HookGuidanceLookupRequestV1, HookGuidanceStateV1, HookImmediateAdmissionStateV1,
+    HookImmediateAdmissionV1, HookReadyGuidanceV1, HookReplaySpoolPortV1, HookRuntimeControlV1,
+    HookRuntimeErrorV1, HookRuntimeStatusV1, HookSynchronousDeadlineV1, HookSynchronousResultV1,
+    MAX_GUIDANCE_LOOKUP_ITEMS, admit_async_exact_scope, deliver_feedback_with_rollback,
+    finish_synchronous_hook,
 };
 pub use spool::{
     HookReplayBatchV1, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
@@ -44,8 +58,9 @@ pub const MAX_REPLAY_BATCH_RECORDS: u16 = 64;
 pub const MAX_REPLAY_BATCH_BYTES: u32 = 256 * 1024;
 pub const MAX_SUGGESTION_BYTES: usize = 4 * 1024;
 
-/// The five stock hosts. Cursor surfaces are separated because their native
-/// diagnostic capabilities differ, but they remain one host integration.
+/// Stock host surfaces plus Kimi/OpenCode native plugin adapters and explicit
+/// Cline-family dispositions. Split variants preserve provider-specific
+/// evidence; one family label must never widen another provider's capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookHostV1 {
@@ -55,6 +70,11 @@ pub enum HookHostV1 {
     CursorCloud,
     Hermes,
     Kiro,
+    KimiCode,
+    OpenCode,
+    Cline,
+    RooCode,
+    Kilo,
 }
 
 /// Event families that a host hook itself may emit in PR13.
@@ -89,22 +109,32 @@ pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> H
     use HookEventSupportV1::{Native, ReceiptDerived, Unavailable};
 
     match (host, family) {
-        (HookHostV1::ClaudeCode | HookHostV1::Codex, SessionBoundary) => Native,
-        (HookHostV1::ClaudeCode | HookHostV1::Codex, SavedEdit | TestLifecycle) => ReceiptDerived,
-        (HookHostV1::ClaudeCode | HookHostV1::Codex, PromptBoundary | ToolLifecycle) => Unavailable,
-        (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, SessionBoundary) => Native,
+        (HookHostV1::ClaudeCode, SessionBoundary | SavedEdit) => Native,
+        (HookHostV1::ClaudeCode, TestLifecycle) => ReceiptDerived,
+        (HookHostV1::ClaudeCode, PromptBoundary | ToolLifecycle) => Unavailable,
+        (HookHostV1::Codex, SessionBoundary) => Native,
+        (HookHostV1::Codex, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (HookHostV1::Codex, PromptBoundary | ToolLifecycle) => Unavailable,
+        (HookHostV1::CursorDesktop, SessionBoundary | SavedEdit) => Native,
+        (HookHostV1::CursorCloud, SessionBoundary) => Native,
         (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, TestLifecycle) => ReceiptDerived,
-        (
-            HookHostV1::CursorDesktop | HookHostV1::CursorCloud,
-            PromptBoundary | ToolLifecycle | SavedEdit,
-        ) => Unavailable,
-        (HookHostV1::Hermes, SessionBoundary) => Native,
-        (HookHostV1::Hermes, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (HookHostV1::CursorDesktop, PromptBoundary | ToolLifecycle) => Unavailable,
+        (HookHostV1::CursorCloud, PromptBoundary | ToolLifecycle | SavedEdit) => Unavailable,
+        (HookHostV1::Hermes, SessionBoundary | SavedEdit) => Native,
+        (HookHostV1::Hermes, TestLifecycle) => ReceiptDerived,
         (HookHostV1::Hermes, PromptBoundary | ToolLifecycle) => Unavailable,
         (HookHostV1::Kiro, PromptBoundary) => Native,
         (HookHostV1::Kiro, SessionBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
             Unavailable
         }
+        (HookHostV1::KimiCode, SessionBoundary | ToolLifecycle | SavedEdit) => Native,
+        (HookHostV1::KimiCode, PromptBoundary | TestLifecycle) => Unavailable,
+        (HookHostV1::OpenCode, SessionBoundary | ToolLifecycle | SavedEdit) => Native,
+        (HookHostV1::OpenCode, PromptBoundary | TestLifecycle) => Unavailable,
+        (
+            HookHostV1::Cline | HookHostV1::RooCode | HookHostV1::Kilo,
+            SessionBoundary | PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
+        ) => Unavailable,
     }
 }
 
@@ -336,7 +366,8 @@ pub enum SpoolAppendOutcomeV1 {
 
 /// Acceptance stages are intentionally distinct. Neither variant claims that
 /// projection or any application effect completed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HookTransportDispositionV1 {
     Accepted,
     AcceptedForReplay,
@@ -548,8 +579,8 @@ mod tests {
         );
         assert_eq!(
             stock_event_support(HookHostV1::CursorDesktop, HookEventFamily::SavedEdit),
-            HookEventSupportV1::Unavailable,
-            "no checked-in real Cursor saved-edit fixture currently proves this native family"
+            HookEventSupportV1::Native,
+            "the checked-in Cursor afterFileEdit capture proves this native family"
         );
     }
 
