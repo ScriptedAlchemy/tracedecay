@@ -172,8 +172,9 @@ Replayable external sources persist bounded operations, receipts, and frontiers
 only; they do not persist a raw-content spool. Refresh operation durability
 remains in Plan 27's acquisition state/receipts rather than a capture-owned
 scheduler table. The existing bounded local
-non-replayable host-admission spool remains Plan 27 scope, while the remote
-offline-capture spool remains the PR16 remote shared-Brain slice. Neither spool
+non-replayable host-admission spool remains Plan 27 scope, while
+[the remote shared-Brain plan](28-remote-multi-machine-shared-brain.md) owns
+offline capture and replay. Neither spool
 defines source identity or substitutes its receipt for a source revision.
 
 ## Implementation and verification

@@ -20,9 +20,9 @@ logical copies, and summary-DAG nodes. Preserve exact retained evidence,
 history, provenance, privacy, stable anchors, and truthful coverage while
 returning the smallest useful context.
 
-PR8 operates on explicitly resolved current-project/single-root scope. Plan 15
-and Plan 16 add canonical multi-root/cross-project execution later; PR8 must not
-guess another root or fall back to CWD.
+PR8 operates on explicitly resolved current-project/single-root scope. It must
+not guess another root or fall back to CWD. All retained later capabilities are
+mapped in [the authoritative roadmap](00-plan-set-index.md).
 
 The active path is:
 
@@ -35,22 +35,19 @@ sanitized PR5/PR6 observations plus PR7 anchors
   -> compact anchored context or a typed partial/unavailable result
 ```
 
-## Ownership and implementation boundary
+## Production boundary
 
-- Plan 23 owns temporal truth, occurrence/copy semantics, summary lineage,
-  context assembly, freshness, and PR8 acceptance.
-- Plan 05 owns shared query-execution primitives only: typed port boundaries,
-  scope inputs, budgets, cancellation, cursors, watermarks, deterministic
-  merge, coverage, and explanations.
-- PR8 keeps the temporal kernel in root-package modules while it has only one
-  consumer. It must satisfy the Plan 05 dependency boundary in place. PR9
-  re-evaluates physical query-crate extraction using measured reuse and compile
-  evidence; PR8 does not extract a crate speculatively.
-- Plan 09 owns typed application orchestration and authorization. CLI/MCP
-  compatibility bindings translate and delegate; they do not keep private
-  search, freshness, hydration, pagination, or repair behavior.
-- The daemon/store path remains the sole mutable authority. Reads are
-  side-effect free; explicit refresh is a separate durable operation.
+Plan 23 owns temporal truth, occurrence/copy semantics, summary lineage,
+context assembly, freshness, and PR8 acceptance using Plan 05's typed scope,
+budget, cancellation, cursor, watermark, deterministic-merge, coverage, and
+explanation primitives. Plan 09 owns authorized application orchestration.
+
+The temporal kernel remains in root-package modules while it has one consumer;
+physical extraction requires measured reuse and compilation evidence. CLI/MCP
+compatibility bindings translate and delegate without private search,
+freshness, hydration, pagination, or repair behavior. The daemon/store path is
+the sole mutable authority, reads are side-effect free, and explicit refresh is
+a separate durable operation.
 
 ## Required behavior
 
@@ -124,43 +121,19 @@ sanitized PR5/PR6 observations plus PR7 anchors
 - stock format, focused tests, all-feature checks/tests, and relevant
   cross-platform gates pass before PR8 completion.
 
-## Later roadmap contracts (not PR8 scope)
+## Later work
 
-PR8 priority above is unchanged. Later slices already have owners; do not pull
-them into this executable path:
-
-- **Source contracts:** [Plan 01](01-domain-crate.md) definition/binding
-  identity; [Plan 20](20-configuration-control-plane.md) policy metadata
-  including mandatory local privacy; [Plan 06](06-policy-crate.md) authorization;
-  [Plan 03](03-capture-crate.md) / [Plan 27](27-cross-host-agent-plugin-bundles.md)
-  capture and connectors; [Plan 09](09-application-crate.md) sink recheck.
-- **Evidence spans:** Plan 23 session-derived spans/bursts ship in PR8; Plan 13
-  cross-domain `EvidenceSpanRecordV1` and Plan 24 TaskId references follow their
-  PR sequence.
-- **Federated retrieval / query collections:** [Plan 16](16-cross-project-repository-worktree-scope.md)
-  owns collections and scope-set digests; Plan 05 executes federation at PR15.
-- **Task investigation / evidence / synthesis:** [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md)
-  / [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) at PR17. Canonical retrieval
-  rejects expertise context; expertise is interactive-only and never durable
-  evidence, completion, or routing authority.
-- **Execution/review/integration topology:** host-neutral TaskId/Kanban does not
-  require Git. Plan 16/36/37 PR15 work owns local worktree/branch scope, typed
-  native Git integration, central daemon fanout, and the optional
-  private-preview GitHub Stacked PR adapter; Plan 24/32 PR17 work owns the four
-  independent placement/branch/review/integration dimensions and runtime
-  orchestration. Standard Git/other-forge/no-Git fallback remains valid. None
-  of this is PR8 scope.
-- **LSP handoff / dashboard / observability / performance:** Plan 35/09 handoff,
-  Plan 11 dashboard, Plan 26 observations, Plan 33 PR20 optimization — each in
-  its indexed PR, never as PR8 work.
+Do not pull later product journeys into PR8. Their complete retained features,
+semantic ownership, and PR assignments are in
+[00-plan-set-index.md](00-plan-set-index.md).
 
 ## Prohibited scope
 
 - no parsing or execution of this file or any V2 roadmap document;
 - no task/work graph filtering, Kanban behavior, plan execution, or workflow
   runtime;
-- no PR9 lexical code index, PR10 semantic index, PR11 policy/catalog rewrite,
-  PR12 transport convergence, or PR15 multi-root federation;
+- no later lexical/semantic code index, policy/transport convergence, or
+  multi-root federation;
 - no universal query AST, task/board query language, Search Quality Lab, or
   benchmark bureaucracy;
 - no writable read path, implicit ingest/repair, fallback store, or direct

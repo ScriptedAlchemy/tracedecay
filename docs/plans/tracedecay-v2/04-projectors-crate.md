@@ -6,9 +6,9 @@ PR5 pinned the first production observation-to-view contract. Projection now
 participates in each active vertical PR that introduces or replaces a product view. It
 is not a standalone framework, registry, or generated-inventory project. See
 [the plan index](00-plan-set-index.md) for the owning slices and
-[the V2 overview](README.md) for global rules.
-Each projection/synchronization slice records lag, throughput, resource, and
-no-op baselines for [PR20](33-end-to-end-performance-optimization.md).
+[the V2 overview](README.md) for global rules. Production projection paths emit
+lag, throughput, resource, and no-op measurements directly to the end-to-end
+performance journey.
 
 ## Outcome
 
@@ -256,8 +256,8 @@ typed generations and their own checkpoints.
   branch/worktree code graphs.
 - PR14 tests prove Doctor diagnosis remains read-only and repair views reflect
   only authoritative, receipt-bearing operations.
-- PR13 parity and restart tests must pass before any superseded V1 projection
-  path is removed.
+- Host-surface parity and restart tests must pass before any superseded V1
+  projection path is removed.
 - Incremental and rebuild output is byte-identical at the same aggregate
   frontier; every duplicate/reordered partition permutation converges.
 - Output, lineage, partition frontier, aggregate digest, and receipt commit

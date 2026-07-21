@@ -3,7 +3,7 @@
 **Delivery:** PR 8
 
 **Status:** active PR8 product work
-**Depends on:** [01 domain](01-domain-crate.md), [02 store](02-store-crate.md), [03 capture](03-capture-crate.md), [04 projectors](04-projectors-crate.md), [05 query](05-query-crate.md), [09 application](09-application-crate.md), [13 anchors](13-research-provenance-and-context-anchors.md), and [18 privacy](18-secret-detection-redaction-and-private-data-safety.md). PR8 ships against explicitly resolved current-project/single-root scope and address contracts available by then; [16 scope](16-cross-project-repository-worktree-scope.md) later composes this retrieval with canonical cross-project/repository/worktree resolution in PR15 and is not a PR8 implementation prerequisite.
+**Depends on:** [01 domain](01-domain-crate.md), [02 store](02-store-crate.md), [03 capture](03-capture-crate.md), [04 projectors](04-projectors-crate.md), [05 query](05-query-crate.md), [09 application](09-application-crate.md), [13 anchors](13-research-provenance-and-context-anchors.md), and [18 privacy](18-secret-detection-redaction-and-private-data-safety.md). PR8 ships against explicitly resolved current-project/single-root scope and address contracts available by then; the [multi-root scope plan](16-cross-project-repository-worktree-scope.md) composes this same retrieval kernel with canonical cross-project/repository/worktree resolution and is not a PR8 implementation prerequisite.
 
 ## Outcome
 
@@ -149,7 +149,7 @@ freshness logic. `src/mcp/server.rs`,
 adapters only: they do not query LCM tables, call `get_session_message`,
 hydrate payloads, apply semantic filters after ranking, or encode a second LCM
 cursor. Workflow recovery consumes session evidence through this kernel; the
-term workflow otherwise belongs to the PR17 product.
+executable-work product owns all other workflow semantics.
 
 PR8 accepts exactly one already-resolved `ResolvedSessionIdentity` and one
 `SessionRetrievalScope::{Session, AllSessionsInAuthorizedRoot}` per request.
@@ -291,16 +291,16 @@ resolve through Plan 13 anchors and their owning stores; Plan 37 binds cycle
 results and capsules to those references instead of copying durable evidence into
 session payloads.
 
-PR13 read-only GitHub and CI ingress does not require
-[Plan 32](32-dynamic-workflow-runtime-and-sdk.md). Plan 32 at PR17 may
-optionally compose already-shipped read-only operations in workflows through
+Read-only GitHub review and CI-failure ingress does not require
+[Plan 32](32-dynamic-workflow-runtime-and-sdk.md). The executable-work journey
+may optionally compose already-shipped read-only operations through
 [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md); it
 never enables a GitHub write path. LCM and summary payloads remain
 session-narrative authority only with no write-side GitHub path.
 
 ## TaskId-rooted reuse without task authority
 
-At PR17, an authorized
+In the executable-work journey, an authorized
 [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) `TaskId`
 may select task-linked session, Thread, Turn, message, agent, and tool narrative
 through this sole temporal kernel in `current`, `as_of`, `evolution`, or
@@ -309,18 +309,19 @@ diagnostic, Git, code-generation, review, artifact, and runtime evidence
 resolves through Plan 13 anchors and its owning stores; no task evidence is
 copied into LCM.
 
-The PR8 kernel stays task-agnostic. PR17 application composition supplies the
-authorized selector and reuses PR8's scope, temporal, hydration, cursor,
-coverage, and expansion contracts without changing PR8 storage or sequencing.
+The PR8 kernel stays task-agnostic. Executable-work application composition
+supplies the authorized selector and reuses PR8's scope, temporal, hydration,
+cursor, coverage, and expansion contracts without changing PR8 storage or
+sequencing.
 A handoff-oriented assembly profile returns coverage and unresolved gaps first,
 compact task-linked narrative second, and exact chronology only by authorized
 expansion. Summaries accelerate retrieval but cannot replace raw messages or
 external anchored evidence.
 
 No PR8 domain record, store port, SQL table, migration receipt, refresh key,
-cursor, query request, or application request contains `TaskId`. PR17
-translates an authorized `TaskId` into an ordinary PR8 request without changing
-PR8 storage, sequencing, authority, or scope.
+cursor, query request, or application request contains `TaskId`. The
+executable-work application translates an authorized `TaskId` into an ordinary
+PR8 request without changing PR8 storage, sequencing, authority, or scope.
 
 ## Side-effect-free reads and freshness
 
@@ -526,13 +527,13 @@ session_derived_evidence_members(
 `idx_session_derived_evidence_members_occurrence`, then validates each exact
 column and index shape before recording schema version 3.
 
-Through PR14, physical `session_messages` and `lcm_*` tables remain explicitly
-non-authoritative dashboard compatibility projections because SQLite views
+Until dashboard bindings migrate, physical `session_messages` and `lcm_*`
+tables remain explicitly non-authoritative dashboard compatibility projections because SQLite views
 cannot preserve the dashboard's direct FTS
-`MATCH`/rank/snippet/rowid behavior. PR14 migrates dashboard bindings. PR19
-removes or renames physical legacy tables only after zero production legacy
-reads/writes and validated parity. Compatibility tables never rank, hydrate,
-paginate, or report freshness.
+`MATCH`/rank/snippet/rowid behavior. Final cutover removes or renames physical
+legacy tables only after zero production legacy reads/writes and validated
+parity. Compatibility tables never rank, hydrate, paginate, or report
+freshness.
 
 ## Implementation order
 
@@ -684,9 +685,9 @@ named case is a failed gate, not deferred work.
 - Architecture-boundary tests prove PR8 modules contain no `TaskId`, project
   registry fan-out, CWD store resolution, writable read fallback, second LCM
   cursor, second payload lookup, or external evidence payload ownership.
-- PR8 proves a dependency-free typed application extension boundary for Plan
-  37. Plan 37 owns its PR11-PR13 integration gate and must add no second LCM
-  engine, summary store, ranking path, cursor, or hydration path.
+- PR8 proves a dependency-free typed application boundary for Plan 37.
+  Plan 37 consumes it without adding a second LCM engine, summary store,
+  ranking path, cursor, or hydration path.
 
 ## Commands and expected outcomes
 
@@ -809,8 +810,8 @@ workspace gate.
 - LCM, summary, and derived payloads remain session-narrative projections only;
   GitHub, CI, diagnostic, Git, receipt, task, and `rh_` evidence stays on Plan
   13 anchors and in owning stores.
-- PR8 remains task-agnostic and single-root. PR15 owns cross-project scope,
-  PR17 owns TaskId composition, PR14 owns dashboard cutover, and PR19 owns
-  physical legacy-table removal.
+- PR8 remains task-agnostic and single-root. The scope plan owns cross-project
+  composition, Plan 24 owns TaskId composition, the dashboard journey owns its
+  binding cutover, and final migration owns physical legacy-table removal.
 - All focused commands and the final `cargo test --workspace --all-features`
   gate complete with the expected outcomes above.

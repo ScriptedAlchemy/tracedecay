@@ -7,9 +7,9 @@ deterministic code indexing, immutable generations, generation-bound Git/
 diagnostic/test evidence, and accepted exact/lexical/graph retrieval. Start as
 a focused module; extract `tracedecay-code-index` only when independent reuse,
 dependency isolation, and same-host compile measurements justify the crate
-boundary.
-PR9/PR10 record incremental, no-op, generation, and resource baselines for
-[PR20](33-end-to-end-performance-optimization.md).
+boundary. Production indexing and retrieval paths emit incremental, no-op,
+generation, and resource measurements directly to the end-to-end performance
+journey.
 Generation-bound diagnostics compose with the daemon gateway defined by
 [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 [Plan 15](15-search-quality-evaluation-and-retrieval-research.md) exclusively
@@ -60,10 +60,10 @@ when semantics are unavailable.
   generation. Plan 15 owns the common candidate, contribution, fusion,
   diversity, rerank, hydration, cursor, and evaluation types; this plan owns
   only the code-generation evidence carried by those adapters.
-- At PR17, exact code-generation, occurrence, relationship, diagnostic, and
-  test-attribution evidence may be selected from an authorized Plan 24
-  `TaskId` only through Plan 13 anchors and typed application joins. The index
-  stores no task identity, task summary, or copied task evidence.
+- Task/work composition may select exact code-generation, occurrence,
+  relationship, diagnostic, and test-attribution evidence from an authorized
+  Plan 24 `TaskId` only through Plan 13 anchors and typed application joins.
+  The index stores no task identity, task summary, or copied task evidence.
 - Content-addressed incremental reuse and bounded sanitized dirty-worktree
   indexing overlays captured from repository state. Unsaved per-client LSP
   document overlays are separate Plan 35 daemon session state.
@@ -376,7 +376,7 @@ pub struct ProjectionBatchReceiptV1 {
 - PR9 remains explicitly single-root. "Federation" in Plan 15 means composing
   independent evidence lanes within one authorized root; Plan 16's multi-root
   scope-set resolution, per-shard continuations, and cross-root rank fallback
-  remain PR15 work.
+  remain owned by [Plan 16](16-cross-project-repository-worktree-scope.md).
 - `src/query/retrieval/{fusion,dedupe,diversity,hydrate}.rs` operates on compact
   candidates. The promoted PR9 profile uses deterministic fixed-point
   contributions, complete comparator provenance, source/file caps, and bounded
@@ -413,12 +413,7 @@ pub struct ProjectionBatchReceiptV1 {
 `tests/code_index_suite/main.rs` is the Cargo integration-test entrypoint and
 declares every `tests/code_index_suite/*.rs` module named below.
 
-1. **Freeze `PR9_BASE`:** finish PR8, commit every accepted PR8 fix, restore a
-   clean worktree except for explicitly excluded user artifacts, run the PR8
-   aggregate gate, push `codex/tracedecay-total-redesign-plan`, and record that
-   exact green commit as `PR9_BASE`. No PR9 worker starts from a moving or
-   unpublished base.
-2. **Contract spine and intake:** add
+1. **Contract spine and intake:** add
    `crates/tracedecay-domain/src/code_intelligence/{mod.rs,search.rs,index.rs}`
    with the search values above plus `SanitizedCodeSnapshotV1`,
    `CodeGenerationManifestV1`, `ExtractionBatchV1`, `SymbolLineageCandidateV1`,
@@ -435,7 +430,7 @@ declares every `tests/code_index_suite/*.rs` module named below.
    `crates/tracedecay-domain/src/retrieval.rs`, create module/suite spines, and
    decide the Plan 05 physical query-crate extraction from measured reuse and
    compile evidence. That decision changes location only, not contracts.
-3. **Language registry, extraction, and chunks:** add
+2. **Language registry, extraction, and chunks:** add
    `src/code_index/{languages.rs,extract.rs,chunks.rs,capabilities.rs}`.
    `languages.rs` owns `LanguageDescriptorV1` and the complete extractor port
    `LanguageExtractor::extract(&ValidatedCodeFileV1,
@@ -446,21 +441,21 @@ declares every `tests/code_index_suite/*.rs` module named below.
    `deterministic_extraction.rs`, and `search_chunks.rs`, covering descriptor
    aliases, parse errors, cancellation, caps, every chunk grain, exact terms,
    structural fallback, unsupported ranges, ordering, and capability digests.
-4. **Independent authorities in parallel:** implement three disjoint packets:
+3. **Independent authorities:** implement three disjoint authorities:
    Plan 36 read-only Git status/diff/history/blame/`HunkRef` ports and native
    adapters; generation-bound clean diagnostic persistence/query fixtures; and
    the frozen Plan 15 real sanitized corpus, manifest validator, exact
    admission oracles, authorization canaries, and raw baseline
    instrumentation. Synthetic fixtures may prove contracts but cannot stand in
    for locked quality or resource evidence.
-5. **Generations, incrementality, and lineage:** add
+4. **Generations, incrementality, and lineage:** add
    `src/code_index/{generation.rs,incremental.rs,lineage.rs}` with
    `GenerationPlannerV1`, `GenerationSealV1`, and `LineageEvidenceV1`. Tests:
    `tests/code_index_suite/generations.rs`,
    `chunk_incremental.rs`, and `lineage.rs`, covering no-op, one-symbol and
    preamble edits, rename, move, deletion, split/merge, ambiguity/abstention,
    chunker/grammar/privacy invalidation, sealing, and mixed-snapshot rejection.
-6. **Git, diagnostics, and test joins:** add
+5. **Git, diagnostics, and test joins:** add
    `src/code_index/{git_join.rs,diagnostics.rs,test_attribution.rs}` with
    `GenerationGitJoinV1`, `GenerationDiagnosticJoinV1`, and
    `GenerationTestJoinV1`. Tests:
@@ -468,7 +463,7 @@ declares every `tests/code_index_suite/*.rs` module named below.
    `diagnostic_generation.rs`, and `test_attribution.rs`, covering
    working/staged/range hunks, mismatch/binary/rename/deletion cases, current/
    stale/cleared diagnostics, and every declared attribution evidence class.
-7. **Projection boundary and V1 migration:** add
+6. **Projection boundary and V1 migration:** add
    `src/code_index/projection.rs`; implement
    in-memory conformance fixtures that return reordered, duplicate, missing,
    extra, wrong-generation, and wrong-digest receipts in
@@ -479,7 +474,7 @@ declares every `tests/code_index_suite/*.rs` module named below.
    -> Result<CodeGenerationManifestV1, V1CodeImportErrorV1>`. Test counts,
    digests, duplicates, unsupported rows, cancellation, and the no-database-
    open boundary in `tests/code_index_suite/v1_migration.rs`.
-8. **Exact, lexical, and graph retrieval:** add
+7. **Exact, lexical, and graph retrieval:** add
    `src/query/retrieval/{exact.rs,lexical.rs,graph.rs,fusion.rs,dedupe.rs,diversity.rs,hydrate.rs}`.
    Exact and lexical are independently disableable. Graph consumes only
    generation-matched Plan 25 evidence. Tests under
@@ -488,19 +483,20 @@ declares every `tests/code_index_suite/*.rs` module named below.
    filters, shuffled producer order, fixed-point fusion, source/file caps,
    pagination, denial non-interference, partial coverage, and rank-before-
    hydrate behavior.
-9. **Locked lexical evaluation and promotion:** freeze the run manifest before
+8. **Locked lexical evaluation and promotion:** freeze the run manifest before
    holdout access, save each lane's compact candidate list, execute Plan 15's
    PR9 ablations, and emit exactly one terminal outcome. Only `accepted`
    creates `benchmarks/search-quality/promotion-v1.json`. Freeze the accepted
    exact-tier rules, profile digest, named fallback-subpayload bytes, saved
    candidate lists, and result/evidence anchors as PR10 inputs.
-10. **Measurement and aggregate acceptance:** add `benches/code_index_chunks.rs` and
+9. **Measurement and aggregate acceptance:** add `benches/code_index_chunks.rs` and
    `benchmarks/pr9-code-index/{workload-v1.json,expected-v1.json,README.md}`.
    Record clean, warm one-file, deletion, no-op, chunker/model-key replay, and
    incompatible full-rebuild cases at current and 10x corpus sizes. Report
    files parsed, chunks added/changed/deleted/reused, projection calls, bytes,
-   wall time, CPU, and peak RSS separately; PR20 owns later end-to-end resource
-   budgets and Plan 15 owns quality interpretation. The workload manifest pins
+   wall time, CPU, and peak RSS separately; end-to-end performance work owns
+   product resource budgets and Plan 15 owns quality interpretation. The
+   workload manifest pins
    exact file/byte/chunk counts, content and descriptor digests, language
    strata, seed, runtime/hardware manifest, and cache state. Each case runs 5
    untimed warmups plus 30 measured repetitions and retains all samples. Run
@@ -508,78 +504,6 @@ declares every `tests/code_index_suite/*.rs` module named below.
    boundaries, `cargo check --all-features`, `cargo test --all-features`, the
    relevant Linux/Windows and migration/privacy gates, and the accepted Plan 15
    comparison before freezing `pr9/49-aggregate-acceptance`.
-
-## PR9 multi-agent and worktree execution topology
-
-The local branch DAG is execution machinery only. It is not a product task
-graph, is never parsed by TraceDecay, and does not require GitHub or stacked
-PRs.
-
-### Roles and ownership
-
-- One Sol lead owns architecture, contract convergence, shared module spines,
-  manifests/lockfile, migration registration, suite entrypoints, checkpoint
-  construction, conflict decisions, aggregate gates, and integration into
-  `codex/tracedecay-total-redesign-plan`.
-- Sol design leads stay one checkpoint ahead on indexing/generation and
-  retrieval/evaluation decisions. Bounded implementation workers receive one
-  exact file packet and may not expand scope or edit shared spines.
-- Only the integrator edits `Cargo.toml`, `Cargo.lock`, crate/root `lib.rs` or
-  `mod.rs`, integration-suite `main.rs`, migration registration, and
-  repository-wide architecture-boundary tests. Worker packets own leaf modules
-  and their focused test modules.
-
-### Checkpoint DAG
-
-1. `pr9/00-contract-spine` from `PR9_BASE`: domain contracts, module/test
-   spines, exact-admission authority, evaluation schemas, and the query
-   extraction decision.
-2. `pr9/i1-authorities`: sanitized intake, language registry/chunks, read-only
-   Git core, clean diagnostics, and frozen real evaluation fixtures.
-3. `pr9/i2-generations`: immutable generations, incrementality, lineage,
-   projection receipts, and generation-aware Git/diagnostic/test joins.
-4. `pr9/i3-query-ready`: V1 migration, exact/lexical/graph adapters,
-   deterministic fusion/diversity, late hydration, and saved candidate lists.
-5. `pr9/49-aggregate-acceptance`: accepted lexical profile, code-index
-   benchmarks, migration/privacy/cross-platform evidence, and aggregate Cargo
-   gates.
-
-Each checkpoint is created from the preceding accepted checkpoint. Independent
-worker branches may share a checkpoint base but are never merged into each
-other.
-
-### Commit, cross-merge, and review policy
-
-- Each worker makes two to four small conventional green commits: contract,
-  behavior, failure cases, and evidence/benchmark when applicable. No WIP
-  commits, mixed subsystem commits, post-review amendment, or squash-dependent
-  history.
-- The Sol lead reviews each packet before integration. The integrator
-  cherry-picks reviewed single-parent commits in declared dependency order.
-  Workers do not merge or cherry-pick sibling branches.
-- If packet B needs accepted packet A, the integrator first publishes a new
-  checkpoint containing A, then B restarts or merges that checkpoint. Do not
-  duplicate A or copy unreviewed work across worktrees.
-- A semantic conflict returns to the producer with the current checkpoint.
-  The integrator resolves only mechanical shared-spine conflicts whose intended
-  content is already explicit in accepted packets.
-- Optional draft stacked PRs may mirror the local DAG, but local branches and
-  worktrees remain authoritative. PR9 lands only by fast-forwarding the exact
-  accepted `pr9/49-aggregate-acceptance` commit into the rewrite branch; never
-  into `master`.
-
-### Cargo and cleanup
-
-- Run ordinary Cargo commands and let the machine-local shim allocate
-  concurrent worktree lanes. Never set `CARGO_TARGET_DIR` or
-  `TRACEDECAY_DATA_DIR`, pause Rust Analyzer, or overlap broad commands in one
-  worktree.
-- Workers run focused package/test-target checks. The integrator serializes
-  all-feature and aggregate gates at checkpoints so one accepted run is
-  authoritative.
-- Remove a clean worker worktree only after its commits are accepted and
-  present in a checkpoint. Keep checkpoint branches while dependents exist;
-  never force-remove a dirty or active worktree.
 
 ## Acceptance
 
@@ -625,7 +549,7 @@ other.
   rename, deletion, ambiguous lineage, and missing-generation cases remain
   explicit. Caller, hazard, and affected-test results retain their own graph and
   test-evidence provenance rather than inheriting certainty from the Git hunk.
-- At the PR17 extension gate, TaskId-linked fixtures resolve exact generation/
+- TaskId-linked composition fixtures resolve exact generation/
   occurrence evidence through Plan 13 anchors, remain losslessly expandable,
   and introduce no task-owned rows or task authority into the code index; they
   are not a PR9 completion gate.
@@ -645,8 +569,8 @@ other.
   as the only intake and store/projector composition as the only publication
   path.
 - Focused non-indexing package checks do not compile Tree-sitter grammars or
-  structural-search implementation, and PR9 publishes the compilation baselines
-  required for PR20 comparison.
+  structural-search implementation, and PR9 retains the production compilation
+  measurements used by end-to-end performance comparison.
 - Exact and lexical lanes are independently disableable and inspectable, use
   one frozen generation, and emit Plan 15 `CompactCandidate` values without a
   code-specific ranking kernel. One hundred shuffled producer/completion runs

@@ -56,140 +56,82 @@ requirements and boundaries, not separate crate-first work queues.
 
 ## Delivery rules
 
-- Ship executable product behavior and direct tests in every PR.
-- Prefer one end-to-end vertical slice over broad scaffolding.
-- Component plans may contribute to the same PR. A plan name does not require a
-  new crate, generator, registry, or standalone implementation phase.
-- One typed kernel owns each mechanism. Public names and compatibility aliases
-  are bindings, never alternate query, edit, storage, rendering, health, or
-  workflow implementations.
-- Consumers compose owner results without duplicating authority: Plan 05 owns
-  shared query execution, Plan 23 temporal session/LCM retrieval, Plan 14 the
-  Doctor/health/remediation kernel, Plan 20 configuration resolution,
-  snapshots, and source policy metadata (including mandatory local privacy),
-  Plan 26 measurements and labels, and Plan 32 workflow clocks, scheduling,
-  attempts, effects, and runtime receipts. Plan 11 renders Plan 14 findings
-  and legal actions without becoming another health or remediation authority.
-- External-source contracts separate definition/binding identity
-  ([Plan 01](01-domain-crate.md)), Plan 20 policy metadata, Plan 06 pure
-  authorization, Plan 03/27 capture and connectors, and Plan 09 sink recheck.
-  Definitions never own local privacy or sinks.
-- Federated retrieval and `QueryCollection` / `WorkspaceCollection` are Plan 16
-  scope contracts executed through Plan 05; membership never grants ownership
-  or authorization. Evidence spans are Plan 23 session-derived for PR8 and Plan
-  13 `EvidenceSpanRecordV1` for cross-domain anchors; Plan 24 references them
-  from TaskId-rooted packets without copying span authority.
-- Task investigation/evidence is Plan 24; optional synthesis and runtime
-  execution are Plan 32. Canonical task retrieval rejects demonstrated
-  expertise; expertise may exist only in an authorized ephemeral interactive
-  view and never enters durable evidence, completion, or routing. LSP
-  investigation handoff is Plan 35 cue/token encoding over Plan 09
-  transport-neutral results. Dashboard investigation UX is Plan 11 over those
-  envelopes. Observability descriptors are Plan 26; PR20 performance
-  optimization is Plan 33. Active executable work remains PR8 temporal
-  retrieval in [NEXT.md](NEXT.md).
-- TaskId, the task graph, and Kanban are host-neutral and require no Git,
-  worktree, branch, pull request, GitHub, or stack. Execution placement, branch
-  topology, review topology, and integration strategy are independent.
-  Plan 16 owns local repository/worktree/branch-stack scope; Plan 27/37 own the
-  optional GitHub Stacked PR capability/snapshot adapter; Plan 36 owns native
-  Git preflight/apply/receipts; Plans 20/21/35 gate policy, surfaces, and
-  handoffs; Plan 32 owns runtime orchestration. The private-preview GitHub
-  adapter never replaces standard Git, another forge, or no-Git work.
-- High-confidence architecture and explicit rejection findings are normative.
-  Medium-confidence model, ranking, topology, renderer, calibration, and
-  optimization mechanisms are versioned candidates that ship only after
-  TraceDecay-specific locked evidence. Low-confidence or causal product-effect
-  claims are neither requirements nor acceptance gates without direct
-  intervention evidence.
-- Code and product quantifiers retain raw values, units, denominators,
-  coverage, cohort, temporal delta, provenance, uncertainty kind, and
-  calibration validity. Universal quality/health/reward/readiness scores,
-  uncalibrated probabilities, and dashboard-local truth are prohibited.
-- PR9 exact identifiers, paths, quoted phrases, errors, tool names, and
-  configuration keys form a non-demotable lexical tier. PR10 semantic search
-  starts with an exact flat-vector baseline/oracle; rerankers, ANN, late
-  interaction, and quantization remain measured candidates, never mandatory
-  defaults or identity/equivalence evidence.
-- [Git intelligence and safe repository operations](36-git-aware-change-context-and-index-transactions.md)
-  progress from PR7 provenance anchors through PR9 read-only semantic evidence,
-  PR11 daemon-serialized index/commit transactions, and PR12 shared surface
-  bindings. PR15 adds only clean, authorized, no-conflict, policy-approved
-  fast-forward/two-parent-merge/exact-cherry-pick operations with durable
-  receipts. TraceDecay never automatically rebases, force-pushes, resolves a
-  semantic conflict, or invokes GitHub's cascading stack rewrite.
-- PR17 delivers the [canonical product task/work graph and Kanban/DAG/timeline/
-  causal/workload projections](24-canonical-task-plan-graph-and-multi-agent-executor.md)
-  plus advisory task-shape/decomposition/sizing/model-routing intelligence,
-  independent outcomes/calibration, and human-reviewed live resize/re-route
-  proposals. Every opaque `TaskId` is an authorized retrieval root whose compact
-  context losslessly expands through Plan 23 narrative retrieval, Plan 13
-  anchors, Plan 25 code generations, and owning Git, CI, diagnostic, review,
-  artifact, and runtime stores. [Plan 32](32-dynamic-workflow-runtime-and-sdk.md)
-  remains the sole runtime clock, scheduler, history, lease, attempt, effect,
-  and artifact authority.
-  Recommendations never auto-mutate the graph or silently choose a model.
-  These are typed product data, never an execution model for this developer
-  roadmap.
-- [The branch-aware feedback cycle, read-only GitHub review-comment
-  ingestion/surfacing, CI-failure localization, and tiered concurrent-agent
-  proximity](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
-  compose the existing semantic-evidence, query, Git
-  ([Plan 36](36-git-aware-change-context-and-index-transactions.md)), temporal
-  retrieval ([Plan 23](23-session-lcm-temporal-retrieval-and-evaluation.md)), Scout, host, and
-  observability owners behind one typed read-only/advisory cycle. PR11–PR13 is
-  the first coherent milestone with all four pillars; PR13 is first availability
-  of GitHub/CI/proximity adapters; PR14 dashboard/Doctor; PR15 multi-root;
-  PR16 remote; PR17 composes already-shipped advisory operations into
-  [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) workflows without GitHub
-  writes. TraceDecay never posts, updates, resolves, replies to, or dismisses
-  GitHub comments. It introduces no second diagnostic store, provider contract,
-  suggestion channel, or executor.
-- Preserve stock Cargo compatibility. Developer-local build wrappers and cache
-  layouts are never repository or CI requirements.
-- Use explicit cancellation and typed progress for long operations. Do not add
-  an automatic rewrite, workflow, agent, or no-progress timeout.
-- Keep privacy, recovery, concurrency, cross-platform, migration, and deletion
-  gates with the product behavior they protect.
-- PR12 transport and PR18 SDK contracts are revisioned and tested for
-  structural, semantic, and lifecycle compatibility. Generated schemas,
-  clients, or successful compilation do not establish product conformance.
-- PR14 ships Plan 11's shared shell and original twelve workspaces, including
-  renderer-neutral flagship Brain/Explorer/Loom surfaces, with a permissive
-  default renderer and accessible semantic parity. PR17 adds the Work task-
-  graph/Kanban/DAG/timeline/causal/workload UI. Optional GPU or commercial
-  adapters draw and accelerate only; they never own graph, query, storage,
-  health, readiness, scheduling, ranking, or remediation.
-- PR15 freezes one authorized scope-set digest and per-shard state vector for
-  federation. PR16 enforces a higher fence at every durable mutation/publication
-  sink and admits duplicate offline delivery through idempotent receipts; CRDT,
-  wall-clock, or replicated-SQLite convergence never becomes mutation authority.
-- PR19 migration is forward-only after publication: V1 archives are bounded
-  recovery input, restoration produces verified V2 under a new fence, and no
-  reverse cutover, long-lived dual write, lazy read migration, or production
-  shadow read remains.
-- Instrument each production path when it ships and retain a representative
-  baseline for [PR20 performance optimization](33-end-to-end-performance-optimization.md).
-  Promotion uses frozen workloads, A/A noise floors, paired effects and
-  intervals, practical margins, worst-stratum/resource/tail evidence,
-  open-loop overload accounting, and recomputation equivalence—not a universal
-  score, public benchmark rank, or paper-derived threshold.
-- PR #421 merges only after PR20 completes and aggregate verification is stable.
+Every PR13–PR20 section in
+[the authoritative roadmap](00-plan-set-index.md) is implemented in this order:
 
-## Removed permanently
+1. Start with the user outcome.
+2. Trace one real supported input through daemon/application behavior and
+   durable state or computation to an observable result.
+3. Add only the implementation slices needed to complete that path in the same
+   PR.
+4. Delete legacy or duplicate paths once the production route and recovery
+   boundary permit it.
+5. Accept the PR with a direct product journey, the focused failure/recovery
+   behavior that protects it, and the relevant aggregate gate.
+6. Defer only work named in that PR's **Not in this PR** section.
 
-- compatibility and architecture inventory implementations;
-- plan Markdown parsers, PR-ID normalizers, developer-roadmap slice DAGs,
-  completion ledgers, progress trackers, next-ready controllers, and rewrite
-  executors;
-- generated plan views, owner maps, baseline packets, and planning-artifact CI;
-- large agent checklists or Claude workflow JavaScript for executing the rewrite;
-- parallel YAML/JSON/Markdown models that generate product declarations.
+Contracts, schemas, adapters, ports, dispatch, packaging, instrumentation, and
+tests are part of the first production journey that uses them. They are not
+standalone milestones. Component plans contribute requirements to the
+authoritative PR sequence; they do not create independent queues, crates, owner
+maps, or conformance projects.
 
-Real product generation remains legal only when it removes duplicate product
-authorities and follows [RUST-METAPROGRAMMING.md](RUST-METAPROGRAMMING.md).
-Real task/work graphs and dynamic workflows are daemon-owned typed product
-operations. They never parse or execute this roadmap.
+Each mechanism has one typed production kernel. Surfaces and compatibility
+names translate and delegate; they never own alternate query, edit, storage,
+rendering, health, policy, scheduling, measurement, remediation, or recovery
+logic. Long operations expose typed progress and explicit cancellation.
+
+Acceptance uses direct behavior and checked-in real provider/data fixtures.
+Generated declarations, schema equality, successful client compilation,
+inventories, placeholder baselines, and agreement between planning artifacts do
+not prove product behavior. Performance instrumentation ships with the
+production path it measures, and optimization keeps only reproducible practical
+gains with equivalent results.
+
+High-confidence architecture and explicit rejection findings are normative.
+Medium-confidence models, algorithms, topology choices, renderers, ranking
+profiles, calibration methods, and performance mechanisms remain versioned
+measured candidates. Low-confidence or causal product-effect claims are not
+requirements or acceptance criteria without direct TraceDecay intervention
+evidence. Optional features remain disabled only until their stated product
+acceptance gate passes.
+
+Every product quantifier preserves its raw value, unit, denominator, coverage,
+cohort, temporal delta, provenance, uncertainty kind, and calibration validity.
+Similarity, rank, centrality, and heuristic values are not probabilities, and
+no universal quality, health, reward, readiness, or performance score becomes
+product truth.
+
+The authorization/privacy, durable-integrity/recovery, migration/cutover,
+compatibility, Git-safety, and truthful-unavailable guards are centralized in
+[00-plan-set-index.md](00-plan-set-index.md) and apply to every plan. Numbered
+plans may specialize those guards for a product journey but must not restate or
+weaken them.
+
+PR12 transport and PR18 SDK contracts prove structural, semantic, and lifecycle
+compatibility against supported old and current consumers. Direct fault,
+restart, concurrency, cross-platform, privacy, migration, recovery, and deletion
+tests remain part of the product journey they protect.
+
+Product, contributor, CI, release, and publication behavior preserves stock
+Cargo semantics. A slice that materially changes crate boundaries, dependency
+fan-in, feature activation, build-script inputs, or test-target topology records
+same-host warm incremental/no-op and representative touched-test evidence,
+including wall time, rebuilt units, available CPU/peak-memory data, and visible
+variance. Machine-specific timings are diagnostic, not portable thresholds;
+Rust Analyzer ownership, local wrappers, lanes, target paths, and cache
+placement never become repository or hosted-CI requirements.
+
+Long-running product operations never acquire an automatic no-progress timeout,
+rewrite, or hidden agent decision. Real product generation is allowed when it
+removes duplicate authorities and follows
+[RUST-METAPROGRAMMING.md](RUST-METAPROGRAMMING.md); generated planning models
+remain non-product.
+
+The current executable slice is always [NEXT.md](NEXT.md). This roadmap is
+contributor documentation, never daemon input, workflow input, product state, or
+a source of completion truth. PR #421 merges only after PR20 and stable
+aggregate verification.
 
 ## Release
 

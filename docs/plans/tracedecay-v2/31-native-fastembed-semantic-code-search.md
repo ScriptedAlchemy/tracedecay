@@ -1,10 +1,11 @@
 # PR10: Native FastEmbed semantic code search
 
-**Status:** implementation authority for PR10. PR10 starts only from the exact
-accepted PR9 checkpoint and delivers configurable native semantic code search
-end to end. Early artifact/runtime/vector packets may be prepared in parallel,
-but they are quarantined until replayed onto `PR10_BASE`; this is not a future
-experiment bucket.
+**Status:** planned PR10 implementation authority. PR8 is active; PR9 ships
+and accepts the exact lexical/graph fallback and exact-tier evidence before
+PR10 begins its locked semantic work. Those PR9 results become immutable
+runtime prerequisites only after PR9 acceptance. All implementation,
+evaluation, activation, rollback, and direct-acceptance work below remains
+required for PR10.
 
 ## Outcome
 
@@ -381,36 +382,30 @@ Legacy vectors are never trusted or republished. Migration records
 `rebuild_from_retained_eligible_code | drop_with_receipt | quarantine_unreadable`
 and proves every active generation was rebuilt from canonical documents.
 
-## PR10 phases, tests, and benchmarks
+## Planned implementation and direct verification
 
 `tests/semantic_search_suite/main.rs` is the Cargo integration-test entrypoint
 and declares every `tests/semantic_search_suite/*.rs` module named below.
 
-1. **Freeze `PR10_BASE`:** PR9 must have an accepted Plan 15 lexical report,
-   frozen exact-tier rules and candidate lists, byte-stable fallback fixture,
-   green aggregate gates, and an exact pushed
-   `pr9/49-aggregate-acceptance` commit. Create
-   `PR10_BASE` from that commit; do not begin semantic comparison or activation
-   against a moving PR9 baseline.
-2. **Contracts and capability admission:** add semantic-only domain values,
+1. **Contracts and capability admission:** add semantic-only domain values,
    ports, manifest validators, ephemeral query-view rules, and split in-memory
    adapters. Reuse PR9's generic retrieval/fusion/hydration types. Tests:
    `tests/semantic_search_suite/contracts.rs`,
    `capabilities.rs`, and `storage_independence.rs`.
-3. **Artifact and runtime foundation:** add
+2. **Artifact and runtime foundation:** add
    `src/semantic_code/{artifacts.rs,manifest.rs,fastembed_adapter.rs,session_pool.rs}`.
    Test signature/trust-root verification, local and explicit HTTPS import,
    traversal/expansion rejection, interrupted staging, atomic install,
    revocation/quarantine/GC, cold and warm sessions, OOM, cancellation,
    offline startup, no ambient cache, and Linux/Windows native-runtime
    compatibility.
-4. **Incremental vector projection:** add the projector and vector-generation
+3. **Incremental vector projection:** add the projector and vector-generation
    store against Plan 04 projection/checkpoint semantics, Plan 02
    receipt/publication authority, and PR10 runtime ports. Daemon/service
    orchestration owns scheduling; do not assign it to Plan 04.
    Tests: `tests/semantic_search_suite/projection.rs`,
    `model_replay.rs`, `atomic_publication.rs`, and `offline_lifecycle.rs`.
-5. **Exact-flat semantic retrieval and shadow composition:** add only
+4. **Exact-flat semantic retrieval and shadow composition:** add only
    `src/query/retrieval/semantic.rs`, emit
    `RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>`, and compose it
    with the frozen PR9 lane outputs through the existing
@@ -418,13 +413,13 @@ and declares every `tests/semantic_search_suite/*.rs` module named below.
    `tests/semantic_search_suite/channel_isolation.rs`,
    `fusion_provenance.rs`, `protected_exact.rs`,
    `diversity_pagination.rs`, and `fallback.rs`.
-6. **Late hydration, privacy, and rollback:** reuse PR9 hydration with semantic
+5. **Late hydration, privacy, and rollback:** reuse PR9 hydration with semantic
    profile admission, generation checks, authorization recheck, revocation,
    domain-keyed caches, payload-safe receipts, active/rollback pointer CAS, and
    cold offline rollback. Tests:
    `tests/semantic_search_suite/hydration.rs`,
    `authorization.rs`, `privacy_domains.rs`, and `activation_rollback.rs`.
-7. **Locked evaluation:** add
+6. **Locked evaluation:** add
    `benchmarks/pr10-semantic/{workload-v1.json,expected-v1.json,README.md}`,
    rebuild-only migration, saved PR9 and semantic candidate lists, immutable
    Plan 15 report inputs, exact-flat oracle comparisons, channel/fusion/
@@ -432,14 +427,12 @@ and declares every `tests/semantic_search_suite/*.rs` module named below.
    10x resource evidence. Optional ANN and reranker branches begin only after
    the exact-flat shadow checkpoint and cannot enter the critical path without
    an accepted locked comparison.
-8. **Activation and aggregate acceptance:** only an `accepted` Plan 15 outcome
+7. **Activation and aggregate acceptance:** only an `accepted` Plan 15 outcome
    may create promotion evidence or activate semantics. Run staged shadow/
    cohort eligibility, rollback, migration, privacy, native-platform,
-   architecture, all-feature, and aggregate gates. Add conformance-only
-   `tests/semantic_search_suite/status_doctor.rs` and
-   `tests/semantic_search_suite/future_surface_contract.rs` for later owning
-   plans. They contain no application, transport, or dashboard adapter; PR10
-   does not create a temporary public semantic endpoint.
+   architecture, all-feature, and aggregate gates. Status and Doctor behavior
+   is accepted through the production semantic service; PR10 does not create a
+   temporary public semantic endpoint or reserve later surface contracts.
 
 `benches/semantic_code_projection.rs` measures clean, warm one-symbol,
 deletion, no-op, model-key replay, cancellation, and incompatible rebuild.
@@ -448,8 +441,9 @@ rerank, and hydration time separately at current and 10x corpus sizes,
 including p50/p95/p99, CPU, peak RSS, model/vector/cache bytes, candidates per
 channel, chunks embedded/reused/deleted, hydration fetch count, and fallback.
 Channel ablations use equal candidate budgets; exact flat-vector search is the
-semantic oracle. PR20 owns later end-to-end performance tuning, while Plan 15
-owns quality/resource trade-off and promotion policy.
+semantic oracle. End-to-end performance work consumes these production
+measurements, while Plan 15 owns quality/resource trade-off and promotion
+policy.
 
 Each workload manifest pins corpus/query digests, exact file/chunk/query counts,
 language/source strata, seed, model/projection/fusion revisions, hardware and
@@ -460,95 +454,25 @@ quality labels across partitions. Query benchmarks run 10 untimed warmups then
 concurrency; projection cases run 5 warmups and 30 measured repetitions.
 Reports retain all samples needed to recompute percentiles.
 
-## Combined PR9 to PR10 multi-agent/worktree topology
-
-PR9 and PR10 are sequential delivery checkpoints in one local DAG. GitHub
-stacked PRs are an optional review mirror, not an execution requirement.
-
-### Quarantined early PR10 preparation
-
-These packets may start after the named PR9 checkpoint, but cannot activate
-semantics or become ancestors of PR9:
-
-1. `pr10/prep-artifact-runtime` from `pr9/00-contract-spine`: artifact/profile
-   manifests, verifier, fake runtime ports, session-pool limits, and failure
-   fixtures. It defines no production default and performs no query wiring.
-2. `pr10/prep-evaluation-schema` from `pr9/i1-authorities`: workload/result/
-   evidence schemas and validators only. It cannot invent fixtures, access
-   locked labels, tune, or promote.
-3. `pr10/prep-vector-generation` from `pr9/i2-generations`: semantic projection
-   keys, receipts, checkpoints, atomic publication, and fake-vector tests. It
-   runs no inference against unstable chunks.
-
-After `pr9/49-aggregate-acceptance`, the Sol integrator creates `PR10_BASE` from
-that exact commit and cherry-picks only reviewed preparation commits onto
-`pr10/00-contract-replay`. Preparation branches are never merged wholesale and
-are deleted after replay and verification.
-
-### PR10 checkpoints
-
-1. `pr10/i1-foundation`: replayed contracts, artifacts/runtime, vector store,
-   projection admission, and platform compile proof.
-2. `pr10/i2-semantic-ready`: incremental projection, exact-flat semantic
-   retriever, offline lifecycle, and atomic publication.
-3. `pr10/i3-shadow-ready`: generic hybrid composition, protected exact tier,
-   byte-identical PR9 fallback subpayload, hydration, authorization, and
-   privacy caches.
-4. `pr10/i4-evidence-ready`: signed frozen run manifest plus locked shadow
-   measurements over saved accepted PR9 and semantic candidate lists.
-5. `pr10/49-aggregate-acceptance`: accepted profile, activation/rollback drill,
-   rebuild-only migration, semantic benchmarks, native-platform evidence, and
-   aggregate gates.
-
-### Roles, ownership, and integration
-
-- One Sol integrator owns shared spines, Cargo manifests/lockfile, dependency
-  selection, platform policy, migration registration, suite entrypoints,
-  checkpoint construction, conflicts, aggregate gates, rewrite-branch
-  integration, and cleanup.
-- Sol leads own semantic architecture/runtime and retrieval/evaluation
-  convergence. Bounded workers own exactly one leaf family: artifact/runtime,
-  projection/store, semantic adapter, privacy/activation, test module, or
-  benchmark packet.
-- Only the integrator edits `Cargo.toml`, `Cargo.lock`, crate/root `lib.rs`/
-  `mod.rs`, integration-suite `main.rs`, migrations, and repository-wide
-  architecture tests. PR9 exact/lexical/graph files are frozen inputs; PR10
-  workers do not modify them to make semantic tests pass.
-- Workers make two to four conventional green commits and never merge or
-  cherry-pick siblings. The integrator reviews and cherry-picks single-parent
-  commits in dependency order. A needed dependency first enters a new
-  checkpoint; consumers then restart or merge that checkpoint. Semantic
-  conflicts return to the producer.
-- Run focused checks in worker worktrees with ordinary Cargo. Let the local
-  shim allocate targets; never set target/data directories or stop Rust
-  Analyzer. The integrator serializes broad all-feature/platform gates in the
-  checkpoint worktree.
-- PR9 fast-forwards first, then PR10 fast-forwards only
-  `codex/tracedecay-total-redesign-plan`; neither targets `master`. Keep
-  `pr9/49-aggregate-acceptance` until PR10 lands. Remove a worker worktree only
-  after accepted commits are in
-  a checkpoint and the worktree is clean.
-
 ### Hard activation barrier
 
 No locked semantic comparison starts until PR9's accepted profile, exact-tier
 contract, saved candidate lists, fallback-subpayload bytes, fixture validation, and
-baseline evidence are frozen. No activation occurs unless Plan 15 returns
+accepted lexical evidence are frozen. No activation occurs unless Plan 15 returns
 `accepted`, authorization/scope leakage is zero, protected exact results are
 unchanged, the PR9 fallback subpayload is byte-identical, generation
 compatibility holds, all
 resource ceilings pass, and cold offline rollback succeeds.
 
-Preparation or shadow commits may be retained after a `blocked`,
-`inconclusive`, `rejected`, `invalid_run`, or
-`runtime_fallback_observed` result, but PR10 is not complete and no semantic
-profile becomes eligible.
+A `blocked`, `inconclusive`, `rejected`, `invalid_run`, or
+`runtime_fallback_observed` result leaves semantics disabled and no semantic
+profile eligible.
 
 ## Acceptance
 
 PR10 is complete when semantic projection, atomic publication, PR9-preserving
 search, bounded generic fusion/reranking/redundancy, artifact/offline lifecycle,
-configuration, status/Doctor and future-surface conformance, locked
+configuration, production status/Doctor behavior, locked
 corpus/resource/privacy gates, fault recovery, rollback, and rebuild-only
 migration pass direct tests. PR11/PR12/PR14 still own application, public
 transport, and dashboard adapters. No separate

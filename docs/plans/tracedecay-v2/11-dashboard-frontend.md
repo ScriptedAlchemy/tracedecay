@@ -16,6 +16,41 @@ highly interactive connected brain across projects that preserves precise
 repository, worktree, branch, session, agent, time, provenance, coverage, and
 authority scope. Visual quality serves comprehension rather than novelty.
 
+## Delivery-first product journeys
+
+The detailed contracts below remain binding and are delivered through two real
+product journeys rather than as contract, fixture, or route milestones.
+
+**PR14 finding → evidence → Doctor → confirmed remediation:** a user enters
+from Brain, Explorer, Loom, or Code with exact scope; follows a canonical
+finding into citations, provenance, coverage, and source progress; opens the
+one Doctor application diagnosis; previews and confirms an owner-supplied
+configuration, host, or runtime remediation; resumes the durable operation
+receipt after reload or restart; and sees an independent post-operation
+observation confirm recovery or retain a truthful partial/unavailable/failing
+state. Sessions, Agents, Knowledge, Delivery, and Automations provide the
+linked context for that investigation. Settings shows effective layered
+configuration and validated CAS changes. Observatory and Costs render the same
+Plan 26 production observations with denominator, horizon, coverage,
+censoring, evidence class, and unavailable reason intact.
+
+**PR17 work item → admitted execution → observed outcome → reviewed
+replanning:** a user creates or selects one Plan 24 work item; moves through
+Kanban, DAG, timeline, causal, workload, repository, delegation, attempt, and
+execution-topology projections without losing TaskId, scope, graph version, or
+evidence; runs a legal step through Plan 32 and a real provider adapter;
+observes requested/actual identity, lease, progress, artifacts, cancellation,
+recovery, tests/CI, integration receipts, and Plan 26 measurements; reviews
+independent outcome evidence; and explicitly accepts, rejects, or supersedes a
+Plan 24 proposal. No-Git work remains complete. Placement, branch, review, and
+integration topology remain independent when repository-linked work is
+present.
+
+Every workspace, interaction, state, renderer, accessibility behavior,
+performance budget, compatibility surface, and safety rule specified below is
+part of one of these journeys or its focused failure/recovery coverage. None is
+deferred by this framing.
+
 ## Owns
 
 - Navigation, responsive layout, accessibility, interaction state, and client-side presentation.
@@ -601,33 +636,33 @@ evidence, parity, recovery, and action-authority tasks unassisted and 10/12
 complete every other task; every screen-reader participant completes the
 graph-equivalent task; median Single Ease Question is ≥6/7 and SUS is ≥80.
 
-## Delivery milestones and test assets
+## Journey implementation and test assets
 
-1. **PR14 Gate A — contract freeze:** generated DTOs/decoders, route manifest, domain
-   state matrix, projection manifest, and sanitized fixtures.
-2. **PR14 Gate B — shell:** scope-preserving responsive navigation, deep links,
-   state boundary, inspector, and monotone cache/SSE reducer.
-3. **PR14 Gate C — flagship exploration:** Brain, Explorer planner query, Loom,
-   linked selection, clustering, playback, evidence packets, and late context.
-4. **PR14 Gate D — diagnosis and recovery:** Code diagnostics, Observatory, Doctor,
-   and resumable preview → confirmation → dispatch → receipt → verification.
-5. **PR14 Gate E — workspace completion:** Sessions, Agents, Knowledge, Delivery,
-   Automations, Costs, and Settings with cross-workspace evidence links.
-6. **PR14 Gate F — hardening:** responsive/a11y/manual assistive-technology records,
-   virtualization, renderer parity/fallback, budgets, SSE churn, and usability.
-7. **PR17 Gate A — Work projections:** one Plan 24 selection across Kanban, DAG,
-   timeline, causal, workload, repository, delegation, and attempt lenses.
-8. **PR17 Gate B — Work intelligence/runtime:** proposal diffs, route/exclusion
-   evidence, requested/actual identity, attempts, receipts, and recovery.
-9. **PR17 Gate C — execution topology:** independent placement/branch/review/
-   integration lane-family states, no-Git and decoupled topology cases,
-   dependency commits, merge order, GitHub stack capability/fallback, dirty/
-   lease truth, conflict/proximity, tests/CI, TaskId drill-down, and dual-time
-   playback over the same selection.
-10. **PR17 Gate D — governed integration controls:** dry-run/apply/cancel
-    request rendering, stale/denied/locked/unsupported/effect-unknown outcomes,
-    crash-safe receipt resume, authority-negative tests, topology performance,
-    and Plan 26 metric parity.
+PR14 implements the finding-to-confirmed-remediation journey as reviewable
+slices that remain usable together: generated DTO decoding and exhaustive
+state rendering; scope-preserving responsive shell, deep links, inspectors,
+and monotone HTTP/SSE state; Brain/Explorer/Loom investigation with planner
+progress, linked selection, clustering, playback, evidence packets, and late
+context; Code/Observatory/Doctor diagnosis with resumable preview,
+confirmation, dispatch, receipt, and verification; complete Sessions, Agents,
+Knowledge, Delivery, Automations, Costs, and Settings workspaces with
+cross-workspace evidence links; and responsive, accessibility,
+assistive-technology, virtualization, renderer parity/fallback, performance,
+SSE-churn, and usability hardening on that same journey.
+
+PR17 extends the running product with one executable Work loop: one Plan 24
+selection across Kanban, DAG, timeline, causal, workload, repository,
+delegation, and attempt lenses; proposal diffs, route/exclusion evidence,
+requested/actual provider identity, attempts, receipts, and recovery; the
+independent placement/branch/review/integration topology dimensions including
+no-Git and decoupled cases, dependency commits, merge order, GitHub stack
+capability/fallback, dirty/worktree/lease truth, conflict/proximity, tests/CI,
+TaskId drill-down, and dual-time playback; and governed dry-run/apply/cancel
+controls with stale, denied, locked, unsupported, effect-unknown, crash-safe
+receipt, performance, authority-negative, and Plan 26 parity coverage.
+
+The contracts and fixtures are prerequisites inside those production slices,
+not standalone completion phases.
 
 Fixtures live under `dashboard/test/fixtures/` and include
 `dashboard-state-taxonomy.json`, `planner-parallel-source-progress.json`,

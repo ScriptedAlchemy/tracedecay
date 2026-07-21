@@ -1,145 +1,267 @@
 # Official Public API and SDKs
 
-## Status / Role
+## Status / role
 
-- Required V2 product surface.
-- PR12 delivers the official daemon API.
-- PR17 extends that API with Plan 24 task/work graph and Plan 32 runtime
-  operations through internal typed contracts and then-supported adapters; it
-  does not publish generated clients or SDKs.
-- PR18 stabilizes that API and fully delivers supported Rust, TypeScript, and Python SDKs.
-- The end state is complete across all three SDKs; no language binding is deferred or skipped.
+PR12 ships the official daemon API. PR17 adds accepted task/work graph and
+workflow-runtime application operations. PR18 stabilizes every supported
+public operation, including the PR12 base and all later accepted additions, and
+publishes working Rust, TypeScript, and Python SDKs. No operation family or
+language is deferred.
 
-## Outcome
+## User outcome
 
-Agents and applications use one supported daemon API to access TraceDecay capabilities.
-CLI, MCP, HTTP, and SDK adapters expose the same operations, validation, errors, and privacy behavior.
-The daemon remains the only process that reads or writes product storage.
+An external developer can install any supported SDK, connect to a local daemon
+or a PR16-enrolled remote authority, call every supported public operation with
+behavioral/lifecycle parity, and complete the same accepted PR17 journeys:
 
-## Owns
+- use project, source, symbol, graph, retrieval, session/LCM, memory,
+  configuration, health/Doctor, feedback, test, diagnostics, edit, Git,
+  lifecycle, observability, and every other supported public family;
 
-- The public daemon protocol, versioning policy, and compatibility rules.
-- Executable request, response, pagination, streaming, and error contracts.
-- Rust, TypeScript, and Python client libraries.
-- Authentication and connection mechanics for local and remote daemon clients.
-- Cancellation, backpressure, idempotency, and retry-safe operation metadata.
-- The versioned authenticated bidirectional daemon-session contract used by
-  [Plan 35's](35-daemon-lsp-gateway-and-universal-diagnostics.md) transport-only
-  LSP bridge.
-- Direct parity tests across CLI, MCP, HTTP, and all SDKs.
+- create and version initiatives and work items, manage dependencies, page
+  projections and history, and inspect assignment/review state;
+- request and review task-shape, decomposition, routing, resize/re-route,
+  independent-review, outcome, and calibration results, including explicit
+  abstention or insufficient-evidence outcomes; and
+- inspect provider capabilities, admit an authorized attempt, consume ordered
+  progress and artifacts, cancel it, reconnect or resume when supported, and
+  obtain its canonical terminal receipt.
 
-## Does not own
+The documentation examples perform these journeys against a real daemon. The
+SDKs are not generated-type packages that leave users to construct raw
+requests.
 
-- Domain rules, query semantics, privacy policy, configuration semantics, or storage implementation.
-- Direct database access from clients or language bindings.
-- LSP JSON-RPC framing, document lifecycle, analyzer supervision, or an
-  SDK-visible arbitrary LSP payload tunnel.
-- A generated compatibility inventory or a second model of the product.
-- Markdown/developer-roadmap parsers, rewrite trackers, independent task
-  executors, or workflow JavaScript. Typed Plan 24/32 product operations are
-  part of the supported API.
-- Dynamic workflow execution. PR17 stores typed workflow definitions and invokes existing daemon
-  operations; it does not introduce a JavaScript SDK or runtime.
+### Supported public operation coverage
 
-## Required behavior
+Every Rust, TypeScript, and Python SDK exposes every supported public
+operation, not only the PR17 additions, with distinct IDs and typed legal
+actions. The base includes all callable PR12 families and every operation
+accepted before the PR18 freeze; the PR17 additions include:
 
-1. One actual contract source
-   - Public request and response types live at the daemon application boundary.
-   - Routes, MCP tools, CLI commands, schemas, and SDK bindings map directly to those types.
-   - An adapter may change syntax, never meaning.
+- initiative, work-item, and version creation/update/read;
+- dependency mutation and readiness, history, projection, Kanban/DAG/timeline/
+  causal/workload paging;
+- assignment, review, task-shape assessment, decomposition proposal and review,
+  routing recommendation, live split/merge/resize/re-route proposal,
+  independent-review grade, outcome attribution, and calibration;
+- auxiliary-attempt request and its relationship to parent work;
+- provider capability/discovery/negotiation, requested-versus-actual provider/
+  backend/model/protocol identity, admission, lease/attempt state, ordered
+  progress/events/artifacts, cancellation escalation, receipt, reconnect,
+  resume, and restart recovery; and
+- deterministic fallback, abstention, unavailable, partial, censored, unknown,
+  and insufficient-evidence outcomes carried by the owning operation.
 
-2. Complete operation parity
-   - Every supported public operation declares its availability across CLI, MCP, HTTP, and SDKs.
-   - Unsupported transport behavior is an explicit contract decision, not an accidental omission.
-   - Equivalent calls return equivalent values, stable error codes, and the same redaction outcome.
+No SDK computes readiness, scoring, proposal acceptance, provider selection,
+scheduling, completion, or calibration independently.
 
-3. Daemon authority
-   - Clients connect to the daemon and never open TraceDecay databases.
-   - The daemon owns authorization, transaction boundaries, migrations, concurrency, and recovery.
-   - Connection loss, cancellation, and retries cannot duplicate committed mutations.
+## End-to-end production path
 
-4. Stable protocol
-   - Additive changes preserve compatibility within a major version.
-   - Breaking changes require a new major protocol version and an actionable negotiation error.
-   - Unknown fields are handled consistently and documented per protocol version.
-   - Compatibility policy classifies required/optional fields, defaults,
-     nullability, open objects, unions/enums, numeric narrowing, identifiers,
-     errors, stream events, cursors, operation rename/removal, retry class, and
-     capability removal. Unknown enum, error, and event behavior is explicit;
-     retired identifiers and codes remain reserved.
-   - The LSP bridge session negotiates protocol, catalog, project, and client
-     revisions before document content is accepted, and preserves ordered
-     bidirectional events, cancellation, backpressure, and bounded terminal
-     errors without exposing arbitrary daemon invocation.
+1. An SDK negotiates protocol and capability revisions, authenticates, selects
+   an authorized project/profile, and submits a typed operation.
+2. The public daemon boundary maps the request to the same canonical
+   application operation used by CLI, MCP, and HTTP. The daemon remains the
+   only process that authorizes, reads or writes product storage, schedules
+   work, and records receipts. A remote session routes only through PR16's
+   enrolled, fenced authority; PR18 binds accepted operations but owns no
+   remote authority, replication, failover, or offline semantics.
+3. The SDK exposes the operation through an idiomatic façade and returns the
+   canonical value, page, stream event, legal action, structured error, or
+   unavailable/partial outcome without adding business decisions.
+4. Long-running calls preserve ordered progress, bounded backpressure,
+   timeouts, cancellation, reconnect/resume, and one canonical terminal
+   outcome. Every problem preserves exactly the Plan 09 retry directive
+   `Never | SameRequest | AfterDelay | AfterRevalidate | AfterReconcile`; SDKs
+   never infer retry from transport or status.
+5. Privacy and redaction run before every response, stream item, error,
+   diagnostic, and log. Credential material stays opaque.
 
-5. Executable conformance and retry contracts
-   - Structural conformance covers schemas and generated types. Semantic
-     conformance covers operation identity, authorization, redaction, coverage,
-     legal actions, and receipts. Lifecycle conformance covers negotiation,
-     ordering, progress, backpressure, cancellation, reconnect/resume,
-     saturation, and exactly one canonical terminal outcome.
-   - Each operation declares `Never`, `SafeRead`, `IdempotentWithKey`, or
-     `ResumeOnly`. SDKs auto-retry only the declared classes under bounded
-     policy and retain durable idempotency receipts; non-idempotent mutations
-     are never silently retried.
-   - Cancellation exposes typed requested, accepted, before-start,
-     publication-suppressed, upstream-acknowledged, execution-stopped,
-     too-late/committed, unsupported, failed, and terminal outcomes. It never
-     promises rollback of committed effects or exactly-once transport
-     delivery.
-   - Effective capability is the intersection of client support, gateway
-     guarantee, upstream capability, admitted project/language,
-     policy/configuration, and active profile, all bound to explicit revisions.
+Equivalent SDK, CLI, MCP, and HTTP calls have equivalent authorization,
+meaning, stable error codes, redaction, effects, and lifecycle behavior even
+when their syntax is idiomatic to the surface.
 
-6. Usable SDKs
-   - Rust, TypeScript, and Python expose typed sync or async APIs idiomatic to each ecosystem.
-   - Pagination, streaming, cancellation, timeouts, and structured errors are first-class.
-   - SDKs provide connection setup and operation calls, not independent business logic.
-   - PR18 SDKs expose Plan 24 initiative/work-item/version, dependency,
-     history/projection, assignment/review, task-shape assessment,
-     decomposition proposal/review, routing recommendation, live
-     resize/re-route proposal, independent-review grade, outcome/calibration,
-     Plan 24 auxiliary-attempt request, Plan 32 provider capability,
-     admission/progress/cancel/receipt, and other runtime operations with
-     distinct IDs and typed legal actions.
-     PR18 chooses and stabilizes idiomatic public names over PR17 application
-     semantics; planning prose does not freeze generated method spellings. No
-     SDK computes readiness, scoring, proposal acceptance, provider selection,
-     scheduling, or completion; accepts shell strings/raw environment; or
-     executes Claude Code/Codex locally.
+### Compatibility and lifecycle matrix
 
-7. Safe output
-   - Privacy enforcement runs before every public response, stream item, log, and diagnostic payload.
-   - Credential material remains opaque and is never returned by read APIs.
+Each accepted operation has an executable compatibility row across CLI, MCP,
+HTTP, Rust, TypeScript, and Python. The row identifies supported syntax,
+protocol/capability range, required authorization, paging or stream shape,
+retry class, cancellation support, reconnect/resume behavior, stable errors,
+and any explicit transport limitation. The matrix is generated from and tested
+against callable adapters; it is not a manually maintained inventory or an
+acceptance artifact by itself.
 
-## Acceptance
+Within a major protocol version, additive changes preserve compatibility.
+Breaking changes negotiate a new major version and return an actionable error.
+The policy retains the full required/optional field, default, nullability, open
+object, union/enum, numeric narrowing, identifier, error, stream-event, cursor,
+operation rename/removal, retry-class, and capability-removal behavior.
+Unknown fields, enums, errors, and events are handled consistently for the
+negotiated version; retired identifiers and codes remain reserved.
 
-- PR12 ships a versioned daemon API backed by the real application contracts.
-- CLI, MCP, and HTTP parity tests cover every public operation and stable error code.
-- PR18 ships usable, documented, tested Rust, TypeScript, and Python SDKs.
-- PR17 API fixtures cover task/work graph versioning, paged projections,
-  assessment/proposal/recommendation/outcome/calibration semantics, abstention
-  and deterministic fallback, auxiliary request/provider negotiation,
-  requested-versus-actual backend/model identity, typed progress/events/
-  artifacts/terminal outcomes, runtime mapping, cancellation, resume/reconnect,
-  and SSE history; PR18 runs the same fixtures through all three SDKs.
-- Plan 32 PR17 completion never depends on SDK generation or parity. PR18 owns
-  public schema/OpenAPI stabilization, client generation/publication,
-  documentation, and Rust/TypeScript/Python conformance for workflow and
-  task/work and auxiliary-provider operations. PR17 semantic concepts and
-  internal IDs do not freeze public method/tool/route names before this gate.
-- The three SDK suites pass the same contract fixtures against one daemon build.
-- Release gates run current and oldest-supported client/daemon combinations,
-  schema-derived positive and negative cases, hand-authored stateful lifecycle
-  fixtures, generated-package smoke tests, and executable Rust, TypeScript, and
-  Python documentation examples. Schema generation or compilation alone is
-  not semantic conformance.
-- Generated low-level bindings and reviewed idiomatic façades share the same
-  contract fixtures; façades adapt paging, streams, cancellation, and errors
-  but contain no product decisions or generic invocation tunnel.
-- Cancellation, reconnect, idempotent retry, pagination, and streaming tests pass.
-- LSP bridge contract tests cover negotiation, ordered bidirectional delivery,
-  cancellation, backpressure, reconnect, stale revisions, and authentication
-  without adding a raw LSP tunnel to the public SDKs.
-- A client cannot open product storage or bypass daemon authorization and privacy enforcement.
-- Contract drift is detected by executable adapter and SDK tests, not generated inventory files.
+Cancellation retains typed requested, accepted, before-start,
+publication-suppressed, upstream-acknowledged, execution-stopped,
+too-late/committed, unsupported, failed, and terminal outcomes. It never
+promises rollback of committed effects or exactly-once transport delivery.
+Reconnect/resume proves operation and stream identity before continuing and
+cannot duplicate a committed mutation.
+
+Effective capability remains the intersection of client support, gateway
+guarantee, upstream capability, admitted project/language, policy/configuration,
+and active profile, all bound to explicit revisions. The authenticated
+bidirectional daemon session used by Plan 35 negotiates protocol, catalog,
+project, and client revisions before document content; preserves ordered
+events, cancellation, backpressure, reconnect, and bounded terminal errors;
+and does not expose an arbitrary LSP or daemon invocation tunnel through SDKs.
+
+PR18 freezes two distinct public handoff-token consumption operations and
+exposes each through Rust, TypeScript, and Python:
+
+- `open_investigation_handoff` consumes a feedback/diagnostic-cue token and
+  delegates to Plan 09's owning investigation application operation/result;
+- `open_task_handoff` consumes a ready-commit/cross-worktree/task-cue token and
+  delegates to the owning application operation over Plan 24 task identity,
+  version, authorization, and context semantics.
+
+After explicit capability negotiation, Plan 35 may project an LSP action for
+either kind. Each opaque token is 60-second, single-use, kind- and
+destination-bound, and bound to the exact session, project/root, cue/finding
+or task version, authorization/policy epoch, and local or PR16 remote authority
+identity. Consumption reauthenticates, reauthorizes exact scope, checks kind,
+destination, expiry, use state, and current owner version, then returns only
+the owning operation's open-surface result.
+
+Missing, wrong-kind, wrong-destination, wrong-scope, expired, already-used,
+revoked, unauthorized, and policy-hidden tokens use a policy-safe
+non-enumerating unavailable shape unless the caller is independently
+authorized to receive a narrower reason. Possession grants nothing. Tokens
+carry no edit, task body, source, raw path/ID/query/arguments, credential, or
+durable evidence. Consumption cannot invoke `workspace/applyEdit`, Git,
+provider execution, work mutation, or an arbitrary daemon/LSP method.
+
+## Implementation slices
+
+### Stabilize every supported public operation
+
+- Choose public names and request/response shapes at the daemon application
+  boundary for every supported operation, including all PR12 base families and
+  the accepted PR17 additions.
+- Preserve stable published names as compatibility aliases that delegate to
+  the canonical operation. A compatibility name may translate syntax but owns
+  no readiness, scoring, routing, scheduling, provider selection, storage, or
+  lifecycle logic.
+- Define pagination cursors, stream events, cancellation and retry classes,
+  structured errors, version negotiation, and unavailable/partial outcomes in
+  the operation that uses them. Schema/OpenAPI generation is package input,
+  not an independently accepted deliverable.
+- Bind public schema/OpenAPI, routes, MCP tools, CLI commands, adapters, and
+  generated bindings directly to the one daemon application contract source.
+  Syntax may differ; semantics and lifecycle may not.
+- Bind both `open_investigation_handoff` and `open_task_handoff` to their
+  owning application operations and expose the same authorized,
+  non-enumerating result in Rust, TypeScript, and Python without a raw LSP
+  tunnel. Plan 35 owns transport projection, Plan 09 owns investigation
+  results, and Plan 24 owns task semantics; PR18 owns only the public names,
+  token-consumption contract, SDK bindings, and compatibility.
+
+### Publish three usable SDKs
+
+- Ship Rust, TypeScript, and Python packages with authenticated connection
+  setup, typed operation calls, pagination iterators, streaming, cancellation,
+  timeout, retry/idempotency, reconnect/resume, and structured errors idiomatic
+  to each ecosystem.
+- Generated low-level bindings may be used internally, but reviewed façades
+  provide complete journeys and contain no generic invocation tunnel or local
+  product logic.
+- SDKs never accept shell strings or raw process environments and never execute
+  Claude Code, Codex, or provider binaries locally.
+
+### Prove and document real use
+
+- Publish executable quickstarts that cover every public capability family,
+  plus complete work-graph, admitted-runtime, investigation-handoff, and
+  task-handoff journeys in all three languages.
+- Test installed packages against one released daemon build on Linux and
+  Windows, including current and oldest-supported client/daemon combinations.
+- Publish package versions only after the examples and lifecycle tests pass
+  against the same daemon artifact.
+
+## Replacement and deletion
+
+PR18 removes temporary PR17-only public spellings whose compatibility window
+has closed, duplicate surface-specific models, generated-type-only sample
+packages, and any SDK-side business or retry decision that competes with the
+daemon. Stable compatibility aliases remain thin delegates.
+
+Contract drift is detected by running real operations through adapters and
+SDKs. Generated inventories, declaration-parity scorecards, schema-only test
+matrices, and compilation-only conformance are not retained as release gates.
+
+## Direct acceptance
+
+- Every supported public operation is callable from Rust, TypeScript, and
+  Python against the same production daemon boundary; no operation family is
+  omitted because it predates PR17, and no SDK operation bypasses daemon
+  authorization or opens product storage.
+- Each Rust, TypeScript, and Python SDK runs representative read, paged,
+  streamed, cancellable, and effect/receipt operations against both a local
+  daemon and a PR16-enrolled remote authority. The two routes preserve
+  identical application semantics, stable problem/error taxonomy, exact retry
+  directive, authorization decisions, redaction, coverage, legal actions,
+  effects, and terminal receipts; only explicitly declared transport or
+  authority availability differs.
+- Local and remote variants exercise authentication, disconnect,
+  reconnect/resume, paging, streaming/backpressure, cancellation before and
+  after an effect commit point, and partial/unavailable authority as applicable.
+  Remote authority loss or failover uncertainty remains PR16's typed
+  partial/unavailable/reconciliation state and never triggers a local writer,
+  SDK fallback, semantic substitution, or PR18-owned recovery policy.
+- In each language, an executable journey creates and pages work, observes
+  legal proposal/review outcomes, admits a provider-backed attempt, consumes
+  progress, exercises cancellation, reconnects or resumes where supported, and
+  reads the terminal receipt.
+- Cross-surface assertions compare semantic values, stable errors, legal
+  actions, redaction, effects, and terminal outcomes rather than generated
+  declarations.
+- Behavioral/lifecycle conformance for every operation covers its applicable
+  request defaults, authorization, scope, paging/streaming, coverage,
+  redaction, stable problem plus exact retry directive, idempotency/effect
+  receipt, cancellation, reconnect/resume, and unavailable/partial states
+  through Rust, TypeScript, and Python.
+- Stateful fixtures cover task/work versioning, dependencies, paged
+  projections/history, assignment/review, assessment/proposal/recommendation/
+  outcome/calibration semantics, abstention and deterministic fallback,
+  auxiliary request/provider negotiation, requested-versus-actual identity,
+  runtime mapping, SSE/stream history, artifacts, and every terminal outcome.
+- Pagination, streaming, backpressure, cancellation before and after commit,
+  bounded retry, durable idempotency, reconnect/resume, stale revision,
+  authentication failure, provider absence, partial coverage, and
+  insufficient evidence are exercised through every SDK.
+- Current and oldest-supported client/daemon combinations run schema-derived
+  positive/negative cases, hand-authored stateful lifecycle fixtures,
+  installed-package smoke tests, and executable documentation. Generated
+  bindings and idiomatic façades share those fixtures.
+- The Plan 35 session journey covers negotiation, ordered bidirectional
+  delivery, cancellation, backpressure, reconnect, stale revisions, and
+  authentication without exposing a raw LSP tunnel. For each Rust,
+  TypeScript, and Python SDK, local-daemon and PR16-enrolled-remote variants
+  produce and consume both token kinds: a feedback/diagnostic cue opens the
+  owning investigation surface, and a ready-commit/cross-worktree/task cue
+  opens the owning task surface. Both variants assert identical application
+  semantics and problem taxonomy.
+- Handoff failures cover wrong kind/destination/session/project/root/cue/task
+  version/authority, expiry, replay, authorization or policy revocation,
+  partial/unavailable remote authority, and unsupported clients. They preserve
+  policy-safe non-enumeration and never return task bodies through LSP, mutate
+  work, apply edits, invoke arbitrary methods, or create local fallback
+  authority.
+- Linux and Windows package-install and documentation examples pass for all
+  three languages, followed by one aggregate repository gate.
+
+## Not in PR18
+
+- New task/work or provider-runtime semantics; PR17 owns them.
+- A JavaScript workflow runtime, arbitrary daemon/LSP payload tunnel, local
+  provider executor, or direct database API.
+- Generated compatibility inventories, standalone conformance services,
+  planning ledgers, placeholder baselines, or publication based only on schema
+  generation or package compilation.

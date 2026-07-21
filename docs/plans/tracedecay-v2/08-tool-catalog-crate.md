@@ -35,6 +35,12 @@ Every public surface resolves stable capability IDs to the same application use 
 - Typed standard-LSP bindings from navigation and diagnostic methods to the
   existing code and diagnostic capabilities and application handlers defined
   for [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
+- The typed binding and schema revision for Plan 35's owned TraceDecay LSP
+  context extension: negotiated experimental capability metadata, provider
+  contribution requirements, bounded request/result envelopes, and the
+  canonical handlers for diagnostics, impact, affected tests, test results,
+  and opaque authorized expansion. The catalog does not own its framing,
+  session state, provider data, or projection behavior.
 - Immutable catalog snapshot assembly from reviewed contributions registered beside implemented application use cases.
 - Pure validation and lookup by stable ID, surface, profile, and availability.
 
@@ -100,13 +106,28 @@ Every public surface resolves stable capability IDs to the same application use 
   to `tracedecay_rename_symbol`, API-migration apply, another write-effect
   entry, `workspace/applyEdit`, or opaque server commands. No separate
   `lsp_*` capability is cataloged for them, and no binding may apply an edit
-  on their behalf. General LSP `textDocument/codeAction` is deferred: it does
-  not ship in PR12 and cannot be cataloged until a separate owner defines a
+  on their behalf. `textDocument/codeAction` is cataloged only when its owning
   typed candidate-consumption operation, policy classification, canonical
-  preview/`EditTransaction` route, and acceptance fixtures.
+  preview/`EditTransaction` route, and direct acceptance behavior ship
+  together.
 - **PR12 — LSP extensions:** require every vendor extension to have an explicit
   typed catalog entry, bounded schema, policy classification, and tested
-  handler. Never expose arbitrary method or payload forwarding.
+  handler. Ship the versioned TraceDecay context extension only through
+  standard LSP/JSON-RPC framing and explicit experimental capability
+  negotiation. Its compact envelope carries exact authorized scope, content/
+  graph generation, producer and coverage state, bounded diagnostics/impact/
+  affected-test/test-result projections, omissions, and opaque expansion
+  handles. Expansion reauthorizes and calls the same canonical application
+  reads; handles are not durable evidence identity. The provider contribution
+  point admits a contribution only when its typed handler is callable, so
+  PR13 can add GitHub review, CI localization, and proximity without changing
+  the reader transport. Never expose arbitrary method or payload forwarding.
+- **PR12 — feedback reads:** bind canonical diagnostics, impact, affected-test,
+  test-result, feedback get/list, and exact expansion handlers as real callable
+  reads on their supported CLI, MCP, HTTP, and negotiated LSP surfaces. No
+  placeholder handler or advertised-but-unavailable binding may stand in for
+  a PR12 operation. PR13 adds GitHub/CI/proximity producers and catalog
+  contributions to these readers; it does not replace or fork their transport.
 - **PR12 — schemas:** surface adapters use reviewed typed schemas or schema references from the owning contract. The catalog does not generate domain types from prose or source parsing.
 - **PR12 — Git bindings:** expose exactly `git_preview` and `git_apply` to CLI
   and MCP. Both surfaces share one request/result schema: preview returns the
@@ -147,9 +168,12 @@ Every public surface resolves stable capability IDs to the same application use 
   task query DSL, invoke-anything operation, task-local scheduler, or hidden
   alias is admitted.
 - **PR18 — SDK bindings:** add Rust, TypeScript, and Python SDK BindingIds only
-  with the shipped typed methods and conformance fixtures. PR12 may describe
-  future SDK availability as unavailable protocol metadata but cannot advertise
-  an unimplemented SDK method.
+  with shipped typed methods and behavioral/lifecycle conformance fixtures.
+  Every supported public operation, including operations accepted before
+  PR17, must receive bindings in all three SDKs; absence from a generated list
+  or late milestone is not permission to omit a family. PR12 may describe
+  future SDK availability as unavailable protocol metadata but cannot
+  advertise an unimplemented SDK method.
 
 ## Capability and retrieval contracts
 
@@ -336,7 +360,7 @@ schema/routing budget or for inventing a universal tool-count limit.
 owner approval plus an eager-client routing fixture in `profile_budget.rs`.
 There is no aggregate or universal count shared by all profiles.
 
-## Implementation order and migration gates
+## Runtime composition and migration
 
 1. **Crate contract gate:** add workspace/manifests, then land `id.rs`,
    `manifest.rs`, `retrieval.rs`, and serialization tests without application
@@ -364,14 +388,12 @@ There is no aggregate or universal count shared by all profiles.
    duplicate discovery metadata only after direct old-versus-new compatibility
    fixtures pass for supported names. Do not retain a shadow registry or
    generated inventory.
-7. **PR17 extension gate:** add Plan 24/32 contributions only after their typed
-   Plan 09 handlers exist. Profile tests prove active executors cannot
-   self-grade, decide proposals, create fan-out, or call runtime effects outside
-   Plan 32.
-8. **PR18 naming gate:** SDK BindingIds and public SDK methods remain absent
-   until PR18 ships official methods and conformance fixtures. Internal
-   capability families, existing CLI/MCP bindings, and this file map do not
-   freeze that public vocabulary.
+Plan 24/32 contributions enter the runtime snapshot only with their shipped
+typed application handlers. SDK BindingIds enter only with shipped official
+methods and direct conformance. Internal capability families and existing
+CLI/MCP bindings do not reserve or freeze later public SDK vocabulary. Active
+executors cannot self-grade, decide proposals, create undeclared fan-out, or
+invoke runtime effects outside Plan 32.
 
 The final PR11 checks are
 `cargo test -p tracedecay-tool-catalog --all-features`,
@@ -385,6 +407,17 @@ runs `cargo test --test mcp_suite`.
 - PR11 integration tests prove every catalog entry resolves to one real application handler with matching scope, effect, privacy, and schema contracts.
 - Policy tests cover routing among available entries, missing capability, denied scope, stale availability, and no silent substitution.
 - PR12 parity tests invoke representative read, write, administrative, streaming, and long-running use cases through CLI, MCP, HTTP, and LSP adapters and compare typed results before rendering.
+- PR12 feedback parity tests call the canonical diagnostics/impact readers
+  through CLI, MCP, and HTTP, then negotiate the TraceDecay experimental LSP
+  capability and obtain real diagnostics, impact, affected-test, and
+  test-result projections. They compare exact scope, generation, coverage,
+  omissions, and authorized opaque-handle expansion before rendering; reject
+  absent handlers, unnegotiated calls, arbitrary methods/payloads, and any LSP
+  data ownership.
+- PR13 provider-contribution tests prove GitHub review, CI localization, and
+  proximity appear through the unchanged reader contract only when their
+  cataloged typed handlers are callable, with typed unavailable state
+  otherwise.
 - PR12 Git parity tests compare CLI and MCP `git_preview`/`git_apply` semantic
   results before rendering, including Markdown/JSON equivalence, stale CAS,
   conflicting index state, idempotent replay, and receipt identity.
@@ -405,8 +438,11 @@ runs `cargo test --test mcp_suite`.
   app-server-versus-CLI fallback eligibility, native Claude Code selection,
   deterministic lookup, and rejection of shell-string, recursive-dispatch, or
   graph/runtime-mutation capabilities.
-- PR18 SDK parity tests require every advertised SDK binding to resolve to the
-  shipped typed method and canonical application handler.
+- PR18 SDK parity tests require every supported public operation—not only
+  PR17 task/runtime additions—to resolve through shipped Rust, TypeScript, and
+  Python methods to the canonical application handler, with matching
+  authorization, paging/streaming, problems/retry directives, cancellation,
+  receipts, reconnect/resume, and unavailable/partial lifecycle semantics.
 - Discovery tests prove compact profiles stay bounded and administrative/private capabilities are filtered correctly.
 - Compatibility tests cover only currently supported names and typed guidance for retired names; no frozen total-count assertion is allowed.
 - Architecture tests reject source parsers, generators, generated inventories, plan/workflow dependencies, execution logic, storage, transport implementations, and UI code from tracedecay-tool-catalog.
@@ -417,7 +453,7 @@ runs `cargo test --test mcp_suite`.
 The catalog owns discovery and typed definitions for refactoring capabilities,
 not a second refactoring engine. Read-only `tracedecay_rename_preview`, existing
 symbol/string edit primitives, callers/reference discovery, diagnostics, and
-future apply operations remain independently callable base tools. Composed
+shipped apply operations remain independently callable base tools. Composed
 refactoring workflow bundles reference those canonical tools instead of copying
 handlers or schemas.
 

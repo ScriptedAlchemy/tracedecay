@@ -2,7 +2,10 @@
 
 ## Status / Role
 
-Normative PR12 plan. `tracedecay-api` is a thin Axum HTTP, SSE, and static-dashboard adapter over `tracedecay-application`. PR17 adds typed Plan 24 task/work and Plan 32 runtime routes through the same adapter.
+Normative PR12 plan. `tracedecay-api` is a thin Axum HTTP, SSE, and
+static-dashboard adapter over `tracedecay-application`. The executable-work
+journey adds typed Plan 24 task/work and Plan 32 runtime routes through this
+same adapter only when their application operations ship.
 
 ## Outcome
 
@@ -27,9 +30,9 @@ Local and remote clients receive one stable, bounded, observable public service 
   supervision, or an LSP tunnel.
 - An exhaustive hand-maintained endpoint registry or generated compatibility inventory.
 - Developer-roadmap, Markdown-plan, board-local, generic executor/scheduler,
-  edit-bundle, or arbitrary workflow-edit APIs. PR17 exposes only typed
+  edit-bundle, or arbitrary workflow-edit APIs. Executable work exposes only typed
   Plan 24 work-graph and Plan 32 runtime application operations.
-- JavaScript execution. PR17 workflow endpoints adapt typed product operations only.
+- JavaScript execution. Executable-work endpoints adapt typed product operations only.
 
 ## Required behavior
 
@@ -65,7 +68,7 @@ Local and remote clients receive one stable, bounded, observable public service 
 - Health and readiness distinguish process health from daemon/store readiness without performing destructive repair.
 - OpenAPI or equivalent documentation is derived from shipped handlers and DTOs, not a parallel source of truth.
 - PR12 moves root HTTP behavior into this crate and deletes duplicate legacy handler logic.
-- PR17 adds the concrete workflow product routes plus bounded task/work reads,
+- The executable-work journey adds concrete workflow product routes plus bounded task/work reads,
   graph/history/projection reads,
   explicit versioned graph commands, route-review reads, and task-step runtime
   admission/control backed by Plan 24/32 application methods. There is no
@@ -81,7 +84,7 @@ Local and remote clients receive one stable, bounded, observable public service 
 - Tests prove handlers delegate to application use cases and do not access stores directly.
 - Public DTO compatibility is intentional and versioned; no shadow compatibility generator is required.
 - Route documentation matches executable handlers automatically.
-- PR17 HTTP/SSE fixtures prove Kanban, DAG, timeline, causal, workload, and
+- Executable-work HTTP/SSE fixtures prove Kanban, DAG, timeline, causal, workload, and
   history reads preserve the same canonical IDs, versions, scope, watermarks,
   coverage, and runtime refs as direct application calls.
 - No developer-plan executor, generic/untyped task editor, arbitrary

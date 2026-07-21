@@ -1,119 +1,145 @@
 # TraceDecay V2 Root, Migration, and Cutover
 
-## Status / Role
+## Status / role
 
-Normative PR19 plan. This is the bounded final cutover from the V1 root implementation and stores to the V2 daemon and crates. PR19 completes migration, verification, cutover, archive, and obsolete-code/data deletion.
+Normative PR19 plan. PR19 performs the complete forward migration from released
+V1 data and root wiring, atomically makes V2 authoritative, provides bounded
+recovery, and deletes migration-only and superseded V1 paths.
 
-## Outcome
+## User outcome
 
-Before remote delivery, one local daemon is the sole database authority; PR16
-preserves exactly one fenced daemon authority per mutable shard. Thin clients
-and hooks communicate with the owning authority through supported APIs.
-Existing user data is migrated once, verified, cut over safely, archived for
-the defined recovery window, and then deleted under explicit policy.
+An existing user upgrades without losing supported data or changing the
+meaning of queries. After cutover, clients reconnect to one V2 daemon authority
+and continue through supported surfaces. A failed or interrupted upgrade either
+resumes safely before cutover or rolls forward from verified recovery material
+after cutover; it never restores V1 as a writer.
 
-## Owns
+## End-to-end production path
 
-- Root composition, process lifecycle, daemon discovery, startup, shutdown, and upgrade handoff.
-- V1 store detection and direct family-by-family import into V2 staging.
-- Preflight, backup, verification, atomic cutover, recovery, archive, and deletion.
-- Doctor diagnostics and safe, explicit healing actions for migration and daemon/storage health.
-- Removal of obsolete V1 root wiring, direct database clients, and migration-only code after success.
+1. The owning daemon acquires a maintenance fence that pauses ingest, sync, and
+   other writers for the affected store. Preflight discovers every supported V1
+   family, schema/version, source path, destination scope, required space, and
+   blocking corruption, and returns an actionable outcome when complete
+   migration cannot be proved.
+2. Before any source mutation, the daemon creates and verifies a recoverable
+   backup. The only usable copy is never overwritten.
+3. The daemon imports every detected supported family into isolated V2 staging
+   in bounded transactions. Durable checkpoints bind the migration and source
+   epochs, family and deterministic range, transform/privacy revisions,
+   destination identity, counts, and digest. Restart revalidates those inputs
+   and is idempotent or fails closed.
+4. Verification compares identities, references, counts, normalized content
+   and content hashes where applicable, normalized query results,
+   deletion/correction/quarantine lineage, scope mapping, searchability, and
+   representative reads. Missing, corrupt, partial, or noisy proof yields
+   `insufficient_evidence` or a typed blocking failure, never an optimistic
+   cutover.
+5. Cutover atomically publishes the verified V2 store and schema epoch. Before
+   that point V1 is the only authority; after it, the V2 daemon is the only
+   writer and all CLI, MCP, hook, API, LSP, dashboard, and SDK clients
+   reconnect through it rather than opening storage.
+6. The verified V1 archive remains read-only for one declared recovery window.
+   It records source version, checksum, timestamp, migration ID, and restore
+   instructions.
+   Recovery restores forward into a new verified V2 epoch, reapplies every
+   newer disposition, rebuilds affected derivatives, and fences older daemons.
+   There is no reverse cutover, dual write, production shadow read, or lazy
+   read migration.
+7. When the recovery window and deletion policy are satisfied, PR19 deletes the
+   V1 archive and all migration-only code and reports what was removed.
 
-## Does not own
+Before PR16 one local daemon owns the live store. With remote shared Brain,
+exactly one fenced daemon authority owns each mutable shard; migration never
+creates another writer.
 
-- Long-lived dual reads, dual writes, shadow execution, or broad compatibility fallbacks.
-- Generated compatibility inventories, baseline ledgers, source parsers, route registries, or parity dashboards.
-- Product business logic already owned by domain/application/store/query crates.
-- Task-plan execution, workflow JavaScript, edit bundles, or developer orchestration.
-- Indefinite retention of migrated stores or skipped/deferred migration families.
+The maintenance fence also covers integrity repair, index rebuild, cutover,
+and offline recovery so scheduled sync/ingest cannot race verification. An FTS
+or projection repair is admitted only after corruption is localized to
+deterministically rebuildable derived state; whole-store or authoritative
+family corruption remains preserve-and-escalate.
 
-## Required behavior
+## Implementation slices
 
-- The owning daemon alone opens each live project or profile database for reads
-  and writes; MCP, CLI, hooks, API, LSP bridges, and dashboard are clients.
-- Hooks send bounded events or signals and return; daemon scheduling, deduplication, sync, retries, and writes are authoritative.
-- Refuse concurrent migration for the same store and record a durable migration ID and phase.
-- Preflight identifies every supported V1 data family, schema/version, source path, destination scope, required space, and blocking corruption.
-- Create and verify a recoverable backup before mutation; never overwrite the only usable copy.
-- Import into isolated V2 staging in bounded transactions with deterministic
-  identity mapping and durable range/family checkpoints. A checkpoint is
-  written only after the destination commit and binds migration/source/checksum
-  epoch, family, deterministic order/range, transform and privacy revisions,
-  destination identity, counts, and digest. Resume revalidates those inputs and
-  is idempotent or fails closed.
-- Migrate all detected supported families in PR19; an unknown or corrupt required family blocks cutover with actionable Doctor output.
-- Verify counts, identities, referential integrity, content hashes where
-  applicable, deletion/correction lineage, scope mapping, quarantine,
-  searchability, normalized query results, and representative reads. Any
-  shadow comparison is read-only and isolated from production reads and
-  effects while V1 remains sole authority.
-- Cut over atomically only after verification. Before cutover, V1 remains authoritative; failed staging is safely discardable or resumable.
-- After cutover, clients reconnect to the V2 daemon without opening stores directly.
-- Archive the V1 store with version, checksum, timestamp, migration ID, and
-  restore instructions for one defined recovery window. Archive eligibility is
-  blocked until deletion, correction, quarantine, and derivative ownership are
-  captured. Restore replays every newer disposition and rebuilds affected
-  derivatives before serving; provenance never overrides erasure.
-- Doctor can diagnose preflight, incomplete migration, archive, daemon-version, lock, corruption, and recovery states without unsafe automatic deletion.
-- Doctor classifies corruption by data family before prescribing recovery.
-  Derived, deterministically rebuildable structures — external-content
-  full-text shadow tables, projection generations, caches — get an explicit,
-  safe, in-place rebuild action under quiesced maintenance authority.
-  Authoritative families (facts, observations, sessions, receipts) keep
-  preserve-and-escalate. A corrupt derived index must not escalate the whole
-  store to offline recovery: PR7 dogfooding hit a malformed external-content
-  FTS index whose generic "unrecoverable" prescription concealed a
-  one-statement, loss-free rebuild.
-- Upgrades quiesce writes, preserve client reconnection, validate the replacement daemon, and recover to the last verified state on failure.
-- Upgrade handoff is fenced roll-forward: once a newer binary has migrated a
-  shared store, an older daemon must refuse to reopen it as writer (schema
-  epoch fence) rather than wedging or contending. Recovery from a failed
-  upgrade replaces the binary and rolls forward; it never re-admits the old
-  authority over migrated state (a PR7 upgrade wedged exactly this way when an
-  old daemon rejected a newer schema it still claimed to own).
-- After publication, rollback means forward restoration into a verified V2
-  schema epoch under a new fence. The V1 archive is bounded recovery input,
-  never renewed writer authority; no reverse cutover, lazy read migration,
-  production shadow read, or long-lived dual-write path is admitted.
-- Sensitive store operations hold a maintenance fence that pauses scheduled
-  sync and ingest for the affected store until the operation commits and
-  verifies: integrity repair, index rebuild, migration, cutover, and offline
-  recovery never race a sync cycle. PR7 dogfooding demonstrated the failure
-  this forbids — a sync cycle ran immediately after an index repair and
-  re-amplified latent divergence before the repair could be verified.
-- Delete archives and migration-only code when the recovery policy permits and verification remains valid; report exactly what was removed.
-- Delete migration-only dependencies, feature edges, build-script inputs, and
-  test harnesses with the code they served. The final root package is
-  composition and compatibility only, not a catch-all compilation boundary for
-  V2 product implementation.
-- Do not keep compatibility fallbacks for stale clients. Return a clear upgrade/reconnect error instead.
-- Remove external `ast-grep` capability probing and subprocess outline/rewrite,
-  duplicate transport/admin handlers, handler-local query/render/database logic,
-  and semantic aliases whose compatibility window has closed. Surviving names
-  delegate to canonical application operations until their stated removal.
-- Remote/shared-brain support must still route through exactly one fenced
-  authoritative daemon per mutable shard; it never introduces extra database
-  clients.
-- Use measured focused-test compilation to right-size integration-test targets.
-  Split an oversized shared test binary when a narrow test selection repeatedly
-  recompiles unrelated subsystems; do not multiply binaries when the added link
-  cost is greater than the measured feedback-time benefit.
+### Complete staged migration
 
-## Acceptance
+- Ship preflight, verified backup, maintenance fencing, family-by-family
+  staging, durable checkpoints, and restart/resume as one callable daemon
+  upgrade path.
+- Migrate all detected supported families. Unknown or corrupt required data
+  blocks the upgrade with Doctor guidance; PR19 has no skipped-family or
+  deferred-family success state.
+- Classify corruption by family. Deterministically rebuildable indexes and
+  projections may be repaired under exclusive maintenance authority;
+  authoritative facts, observations, sessions, and receipts are preserved and
+  escalated.
 
-- End-to-end fixtures migrate every supported V1 data family and prove representative V2 reads and searches.
-- Crash/restart tests cover each migration phase and checkpoint boundary,
-  daemon upgrade, pre-cutover failure, post-cutover forward restoration, and
-  archive restoration with newer deletion/quarantine overlays.
-- Parity fixtures compare complete families, identities, references,
-  normalized digests, query results, quarantines, and representative reads
-  without letting shadow execution write or serve production traffic.
-- Multi-client tests prove only the daemon accesses live databases and concurrent hooks/clients cannot corrupt them.
-- Doctor reports actionable states and performs only explicitly selected safe repairs.
-- PR19 leaves no dual-write path, generated inventory, compatibility runtime, obsolete direct DB client, skipped family, or migration TODO.
-- Archive deletion follows the documented recovery policy and is tested without risking the sole verified backup.
-- Same-host before/after evidence shows the root package's dependency fan-in,
-  warm incremental check, and representative focused-test compile scope after
-  migration-only code is removed. Any retained high-cost edge has a current
-  product owner and measured justification.
+### Verify and cut over atomically
+
+- Run semantic-equivalence checks against real reads and searches while V1 is
+  still authoritative and any comparison remains read-only.
+- Publish one verified V2 epoch atomically, reconnect clients, and reject an
+  older or stale client/daemon with an actionable upgrade error.
+- Preserve stable public compatibility names only as thin delegates to
+  canonical V2 application operations. They own no storage, policy, lifecycle,
+  or migration logic.
+
+### Recover forward, then delete
+
+- Validate daemon replacement during upgrade handoff and recover to the last
+  verified V2 state if replacement fails.
+- Keep the archive only for the bounded recovery policy, including provenance
+  required to preserve erasure, correction, quarantine, and derivative
+  ownership.
+- Block archive eligibility until deletion, correction, quarantine, and
+  derivative ownership are captured. Restoration replays every newer
+  disposition before serving and rebuilds affected derivatives; provenance
+  never overrides erasure.
+- Delete obsolete V1 root wiring, direct database clients, temporary adapters,
+  dead flags, migration-only dependencies/features/build inputs, and their
+  dedicated test support after the recovery boundary passes.
+
+## Replacement and deletion
+
+PR19 removes duplicate transport/admin handlers, handler-local database and
+query logic, obsolete root-owned product implementation, writable fallbacks,
+external `ast-grep` capability probing, and subprocess outline/rewrite paths.
+Temporary compatibility wrappers are deleted after their named consumer has
+migrated. Stable published aliases remain, but delegate to the same canonical
+operation and preserve equivalent authorization, errors, redaction, effects,
+pagination, streaming, cancellation, and retry behavior.
+
+The final root package owns composition, daemon lifecycle, discovery, upgrade
+handoff, and stable compatibility entry points. It is not a catch-all product
+implementation or a permanent migration runtime.
+
+## Direct acceptance
+
+- Real V1 fixtures containing every supported family migrate through the
+  production upgrade entry point and produce semantically equivalent V2 reads,
+  searches, identities, references, and lineage.
+- Fault injection at every preflight, backup, staging transaction, checkpoint,
+  verification, cutover, archive, and forward-recovery boundary proves
+  crash/restart behavior and that no partial authority is published.
+- Multi-client tests prove one writer, maintenance fencing, reconnect behavior,
+  and refusal by older binaries after the schema-epoch fence advances.
+- Upgrade-handoff tests quiesce writes, validate the replacement daemon,
+  preserve client reconnection, and recover to the last verified V2 state
+  without re-admitting an older daemon as writer.
+- Linux and Windows upgrade journeys cover clean success, insufficient space,
+  required-family corruption, interrupted migration, failed daemon handoff,
+  post-cutover forward recovery, and archive expiry.
+- Doctor reports actionable preflight, lock, version, corruption, incomplete
+  migration, archive, and recovery states and performs only explicitly selected
+  safe repairs.
+- One aggregate repository gate passes after the journey tests. PR19 leaves no
+  dual-write/read path, lazy migration, reverse cutover, direct writable
+  client, skipped family, migration TODO, generated inventory, or
+  migration-only implementation.
+
+## Not in PR19
+
+- New product-domain behavior or a second compatibility implementation.
+- Autonomous Git history mutation.
+- Indefinite archive retention or V1 writer restoration.
+- A migration dashboard, execution ledger, schema-only conformance suite, or
+  placeholder acceptance baseline.

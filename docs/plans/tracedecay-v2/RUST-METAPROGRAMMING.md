@@ -61,8 +61,8 @@ PR registries, rewrite status, or implementation ownership maps are not.
 
 ## Dynamic workflows
 
-PR17 dynamic workflows are typed runtime product data submitted through the
-public application/SDK contracts. The daemon validates them and uses the shared
+Dynamic workflows are typed runtime product data submitted through shipped
+application/SDK contracts. The daemon validates them and uses the shared
 operation, scheduler, history, lease, effect, artifact, event, and store
 authorities. JavaScript/TypeScript may call an SDK but is not a workflow
 definition language or execution runtime.
@@ -75,26 +75,6 @@ They must not:
 - create a second scheduler, database writer, event log, task identity, or
   authorization path;
 - ship Claude-specific workflow JavaScript as a canonical implementation.
-
-## Procedural-macro admission
-
-A procedural macro may be proposed only after a minimized ordinary-Rust spike
-shows the invariant cannot be preserved with maintained libraries and normal
-types. The proposal must:
-
-- leave Rust structs/enums as the sole field and variant authority;
-- delete at least 500 non-test lines or 65% of the repeated implementation;
-- retain at least 300 net deleted production lines after support code;
-- preserve actionable nested errors and existing valid wire behavior;
-- reject duplicate keys, unknown fields/variants, and illegal tagged fields;
-- cover supported Serde forms and compile-fail unsupported forms;
-- add no runtime reflection or metadata registry;
-- add at most 5% clean-build cost and 200 ms unrelated incremental-build cost;
-- own no persistence, rendering, transport, authorization, digest, or business
-  behavior.
-
-At most one derive crate and one sealed derive may be admitted. Custom attribute
-macros remain out of scope.
 
 ## Rejected targets
 

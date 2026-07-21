@@ -8,10 +8,11 @@ PR9 ships the typed federated-retrieval contract, independent exact and lexical
 retrievers, adapters for authorities available at that dependency point, deterministic
 fusion, source-aware dedupe and diversity, compact-candidate ranking, and the locked
 evaluation harness. PR10 ships source-local semantic projections, native semantic
-retrieval, and optional bounded reranking. PR11 wires the application service over the
-PR9/PR10 ports, PR14 exposes dashboard controls, and PR17 wires the Plan 24 task/session
-retriever after task identity exists. Semantic implementation is required in PR10;
-activation remains evidence-gated and lexical-only operation remains fully supported.
+retrieval, and optional bounded reranking. The application service consumes the
+accepted ports, the dashboard exposes their controls and state, and the
+task/work journey adds the Plan 24 task/session retriever after canonical task
+identity exists. Semantic implementation is required in PR10; activation
+remains evidence-gated and lexical-only operation remains fully supported.
 
 This plan is the quality and composition authority. It does not replace the canonical
 stores, the Plan 23 temporal query kernel, the Plan 24 task/work graph, the Plan 25 code
@@ -606,47 +607,24 @@ are hard invariants. Quality, latency, RSS, tokens, cost, completion, learned we
 and learned thresholds use frozen evidence-backed margins; this plan deliberately does
 not invent universal numeric cutoffs.
 
-## Dependency sequence
+## Delivery composition
 
-1. **PR9 contract and baseline capture:** add domain contracts, query-layer ports,
-   snapshot/freshness binding, fixture schemas, manifest validator, raw baseline
-   instrumentation, authorization canaries, and temporal oracles. Freeze
-   `fixture-manifest-v1.json` before retrieval tuning.
-2. **PR9 exact and lexical lanes:** implement independent exact and fielded lexical
-   candidate producers, typo and echo handling, deterministic pagination, same-source
-   dedupe, provenance rendering, and lexical-only fallback. Lock exact-tier contract
-   tests before adding approximate channels.
-3. **PR9 available federated adapters:** adapt the already-delivered Plan 25 graph,
-   Plan 23 temporal export port, and delivered Plan 13 diagnostic authorities to
-   `CompactCandidate`. An unavailable authority is capability-reported, not simulated.
-   Each adapter lands with oracle-recall, freshness, denial, stale, partial,
-   cancellation, and source-authority tests.
-4. **PR9 fusion and query-layer hydration boundary:** add fixed-point profile fusion, complete
-   contribution provenance, evidence-backed copy relations, diversity policies,
-   compact ranking, bounded hydration, context assembly, and saved-candidate ablations.
-   Promote the measured lexical profile before PR10 changes its baseline.
-5. **PR10 semantic projection:** add source-local compatible vector projections,
-   batching, incremental reuse, exact flat-scan oracle, model lifecycle, offline reuse,
-   privacy-domain isolation, and shadow-only semantic evaluation.
-6. **PR10 optional ANN and reranker:** evaluate ANN only against exact scan, then evaluate
-   bounded reranking over saved candidate lists. Land cancellation and the
-   byte-identical PR9 fallback subpayload before either feature can activate.
-7. **PR10 promotion and configuration:** publish the accepted report and evidence index,
-   add versioned configuration controls, run shadow and staged exposure, and make the
-   accepted profile eligible for default activation.
-8. **PR11 application integration:** implement
-   `src/application/retrieval/` over the accepted query ports, preserving sealed internal
-   outcomes, sanitized public coverage, pinned cursors, and rank-before-hydrate.
-9. **PR14 dashboard integration:** render accepted profile, freshness, fallback, and
-   report state without acquiring promotion authority.
-10. **PR17 task/session integration:** after Plan 24's canonical task identity and query
-    ports exist, implement `task_session.rs`, its joins to Plan 23, and the locked
-    lane-disabled ablation. Until then the lane is capability-reported unavailable and
-    never simulated or copied.
+The exact, lexical, graph, temporal, diagnostic, semantic, and optional bounded
+rerank behavior above ships through one accepted retrieval profile and one
+application pipeline. An unavailable authority remains capability-reported
+rather than simulated. The dashboard renders the accepted profile, freshness,
+fallback, and report state without gaining promotion authority.
 
-No later step may begin its locked comparison before all prior contract and invariant
-gates pass. PR10 cannot redefine PR9 fixtures or baseline after seeing locked results;
-changes require a new append-only fixture and report revision.
+Task/session retrieval joins Plan 24 task roots to Plan 23 session evidence only
+after the canonical task identity and typed application join ship. Until then
+that lane is explicitly unavailable and never simulated or copied. Adding it
+requires the same lane-disabled ablation and locked acceptance policy as every
+other retriever.
+
+Locked comparison inputs and accepted fallback bytes are immutable. A later
+change creates a new append-only fixture, run, report, and promotion revision;
+it cannot reinterpret an already revealed result or redefine the accepted
+lexical fallback.
 
 ## Tests, commands, and gates
 

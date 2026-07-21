@@ -1,134 +1,155 @@
-# System Convergence and Extensibility Charter
+# System Convergence and Extensibility
 
-## Status / Role
+## Status / role
 
-- V2 architecture charter applied throughout delivery.
-- PR19 completes convergence, deletes superseded paths, and removes temporary compatibility code.
-- The charter constrains implementation; it is not a second model of the product.
+V2 architecture constraints apply throughout delivery. PR19 performs the
+complete forward migration and atomic product cutover, then deletes superseded
+V1 implementations and temporary convergence machinery. This plan constrains
+that production journey; it is not a second product model.
 
-## Outcome
+## User outcome
 
-TraceDecay is one coherent daemon-owned system with clear domain, application, infrastructure, and
-adapter boundaries. Features compose through typed operations instead of duplicating storage,
-policy, lifecycle, or transport logic.
+After upgrading, every supported surface reaches one coherent V2 system.
+Existing data and stable APIs continue to mean the same thing, while the daemon
+is the only storage authority and canonical application operations own product
+behavior. Recovery is bounded and forward-only. V1 and migration-only paths no
+longer remain available as hidden fallbacks.
 
-## Owns
+## End-to-end production path
 
-- Dependency direction and component ownership rules.
-- The criteria for admitting a new crate or external extension point.
-- Convergence of duplicate implementations onto canonical operations.
-- Repository-controlled compilation boundaries, dependency fan-in, and test
-  target ownership where they follow product ownership.
-- PR19 deletion of obsolete modules, adapters, shims, and compatibility paths.
-- Architectural tests that protect real boundaries.
+1. Plan 12 preflights, backs up, stages, and verifies every supported released
+   V1 data family under the owning daemon's maintenance fence.
+2. Production callers are migrated to canonical V2 domain and application
+   operations. CLI, MCP, hooks, dashboard, LSP bridge, HTTP, and SDK adapters
+   translate requests but do not own storage, policy, query, scheduling,
+   diagnostics, or lifecycle behavior.
+3. Stable public compatibility aliases are bound to those same canonical
+   operations and preserve semantic and lifecycle equivalence. Temporary
+   aliases identify their consumer, owner, exact deletion condition, and latest
+   delivery slice and are removed in PR19 after that consumer migrates.
+4. One atomic release cutover publishes the verified V2 store/schema epoch and
+   V2 composition root. Before cutover V1 is authoritative; after cutover one
+   fenced V2 daemon owns each mutable shard and stale binaries or clients fail
+   with an actionable upgrade/reconnect outcome.
+5. Failed pre-cutover staging is resumable or discardable. Post-cutover
+   rollback restores forward to the exact prior verified V2 epoch from verified
+   backup/archive material. There is no reverse cutover, dual write,
+   production shadow read, or lazy migration.
+6. After the bounded recovery window passes, V1 stores, implementations,
+   writable fallbacks, migration-only adapters, dead features and dependencies,
+   and their dedicated tests are deleted.
 
-## Does not own
+If migration, parity, authority, or recovery evidence is missing or partial,
+the operation returns a blocking or `insufficient_evidence` outcome and keeps
+the current authority unchanged.
 
-- Feature-specific behavior defined by the other plans.
-- A target package count, crate quota, generated inventory, or architecture scorecard.
-- A plan parser, progress tracker, executor, or generated view of the repository.
-- Workflow JavaScript or a second orchestration runtime.
+### Retained owners and extension behavior
 
-## Required behavior
+- Domain modules retain invariants and stable value types; application modules
+  retain use-case coordination, policy, authorization, and transactions;
+  infrastructure retains stores, providers, runtimes, and operating-system
+  effects; adapters retain syntax translation only.
+- Storage, configuration, privacy, identity, query, diagnostics, lifecycle,
+  repair, and durable disposition derivation each have one canonical owner.
+  Reads never repair. Skip/collision/refusal dispositions are interpreted in
+  that derivation owner rather than patched independently into drain, audit,
+  and rebuild callers.
+- Extensions use typed revisioned capabilities and declare compatible
+  protocol/schema/capability ranges, lifecycle class, canonical operation, and
+  unsupported behavior. They cannot bypass policy or daemon authority.
+- PR17 workflows remain typed stored definitions whose steps invoke existing
+  authorized daemon operations. PR19 does not replace them with workflow
+  JavaScript, repository scripts, or another task runtime.
+- The daemon gateway plus thin bridge remains the sole analyzer/diagnostic
+  lifecycle after Plan 35 parity and rollback acceptance. Canonical registry,
+  configuration, store, and query owners remain unchanged.
 
-1. Daemon authority
-   - Before PR16, one local daemon owns product database connections, writes,
-     migrations, and recovery. PR16 preserves exactly one fenced daemon
-     authority per mutable shard; no client or peer becomes a second writer.
-   - CLI, MCP, hooks, UI, SDKs, and other clients call daemon operations.
-   - Hooks send bounded events or signals; they do not implement synchronization or storage policy.
+## Implementation slices
 
-2. Layered ownership
-   - Domain modules define invariants and stable value types without transport or database concerns.
-   - Application modules coordinate use cases, policy, authorization, and transactions.
-   - Infrastructure modules implement storage, providers, runtimes, and operating-system effects.
-   - Adapters translate CLI, MCP, HTTP, hooks, and UI requests without owning business rules.
+### Migrate callers and state forward
 
-3. Modules first
-   - New components begin as modules in the crate that owns their lifecycle.
-   - A new crate is admitted only when it creates a real ownership boundary, enforces useful
-     dependency direction, supports independent reuse, or isolates a materially different runtime.
-   - Compile-time savings justify extraction only when same-host measurements
-     show a smaller frequently touched graph after accounting for added crate
-     metadata, code generation, and linking.
-   - File size, naming preference, or speculative reuse alone does not justify a crate.
+- Move complete feature families to the canonical owner rather than wrapping a
+  partial V2 implementation around remaining V1 logic.
+- Keep domain invariants and stable values free of transport/database concerns;
+  application operations own authorization and transactions; infrastructure
+  owns stores, providers, runtimes, and operating-system effects; adapters only
+  translate.
+- Use Plan 34's transactional API-migration path for source/API changes and
+  Plan 12 for stored data. Source migration never substitutes for store
+  migration.
 
-4. Canonical operations
-   - Storage, configuration, privacy, identity, query, and lifecycle behavior each have one owner.
-   - Adapters call those operations rather than reimplementing them.
-   - Extensions use typed, revisioned capabilities and cannot reach around
-     policy or daemon authority. Each adapter declares the canonical operation,
-     compatible capability/protocol/schema revision range, lifecycle class,
-     and unsupported behavior; generated schemas or successful compilation do
-     not establish semantic or lifecycle conformance.
-   - A compatibility alias may translate wire shape only. Availability, errors,
-     authorization, effects, health, and cancellation come from its canonical operation.
-   - Reads never repair. Status and read projections report stored state;
-     convergence and repair loops have exactly one owner below all callers,
-     and callers are one-shot. PR7 accumulated three divergent copies of one
-     derived-memory convergence policy — scheduler, curation, and a startup
-     loop — plus status reads that performed repair writes; that shape is the
-     anti-pattern this rule forbids.
-   - Durable dispositions are consulted at the canonical derivation, not
-     patched around it. When an input has a recorded disposition (skip,
-     collision, refusal), the one derivation path returns the typed outcome;
-     drain, audit, and rebuild consumers must not each implement coordinated
-     pre-checks or substitutions over a disposition-blind core. PR7's
-     output-collision handling began as three coordinated special cases and
-     converged to one disposition-aware derivation; new dispositions start in
-     that shape.
+### Cut over one authority
 
-5. Typed workflows
-   - PR17 represents dynamic workflows as typed, stored definitions.
-   - Workflow steps invoke existing authorized daemon operations.
-   - There is no JavaScript workflow SDK, repository workflow script, or parallel task runtime.
+- Publish V2 composition and storage together only after real user journeys
+  prove semantic equivalence.
+- Preserve exactly one writer before, during, and after cutover. Hooks remain
+  bounded event clients; reads never perform repair; repair and convergence
+  loops have one daemon-owned writer below all callers.
+- Preserve compatibility aliases, pagination, streams, cancellation, retry and
+  error behavior through the canonical operation instead of parallel
+  compatibility implementations.
 
-6. Convergence and deletion
-   - Each replacement identifies its canonical owner and removes the superseded path.
-   - Every alias, wrapper, or adapter is classified
-     `stable_public_contract` or `temporary`, names its external consumer and
-     owner, and for temporary surfaces records the exact deletion gate and
-     latest delivery slice. Missing disposition blocks convergence.
-   - Temporary adapters have an explicit deletion condition within the delivering PR sequence.
-   - PR19 removes all satisfied shims, duplicate paths, dead feature flags, and obsolete dependencies.
-   - After [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)
-     parity and rollback gates pass, PR19 removes legacy root-, dashboard-, and
-     host-owned analyzer lifecycle; direct per-language host plugins; duplicate
-     adapter or extension tables; direct diagnostic caches or stores; and every
-     writable fallback.
-   - The surviving diagnostic path is the daemon gateway plus thin bridge,
-     canonical registry/configuration, and canonical store/query operations.
-   - Delete external `ast-grep` probing, subprocess outline/rewrite, duplicate
-     parser acquisitions, surface-local handlers/query/render/database logic,
-     and superseded semantic aliases after their bounded compatibility window.
+### Recover, converge, and delete
 
-7. Developer feedback topology
-   - Each crate owns only the normal, optional, build, and development
-     dependencies required by its product boundary. Heavy providers, grammars,
-     model runtimes, transports, and dashboard generation remain isolated from
-     unrelated focused checks and tests.
-   - Integration-test targets align with product ownership and measured focused
-     workflows. A name filter is not treated as proof of narrow compilation.
-   - Build scripts declare narrow rerun inputs and skip generation or asset work
-     when the relevant inputs and features are unchanged or disabled.
-   - Optimize boundaries from the PR7+ developer-feedback evidence in Plan 00;
-     do not create a crate-count target or machine-specific build policy.
+- Exercise bounded pre-cutover resume and post-cutover forward restoration,
+  including crash/restart and stale-binary fencing.
+- Remove duplicate root, dashboard, host, adapter, analyzer, diagnostic,
+  query/render, parser, and storage paths once the canonical journey is
+  accepted.
+- Remove obsolete external `ast-grep` probing, subprocess outline/rewrite,
+  direct writable clients, dead feature flags, unused dependencies, and
+  migration-only build/test support.
+- Preserve normal/optional/build/development dependency ownership, isolate
+  heavy providers/grammars/model runtimes/transports/dashboard generation from
+  unrelated focused checks, keep build-script rerun inputs narrow, and align
+  integration-test targets with measured product workflows. Plan 33 owns
+  retained same-host performance comparisons; PR19 does not invent a crate
+  quota or machine-local build policy.
 
-## Acceptance
+## Replacement and deletion
 
-- Dependency checks prevent domain and application layers from importing adapters or concrete stores.
-- CLI, MCP, hooks, UI, and SDKs perform product work only through daemon application operations.
-- Concurrent clients cannot become additional database authorities.
-- Every surviving crate has a documented ownership or dependency reason beyond file organization.
-- PR19 removes superseded implementations, compatibility shims, dead flags, and unused dependencies.
-- Every surviving compatibility surface has a stable-public-contract
-  disposition; every removed temporary surface has passed its named
-  conformance and deletion gate without changing PR ownership or sequencing.
-- No client, dashboard, root compatibility path, or host plugin starts
-  analyzers, opens writable stores, owns diagnostic state, or bypasses the
-  canonical daemon gateway after cutover.
-- Every high-fan-in crate, heavy default feature, build script, and oversized
-  shared test target has a current ownership reason or same-host evidence for
-  retaining it; focused workflows do not compile unrelated heavy subsystems.
-- Direct behavior and boundary tests replace generated inventories and architecture scorecards.
-- No plan parser, tracker, executor, generated product model, or workflow JavaScript remains.
+The surviving system has one owner for storage, configuration, privacy,
+identity, query, diagnostics, scheduling, and lifecycle. Extensions use typed,
+revisioned capabilities and cannot bypass authorization or daemon authority.
+A new crate is retained only for a real ownership/runtime boundary or a
+measured build-graph benefit; file size, speculative reuse, or package-count
+targets do not justify it.
+
+PR19 removes every temporary wrapper whose consumer has migrated. Stable public
+aliases remain only when they are actual compatibility contracts and delegate
+all availability, errors, authorization, effects, health, paging, streaming,
+cancellation, and retries to the canonical operation.
+
+Generated ownership inventories, architecture scorecards, convergence ledgers,
+route registries, and declaration-only boundary checks are deleted. Focused
+behavior and dependency-direction tests protect the surviving architecture.
+
+## Direct acceptance
+
+- Released V1 fixtures upgrade through Plan 12 and complete representative
+  CLI, MCP, hook, dashboard, LSP, HTTP, and SDK journeys through canonical V2
+  operations with semantically equivalent values, errors, redaction, and
+  effects.
+- Fault injection proves atomic cutover, one-writer fencing, crash/restart,
+  failed daemon replacement, bounded forward recovery, and refusal of stale
+  binaries on Linux and Windows.
+- No surface starts its own analyzer lifecycle, opens writable product storage,
+  owns diagnostic state, or repairs on read after cutover.
+- Stable compatibility aliases execute the same behavior and lifecycle as
+  primary names. No unapproved temporary alias or duplicate implementation
+  remains.
+- Dependency-direction tests prevent domain/application layers from importing
+  adapters or concrete stores, and focused build/test workflows do not pull
+  unrelated heavy subsystems without measured ownership justification.
+- One aggregate repository gate passes after direct journey and recovery tests.
+  PR19 ends with no V1 runtime, dual read/write, lazy migration, reverse
+  cutover, writable fallback, skipped family, migration TODO, or
+  migration-only path.
+
+## Not in PR19
+
+- New feature semantics, a second workflow runtime, or speculative extension
+  framework.
+- A crate-count target, generated product model, architecture dashboard,
+  execution ledger, schema-only conformance suite, or placeholder baseline.
+- Autonomous Git history mutation or restoration of V1 as writer.

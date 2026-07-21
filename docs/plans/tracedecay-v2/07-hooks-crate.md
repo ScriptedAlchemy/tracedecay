@@ -1,370 +1,225 @@
 # V2 host hooks and cross-worktree event boundary
 
-## Status / Role
+## Status and existing foundation
 
-- Status: current host behavior is captured and hardened in PR6; the V2 hook
-  cutover and single-root worktree-event path land in PR13.
-- PR11 supplies application and policy decisions. PR12 supplies stable
-  daemon/API surfaces. PR15 supplies canonical multi-root/worktree admission.
-  PR17 may add Plan 24 `TaskId` placement and ready-commit joins. PR18 freezes
-  public command, MCP-tool, route, and SDK spellings; hook wire names remain
-  provider-private compatibility inputs.
-- Hooks are thin host adapters. They emit bounded typed events to
-  `tracedecayd`, optionally append the exact safe envelope to the one bounded
-  replay spool, and render a bounded daemon response. They never coordinate
-  peer worktrees directly.
+PR6 captured the supported Claude Code, Codex, Cursor, Hermes, and Kiro event
+semantics. PR13 replaces the remaining compatibility planners with thin,
+bounded adapters that signal one daemon-owned feedback path. Hooks are
+transport adapters; they do not own product state, synchronization, Git,
+feedback policy, or peer coordination.
 
-## Outcome
+## PR13 user outcome
 
-Codex, Claude Code, Cursor, Hermes, Kiro, and supported daemon/MCP
-notifications feed one daemon-owned event authority. A daemon-issued session
-binding lets a hook report task placement, worktree epoch, ref/commit, tool,
-edit, test, and conflict observations without treating a path as identity,
-opening a business database, running synchronization, or writing another
-worktree.
+After a supported saved edit or agent stop boundary, the host can receive the
+same current TraceDecay feedback available through MCP, CLI, LSP, or native
+diagnostics. A temporarily unavailable daemon does not block the host or
+corrupt product state, and replay does not duplicate a logical event.
 
-The transport is at-least-once and replayable. Daemon acceptance, durable
-spool acceptance, downstream processing, and effect completion are separate
-typed dispositions. Only a daemon receipt may claim an application effect.
+## End-to-end production path
 
-## Owns
+1. The host adapter decodes a real native edit, tool, test, session, or stop
+   event through the bounded V1 wire decoder and verifies that the host/version
+   actually supports it. The envelope revision is checked before any field is
+   interpreted, admitted, or spooled.
+2. The adapter obtains canonical project, repository, worktree, and epoch
+   identity from a daemon-issued session binding. Paths and branch labels are
+   resolver inputs, never identity.
+3. The adapter emits one bounded, content-free event with stable event,
+   ordering, payload-digest, and idempotency identity.
+4. It sends the event to `tracedecayd`. If an eligible bound event cannot be
+   delivered within the host budget, it appends the exact validated bytes to
+   the sole bounded transport replay spool and returns.
+5. The daemon reauthorizes the binding and epoch, durably admits the event,
+   schedules capture/synchronization and the Plan 09 one-shot feedback cycle,
+   then returns a typed receipt and, only if it was already current before the
+   hook deadline, bounded already-ready guidance.
+6. The adapter renders that already-ready guidance only where the native event
+   permits it. Model invocation, GitHub/CI acquisition, Context Scout, and
+   feedback refresh always continue asynchronously; the synchronous hook never
+   waits for them. Spool acceptance, daemon admission, feedback completion,
+   and display remain distinct outcomes.
 
-- Provider-specific wire decoding, event-name mapping, matcher handling, and
-  legal response rendering.
-- `HookEventEnvelopeV2`, `WorktreeEventV1`, the host capability matrix, bounded
-  transport encoding, and the transport-only replay-spool record.
-- Bounded IPC to `tracedecayd`, strict serialization limits, fair replay, and
-  provider-safe behavior when the daemon is unavailable.
-- Direct fixtures for each supported host event, capability claim, replay
-  disposition, and response contract.
-- Hook-process latency, payload-size, spool, replay, and privacy telemetry that
-  contains no prompt, command, path, source, tool arguments, test log, or tool
-  output.
+## PR13 implementation slices
 
-## Does not own
+### Native edit and stop signaling
 
-- Database reads or writes, transcript ingestion, sync, catch-up, project
-  discovery, source parsing, sanitization, indexing, projection, query, policy
-  evaluation, readiness, placement, merge planning, or hint selection.
-- A business-event queue, second event authority, embedded daemon, writable
-  fallback store, or spool database. The append-only replay spool defined
-  below is the sole transport exception: it stores only validated
-  `HookEventEnvelopeV2` bytes plus checksum and offset, and cannot be queried
-  as product state.
-- Task plans, boards, dependency calculation, workflow execution, attempts,
-  leases, agent steering, merge application, conflict resolution, or
-  end-of-turn task completion.
-- Host installation/bundle management, tool catalogs, config mutation, network
-  services, or generic command execution.
-- Generated provider inventories, generated conformance matrices, source
-  parsers, workflow JavaScript, or plan-derived code.
+- Cut over real saved-edit and stop/pre-stop boundaries for each supported
+  host. Receipt-derived edit or test events are emitted only when the native
+  event supplies typed identity; otherwise the capability is truthfully
+  unavailable.
+- Keep host deadlines and payload limits hard. Hooks do not search, invoke a
+  model, run Git, scan a workspace, call GitHub, localize CI, calculate
+  proximity, or synchronize data.
+- Optional guidance fails open. A hook timeout or unavailable daemon never
+  becomes a false clean result or a false accepted receipt.
 
-## Canonical event contract
+The retained event families are session/workspace lifecycle, worktree-epoch
+change, native ref/commit observation, tool lifecycle, saved edit, test
+lifecycle, and advisory conflict observed/cleared. Events carry canonical IDs,
+bounded ranges or typed record IDs, digest, terminal state, and receipt
+references where available; they never carry source, paths, command text,
+arguments, environment, output, or test logs. Conflict observations remain
+advisory and create no lock, dependency, assignment, or merge decision.
 
-The hook can emit a cross-worktree event only after daemon admission returns a
-signed, session-bound `HookScopeBindingToken`. Admission may inspect a host
-workspace locator transiently through Plan 16, but neither the token, event
-identity, spool, nor receipt contains a path. A hook that has not obtained a
-binding reports `UnboundScope` and relies on authoritative host/Git catch-up;
-it never hashes a path into `WorktreeId` or persists a path for later replay.
+Wire compatibility remains normative on this production path:
 
-```rust
-pub struct HookEventEnvelopeV2 {
-    pub schema_version: HookEventSchemaVersion,
-    pub event_id: HookEventId,
-    pub producer: HookProducer,
-    pub provider_session_id: ProtectedSessionId,
-    pub task_id: Option<TaskId>,
-    pub project_id: ProjectId,
-    pub repository_id: RepositoryId,
-    pub worktree_id: WorktreeId,
-    pub worktree_epoch: WorktreeEpoch,
-    pub source_sequence: Option<ProviderSequence>,
-    pub ordering: HookOrdering,
-    pub observed_at: UtcMicros,
-    pub capability_snapshot: HostWorktreeEventCapabilitiesRevision,
-    pub authorization_epoch: AuthorizationEpoch,
-    pub binding_token: HookScopeBindingToken,
-    pub event: WorktreeEventV1,
-    pub idempotency_key: IdempotencyKey,
-    pub payload_digest: HookPayloadDigest,
-}
+- V1 decoding is bounded before allocation and validates the exact envelope,
+  payload, string, collection, and nesting limits. Structs use
+  `deny_unknown_fields` where the V1 contract specifies closed fields, and
+  wire enums are exhaustively matched; neither silently ignores a value that
+  could change identity, ordering, privacy, effect, or terminal meaning.
+- Every envelope carries an explicit schema revision. An older decoder rejects
+  every newer revision before interpreting its payload. Unsupported or
+  unknown versions are quarantined with bounded content-free reason and digest
+  metadata; they are never admitted, projected, acknowledged as accepted, or
+  replayed through a known decoder.
+- During the declared migration window, the current daemon can decode the
+  current and explicitly retained prior revision, while each writer emits only
+  its configured negotiated revision. There is no heuristic downgrade,
+  reinterpretation, or dual-write. Receipts preserve the decoded and emitted
+  revision, mixed-version replay remains idempotent, and expiry of the window
+  converts the retired revision to the same reject-and-quarantine path without
+  rewriting accepted history.
 
-pub enum WorktreeEventV1 {
-    TaskPlaced {
-        placement_revision: TaskPlacementRevision,
-    },
-    WorktreeEpochChanged {
-        previous: WorktreeEpoch,
-        current: WorktreeEpoch,
-        reason: WorktreeEpochChangeReason,
-    },
-    RefAdvanced {
-        ref_id: GitRefId,
-        previous: Option<CommitId>,
-        current: CommitId,
-    },
-    CommitObserved {
-        commit_id: CommitId,
-        parent_ids: Vec<CommitId>,
-        readiness: CommitReadinessObservation,
-    },
-    ToolLifecycle {
-        tool_call_id: ToolCallId,
-        tool_id: CatalogToolId,
-        phase: ToolPhase,
-        effect_receipt_id: Option<EffectReceiptId>,
-    },
-    EditObserved {
-        file_id: FileId,
-        ranges: Vec<ChangedRange>,
-        content_digest: ContentDigest,
-        saved: bool,
-    },
-    TestLifecycle {
-        test_run_id: TestRunId,
-        test_ids: Vec<TestId>,
-        phase: TestPhase,
-        outcome: Option<TestOutcome>,
-        receipt_id: Option<TestReceiptId>,
-    },
-    ConflictObserved {
-        conflict_id: ConflictId,
-        class: CrossWorktreeConflictClass,
-        other_worktree_id: Option<WorktreeId>,
-        file_ids: Vec<FileId>,
-        symbol_ids: Vec<SymbolId>,
-        observed_at: UtcMicros,
-        expires_at: UtcMicros,
-    },
-    ConflictCleared {
-        conflict_id: ConflictId,
-        clearing_evidence: ConflictClearingEvidenceId,
-    },
-}
-```
+Host capability remains versioned and evidence-backed:
 
-The envelope shape is versioned across delivery slices. Before PR17,
-`task_id` is always absent, `TaskPlaced` is unconstructable, and
-`CommitObserved.readiness` is `NotEvaluated`; the capability snapshot rejects
-any producer claiming otherwise. PR17 enables those fields/variants only after
-the Plan 24 ID, placement, and readiness contracts exist. Older decoders reject
-the newer capability revision rather than interpreting task/ready state.
+- Claude Code supplies session, post-tool, and stop boundaries plus native
+  tool lifecycle; typed edit/test identity may be receipt-derived.
+- Codex supplies session, post-tool, and turn boundaries plus native tool
+  lifecycle; typed edit/test identity may be receipt-derived.
+- Cursor supplies session/workspace and after-file-edit boundaries, native
+  saved edits, and receipt-derived tests. Native editor diagnostics remain a
+  Plan 35 surface rather than hook events.
+- Hermes supplies terminal receipts, turn completion/ingestion, and terminal
+  tool state; edit/test events require typed receipt identity.
+- Kiro supplies its proved session/workspace/prompt boundaries. Tool, edit, or
+  test events remain unavailable until a checked-in native event proves their
+  exact ordering and response contract.
 
-`TaskId` is present only when the daemon-issued binding independently
-authorizes that Plan 24 task/worktree relation. It is never inferred from a
-branch, worktree, session, card title, path, or commit. A hidden or denied task
-omits the field; possession of it grants no task read or mutation capability.
+Ref, commit, worktree epoch, and conflict truth is daemon-derived when the host
+does not expose a typed native record. No adapter parses shell text to
+manufacture Git authority. Unknown events remain explicit and harmless.
 
-`RefAdvanced` and `CommitObserved` carry native Git object/ref identity from
-Plan 36. `ToolLifecycle` never carries arguments, stdin, environment, output,
-or command text. `EditObserved` carries canonical `FileId`, ranges, and digest,
-never source or path. `TestLifecycle` carries typed IDs and terminal state,
-never logs. Conflict events are advisory observations; they create no lock,
-assignment, dependency, merge decision, or peer message.
+### Replay-safe daemon admission
 
-Every enum is exhaustive and `deny_unknown_fields`. A V1 record remains
-decodable only for the bounded migration window. Unknown versions are
-quarantined as content-free replay failures; unknown variants are never
-coerced into another event.
+- Preserve at-least-once transport with exact-duplicate convergence and
+  explicit conflict for reuse of an event identity with different bytes.
+- Reject stale bindings, stale worktree epochs, revoked authorization,
+  malformed or oversized events, and unsupported host capabilities before
+  product mutation.
+- Keep one checksummed, append-only, quota- and age-bounded transport spool.
+  It stores validated event bytes only, is not queryable product state, never
+  overwrites unacknowledged records, and replays fairly across sessions.
+- Reauthorize every replay against current scope, privacy, capability, and
+  epoch. Permanent rejection receives a tombstone receipt; transient pressure
+  leaves the record pending.
 
-## Host capability matrix
+Retain the accepted operational bounds: one event is at most 16 KiB; one replay
+batch is at most 64 records/256 KiB; the spool is bounded to 4,096 records or
+32 MiB per host, 1,024 records or 8 MiB per producer/session, and 24 hours.
+Replay is FIFO within a provider sequence and fair across sessions, with at
+most four sessions and one in-flight batch per session. Unknown ordering stays
+unknown rather than being inferred from arrival time.
 
-`HostWorktreeEventCapabilitiesV1` records, for each host and exact host
-version, every event family as `Native`, `ReceiptDerived`, `DaemonDerived`,
-`Unavailable`, or `Prohibited`. It also pins provider-event names, ordering
-support, response legality, maximum bytes, hard deadline, and the fixture
-digest. A hook may emit only a `Native` or `ReceiptDerived` family; the daemon
-alone emits `DaemonDerived` ref, commit, readiness, and conflict observations.
-`Unavailable` is truthful absence, not permission to infer from command text.
+Saved edits with the same worktree/file/content identity coalesce for 75 ms
+with a 250 ms maximum. Tool/test progress coalesces for 100 ms with a 500 ms
+maximum while every terminal event survives. Epoch, ref, commit, conflict, and
+clear events bypass debounce and use reserved admission capacity so progress
+traffic cannot starve them.
 
-The PR13 minimum matrix is:
+The synchronous path keeps the stricter measured host deadline and never
+exceeds 100 ms. At 25 ms without acknowledgement, an eligible event switches
+to spool append; replay never runs on the hook path. Backpressure is typed and
+never interpreted as acceptance. Its response contains only the admission/
+spool receipt, already-ready guidance, or a typed unavailable/backpressure
+state; it never contains the result of work started by that hook.
 
-- **Claude Code:** session-start and post-tool/stop boundaries are native;
-  tool lifecycle is native; edit and test lifecycle are receipt-derived only
-  when typed tool identity is present; ref, commit, and conflict are
-  daemon-derived; dependency readiness is unavailable until PR17.
-- **Codex:** session-start and post-tool/turn boundaries are native; tool
-  lifecycle is native; edit and test lifecycle are receipt-derived only when
-  typed tool identity is present; ref, commit, and conflict are daemon-derived;
-  dependency readiness is unavailable until PR17.
-- **Cursor:** session/workspace, after-file-edit, and supported shell/tool
-  boundaries are native; saved edits are native; tests are receipt-derived;
-  ref, commit, and conflict are daemon-derived; dependency readiness is
-  unavailable until PR17. Native editor diagnostics remain Plan 35 evidence,
-  not hook events.
-- **Hermes:** terminal receipt and turn completion/ingestion are native; tool
-  terminal state is native; edit/test events are receipt-derived only when
-  their typed IDs are present and otherwise unavailable; ref, commit, and
-  conflict are daemon-derived; dependency readiness is unavailable until PR17.
-- **Kiro:** prompt/session/workspace boundaries are native; tool, edit, and
-  test families remain unavailable until a checked-in native fixture proves
-  their exact event and ordering contract; ref, commit, and conflict are
-  daemon-derived; dependency readiness is unavailable until PR17.
+### Feedback delivery and cutover
 
-All five hosts obtain `ProjectId`, `RepositoryId`, `WorktreeId`, and epoch only
-from the daemon binding token. PR17 may add an optional authorized `TaskId` to
-any host without changing the host's event-family support. No host may claim
-native ref/commit/conflict authority from parsing a shell command.
+- Deliver only the single Plan 09 feedback result used by Plan 22 Scout,
+  Plan 35 diagnostics, and Plan 37 GitHub/CI/proximity findings. Hook-local
+  ranking or fallback logic is prohibited.
+- Deliver newly computed feedback through the daemon-owned asynchronous host
+  projection/read path. A later host callback, MCP/CLI/HTTP read, LSP/native
+  diagnostic publication, or explicit receipt inspection may observe it; the
+  original synchronous hook response is never held open for completion.
+- Preserve distinct dispositions for rejected, backpressured, daemon-accepted,
+  spool-accepted-for-replay, projected, effect-completed, and guidance
+  displayed. Only the owning daemon/application receipt may claim its effect.
+- Shadow the V2 path against current host behavior, cut over one proven native
+  event family at a time, and retain a direct rollback switch until receipt
+  parity passes.
+- Delete each path/command-derived compatibility planner after its native
+  family cuts over. No second hook authority or business-event queue remains.
 
-## Routing, replay, debounce, and backpressure
+## Replacement and deletion
 
-- The hook routes only to the daemon authority named by the binding token.
-  `WorktreeId` and epoch choose the logical stream; provider/session and
-  `source_sequence` choose its ordering domain. No event is broadcast to a
-  peer hook, worktree, agent, or LSP session.
-- Per producer/session ordering is preserved when the provider supplies a
-  sequence. Otherwise `ordering = Unknown`; arrival time never manufactures a
-  total order. Daemon projectors order ref/commit facts by native Git
-  identities and retain unknown ordering for unrelated tool/edit/test events.
-- Duplicate `(event_id, payload_digest)` is `ExactDuplicate`. Reuse of an
-  `event_id` with another digest is `IdempotencyConflict` and writes no product
-  state. A stale worktree or authorization epoch is `StaleEpoch`; it cannot be
-  rebound to the current path, ref, task, or worktree.
-- Edit observations for the same `(worktree_epoch, file_id, content_digest)`
-  coalesce for 75 ms with a 250 ms maximum wait. Tool and test progress
-  coalesce for 100 ms with a 500 ms maximum wait, but every terminal event is
-  retained. Ref advances, commit observations, conflict observed/cleared, and
-  epoch changes bypass debounce.
-- One envelope is at most 16 KiB. It contains at most 64 changed ranges, 128
-  test IDs, 64 file IDs, 64 symbol IDs, and 16 commit parents. A replay batch
-  contains at most 64 records and 256 KiB. Oversized input is rejected before
-  IPC or spool append and cannot be truncated into another semantic event.
-- The transport spool is an append-only, checksummed, length-prefixed log with
-  one writer lease per host process and daemon-only acknowledgement/compaction.
-  Bounds are 4,096 records or 32 MiB per host, 1,024 records or 8 MiB per
-  producer/session, and 24 hours maximum age. Reaching any limit returns
-  `SpoolFull`; unacknowledged records are never overwritten or silently
-  evicted.
-- Replay is FIFO within one producer sequence, fair round-robin across
-  sessions, at most four sessions concurrently and one in-flight batch per
-  session. The daemon reauthorizes the binding, task visibility, worktree
-  epoch, ref/commit identity, privacy revision, and event capability before
-  applying each replayed record. Permanent denial or stale epoch produces a
-  tombstone receipt and compaction; transient saturation leaves the record
-  pending.
-- Normal daemon admission reserves a high-priority class for epoch, ref,
-  commit, conflict, and terminal test/tool receipts. Progress/edit traffic
-  cannot starve it. Saturation returns `Backpressured` with retry class and
-  never a raw broken pipe interpreted as acceptance.
-- Cross-worktree encoding plus enqueue adds at most 5 ms at warm p95 and 20 ms
-  at p99. A local daemon acknowledgement has p95 <= 25 ms and p99 <= 75 ms.
-  At 25 ms without acknowledgement the hook switches to spool append; the
-  complete event path has a 100 ms hard deadline or the provider's stricter
-  measured PR6 deadline. Replay never runs on the synchronous hook path.
-- Optional guidance still fails open with no injected text. Event disposition
-  remains visible in telemetry and later status; failure to emit guidance is
-  never reported as event acceptance.
+- Remove the reserved pre-PR17 task-placement and ready-commit fields and
+  variants from the PR13 event contract.
+- Remove generated host matrices, exact schema/file inventories, milestone
+  gates, and placeholder hook benchmarks. Keep only checked-in native events
+  needed to prove every supported behavior and capability difference.
+- Remove hook-local sync, Git inference, conflict/proximity calculation,
+  policy fallback, and writable-store access as each provider cuts over.
+- This pruning removes no native event family, host capability, replay mode,
+  response behavior, compatibility obligation, operational bound, or safety
+  requirement.
 
-## Required behavior
+## Direct acceptance
 
-- **PR6 — baseline:** preserve current supported Codex, Claude Code, Cursor,
-  Hermes, and Kiro event semantics in direct redacted fixtures. Unknown events
-  remain explicit and harmless.
-- **PR6 — measurements:** record real hook wall time, daemon round-trip time,
-  payload bytes, timeout, and disposition without recording message content.
-- **PR6 — failure:** prove existing hooks do not corrupt state when duplicated,
-  reordered, interrupted, or invoked while the daemon is unavailable.
-- **PR13 — signal path:** decode one host event, validate the capability and
-  bounds, resolve a daemon-issued binding, assign idempotency/order identity,
-  send or spool `HookEventEnvelopeV2`, and stop. Session-start and file-change
-  hooks signal required work; they do not perform sync.
-- **PR13 — daemon authority:** `tracedecayd` owns durable capture,
-  sanitization, canonical scope resolution, sync, database transactions,
-  projections, conflict/proximity calculation, query freshness, policy
-  evaluation, and receipts.
-- **PR13 — acknowledgement:** `Accepted` means the daemon durably accepted the
-  exact event. `AcceptedForReplay` means only that the transport spool durably
-  accepted it. Neither means projection, test, merge, or task work completed.
-- **PR13 — unavailable daemon:** optional guidance fails open; eligible bound
-  events use the bounded replay spool and unbound/oversized/full-spool events
-  rely on authoritative host/Git catch-up. The hook creates no business writer.
-- **PR13 — response:** render only application-approved, sensitivity-safe
-  guidance supported by that host event. No hook-local reranking, readiness,
-  conflict, merge, or policy fallback.
-- **PR13 — isolation:** one busy session cannot block another. Bounds and
-  admission classes above are mandatory.
-- **PR13 — migration:** shadow V2 against current host behavior, cut over one
-  provider/event family at a time, and retain a direct rollback switch until
-  parity receipts pass.
-- **PR15 — multi-root:** every root gets an independent Plan 16 binding and
-  event stream. A multi-root host message is split only after canonical
-  resolution; denied or ambiguous roots cannot be counted, renamed, or folded
-  into an admitted neighbor.
-- **PR17 — task joins:** optional `TaskId` placement and ready-commit events
-  require Plan 24 version/readiness evidence and remain observations. They do
-  not schedule work or authorize the native-integration effect bound by Plan
-  21. GitHub stack capability and review topology are daemon-derived Plan
-  27/37 observations, never hook-derived branch or path inference.
+- A real saved edit and a real stop boundary on every supported host reach the
+  daemon and can render the same bounded feedback result where that host
+  supports active delivery.
+- Timing tests prove the synchronous response returns only a receipt or
+  already-ready guidance within the host deadline while delayed model,
+  GitHub/CI, Context Scout, and feedback work completes asynchronously and is
+  observed through a later supported delivery/read path.
+- Duplicate delivery, restart before/after spool append, daemon restart, stale
+  epoch, revoked authorization, saturation, spool exhaustion, malformed input,
+  and cancellation produce stable typed outcomes with no duplicate logical
+  event.
+- Wire fixtures prove bounded V1 decoding, exhaustive enum handling,
+  `deny_unknown_fields` on closed V1 structures, older-decoder rejection of
+  every newer revision, unknown-version quarantine, current/prior decoding
+  during the declared migration window, single-revision writes, and
+  reject-and-quarantine after window expiry without duplicate admission.
+- A daemon outage leaves the host responsive; eligible events replay later,
+  while unbound, oversized, expired, or full-spool cases rely on authoritative
+  host/Git catch-up and never create another writer.
+- Privacy canaries prove prompts, commands, source, paths, tool arguments or
+  output, test logs, credentials, reasoning, and hidden peer identity never
+  enter event, spool, telemetry, or error bytes.
+- Content-free telemetry preserves hook wall time, daemon round-trip, bytes,
+  queue/spool state, replay, timeout, capability, and disposition so latency
+  and reliability remain observable without payload capture.
+- Host adapters never open a TraceDecay database, run synchronization, invoke
+  Git/GitHub/CI, write another worktree, schedule work, or continue an agent.
+- The relevant host-hook integration tests plus the repository documentation
+  review are the PR13 aggregate gate; no standalone benchmark packet is an
+  acceptance artifact.
 
-## Files and dependency order
+## Later callable extensions
 
-- `crates/tracedecay-hooks/src/event.rs` owns the V2 envelope and exhaustive
-  event codec; `binding.rs` owns the opaque daemon-issued scope token;
-  `capabilities.rs` owns the checked-in host matrix; `transport.rs` owns IPC
-  admission; and `spool.rs` owns the append/replay/compaction mechanics.
-- Existing provider decoders in `src/hooks/{claude,codex,cursor,kiro}.rs`,
-  `src/hooks/post_tool_use.rs`, and the Hermes boundary lower provider wire
-  events into the crate contract. They retain no canonical identity or
-  application logic.
-- `src/daemon/hook_events/{mod,admission,replay,projector}.rs` owns daemon
-  binding validation, class-aware admission, replay acknowledgement, and
-  dispatch to Plan 09 application operations.
-- `src/mcp/hook_events.rs` becomes a compatibility decoder only and loses
-  sync, branch, path, command parsing, and effect planning when each family
-  cuts over.
-- Contract tests live in
-  `crates/tracedecay-hooks/tests/{event_contract,spool_contract,host_capabilities}.rs`;
-  integration tests live in
-  `tests/hooks_lsp_suite/{worktree_event_test,hook_replay_test,hook_backpressure_test}.rs`;
-  redacted native fixtures live under
-  `tests/fixtures/host_events/<host>/worktree-events-v2.json`.
+- **PR15:** a multi-root host resolves each root independently through Plan 16
+  and obtains one binding and event stream per admitted root. Denied or
+  ambiguous roots remain explicit and cannot be folded into a neighbor.
+- **PR17:** after Plan 24 ships task identity and Plan 32 ships runtime
+  receipts, a host may call their application operations with an independently
+  authorized task join. The event contract then adds the retained task-placed
+  and dependency-ready commit observations under a new capability revision.
+  `TaskId` is present only when the daemon independently authorizes the exact
+  task/worktree relation; readiness comes only from Plan 24/36 state and
+  completion only from an owning Plan 32 receipt. The hook remains an
+  observation transport and cannot schedule work, infer readiness, or
+  synthesize completion.
 
-Dependency order is fixed:
+## Safety constraints retained
 
-1. **M7.1 — schema/binding:** land exhaustive IDs/events, path-free codec,
-   capability matrix, and signed binding token; exit requires round-trip,
-   unknown-version, bounds, and path/secret canaries.
-2. **M7.2 — transport/spool:** land send-or-spool disposition, fair replay,
-   checksums, quotas, expiry, acknowledgement, and crash recovery; exit
-   requires at-least-once replay with no duplicate logical event.
-3. **M7.3 — daemon admission:** land epoch/authorization recheck,
-   idempotency, priority classes, and application receipts; exit requires no
-   hook-local sync, Git, task, conflict, or merge effect.
-4. **M7.4 — host cutover:** prove the checked-in matrix for all five hosts,
-   shadow each family, then delete its path/command-derived compatibility
-   planner.
-5. **M7.5 — PR15/PR17 extension:** enable independent multi-root bindings,
-   then optional TaskId/ready-commit joins after their owner contracts pass.
-
-## Acceptance
-
-- PR6 fixtures assert exact supported event mappings and provider response
-  legality against current host probes.
-- PR13 tests cover every envelope variant and capability state; duplicate,
-  reordered, concurrent, malformed, oversized, unknown, timed-out, cancelled,
-  daemon-down, daemon-restart, stale-epoch, authorization-revoked,
-  spool-full/expired/corrupt, replay-gap, and slow-consumer cases.
-- A five-host matrix fixture fails if an adapter emits an unavailable family,
-  parses shell text into Git authority, omits ordering limitations, or
-  advertises a capability without a direct native fixture.
-- Replay tests kill the hook before append, during append, after fsync, during
-  daemon send, after daemon commit, and before acknowledgement. Restart
-  produces one logical daemon event and one stable receipt.
-- Multi-root tests prove same-name repositories, linked worktrees, moved
-  paths, symlink swaps, detached refs, stale epochs, hidden neighbors, and
-  authorization narrowing never rebind an event or reveal hidden root counts.
-- Integration tests prove hooks never open TraceDecay databases, run
-  sync/catch-up, scan project files, load models, invoke Git, calculate
-  readiness/conflicts, apply a merge, write a peer worktree, or start child
-  workflows.
-- Privacy/schema tests prove prompts, commands, tool args/output, test logs,
-  credentials, private paths, source, reasoning, task narrative, and hidden
-  peer identity do not enter event/spool/telemetry/error bytes.
-- Performance tests enforce every envelope, queue, spool, debounce, replay,
-  and latency bound above under 1/8/32 concurrent sessions and daemon restart.
-- Cutover tests compare current and V2 event dispositions, daemon receipts,
-  and rendered guidance before each provider family switches.
-- Architecture tests reject database, store-adapter, query, policy-runtime,
-  executor, Git mutation, LSP, workflow-JavaScript, peer-transport, and
-  generated-inventory imports from hook adapters.
+- Hooks are bounded, replay-safe, privacy-safe, and never durable product
+  authorities.
+- Unsaved or dirty source content is never placed in the replay spool or any
+  durable feedback record.
+- Capability absence, daemon failure, stale scope, and partial processing are
+  reported honestly; none becomes clean or supported.
+- No hook performs GitHub writes, Git history mutation, agent continuation, or
+  peer-worktree coordination.

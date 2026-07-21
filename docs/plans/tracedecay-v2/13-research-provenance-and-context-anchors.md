@@ -79,8 +79,8 @@ and index rebuilds, while deletion and retention remain explicit.
    name, timestamp, or content hash. IDs never embed payload bytes.
 2. Owning ingress paths create anchors in the same authoritative transaction as the
    retained sanitized evidence and its source identity for that target kind. PR7
-   covers observation anchors; PR13 read-only GitHub and CI ingress covers those
-   evidence classes. Retry returns the existing anchor.
+   covers observation anchors; the read-only GitHub review and CI localization
+   journey adds those evidence classes. Retry returns the existing anchor.
 3. Each anchor records target kind, canonical owner, native aliases when available,
    occurred and ingested time, source generation, projection watermark, and evidence
    class. It does not copy the target payload.
@@ -988,9 +988,9 @@ project-local output recovery for truncated MCP/CLI responses and are never
 durable evidence identity, anchor targets, or storage keys. This plan does not
 own response-handle implementation.
 
-PR13 read-only GitHub thread/comment/reply and CI-failure ingress may create and
-resolve these anchors without [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) as
-a prerequisite. Plan 32 remains required only for PR17 write-side effects and
+Read-only GitHub thread/comment/reply and CI-failure ingress may create and
+resolve these anchors without [Plan 32](32-dynamic-workflow-runtime-and-sdk.md)
+as a prerequisite. Plan 32 is required only for admitted write-side effects and
 workflow automation outside this contract.
 
 ## Acceptance

@@ -7,16 +7,50 @@ Its versioned measurements and coverage semantics are the canonical product
 telemetry input to [PR20 performance optimization](33-end-to-end-performance-optimization.md).
 Versioned benchmark, profiler, and operating-system measurements remain valid
 PR20 evidence under that plan's measurement contract.
-Plan 33 also owns the dated optimization evidence/execution ledger and the
-distinction between completed evidence, active near-term implementation,
-and unaccepted PR20 candidates. Those ledger states are planning evidence, not
-new telemetry events, rollout states, or delivery authority. Product owners
-emit through this plan's existing schemas; Plan 33 freezes workloads, compares
-effects, and decides performance disposition without changing Plan 26 labels.
+Plan 33 owns no execution ledger. It consumes accepted production
+observability and comparison artifacts, freezes workloads, compares effects,
+and records only the accepted/provisional/rejected comparison disposition
+required by its direct optimization journey. Those artifacts are not new
+telemetry events, rollout states, planning authority, or a generated delivery
+tracker. Product owners emit through this plan's existing schemas, and Plan 33
+never changes Plan 26 labels.
 
 ## Outcome
 
 Every operational and product metric states what was measured, over which population and horizon, at which watermark, with what coverage. Unknown, partial, stale, sampled, or capped data stays visible and can never render as a trustworthy zero.
+
+## Delivery-first product journeys
+
+The event, projection, descriptor, privacy, retention, label, and measurement
+contracts below remain binding. They ship as instrumentation and read models on
+real product paths, not as schema-only, fixture-only, projector-only, or
+promotion-gate milestones.
+
+**PR14 finding → evidence → Doctor → confirmed remediation:** production
+operations emit through the canonical observability boundary; denominator-safe
+projectors build the exact read models consumed by CLI, MCP, HTTP, Observatory,
+Costs, Settings, and the one Doctor application kernel; the user drills from a
+finding to safe evidence, confirms an owner remediation, follows its receipt,
+and sees post-operation health, usage, latency, resource, token, cost, drop,
+coverage, and unavailable state reconcile at pinned watermarks. Every
+retrieval, adoption, automation, performance, attestation, privacy, retention,
+rejected-argument, LSP, feedback-cycle, and provider measurement specified
+below remains attached to its owning production action and visible through the
+appropriate PR14 view.
+
+**PR17 work item → admitted execution → observed outcome → reviewed
+replanning:** Plan 24 work identity and evidence flow into a real Plan 32 run;
+the selected provider adapter emits requested/actual route, negotiation,
+queue/admission, lease, progress, heartbeat, stream/artifact, cancellation,
+recovery, terminal, resource, token, cost, topology, integration, test/CI,
+review, and outcome observations; canonical projectors expose denominator,
+coverage, censoring, selection/override, drift, and safe anchors; Work,
+Observatory, and Costs render those same values; and Plan 24 may propose a
+versioned graph change that still requires explicit user disposition.
+
+The detailed semantics below are the coverage audit for those journeys. No
+metric, label, dimension, cohort, compatibility surface, privacy rule,
+retention rule, or unavailable state is reduced or deferred by this framing.
 
 ## Owns
 
@@ -387,23 +421,21 @@ Exact implementation and test ownership is:
   `integration-operation-matrix.json`; missing or zero imported cases fails
   the suite.
 
-Delivery milestones are exact:
-
-1. **M26.T1 — event contract:** land the domain file, canonical
-   serialization/digest fixtures, exhaustive enum matches, prohibited-field
-   schema scan, and idempotency tests.
-2. **M26.T2 — projector:** land deterministic joins, interval union,
-   censoring, fixed buckets, support/coverage floors, late correction,
-   retention, and rebuild equality over every Plan 14 topology fixture.
-3. **M26.T3 — owner emission and parity:** Plans 24/32/36/37 emit through the
-   existing application boundary; CLI/MCP/HTTP/Observatory/Costs return the
-   same descriptors, values, denominators, coverage, and unavailable reasons.
-4. **M26.T4 — promotion gate:** execute concurrency, duplicate-work,
-   conflict confusion-matrix, integration, stale-stack, blocked, rerun, leak,
-   fanout, replay/drop, privacy-canary, and cardinality fault fixtures on one
-   pinned build. Any duplicate committed effect, privacy canary leak,
-   identity-bearing metric label, formula drift, or cross-transport mismatch
-   blocks promotion.
+This contract ships through the PR17 executable Work loop: the domain event
+types, canonical serialization, exhaustive enum handling, prohibited-field
+checks, and idempotency are implemented with the first real owner emission;
+deterministic joins, interval union, censoring, fixed buckets,
+support/coverage floors, late correction, retention, and rebuild equality are
+implemented with the first Work/Observatory/Costs query that consumes them;
+Plans 24/32/36/37 emit through the existing application boundary and
+CLI/MCP/HTTP/Observatory/Costs return the same descriptors, values,
+denominators, coverage, and unavailable reasons; and the aggregate product
+test exercises concurrency, duplicate work/effects, conflict outcomes,
+integration, stale stacks, blocked intervals, reruns, leaks, fanout,
+replay/drop, privacy canaries, cardinality, and cross-transport parity on the
+same production path. Any duplicate committed effect, privacy canary leak,
+identity-bearing metric label, formula drift, or cross-transport mismatch
+blocks acceptance.
 
 ### Concrete event and type contract
 

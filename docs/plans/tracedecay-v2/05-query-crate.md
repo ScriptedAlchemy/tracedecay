@@ -24,12 +24,12 @@
 - PR11 composes query use cases in application and policy. PR12 exposes them
   through CLI, MCP, HTTP, LSP, export, and live non-dashboard adapters.
   PR14 first ships dashboard binding and dashboard parity.
-- PR17 may reuse these shared scope, budget, cancellation, cursor, watermark,
-  merge, and coverage primitives to execute Plan 24 task/work requests. Plan 24
-  owns those typed requests, graph traversal/projection semantics, lenses,
-  readiness meaning, and legal pivots.
-- Each retrieval slice records representative latency, throughput, resource,
-  and no-op baselines for [PR20](33-end-to-end-performance-optimization.md).
+- The task/work delivery journey reuses these shared scope, budget,
+  cancellation, cursor, watermark, merge, and coverage primitives to execute
+  Plan 24 requests. Plan 24 owns those typed requests, graph
+  traversal/projection semantics, lenses, readiness meaning, and legal pivots.
+- Production retrieval slices emit representative latency, throughput,
+  resource, and no-op measurements directly to end-to-end performance work.
 - If extracted, `tracedecay-query` is a transport-neutral execution library. It
   does not replace domain-specific query contracts with one universal language.
 - Staged execution: PR8 operates on current-project/single-root scope with
@@ -223,7 +223,7 @@ Every product surface can run the same bounded query use case and receive determ
   CLI JSON, MCP JSON, HTTP JSON, LSP, export, and live adapters and compare
   semantic results before rendering. PR14 contract tests add dashboard binding
   and dashboard parity on the same typed requests.
-- PR17 contract tests prove Plan 24 requests retain identical selected entity
+- Task/work composition tests prove Plan 24 requests retain identical selected entity
   IDs, versions, scope, watermarks, coverage, and ordering when run through
   shared execution primitives, while no task/board/request semantics enter
   Plan 05. Counterexamples prove unknown coverage never becomes zero or
