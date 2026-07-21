@@ -27,9 +27,11 @@ interruption.
 2. A dry run reports exact files/settings it owns, conflicts, backups, and the
    rollback plan. Ambiguous ownership or a competing plugin requires explicit
    confirmation; discovery never grants authority.
-3. Apply verifies signed bundle digests and the pinned configuration revision,
-   writes only TraceDecay-owned state atomically, records a receipt, and
-   verifies native registration.
+3. Apply verifies the embedded bundle's schema, version, declared capabilities,
+   content digest, and pinned configuration revision, writes only
+   TraceDecay-owned state atomically, records a receipt, and verifies native
+   registration. The digest detects corruption; it is not a separate origin or
+   release-signing authority.
 4. On failure, rollback restores the backup and leaves unrelated host
    configuration untouched. Repair replays the same ownership-aware operation;
    uninstall removes only TraceDecay-owned state.
@@ -84,6 +86,14 @@ credential scopes fail before network access.
 
 - Generate thin host-native artifacts from the existing integration manifest
   and pin them to compatible TraceDecay protocol and catalog revisions.
+- Ship every PR13 first-party host bundle as a versioned embedded asset in the
+  trusted TraceDecay binary. PR13 has no detached bundle signature, bundle trust
+  root, delegated release key, or bundle-key revocation path. Content digests
+  detect accidental corruption; schema, version, and capability checks enforce
+  compatibility.
+- Reject external and third-party bundle loading in PR13. If a real external
+  distribution path is added later, that feature defines and validates its own
+  trust model instead of predeclaring one here.
 - Keep a mandatory MCP-free core path with CLI, hooks, skills, and daemon API
   bindings. Optional MCP companions install and uninstall independently and
   use the same binary, daemon, authorization, and application operations.
@@ -130,12 +140,11 @@ credential scopes fail before network access.
   follows instruction/rules ownership. Dry run, repair, and rollback preserve
   all unrelated host configuration and restore the exact prior analyzer
   selection.
-- Preserve the self-service `configure -> dry-run -> sign -> apply` flow over
-  Plan 20's protected configuration mutation. Apply verifies actor, base
+- Use `configure -> dry-run -> confirm -> apply` for host lifecycle changes
+  over Plan 20's protected configuration mutation. Apply verifies actor, base
   revision, scope, authorization/policy epoch, effective configuration
-  digests, signature trust/revocation, expiry, and the exact change plan.
-  Private signing keys and raw replacement rules never enter configuration or
-  host artifacts.
+  digests, expiry, and the exact confirmed change plan. Raw replacement rules
+  never enter configuration or host artifacts.
 - Detect extension and registration conflicts before mutation. Never disable,
   replace, adopt, install, or upgrade third-party software silently.
 - Keep service-manager and daemon lifecycle separate from host registration.
@@ -177,20 +186,20 @@ freshness, coverage, latency/cost class, authorization, watermark, and evidence
 drilldown. Event acceptance targets projected availability at p95 <= 5 s,
 scheduled incremental refresh at p95 <= 60 s, and complete 10,000-item
 whole-root refresh at p95 <= 15 minutes; stale begins at two minutes and hard
-expiry at one hour unless a stricter signed configuration applies. A stale or
-expired source remains visible and never becomes clean empty.
+expiry at one hour unless a stricter validated configuration applies. A stale
+or expired source remains visible and never becomes clean empty.
 
 Each attempt receives a durable, content-free receipt with refresh identity,
 mode, cursor before/after, generation, capture receipts, counts, disposition,
 failure class, authorization/configuration/catalog identity, and next retry.
 Replaying an idempotency key returns the existing terminal receipt. Bounded
 full-jitter transport retry starts from one second and caps at five minutes;
-`Retry-After` caps at 15 minutes. The signed defaults permit eight attempts
-and quarantine at eight, with validated limits no greater than 16.
-Authorization revocation, privacy violation, and invalid signatures quarantine
-immediately; the same redacted schema drift on three consecutive attempts,
-poison data, exhausted retries, or a failed single cursor-recovery reconcile
-quarantines the affected root while
+`Retry-After` caps at 15 minutes. The built-in validated defaults permit eight
+attempts and quarantine at eight, with validated limits no greater than 16.
+Authorization revocation, privacy violation, and invalid configuration
+quarantine immediately; the same redacted schema drift on three consecutive
+attempts, poison data, exhausted retries, or a failed single cursor-recovery
+reconcile quarantines the affected root while
 preserving its last generation. Only an explicit authorized repair against a
 newer valid configuration releases quarantine. Connector failures never enter
 the host observation replay spool.
@@ -253,9 +262,10 @@ the host observation replay spool.
   before, during, and after install, repair, rollback, and uninstall while
   TraceDecay findings still project.
 - Core-only and each optional companion install, update, repair, and uninstall
-  independently. Interrupted and repeated operations converge; invalid
-  signatures, protocol skew, ownership conflicts, and partial installs fail
-  before unsafe mutation and roll back only TraceDecay-owned state.
+  independently. Interrupted and repeated operations converge; corrupt
+  content, schema/version/capability mismatch, protocol skew, ownership
+  conflicts, and partial installs fail before unsafe mutation and roll back
+  only TraceDecay-owned state.
 - Dogfood the official TraceDecay install, upgrade, repair, and uninstall
   operations—not hand edits or test-only installers—against every supported
   host, explicitly including Kimi Code and OpenCode, on Linux and Windows and
@@ -286,9 +296,9 @@ the host observation replay spool.
   atomic cursor/generation publication, consistency-token or matching
   double-scan behavior, delete safety, freshness/coverage reporting,
   idempotent receipts, bounded retry, quarantine, and explicit repair.
-- Signed configuration tests prove deny precedence, scope containment,
-  trust-key revocation, expiry, CAS/idempotency, and no ambient host/PATH/PID/
-  CWD authority.
+- Configuration tests prove deny precedence, scope containment, authorization
+  revocation, expiry, CAS/idempotency, and no ambient host/PATH/PID/CWD
+  authority.
 - Security checks prove rejected GitHub writes make zero network calls and
   host processes/hooks cannot open stores, widen authorization, or become
   daemon writers.
