@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{self, error::TrySendError};
 use tracedecay_application::feedback::FeedbackObservationPort;
 use tracedecay_domain::feedback::{
     FeedbackCycleObservationV1, FeedbackEvaluationInputV1, FeedbackSavedEvaluationV1,
@@ -128,34 +129,102 @@ pub trait Plan26FeedbackObservationQueue {
     }
 }
 
+/// Daemon/store-owned durable observation ingress. The sink is responsible for
+/// atomically retaining the idempotency key with the queued observation and
+/// for preserving replay protection across process restart. This adapter has
+/// no database handle, filesystem path, or retry worker of its own.
+pub trait DurablePlan26FeedbackObservationSinkV1 {
+    fn enqueue_durable_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome;
+
+    fn replay_durable_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome {
+        self.enqueue_durable_feedback_observation(envelope)
+    }
+}
+
+/// Concrete adapter from the durable daemon ingress to the application's
+/// non-blocking queue boundary. Corrupt or privacy-invalid values are dropped
+/// before the sink receives them, so a replay never turns bad input into state.
+pub struct DurablePlan26FeedbackObservationQueueAdapterV1<S> {
+    sink: S,
+}
+
+impl<S> DurablePlan26FeedbackObservationQueueAdapterV1<S> {
+    pub fn new(sink: S) -> Self {
+        Self { sink }
+    }
+}
+
+impl<S> Plan26FeedbackObservationQueue for DurablePlan26FeedbackObservationQueueAdapterV1<S>
+where
+    S: DurablePlan26FeedbackObservationSinkV1,
+{
+    fn enqueue_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome {
+        if envelope.validate().is_none() {
+            FeedbackObservationSinkOutcome::Dropped
+        } else {
+            self.sink.enqueue_durable_feedback_observation(envelope)
+        }
+    }
+
+    fn replay_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome {
+        if envelope.validate().is_none() {
+            FeedbackObservationSinkOutcome::Dropped
+        } else {
+            self.sink.replay_durable_feedback_observation(envelope)
+        }
+    }
+}
+
 /// Compatibility name for existing root-owned observation sinks.
 pub use Plan26FeedbackObservationQueue as FeedbackObservationEventSink;
 
 #[derive(Default)]
-struct BoundedFeedbackObservationQueueState {
-    pending: VecDeque<FeedbackObservationEnvelopeV1>,
+struct BoundedFeedbackObservationReplayWindow {
     replay_order: VecDeque<String>,
     replay_identities: BTreeSet<String>,
 }
 
 /// A bounded, process-local Plan-26 ingress queue.
 ///
-/// The queue never blocks producers. It retains replay identities for its
-/// most recently accepted `capacity` envelopes, so concurrent retries converge
-/// while an event is queued or immediately after dequeue. The daemon's durable
-/// observability authority remains responsible for replay protection across
-/// restarts and beyond this bounded in-memory window.
+/// The bounded channel never waits for capacity. A short replay-window
+/// critical section serializes duplicate admission; contention is not overflow
+/// and is never counted as observation loss. Replay identities remain active
+/// for the most recently accepted `capacity` envelopes, including immediately
+/// after dequeue. The daemon's durable observability authority remains
+/// responsible for replay protection across restarts and beyond this window.
 pub struct BoundedPlan26FeedbackObservationQueue {
     capacity: usize,
-    state: Mutex<BoundedFeedbackObservationQueueState>,
+    sender: Option<mpsc::Sender<FeedbackObservationEnvelopeV1>>,
+    receiver: Mutex<Option<mpsc::Receiver<FeedbackObservationEnvelopeV1>>>,
+    replay_window: Mutex<BoundedFeedbackObservationReplayWindow>,
     dropped_count: AtomicU64,
 }
 
 impl BoundedPlan26FeedbackObservationQueue {
     pub fn new(capacity: usize) -> Self {
+        let (sender, receiver) = if capacity == 0 {
+            (None, None)
+        } else {
+            let (sender, receiver) = mpsc::channel(capacity);
+            (Some(sender), Some(receiver))
+        };
         Self {
             capacity,
-            state: Mutex::new(BoundedFeedbackObservationQueueState::default()),
+            sender,
+            receiver: Mutex::new(receiver),
+            replay_window: Mutex::new(BoundedFeedbackObservationReplayWindow::default()),
             dropped_count: AtomicU64::new(0),
         }
     }
@@ -165,7 +234,9 @@ impl BoundedPlan26FeedbackObservationQueue {
     }
 
     pub fn pending_len(&self) -> usize {
-        self.state.lock().map_or(0, |state| state.pending.len())
+        self.sender.as_ref().map_or(0, |sender| {
+            sender.max_capacity().saturating_sub(sender.capacity())
+        })
     }
 
     /// Explicit bounded-overflow accounting for the daemon's Plan-26 metrics.
@@ -177,38 +248,52 @@ impl BoundedPlan26FeedbackObservationQueue {
     /// observability authority. Its replay identity remains retained in the
     /// bounded window, so immediate delivery retries converge locally.
     pub fn take_next(&self) -> Option<FeedbackObservationEnvelopeV1> {
-        self.state
+        self.receiver
             .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()?
+            .try_recv()
             .ok()
-            .and_then(|mut state| state.pending.pop_front())
     }
 
     fn enqueue(&self, envelope: FeedbackObservationEnvelopeV1) -> FeedbackObservationSinkOutcome {
-        let Ok(mut state) = self.state.try_lock() else {
-            self.record_drop();
-            return FeedbackObservationSinkOutcome::Dropped;
-        };
         let Some(identity) = envelope.replay_identity().map(str::to_owned) else {
             self.record_drop();
             return FeedbackObservationSinkOutcome::Dropped;
         };
-        if state.replay_identities.contains(&identity) {
-            return FeedbackObservationSinkOutcome::Duplicate;
-        }
-        if state.pending.len() >= self.capacity {
+        let Some(sender) = self.sender.as_ref() else {
             self.record_drop();
             return FeedbackObservationSinkOutcome::Dropped;
+        };
+        let mut replay_window = self
+            .replay_window
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if replay_window.replay_identities.contains(&identity) {
+            return FeedbackObservationSinkOutcome::Duplicate;
         }
 
-        state.pending.push_back(envelope);
-        state.replay_identities.insert(identity.clone());
-        state.replay_order.push_back(identity);
-        while state.replay_order.len() > self.capacity {
-            if let Some(expired) = state.replay_order.pop_front() {
-                state.replay_identities.remove(&expired);
+        replay_window.replay_identities.insert(identity.clone());
+        match sender.try_send(envelope) {
+            Ok(()) => {
+                replay_window.replay_order.push_back(identity);
+                while replay_window.replay_order.len() > self.capacity {
+                    if let Some(expired) = replay_window.replay_order.pop_front() {
+                        replay_window.replay_identities.remove(&expired);
+                    }
+                }
+                FeedbackObservationSinkOutcome::Enqueued
+            }
+            Err(TrySendError::Full(_)) => {
+                replay_window.replay_identities.remove(&identity);
+                self.record_drop();
+                FeedbackObservationSinkOutcome::Dropped
+            }
+            Err(TrySendError::Closed(_)) => {
+                replay_window.replay_identities.remove(&identity);
+                FeedbackObservationSinkOutcome::Dropped
             }
         }
-        FeedbackObservationSinkOutcome::Enqueued
     }
 
     fn record_drop(&self) {
@@ -226,42 +311,6 @@ impl Plan26FeedbackObservationQueue for BoundedPlan26FeedbackObservationQueue {
         envelope: FeedbackObservationEnvelopeV1,
     ) -> FeedbackObservationSinkOutcome {
         self.enqueue(envelope)
-    }
-
-    fn replay_feedback_observation(
-        &self,
-        envelope: FeedbackObservationEnvelopeV1,
-    ) -> FeedbackObservationSinkOutcome {
-        let Ok(mut state) = self.state.try_lock() else {
-            self.record_drop();
-            return FeedbackObservationSinkOutcome::Dropped;
-        };
-        let Some(identity) = envelope.replay_identity().map(str::to_owned) else {
-            self.record_drop();
-            return FeedbackObservationSinkOutcome::Dropped;
-        };
-        if state
-            .pending
-            .iter()
-            .any(|pending| pending.idempotency_key == envelope.idempotency_key)
-        {
-            return FeedbackObservationSinkOutcome::Duplicate;
-        }
-        if state.pending.len() >= self.capacity {
-            self.record_drop();
-            return FeedbackObservationSinkOutcome::Dropped;
-        }
-
-        state.pending.push_back(envelope);
-        if state.replay_identities.insert(identity.clone()) {
-            state.replay_order.push_back(identity);
-            while state.replay_order.len() > self.capacity {
-                if let Some(expired) = state.replay_order.pop_front() {
-                    state.replay_identities.remove(&expired);
-                }
-            }
-        }
-        FeedbackObservationSinkOutcome::Enqueued
     }
 }
 
@@ -292,7 +341,13 @@ where
 mod tests {
     use std::cell::Cell;
     use std::cell::RefCell;
+    use std::collections::{BTreeSet, VecDeque};
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::Barrier;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
 
     use tracedecay_application::feedback::FeedbackObservationPort;
     use tracedecay_domain::feedback::{
@@ -452,6 +507,34 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct RestartSafeSink {
+        replay_identities: Arc<Mutex<BTreeSet<String>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl DurablePlan26FeedbackObservationSinkV1 for RestartSafeSink {
+        fn enqueue_durable_feedback_observation(
+            &self,
+            envelope: FeedbackObservationEnvelopeV1,
+        ) -> FeedbackObservationSinkOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let identity = envelope.replay_identity().unwrap().to_owned();
+            if self.replay_identities.lock().unwrap().insert(identity) {
+                FeedbackObservationSinkOutcome::Enqueued
+            } else {
+                FeedbackObservationSinkOutcome::Duplicate
+            }
+        }
+
+        fn replay_durable_feedback_observation(
+            &self,
+            envelope: FeedbackObservationEnvelopeV1,
+        ) -> FeedbackObservationSinkOutcome {
+            self.enqueue_durable_feedback_observation(envelope)
+        }
+    }
+
     #[test]
     fn durable_observation_mapping_is_replay_stable_and_sink_suppresses_overlays() {
         let input = saved_input();
@@ -507,21 +590,12 @@ mod tests {
             FeedbackObservationSinkOutcome::Dropped
         );
         assert_eq!(queue.dropped_count(), 1);
-        assert_eq!(queue.take_next(), Some(envelope));
+        assert_eq!(queue.take_next(), Some(envelope.clone()));
         assert_eq!(
-            queue.replay_feedback_observation(
-                feedback_observation_envelope(
-                    &input,
-                    FeedbackCycleObservationV1::trigger(&input).unwrap(),
-                )
-                .unwrap(),
-            ),
-            FeedbackObservationSinkOutcome::Enqueued
+            queue.replay_feedback_observation(envelope),
+            FeedbackObservationSinkOutcome::Duplicate
         );
-        assert_eq!(
-            queue.take_next().map(|queued| queued.observation),
-            Some(observation.clone())
-        );
+        assert_eq!(queue.take_next(), None);
         assert_eq!(
             queue.enqueue_feedback_observation(stage.clone()),
             FeedbackObservationSinkOutcome::Enqueued
@@ -537,19 +611,194 @@ mod tests {
         adapter.observe(&input, observation);
         assert_eq!(dropped.get(), 1);
 
-        let contended = BoundedPlan26FeedbackObservationQueue::new(1);
-        let guard = contended.state.lock().unwrap();
+        let contended = Arc::new(BoundedPlan26FeedbackObservationQueue::new(1));
+        let guard = contended.replay_window.lock().unwrap();
+        let started = Arc::new(Barrier::new(2));
+        let worker_queue = Arc::clone(&contended);
+        let worker_started = Arc::clone(&started);
+        let contended_envelope = feedback_observation_envelope(
+            &input,
+            FeedbackCycleObservationV1::trigger(&input).unwrap(),
+        )
+        .unwrap();
+        let worker = thread::spawn(move || {
+            worker_started.wait();
+            worker_queue.enqueue_feedback_observation(contended_envelope)
+        });
+        started.wait();
+        thread::yield_now();
+        assert_eq!(contended.dropped_count(), 0);
+        drop(guard);
         assert_eq!(
-            contended.enqueue_feedback_observation(
-                feedback_observation_envelope(
-                    &input,
-                    FeedbackCycleObservationV1::trigger(&input).unwrap(),
-                )
-                .unwrap(),
-            ),
+            worker.join().unwrap(),
+            FeedbackObservationSinkOutcome::Enqueued
+        );
+        assert_eq!(contended.dropped_count(), 0);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum QueueAction {
+        Enqueue(usize),
+        Replay(usize),
+        Take,
+    }
+
+    struct QueueModel {
+        capacity: usize,
+        pending: VecDeque<usize>,
+        replay_order: VecDeque<usize>,
+        replay_identities: BTreeSet<usize>,
+        dropped_count: u64,
+    }
+
+    impl QueueModel {
+        fn new(capacity: usize) -> Self {
+            Self {
+                capacity,
+                pending: VecDeque::new(),
+                replay_order: VecDeque::new(),
+                replay_identities: BTreeSet::new(),
+                dropped_count: 0,
+            }
+        }
+
+        fn submit(&mut self, identity: usize) -> FeedbackObservationSinkOutcome {
+            if self.replay_identities.contains(&identity) {
+                return FeedbackObservationSinkOutcome::Duplicate;
+            }
+            if self.pending.len() >= self.capacity {
+                self.dropped_count += 1;
+                return FeedbackObservationSinkOutcome::Dropped;
+            }
+
+            self.pending.push_back(identity);
+            self.replay_identities.insert(identity);
+            self.replay_order.push_back(identity);
+            while self.replay_order.len() > self.capacity {
+                let expired = self.replay_order.pop_front().unwrap();
+                self.replay_identities.remove(&expired);
+            }
+            FeedbackObservationSinkOutcome::Enqueued
+        }
+    }
+
+    #[test]
+    fn bounded_queue_matches_model_across_enqueue_replay_and_take_sequences() {
+        let input = saved_input();
+        let envelopes = [
+            feedback_observation_envelope(
+                &input,
+                FeedbackCycleObservationV1::trigger(&input).unwrap(),
+            )
+            .unwrap(),
+            feedback_observation_envelope(
+                &input,
+                FeedbackCycleObservationV1::stage(&input, FeedbackEvaluationStageV1::Admission)
+                    .unwrap(),
+            )
+            .unwrap(),
+            feedback_observation_envelope(
+                &input,
+                FeedbackCycleObservationV1::stage(&input, FeedbackEvaluationStageV1::Diagnostics)
+                    .unwrap(),
+            )
+            .unwrap(),
+        ];
+        let actions = [
+            QueueAction::Enqueue(0),
+            QueueAction::Replay(0),
+            QueueAction::Enqueue(1),
+            QueueAction::Replay(1),
+            QueueAction::Enqueue(2),
+            QueueAction::Replay(2),
+            QueueAction::Take,
+        ];
+
+        for first in actions {
+            for second in actions {
+                for third in actions {
+                    for fourth in actions {
+                        let sequence = [first, second, third, fourth];
+                        let queue = BoundedPlan26FeedbackObservationQueue::new(2);
+                        let mut model = QueueModel::new(2);
+
+                        for action in sequence {
+                            match action {
+                                QueueAction::Enqueue(identity) => assert_eq!(
+                                    queue.enqueue_feedback_observation(envelopes[identity].clone()),
+                                    model.submit(identity),
+                                    "sequence {sequence:?}"
+                                ),
+                                QueueAction::Replay(identity) => assert_eq!(
+                                    queue.replay_feedback_observation(envelopes[identity].clone()),
+                                    model.submit(identity),
+                                    "sequence {sequence:?}"
+                                ),
+                                QueueAction::Take => assert_eq!(
+                                    queue.take_next().map(|envelope| envelope.idempotency_key),
+                                    model.pending.pop_front().map(|identity| envelopes[identity]
+                                        .idempotency_key
+                                        .clone()),
+                                    "sequence {sequence:?}"
+                                ),
+                            }
+                            assert_eq!(
+                                queue.pending_len(),
+                                model.pending.len(),
+                                "sequence {sequence:?}"
+                            );
+                            assert_eq!(
+                                queue.dropped_count(),
+                                model.dropped_count,
+                                "sequence {sequence:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let zero_capacity = BoundedPlan26FeedbackObservationQueue::new(0);
+        assert_eq!(
+            zero_capacity.enqueue_feedback_observation(envelopes[0].clone()),
             FeedbackObservationSinkOutcome::Dropped
         );
-        assert_eq!(contended.dropped_count(), 1);
-        drop(guard);
+        assert_eq!(zero_capacity.pending_len(), 0);
+        assert_eq!(zero_capacity.dropped_count(), 1);
+    }
+
+    #[test]
+    fn durable_sink_adapter_replays_across_restart_and_rejects_corruption() {
+        let input = saved_input();
+        let envelope = feedback_observation_envelope(
+            &input,
+            FeedbackCycleObservationV1::trigger(&input).unwrap(),
+        )
+        .unwrap();
+        let sink = RestartSafeSink::default();
+        let first_adapter = DurablePlan26FeedbackObservationQueueAdapterV1::new(sink.clone());
+        assert_eq!(
+            first_adapter.enqueue_feedback_observation(envelope.clone()),
+            FeedbackObservationSinkOutcome::Enqueued
+        );
+
+        let restarted_adapter = DurablePlan26FeedbackObservationQueueAdapterV1::new(sink.clone());
+        assert_eq!(
+            restarted_adapter.replay_feedback_observation(envelope.clone()),
+            FeedbackObservationSinkOutcome::Duplicate
+        );
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 2);
+
+        let mut corrupted = envelope;
+        corrupted.schema_version = 0;
+        assert_eq!(
+            restarted_adapter.enqueue_feedback_observation(corrupted),
+            FeedbackObservationSinkOutcome::Dropped
+        );
+        assert_eq!(
+            sink.calls.load(Ordering::SeqCst),
+            2,
+            "corrupt envelopes must not reach a durable sink"
+        );
     }
 }
