@@ -19,15 +19,29 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
   cancel-in-progress: false
 
 jobs:
+  validate-stable-release:
+    name: Validate stable release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate manual stable rebuild
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          test "$(gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" --json isPrerelease --jq .isPrerelease)" = false
+
   build:
     name: Build ${{ matrix.name }}
     if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    needs: validate-stable-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

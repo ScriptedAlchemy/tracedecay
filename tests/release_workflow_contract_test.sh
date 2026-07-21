@@ -61,6 +61,36 @@ for name, text in [("stable", stable), ("beta", beta)]:
     if expected not in text:
         raise SystemExit(f"{name} release identity must normalize to the release tag")
 
+if "  validate-stable-release:" not in stable:
+    raise SystemExit("stable manual rebuild must have a validation job")
+stable_validation = stable.split("  validate-stable-release:", 1)[1].split("\n  build:", 1)[0]
+for item in [
+    "Validate manual stable rebuild",
+    "if: github.event_name == 'workflow_dispatch'",
+    'gh release view "$RELEASE_TAG"',
+    "--json isPrerelease",
+    "--jq .isPrerelease",
+    '= false',
+]:
+    if item not in stable_validation:
+        raise SystemExit(f"stable manual rebuild contract missing {item!r}")
+
+for job_name, next_job in [("build", "package-workspace")]:
+    job = stable.split(f"  {job_name}:", 1)[1].split(f"\n  {next_job}:", 1)[0]
+    if "needs: validate-stable-release" not in job:
+        raise SystemExit(
+            f"stable {job_name} must wait for manual release validation before checkout/build"
+        )
+
+if "  package-workspace:" in stable:
+    package_job = stable.split("  package-workspace:", 1)[1].split(
+        "\n  publish-assets:", 1
+    )[0]
+    if "needs: validate-stable-release" not in package_job:
+        raise SystemExit(
+            "stable package-workspace must wait for manual release validation before checkout/build"
+        )
+
 for item in [
     "Validate manual prerelease rebuild",
     "gh release view \"$RELEASE_TAG\"",
@@ -68,6 +98,18 @@ for item in [
 ]:
     if item not in beta:
         raise SystemExit(f"beta manual rebuild contract missing {item!r}")
+
+for item in [
+    "uses: rui314/setup-mold@v1",
+    "mold-version: 2.41.0",
+    "make-default: true",
+    "Verify mold is the default linker",
+]:
+    if item not in beta:
+        raise SystemExit(f"beta old-tag rebuild must inline Linux mold setup: missing {item!r}")
+
+if "uses: ./.github/actions/setup-linux-mold" in beta:
+    raise SystemExit("beta old-tag rebuild must not depend on a tag-local mold action")
 PY
 
 python3 - "$release_pr_integrity" <<'PY'
