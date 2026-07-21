@@ -384,7 +384,8 @@ fn temporary_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        GitCoverageV1, GitHeadStateV1, GitIndexPreviewDispositionV1, GitIndexTransactionJournalV1,
+        GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitIndexCommitIntentV1,
+        GitIndexPreviewDispositionV1, GitIndexSigningPolicyV1, GitIndexTransactionJournalV1,
         GitIndexTransactionOperationV1, GitObjectFormatV1, GitOidV1, ManifestDigest, ProjectId,
         RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
         RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
@@ -423,23 +424,44 @@ mod tests {
                 ignored_collision_digest: None,
             },
             tracedecay_domain::GitOperationStateV1::None,
-            None,
-            None,
-            None,
-            None,
+            Some(digest('1')),
+            Some(digest('2')),
+            Some(digest('3')),
+            Some(digest('4')),
             UtcMicros(1),
             GitCoverageV1::complete(),
         )
-        .expect("repository snapshot");
+        .expect("repository snapshot")
+        .with_native_identity(
+            "git version fixture".to_owned(),
+            "tracedecay.git-index-adapter.v1".to_owned(),
+            digest('5'),
+        )
+        .expect("native repository snapshot");
         let snapshot_digest =
             GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
-        GitIndexPreviewV1::new(
+        let author = GitCommitIdentityV1 {
+            name: "Persisted Sensitive Author".to_owned(),
+            email: "persisted-sensitive@example.com".to_owned(),
+            at: UtcMicros(1_000_000),
+        };
+        let intent = GitIndexCommitIntentV1::new(
+            "persisted sensitive message\n".to_owned(),
+            author.clone(),
+            author,
+            GitIndexSigningPolicyV1::SignatureRequired {
+                key_reference: "persisted-sensitive-key".to_owned(),
+            },
+        )
+        .expect("commit intent");
+        GitIndexPreviewV1::new_with_commit_intent(
             GitIndexPreviewId::new("preview.fixture").expect("preview id"),
             GitIndexTransactionOperationV1::CommitIndex,
             snapshot,
             snapshot_digest,
             Vec::new(),
             Some(oid('c')),
+            Some(&intent),
             GitIndexPreviewDispositionV1::Applicable,
             UtcMicros(1),
             UtcMicros(10),
@@ -478,6 +500,29 @@ mod tests {
             state["schema_version"],
             GIT_INDEX_TRANSACTION_STORE_SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn persisted_commit_preview_contains_only_the_intent_digest() {
+        let directory = tempfile::tempdir().expect("temporary store directory");
+        let path = directory.path().join("git-index-transactions.json");
+        let store = PersistentGitIndexTransactionStore::open(&path).expect("create store");
+        store.save_preview(preview()).expect("persist preview");
+        drop(store);
+
+        let encoded = std::fs::read_to_string(path).expect("read persisted state");
+        assert!(encoded.contains("commit_intent_digest"));
+        for sensitive in [
+            "persisted sensitive message",
+            "Persisted Sensitive Author",
+            "persisted-sensitive@example.com",
+            "persisted-sensitive-key",
+        ] {
+            assert!(
+                !encoded.contains(sensitive),
+                "persistent state leaked {sensitive:?}"
+            );
+        }
     }
 
     #[test]

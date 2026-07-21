@@ -2,29 +2,22 @@ use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, CancellationContract, CancellationPoint,
     CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
     CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
-    DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass, PaginationContract,
-    PrivacyClass, ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    DeniedDisclosurePolicy, IdempotencyContract, LifecycleClass, PaginationContract, PrivacyClass,
+    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
     RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamResumeContract,
-    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
+    StreamingContract, TerminalState, TerminalStateContract, UnavailabilityReason, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 
-const STAGE_CAPABILITY: &str = "capability.git.stage-hunks";
-const STAGE_USE_CASE: &str = "use-case.git.stage-hunks";
-const UNSTAGE_CAPABILITY: &str = "capability.git.unstage-hunks";
-const UNSTAGE_USE_CASE: &str = "use-case.git.unstage-hunks";
-const COMMIT_CAPABILITY: &str = "capability.git.commit-index";
-const COMMIT_USE_CASE: &str = "use-case.git.commit-index";
+use super::transactions::{git_index_effect_class, git_index_operation_ids};
 
 struct GitIndexCatalogSpec {
-    capability: &'static str,
-    use_case: &'static str,
+    operation: tracedecay_domain::GitIndexTransactionOperationV1,
     request_schema: &'static str,
     result_schema: &'static str,
-    effect: EffectClass,
     summary: &'static str,
     description: &'static str,
     example: &'static str,
@@ -32,31 +25,25 @@ struct GitIndexCatalogSpec {
 
 const GIT_INDEX_SPECS: [GitIndexCatalogSpec; 3] = [
     GitIndexCatalogSpec {
-        capability: STAGE_CAPABILITY,
-        use_case: STAGE_USE_CASE,
+        operation: tracedecay_domain::GitIndexTransactionOperationV1::StageHunks,
         request_schema: "schema.application.git.stage-hunks.request",
         result_schema: "schema.application.git.stage-hunks.result",
-        effect: EffectClass::GitIndexStage,
         summary: "Stage selected hunks",
         description: "Stage only exact preview-bound Git index hunks.",
         example: "Stage these selected hunks",
     },
     GitIndexCatalogSpec {
-        capability: UNSTAGE_CAPABILITY,
-        use_case: UNSTAGE_USE_CASE,
+        operation: tracedecay_domain::GitIndexTransactionOperationV1::UnstageHunks,
         request_schema: "schema.application.git.unstage-hunks.request",
         result_schema: "schema.application.git.unstage-hunks.result",
-        effect: EffectClass::GitIndexUnstage,
         summary: "Unstage selected hunks",
         description: "Unstage only exact preview-bound Git index hunks.",
         example: "Unstage these selected hunks",
     },
     GitIndexCatalogSpec {
-        capability: COMMIT_CAPABILITY,
-        use_case: COMMIT_USE_CASE,
+        operation: tracedecay_domain::GitIndexTransactionOperationV1::CommitIndex,
         request_schema: "schema.application.git.commit-index.request",
         result_schema: "schema.application.git.commit-index.result",
-        effect: EffectClass::GitIndexCommit,
         summary: "Commit the index",
         description: "Commit the exact previewed index tree with fixed safeguards.",
         example: "Commit the previewed index",
@@ -87,9 +74,10 @@ fn capability(
 ) -> Result<CapabilityManifestV1, ApplicationContractError> {
     let request_schema = request_schema(spec)?;
     let result_schema = result_schema(spec)?;
+    let (capability, use_case) = git_index_operation_ids(spec.operation);
     Ok(CapabilityManifestV1::new(CapabilityManifestInputV1 {
-        capability_id: CapabilityId::new(spec.capability)?,
-        use_case_id: UseCaseId::new(spec.use_case)?,
+        capability_id: CapabilityId::new(capability)?,
+        use_case_id: UseCaseId::new(use_case)?,
         routing: RoutingContractV1::new(
             1,
             spec.summary,
@@ -98,12 +86,8 @@ fn capability(
         )?,
         request_schema,
         result_schema,
-        effect: spec.effect,
-        scope: ScopeRequirement::new(vec![
-            ScopeDimension::Project,
-            ScopeDimension::Repository,
-            ScopeDimension::Worktree,
-        ])?,
+        effect: git_index_effect_class(spec.operation),
+        scope: git_index_scope()?,
         authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Explicit,
         privacy: PrivacyClass::ScopedMetadata,
@@ -136,7 +120,9 @@ fn capability(
             TerminalState::EffectUnknown,
             TerminalState::Partial,
         ])?,
-        availability: AvailabilityContract::Available,
+        availability: AvailabilityContract::Unavailable {
+            reason: UnavailabilityReason::NotImplemented,
+        },
         binding_ids: Vec::new(),
         profile_eligibility: Vec::new(),
         required_features: Vec::new(),
@@ -147,10 +133,11 @@ fn handler_descriptor(
     spec: &GitIndexCatalogSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
     let result_schema = result_schema(spec)?;
+    let (capability, use_case) = git_index_operation_ids(spec.operation);
     ApplicationHandlerDescriptor::new(
         ApplicationOperation::new(
-            CapabilityId::new(spec.capability)?,
-            UseCaseId::new(spec.use_case)?,
+            CapabilityId::new(capability)?,
+            UseCaseId::new(use_case)?,
             ResultContractRef::from_schema(&result_schema),
             true,
         ),
@@ -173,4 +160,12 @@ fn result_schema(spec: &GitIndexCatalogSpec) -> Result<SchemaRef, ApplicationCon
         1,
         8_192,
     )?)
+}
+
+fn git_index_scope() -> Result<ScopeRequirement, ApplicationContractError> {
+    Ok(ScopeRequirement::new(vec![
+        ScopeDimension::Project,
+        ScopeDimension::Repository,
+        ScopeDimension::Worktree,
+    ])?)
 }

@@ -49,6 +49,8 @@ pub enum NativeGitIndexError {
     UnsupportedHookPolicy,
     #[error("native write-tree differs from the preview candidate tree")]
     CandidateTreeMismatch,
+    #[error("the full commit intent does not match the preview commitment")]
+    CommitIntentMismatch,
     #[error("native repository state no longer matches the preview")]
     StaleRepositoryState,
     #[error("the previewed index tree is identical to the current HEAD tree")]
@@ -456,6 +458,9 @@ impl FixedGitIndexRunner {
     ) -> Result<GitOidV1, NativeGitIndexError> {
         preview.validate()?;
         intent.validate()?;
+        if preview.commit_intent_digest.as_ref() != Some(&intent.compute_digest()?) {
+            return Err(NativeGitIndexError::CommitIntentMismatch);
+        }
         if preview.operation != GitIndexTransactionOperationV1::CommitIndex
             || !matches!(
                 preview.disposition,

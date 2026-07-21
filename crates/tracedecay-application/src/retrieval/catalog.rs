@@ -8,7 +8,7 @@ use tracedecay_tool_catalog::{
     RetrievalPrimitiveManifestV1, RetrieverId, RevalidationContract, RevalidationPoint,
     RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, ScoringContractRef,
     SortContract, SortContractId, StreamingContract, TemporalMode, TerminalState,
-    TerminalStateContract,
+    TerminalStateContract, UnavailabilityReason,
 };
 
 use crate::error::ApplicationContractError;
@@ -19,9 +19,9 @@ const SYMBOL_SEARCH_CAPABILITY: &str = "capability.retrieval.symbol-search";
 const SYMBOL_SEARCH_USE_CASE: &str = "use-case.retrieval.symbol-search";
 pub const APPLICATION_DEFAULT_PROFILE_ID: &str = "profile.default";
 
-/// Closed set of inert catalog contributions for implemented application use
-/// cases. Adding metadata here requires adding its real typed handler descriptor
-/// to [`crate::application_handler_descriptors`].
+/// Closed set of inert catalog contributions for declared application use
+/// cases. Adding metadata here requires adding its validation-only typed
+/// handler descriptor to [`crate::application_handler_descriptors`].
 pub fn application_catalog_contributions()
 -> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
     Ok(vec![
@@ -65,7 +65,7 @@ pub fn symbol_search_handler_descriptor()
     )
 }
 
-/// Inert catalog contribution for the implemented symbol-search use case.
+/// Inert catalog contribution for the declared symbol-search use case.
 ///
 /// Root composition remains outside this crate; this function has no dispatch,
 /// binding, profile, storage, or transport side effect.
@@ -85,12 +85,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         request_schema: request_schema.clone(),
         result_schema: result_schema.clone(),
         effect: EffectClass::Read,
-        scope: ScopeRequirement::new(vec![
-            ScopeDimension::Project,
-            ScopeDimension::Repository,
-            ScopeDimension::Worktree,
-            ScopeDimension::Resource,
-        ])?,
+        scope: symbol_search_scope()?,
         authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
@@ -119,7 +114,9 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
             TerminalState::Failed,
             TerminalState::Partial,
         ])?,
-        availability: AvailabilityContract::Available,
+        availability: AvailabilityContract::Unavailable {
+            reason: UnavailabilityReason::NotImplemented,
+        },
         binding_ids: Vec::new(),
         profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
         required_features: Vec::new(),
@@ -171,4 +168,13 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         retrieval_primitives: vec![primitive],
         bindings: Vec::new(),
     })?)
+}
+
+fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {
+    Ok(ScopeRequirement::new(vec![
+        ScopeDimension::Project,
+        ScopeDimension::Repository,
+        ScopeDimension::Worktree,
+        ScopeDimension::Resource,
+    ])?)
 }

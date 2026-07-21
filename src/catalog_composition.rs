@@ -5,13 +5,14 @@
 
 use thiserror::Error;
 use tracedecay_application::{
-    APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, application_catalog_contributions,
-    application_handler_descriptors,
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationHandlerDescriptors,
+    application_catalog_contributions, application_handler_descriptors,
 };
 use tracedecay_tool_catalog::{
-    CapabilityId, CatalogSnapshotBuilderV1, CatalogSnapshotV1, CatalogValidationError,
-    IdentifierError, ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileId,
-    ProfileKind, RoutingFixtureExpectation, RoutingFixtureV1,
+    AvailabilityContract, CapabilityId, CatalogContributionV1, CatalogSnapshotBuilderV1,
+    CatalogSnapshotV1, CatalogValidationError, IdentifierError, ProfileBudget, ProfileDefinition,
+    ProfileDefinitionInputV1, ProfileId, ProfileKind, RoutingFixtureExpectation, RoutingFixtureV1,
+    UnavailabilityReason,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -24,11 +25,13 @@ pub enum CatalogCompositionError {
     Identifier(#[from] IdentifierError),
 }
 
-/// Build the immutable catalog snapshot for currently implemented application
-/// use cases.
+/// Build the immutable catalog snapshot for currently declared application use
+/// cases. The snapshot carries no runtime wiring.
 pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError> {
-    let contributions = application_catalog_contributions()?;
+    let mut contributions = application_catalog_contributions()?;
     let handlers = application_handler_descriptors()?;
+    contributions.sort_by(|left, right| left.contribution_id().cmp(right.contribution_id()));
+    validate_application_catalog(&contributions, &handlers)?;
     let mut builder = CatalogSnapshotBuilderV1::new();
 
     for contribution in contributions {
@@ -40,6 +43,38 @@ pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, Catalog
     builder.add_profile(application_default_profile()?);
 
     Ok(builder.build()?)
+}
+
+/// Validates the application-owned catalog before application-only handler
+/// identity is lowered to the generic tool-catalog descriptor.
+///
+/// This packet has no runtime factories or transport bindings, so every
+/// application capability must remain explicitly unavailable as not
+/// implemented. A future packet may relax that gate only when it also owns the
+/// corresponding runtime wiring.
+pub fn validate_application_catalog(
+    contributions: &[CatalogContributionV1],
+    handlers: &ApplicationHandlerDescriptors,
+) -> Result<(), CatalogCompositionError> {
+    for capability in contributions
+        .iter()
+        .flat_map(|contribution| contribution.capabilities())
+    {
+        if !matches!(
+            capability.availability(),
+            AvailabilityContract::Unavailable {
+                reason: UnavailabilityReason::NotImplemented,
+            }
+        ) {
+            return Err(CatalogCompositionError::Application(
+                ApplicationContractError::Inconsistent {
+                    field: "unwired application capability availability",
+                },
+            ));
+        }
+    }
+    handlers.validate_against(contributions)?;
+    Ok(())
 }
 
 fn application_default_profile() -> Result<ProfileDefinition, CatalogCompositionError> {

@@ -133,6 +133,23 @@ fn applicable_preview_binds_each_hunk_to_one_immutable_snapshot() {
     )
     .expect("preview is valid");
     preview.validate().expect("preview remains immutable");
+    assert!(preview.commit_intent_digest.is_none());
+    assert!(
+        GitIndexPreviewV1::new_with_commit_intent(
+            preview_id.clone(),
+            GitIndexTransactionOperationV1::StageHunks,
+            snapshot.clone(),
+            snapshot_digest.clone(),
+            vec![reference.clone()],
+            Some(oid('e')),
+            Some(&commit_intent("must not bind to stage\n")),
+            GitIndexPreviewDispositionV1::Applicable,
+            UtcMicros(10),
+            UtcMicros(20),
+        )
+        .is_err(),
+        "stage previews must reject commit-intent commitments"
+    );
 
     let mut stale = reference;
     stale.snapshot_digest = digest('9');
@@ -206,11 +223,11 @@ fn committed_receipt_is_integrity_bound_to_its_preview() {
 }
 
 #[test]
-fn commit_preview_digest_binds_full_canonical_intent() {
+fn commit_preview_persists_only_a_digest_bound_to_full_canonical_intent() {
     let snapshot = snapshot();
     let snapshot_digest =
         GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
-    let make_preview = |intent| {
+    let make_preview = |intent: &GitIndexCommitIntentV1| {
         GitIndexPreviewV1::new_with_commit_intent(
             GitIndexPreviewId::new("git-preview.commit-intent.fixture").expect("preview id"),
             GitIndexTransactionOperationV1::CommitIndex,
@@ -225,14 +242,96 @@ fn commit_preview_digest_binds_full_canonical_intent() {
         )
         .expect("commit preview")
     };
-    let first = make_preview(commit_intent("first message\n"));
-    let second = make_preview(commit_intent("second message\n"));
+    assert!(
+        GitIndexPreviewV1::new(
+            GitIndexPreviewId::new("git-preview.commit-without-intent").expect("preview id"),
+            GitIndexTransactionOperationV1::CommitIndex,
+            snapshot.clone(),
+            snapshot_digest.clone(),
+            Vec::new(),
+            snapshot.index.tree_id.clone(),
+            GitIndexPreviewDispositionV1::Applicable,
+            UtcMicros(10),
+            UtcMicros(20),
+        )
+        .is_err(),
+        "applicable commit previews must bind one intent commitment"
+    );
+    let mut sensitive_intent = commit_intent("first sensitive message\n");
+    sensitive_intent.author.name = "Sensitive Author".to_owned();
+    sensitive_intent.author.email = "sensitive-author@example.com".to_owned();
+    sensitive_intent.committer.name = "Sensitive Committer".to_owned();
+    sensitive_intent.committer.email = "sensitive-committer@example.com".to_owned();
+    sensitive_intent.signing_policy = GitIndexSigningPolicyV1::SignatureRequired {
+        key_reference: "sensitive-signing-key".to_owned(),
+    };
+    sensitive_intent
+        .validate()
+        .expect("sensitive intent is valid");
+    let expected_intent_digest = sensitive_intent.compute_digest().expect("intent digest");
+    let first = make_preview(&sensitive_intent);
+    let second_intent = commit_intent("second message\n");
+    let second = make_preview(&second_intent);
     assert_ne!(first.preview_digest, second.preview_digest);
     assert_ne!(first, second);
+    assert_eq!(
+        first.commit_intent_digest.as_ref(),
+        Some(&expected_intent_digest)
+    );
 
-    let encoded = serde_json::to_value(&first).expect("serialize preview");
-    let mut tampered = encoded;
-    tampered["commit_intent"]["author"]["name"] = serde_json::json!("Other Author");
+    let base = commit_intent("canonical intent\n");
+    let base_digest = base.compute_digest().expect("base intent digest");
+    let mut changed_author = base.clone();
+    changed_author.author.at = UtcMicros(2_000_000);
+    let mut changed_committer = base.clone();
+    changed_committer.committer.email = "other-committer@example.com".to_owned();
+    let mut changed_signing = base;
+    changed_signing.signing_policy = GitIndexSigningPolicyV1::SignatureRequired {
+        key_reference: "other-signing-key".to_owned(),
+    };
+    for changed in [changed_author, changed_committer, changed_signing] {
+        assert_ne!(
+            changed.compute_digest().expect("changed intent digest"),
+            base_digest,
+            "every executable commit-intent field must affect the commitment"
+        );
+    }
+
+    let encoded = serde_json::to_string(&first).expect("serialize preview");
+    for sensitive in [
+        "first sensitive message",
+        "Sensitive Author",
+        "sensitive-author@example.com",
+        "Sensitive Committer",
+        "sensitive-committer@example.com",
+        "sensitive-signing-key",
+    ] {
+        assert!(
+            !encoded.contains(sensitive),
+            "serialized preview leaked {sensitive:?}"
+        );
+    }
+    let decoded: GitIndexPreviewV1 =
+        serde_json::from_str(&encoded).expect("digest-only preview round trip");
+    assert_eq!(decoded, first);
+
+    let mut missing_digest: serde_json::Value =
+        serde_json::from_str(&encoded).expect("preview JSON");
+    missing_digest
+        .as_object_mut()
+        .expect("preview object")
+        .remove("commit_intent_digest");
+    assert!(serde_json::from_value::<GitIndexPreviewV1>(missing_digest).is_err());
+
+    let mut plaintext_legacy: serde_json::Value =
+        serde_json::from_str(&encoded).expect("preview JSON");
+    plaintext_legacy["commit_intent"] =
+        serde_json::to_value(commit_intent("must not deserialize\n")).expect("legacy intent");
+    assert!(serde_json::from_value::<GitIndexPreviewV1>(plaintext_legacy).is_err());
+
+    let mut tampered: serde_json::Value = serde_json::from_str(&encoded).expect("preview JSON");
+    assert!(tampered.get("commit_intent").is_none());
+    tampered["commit_intent_digest"] = serde_json::json!(digest('9'));
     assert!(serde_json::from_value::<GitIndexPreviewV1>(tampered).is_err());
 }
 

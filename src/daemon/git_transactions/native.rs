@@ -361,13 +361,14 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             (Vec::new(), Vec::new(), None)
         };
         let expires_at = UtcMicros(request.observed_at.0.saturating_add(30_000_000));
-        let preview = GitIndexPreviewV1::new(
+        let preview = GitIndexPreviewV1::new_with_commit_intent(
             request.preview_id.clone(),
             request.binding.operation,
             current,
             snapshot_digest,
             selected_hunks,
             candidate_index_tree,
+            request.commit_intent.as_ref(),
             disposition,
             request.observed_at,
             expires_at,
@@ -750,6 +751,7 @@ where
             .previews
             .lock()
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        previews.retain(|_, cached| !cached.preview.is_expired_at(request.observed_at));
         match previews.get(&materialized.preview.preview_id) {
             Some(existing)
                 if existing.preview.preview_digest != materialized.preview.preview_digest =>
@@ -757,9 +759,10 @@ where
                 return Err(GitIndexTransactionPortError::StalePreview);
             }
             Some(_) => {}
-            None => {
+            None if materialized.preview.disposition.is_applicable() => {
                 previews.insert(materialized.preview.preview_id.clone(), materialized);
             }
+            None => {}
         }
         Ok(result)
     }
@@ -770,13 +773,34 @@ where
         preview: &GitIndexPreviewV1,
         request: &GitIndexApplyRequestV1,
     ) -> Result<NativeGitIndexApplyResult, GitIndexTransactionPortError> {
-        let materialized = self
+        request
+            .validate()
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        let mut previews = self
             .previews
             .lock()
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?
-            .get(&preview.preview_id)
-            .cloned()
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let scope = request.context.scope();
+        let Some(cached) = previews.get(&request.preview_id) else {
+            return Err(GitIndexTransactionPortError::StalePreview);
+        };
+        if scope.project_id != cached.preview.repository_snapshot.project_id
+            || scope.repository_id != cached.preview.repository_snapshot.repository_id
+            || cached.preview.repository_snapshot.worktree_id.as_ref() != Some(&scope.worktree_id)
+        {
+            return Err(GitIndexTransactionPortError::StalePreview);
+        }
+        // Commit messages, identities, and signing keys are process-local
+        // ephemeral material. An authorized apply attempt consumes the one-shot
+        // materialization before preview validation or native work so no stale
+        // or terminal attempt retains plaintext.
+        let materialized = previews
+            .remove(&request.preview_id)
             .ok_or(GitIndexTransactionPortError::StalePreview)?;
+        drop(previews);
+        request
+            .validate_for_preview(preview)
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
         if materialized.preview != *preview {
             return Err(GitIndexTransactionPortError::StalePreview);
         }
@@ -858,6 +882,7 @@ fn map_native_error(error: NativeGitIndexError) -> GitIndexTransactionPortError 
         | NativeGitIndexError::UnsupportedHookPolicy => GitIndexTransactionPortError::Unsupported,
         NativeGitIndexError::PatchDoesNotMatchHunk
         | NativeGitIndexError::CandidateTreeMismatch
+        | NativeGitIndexError::CommitIntentMismatch
         | NativeGitIndexError::StaleRepositoryState
         | NativeGitIndexError::MalformedOutput { .. }
         | NativeGitIndexError::Domain(_) => GitIndexTransactionPortError::StalePreview,
@@ -1010,17 +1035,19 @@ mod tests {
         assembler: &NativeGitIndexPreviewAssembler,
         runner: &FixedGitIndexRunner,
         preview_id: &str,
+        intent: &GitIndexCommitIntentV1,
     ) -> GitIndexPreviewV1 {
         let snapshot = exact_snapshot(assembler, runner);
         let snapshot_digest =
             GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
-        GitIndexPreviewV1::new(
+        GitIndexPreviewV1::new_with_commit_intent(
             GitIndexPreviewId::new(preview_id).expect("preview id"),
             GitIndexTransactionOperationV1::CommitIndex,
             snapshot.clone(),
             snapshot_digest,
             Vec::new(),
             snapshot.index.tree_id,
+            Some(intent),
             GitIndexPreviewDispositionV1::Applicable,
             UtcMicros(2),
             UtcMicros(3),
@@ -1028,14 +1055,14 @@ mod tests {
         .expect("commit preview")
     }
 
-    fn commit_intent() -> GitIndexCommitIntentV1 {
+    fn commit_intent(message: &str) -> GitIndexCommitIntentV1 {
         let identity = GitCommitIdentityV1 {
             name: "TraceDecay Test".to_owned(),
             email: "tracedecay@example.com".to_owned(),
             at: UtcMicros(1_000_000),
         };
         GitIndexCommitIntentV1::new(
-            "transaction commit\n".to_owned(),
+            message.to_owned(),
             identity.clone(),
             identity,
             GitIndexSigningPolicyV1::UnsignedPermitted,
@@ -1208,24 +1235,30 @@ mod tests {
     #[test]
     fn commit_rejects_empty_index_and_stale_ref_before_commit_object_creation() {
         let (directory, assembler, runner) = repository_fixture();
-        let empty = commit_preview(&assembler, &runner, "git-index-preview.empty-commit");
+        let intent = commit_intent("transaction commit\n");
+        let empty = commit_preview(
+            &assembler,
+            &runner,
+            "git-index-preview.empty-commit",
+            &intent,
+        );
         let lock = runner.acquire_index_lock().expect("empty commit lock");
         assert!(matches!(
-            runner.commit_index(&lock, &empty, &commit_intent()),
+            runner.commit_index(&lock, &empty, &intent),
             Err(NativeGitIndexError::EmptyIndexCommit)
         ));
         drop(lock);
 
         fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
         git(directory.path(), &["add", "packet.txt"]);
-        let stale = commit_preview(&assembler, &runner, "git-index-preview.stale-ref");
+        let stale = commit_preview(&assembler, &runner, "git-index-preview.stale-ref", &intent);
         git(directory.path(), &["commit", "--quiet", "-m", "external"]);
         let object_path = directory.path().join(".git").join("objects");
         let objects_before = object_file_count(&object_path);
         let head_before = git_value(directory.path(), &["rev-parse", "HEAD"]);
         let lock = runner.acquire_index_lock().expect("stale ref lock");
         assert!(matches!(
-            runner.commit_index(&lock, &stale, &commit_intent()),
+            runner.commit_index(&lock, &stale, &intent),
             Err(NativeGitIndexError::StaleRepositoryState)
         ));
         drop(lock);
@@ -1237,15 +1270,47 @@ mod tests {
     }
 
     #[test]
+    fn commit_intent_mismatch_fails_before_object_or_ref_mutation() {
+        let (directory, assembler, runner) = repository_fixture();
+        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
+        git(directory.path(), &["add", "packet.txt"]);
+        let previewed_intent = commit_intent("previewed message\n");
+        let preview = commit_preview(
+            &assembler,
+            &runner,
+            "git-index-preview.intent-mismatch",
+            &previewed_intent,
+        );
+        let replacement_intent = commit_intent("replacement message\n");
+        let object_path = directory.path().join(".git").join("objects");
+        let objects_before = object_file_count(&object_path);
+        let head_before = git_value(directory.path(), &["rev-parse", "HEAD"]);
+
+        let lock = runner.acquire_index_lock().expect("commit lock");
+        assert!(matches!(
+            runner.commit_index(&lock, &preview, &replacement_intent),
+            Err(NativeGitIndexError::CommitIntentMismatch)
+        ));
+        drop(lock);
+
+        assert_eq!(object_file_count(&object_path), objects_before);
+        assert_eq!(
+            git_value(directory.path(), &["rev-parse", "HEAD"]),
+            head_before
+        );
+    }
+
+    #[test]
     fn commit_advances_only_the_previewed_ref_to_the_previewed_tree() {
         let (directory, assembler, runner) = repository_fixture();
         fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
         git(directory.path(), &["add", "packet.txt"]);
-        let preview = commit_preview(&assembler, &runner, "git-index-preview.commit");
+        let intent = commit_intent("transaction commit\n");
+        let preview = commit_preview(&assembler, &runner, "git-index-preview.commit", &intent);
         let old_head = git_value(directory.path(), &["rev-parse", "HEAD"]);
         let lock = runner.acquire_index_lock().expect("commit lock");
         let commit = runner
-            .commit_index(&lock, &preview, &commit_intent())
+            .commit_index(&lock, &preview, &intent)
             .expect("commit exact index");
         drop(lock);
         assert_eq!(

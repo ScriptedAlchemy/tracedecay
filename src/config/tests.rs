@@ -723,3 +723,218 @@ fn default_excludes_still_catch_target_and_worktrees() {
     assert!(is_excluded(".tracedecay/tracedecay.db", &config));
     assert!(is_excluded("bin/cli.js", &config));
 }
+
+// ---------------------------------------------------------------------------
+// PR11 topology policy resolution
+//
+// The sole resolver produces the pinned snapshot and src/config/topology.rs
+// extracts its one complete work-topology policy, failing closed on every
+// invalid or unsupported combination without adapter-local defaults.
+// ---------------------------------------------------------------------------
+
+mod topology_resolution {
+    use std::collections::BTreeMap;
+
+    use tracedecay_domain::configuration::{
+        BranchTopologyKindV1, ConfigurationLayerIdV1, ConfigurationSnapshotV1,
+        ConfigurationValueKindV1, ConfigurationValueV1, RestartRequirementV1, SettingKey,
+        SettingScopeV1, SettingSensitivityV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+        WorkTopologyPolicyV1, safe_work_topology_policy_v1,
+    };
+    use tracedecay_domain::{ManifestDigest, ProjectId, UserProfileId};
+
+    use crate::config::registry::ConfigurationRegistry;
+    use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
+    use crate::config::topology::{
+        TopologyConfigurationError, resolved_work_topology_policy,
+        safe_default_work_topology_policy,
+    };
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("fixture id is canonical")
+    }
+
+    fn topology_key() -> SettingKey {
+        SettingKey::new(WORK_TOPOLOGY_POLICY_SETTING_KEY).unwrap()
+    }
+
+    fn project_layer(policy: WorkTopologyPolicyV1) -> ConfigurationLayerV1 {
+        ConfigurationLayerV1 {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: id::<ProjectId>("project.fixture"),
+            },
+            revision_id: id("revision.project.1"),
+            entries: BTreeMap::from([(
+                topology_key(),
+                ConfigurationValueV1::WorkTopologyPolicy(Box::new(policy)),
+            )]),
+        }
+    }
+
+    #[test]
+    fn registry_default_is_the_domain_safe_default() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let definition = registry.definition(&topology_key()).unwrap();
+        assert_eq!(
+            definition.value_kind,
+            ConfigurationValueKindV1::WorkTopologyPolicy
+        );
+        assert_eq!(definition.sensitivity, SettingSensitivityV1::Sensitive);
+        assert_eq!(definition.scope, SettingScopeV1::Project);
+        assert_eq!(
+            definition.restart_requirement,
+            RestartRequirementV1::DaemonRestart
+        );
+        let ConfigurationValueV1::WorkTopologyPolicy(default) = &definition.default_value else {
+            panic!("registry default must be a typed topology policy");
+        };
+        let safe = safe_work_topology_policy_v1();
+        assert_eq!(**default, safe);
+        assert_eq!(
+            default.compute_digest().unwrap(),
+            safe.compute_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolves_safe_default_when_no_layer_overrides() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let snapshot = resolve_configuration(&registry, &[]).unwrap().snapshot;
+        let resolved = resolved_work_topology_policy(&snapshot).unwrap();
+        let safe = safe_default_work_topology_policy();
+        assert_eq!(*resolved, safe);
+        assert_eq!(
+            resolved.compute_digest().unwrap(),
+            safe.compute_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn project_layer_override_wins_with_its_own_digest() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let mut replacement = safe_work_topology_policy_v1();
+        replacement
+            .branch_topology
+            .allowed
+            .insert(BranchTopologyKindV1::LocalStack);
+        replacement.validate().unwrap();
+
+        let resolution =
+            resolve_configuration(&registry, &[project_layer(replacement.clone())]).unwrap();
+        let resolved = resolved_work_topology_policy(&resolution.snapshot).unwrap();
+        assert_eq!(*resolved, replacement);
+        assert_ne!(*resolved, safe_work_topology_policy_v1());
+        assert_eq!(
+            resolved.compute_digest().unwrap(),
+            replacement.compute_digest().unwrap()
+        );
+
+        // The behavior digest changes with the override even though the
+        // resolution path is identical.
+        let baseline = resolve_configuration(&registry, &[]).unwrap();
+        let moved = resolve_configuration(&registry, &[project_layer(replacement)]).unwrap();
+        assert_ne!(
+            baseline.snapshot.effective_behavior_digest,
+            moved.snapshot.effective_behavior_digest
+        );
+    }
+
+    #[test]
+    fn user_profile_layer_cannot_override_project_scoped_topology() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let layer = ConfigurationLayerV1 {
+            layer: ConfigurationLayerIdV1::UserProfile {
+                profile_id: id::<UserProfileId>("profile.fixture"),
+            },
+            revision_id: id("revision.profile.1"),
+            entries: BTreeMap::from([(
+                topology_key(),
+                ConfigurationValueV1::WorkTopologyPolicy(Box::new(safe_work_topology_policy_v1())),
+            )]),
+        };
+        assert!(matches!(resolve_configuration(&registry, &[layer]), Err(_)));
+    }
+
+    #[test]
+    fn reserved_default_layer_injection_is_rejected() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let layer = ConfigurationLayerV1 {
+            layer: ConfigurationLayerIdV1::Default,
+            revision_id: id("revision.adapter.default"),
+            entries: BTreeMap::from([(
+                topology_key(),
+                ConfigurationValueV1::WorkTopologyPolicy(Box::new(safe_work_topology_policy_v1())),
+            )]),
+        };
+        assert!(matches!(resolve_configuration(&registry, &[layer]), Err(_)));
+    }
+
+    #[test]
+    fn wrong_value_kind_fails_closed() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let layer = ConfigurationLayerV1 {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: id::<ProjectId>("project.fixture"),
+            },
+            revision_id: id("revision.project.1"),
+            entries: BTreeMap::from([(
+                topology_key(),
+                ConfigurationValueV1::Text("permissive".to_owned()),
+            )]),
+        };
+        assert!(matches!(resolve_configuration(&registry, &[layer]), Err(_)));
+    }
+
+    #[test]
+    fn invalid_or_unsupported_policy_in_layer_fails_closed() {
+        let registry = ConfigurationRegistry::core().unwrap();
+
+        // No protected-ref rules at all.
+        let mut unprotected = safe_work_topology_policy_v1();
+        unprotected.protected_refs.clear();
+        assert!(resolve_configuration(&registry, &[project_layer(unprotected)]).is_err());
+
+        // Unsupported schema version.
+        let mut future = safe_work_topology_policy_v1();
+        future.schema_version = 2;
+        assert!(resolve_configuration(&registry, &[project_layer(future)]).is_err());
+    }
+
+    #[test]
+    fn snapshot_resolution_requires_the_typed_policy_value() {
+        // Missing key fails closed rather than inventing a default.
+        let empty = ConfigurationSnapshotV1::new(BTreeMap::new(), BTreeMap::new()).unwrap();
+        assert!(matches!(
+            resolved_work_topology_policy(&empty),
+            Err(TopologyConfigurationError::MissingTopologyPolicy)
+        ));
+
+        // A mistyped value at the topology key fails closed.
+        let mistyped = ConfigurationSnapshotV1::new(
+            BTreeMap::from([(
+                topology_key(),
+                ConfigurationValueV1::Text("permissive".to_owned()),
+            )]),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            resolved_work_topology_policy(&mistyped),
+            Err(TopologyConfigurationError::WrongTopologyValue)
+        ));
+
+        // A tampered snapshot identity fails closed before the value is read.
+        let registry = ConfigurationRegistry::core().unwrap();
+        let mut snapshot = resolve_configuration(&registry, &[]).unwrap().snapshot;
+        snapshot.effective_behavior_digest =
+            ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).unwrap();
+        assert!(matches!(
+            resolved_work_topology_policy(&snapshot),
+            Err(TopologyConfigurationError::Domain(_))
+        ));
+    }
+}

@@ -967,6 +967,9 @@ impl HunkRefV1 {
 /// every `HunkRefV1` compare-and-swap precondition.
 pub const GIT_INDEX_SNAPSHOT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.snapshot.v1";
 
+/// Domain separator for a canonical commitment to the complete commit intent.
+pub const GIT_INDEX_COMMIT_INTENT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.commit-intent.v1";
+
 /// Domain separator for immutable PR11 index previews.
 pub const GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.preview.v1";
 
@@ -1112,6 +1115,15 @@ pub struct GitIndexCommitIntentV1 {
     pub signing_policy: GitIndexSigningPolicyV1,
 }
 
+#[derive(Serialize)]
+struct GitIndexCommitIntentDigestMaterial<'a> {
+    domain: &'static str,
+    message_digest: &'a ManifestDigest,
+    author: &'a GitCommitIdentityV1,
+    committer: &'a GitCommitIdentityV1,
+    signing_policy: &'a GitIndexSigningPolicyV1,
+}
+
 impl GitIndexCommitIntentV1 {
     pub fn new(
         message: String,
@@ -1134,6 +1146,19 @@ impl GitIndexCommitIntentV1 {
     pub fn compute_message_digest(&self) -> Result<ManifestDigest, DomainError> {
         validate_git_commit_message(&self.message)?;
         canonical_sha256(&("tracedecay.git-index.commit-message.v1", &self.message))
+    }
+
+    /// Commit to every canonical intent field without retaining plaintext
+    /// commit material in a preview or durable transaction record.
+    pub fn compute_digest(&self) -> Result<ManifestDigest, DomainError> {
+        self.validate()?;
+        canonical_sha256(&GitIndexCommitIntentDigestMaterial {
+            domain: GIT_INDEX_COMMIT_INTENT_DIGEST_DOMAIN_V1,
+            message_digest: &self.message_digest,
+            author: &self.author,
+            committer: &self.committer,
+            signing_policy: &self.signing_policy,
+        })
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -1182,10 +1207,10 @@ pub struct GitIndexPreviewV1 {
     pub repository_snapshot_digest: ManifestDigest,
     pub selected_hunks: Vec<HunkRefV1>,
     pub candidate_index_tree: Option<GitOidV1>,
-    /// Full canonical commit input. It is present exactly for `commit_index`
-    /// and participates in preview identity; apply never accepts a replacement
-    /// message, identity, timestamp, key, or signing policy.
-    pub commit_intent: Option<GitIndexCommitIntentV1>,
+    /// Canonical commitment to the full commit input. It is present exactly
+    /// for `commit_index`; plaintext message, identity, timestamp, key, and
+    /// signing policy remain process-local ephemeral material.
+    pub commit_intent_digest: Option<ManifestDigest>,
     pub disposition: GitIndexPreviewDispositionV1,
     pub created_at: UtcMicros,
     pub expires_at: UtcMicros,
@@ -1201,7 +1226,7 @@ struct GitIndexPreviewDigestMaterial<'a> {
     repository_snapshot_digest: &'a ManifestDigest,
     selected_hunk_digests: &'a [ManifestDigest],
     candidate_index_tree: Option<&'a GitOidV1>,
-    commit_intent: Option<&'a GitIndexCommitIntentV1>,
+    commit_intent_digest: Option<&'a ManifestDigest>,
     disposition: &'a GitIndexPreviewDispositionV1,
     created_at: UtcMicros,
     expires_at: UtcMicros,
@@ -1242,7 +1267,37 @@ impl GitIndexPreviewV1 {
         repository_snapshot_digest: ManifestDigest,
         selected_hunks: Vec<HunkRefV1>,
         candidate_index_tree: Option<GitOidV1>,
-        commit_intent: Option<GitIndexCommitIntentV1>,
+        commit_intent: Option<&GitIndexCommitIntentV1>,
+        disposition: GitIndexPreviewDispositionV1,
+        created_at: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
+        let commit_intent_digest = commit_intent
+            .map(GitIndexCommitIntentV1::compute_digest)
+            .transpose()?;
+        Self::new_with_commit_intent_digest(
+            preview_id,
+            operation,
+            repository_snapshot,
+            repository_snapshot_digest,
+            selected_hunks,
+            candidate_index_tree,
+            commit_intent_digest,
+            disposition,
+            created_at,
+            expires_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_commit_intent_digest(
+        preview_id: GitIndexPreviewId,
+        operation: GitIndexTransactionOperationV1,
+        repository_snapshot: RepositoryStateSnapshotV1,
+        repository_snapshot_digest: ManifestDigest,
+        selected_hunks: Vec<HunkRefV1>,
+        candidate_index_tree: Option<GitOidV1>,
+        commit_intent_digest: Option<ManifestDigest>,
         disposition: GitIndexPreviewDispositionV1,
         created_at: UtcMicros,
         expires_at: UtcMicros,
@@ -1254,7 +1309,7 @@ impl GitIndexPreviewV1 {
             repository_snapshot_digest,
             selected_hunks,
             candidate_index_tree,
-            commit_intent,
+            commit_intent_digest,
             disposition,
             created_at,
             expires_at,
@@ -1294,7 +1349,7 @@ impl GitIndexPreviewV1 {
             repository_snapshot_digest: &self.repository_snapshot_digest,
             selected_hunk_digests: &hunk_digests,
             candidate_index_tree: self.candidate_index_tree.as_ref(),
-            commit_intent: self.commit_intent.as_ref(),
+            commit_intent_digest: self.commit_intent_digest.as_ref(),
             disposition: &self.disposition,
             created_at: self.created_at,
             expires_at: self.expires_at,
@@ -1358,8 +1413,8 @@ impl GitIndexPreviewV1 {
                 });
             }
         }
-        if let Some(intent) = &self.commit_intent {
-            intent.validate()?;
+        if let Some(intent_digest) = &self.commit_intent_digest {
+            intent_digest.validate()?;
         }
 
         match (&self.disposition, self.operation) {
@@ -1373,7 +1428,7 @@ impl GitIndexPreviewV1 {
                         GitHeadStateV1::Attached { .. }
                     )
                     || !self.selected_hunks.is_empty()
-                    || self.commit_intent.is_none()
+                    || self.commit_intent_digest.is_none()
                     || self.candidate_index_tree.as_ref()
                         != self.repository_snapshot.index.tree_id.as_ref()
                 {
@@ -1385,7 +1440,7 @@ impl GitIndexPreviewV1 {
             (GitIndexPreviewDispositionV1::Applicable, _) => {
                 if !self.repository_snapshot.is_mutation_eligible()
                     || self.selected_hunks.is_empty()
-                    || self.commit_intent.is_some()
+                    || self.commit_intent_digest.is_some()
                     || self.candidate_index_tree.is_none()
                 {
                     return Err(DomainError::NonCanonical {
@@ -1397,7 +1452,7 @@ impl GitIndexPreviewV1 {
                 if !self.selected_hunks.is_empty()
                     || self.candidate_index_tree.is_some()
                     || (self.operation == GitIndexTransactionOperationV1::CommitIndex)
-                        != self.commit_intent.is_some()
+                        != self.commit_intent_digest.is_some()
                 {
                     return Err(DomainError::NonCanonical {
                         field: "unsupported git index preview mutation payload",
@@ -1423,7 +1478,7 @@ impl<'de> Deserialize<'de> for GitIndexPreviewV1 {
             repository_snapshot_digest: ManifestDigest,
             selected_hunks: Vec<HunkRefV1>,
             candidate_index_tree: Option<GitOidV1>,
-            commit_intent: Option<GitIndexCommitIntentV1>,
+            commit_intent_digest: Option<ManifestDigest>,
             disposition: GitIndexPreviewDispositionV1,
             created_at: UtcMicros,
             expires_at: UtcMicros,
@@ -1431,14 +1486,14 @@ impl<'de> Deserialize<'de> for GitIndexPreviewV1 {
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        let preview = Self::new_with_commit_intent(
+        let preview = Self::new_with_commit_intent_digest(
             wire.preview_id,
             wire.operation,
             wire.repository_snapshot,
             wire.repository_snapshot_digest,
             wire.selected_hunks,
             wire.candidate_index_tree,
-            wire.commit_intent,
+            wire.commit_intent_digest,
             wire.disposition,
             wire.created_at,
             wire.expires_at,

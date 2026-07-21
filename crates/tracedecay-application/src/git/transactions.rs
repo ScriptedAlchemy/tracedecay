@@ -34,6 +34,36 @@ pub struct GitIndexOperationBindingV1 {
     pub operation: GitIndexTransactionOperationV1,
 }
 
+impl GitIndexOperationBindingV1 {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        let (capability, use_case) = git_index_operation_ids(self.operation);
+        if self.capability_id != CapabilityId::new(capability)?
+            || self.use_case_id != UseCaseId::new(use_case)?
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "git index transaction operation binding",
+            });
+        }
+        Ok(())
+    }
+}
+
+pub(crate) const fn git_index_operation_ids(
+    operation: GitIndexTransactionOperationV1,
+) -> (&'static str, &'static str) {
+    match operation {
+        GitIndexTransactionOperationV1::StageHunks => {
+            ("capability.git.stage-hunks", "use-case.git.stage-hunks")
+        }
+        GitIndexTransactionOperationV1::UnstageHunks => {
+            ("capability.git.unstage-hunks", "use-case.git.unstage-hunks")
+        }
+        GitIndexTransactionOperationV1::CommitIndex => {
+            ("capability.git.commit-index", "use-case.git.commit-index")
+        }
+    }
+}
+
 /// Map each irreversible operation to its distinct catalog effect class.
 pub const fn git_index_effect_class(operation: GitIndexTransactionOperationV1) -> EffectClass {
     match operation {
@@ -122,6 +152,12 @@ impl GitIndexPreviewRequestV1 {
             || self.context.scope().repository_id != self.repository_snapshot.repository_id
             || self.repository_snapshot.worktree_id.as_ref()
                 != Some(&self.context.scope().worktree_id)
+            || !scope_reference_matches_snapshot(
+                self.context.scope().reference.as_ref(),
+                &self.repository_snapshot,
+            )
+            || (self.binding.operation == GitIndexTransactionOperationV1::CommitIndex
+                && self.context.scope().reference.is_none())
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "git index preview repository scope",
@@ -207,6 +243,34 @@ impl GitIndexApplyRequestV1 {
         self.native_idempotency_key()?;
         self.proof.validate_for(&self.authority)
     }
+
+    /// Validate every request field that selects or authorizes an immutable
+    /// preview before a daemon/native adapter may mutate repository state.
+    pub fn validate_for_preview(
+        &self,
+        preview: &GitIndexPreviewV1,
+    ) -> Result<(), ApplicationContractError> {
+        self.validate()?;
+        preview.validate()?;
+        let scope = self.context.scope();
+        if self.preview_id != preview.preview_id
+            || self.preview_digest != preview.preview_digest
+            || self.binding.operation != preview.operation
+            || scope.project_id != preview.repository_snapshot.project_id
+            || scope.repository_id != preview.repository_snapshot.repository_id
+            || preview.repository_snapshot.worktree_id.as_ref() != Some(&scope.worktree_id)
+            || !scope_reference_matches_snapshot(
+                scope.reference.as_ref(),
+                &preview.repository_snapshot,
+            )
+            || preview.is_expired_at(self.observed_at)
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "git index apply preview binding",
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Native port output for a completed preview pass. Unsupported state is a
@@ -229,6 +293,21 @@ impl GitIndexPreviewPortResultV1 {
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "git index preview operation",
+            });
+        }
+        if self.preview.repository_snapshot != request.repository_snapshot {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "git index preview repository snapshot binding",
+            });
+        }
+        let requested_commit_intent_digest = request
+            .commit_intent
+            .as_ref()
+            .map(GitIndexCommitIntentV1::compute_digest)
+            .transpose()?;
+        if self.preview.commit_intent_digest != requested_commit_intent_digest {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "git index preview commit intent binding",
             });
         }
         if self.preview.disposition.is_applicable() {
@@ -458,6 +537,7 @@ fn validate_admission(
 ) -> Result<(), ApplicationContractError> {
     context.validate()?;
     authority.validate_for(context.scope())?;
+    binding.validate()?;
     if context.admission_at(observed_at) != RequestAdmission::Admitted {
         return Err(ApplicationContractError::Inconsistent {
             field: "git index transaction admission",
@@ -469,6 +549,19 @@ fn validate_admission(
         });
     }
     Ok(())
+}
+
+fn scope_reference_matches_snapshot(
+    reference: Option<&tracedecay_domain::RefId>,
+    snapshot: &RepositoryStateSnapshotV1,
+) -> bool {
+    match (reference, &snapshot.head) {
+        (None, _) => true,
+        (Some(reference), tracedecay_domain::GitHeadStateV1::Attached { branch, .. }) => {
+            reference.as_str() == branch
+        }
+        (Some(_), _) => false,
+    }
 }
 
 const fn expected_operation_termination(termination: EffectTermination) -> OperationTermination {

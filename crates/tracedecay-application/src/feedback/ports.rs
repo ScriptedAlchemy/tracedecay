@@ -1,10 +1,42 @@
 use tracedecay_domain::feedback::{
-    FeedbackCycleObservationV1, FeedbackDedupeKeyV1, FeedbackDiagnosticBaselineV1,
-    FeedbackDiagnosticV1, FeedbackEvaluationInputV1, FeedbackImpactV1,
+    FeedbackAuthoritativeRuntimeStateV1, FeedbackCycleObservationV1, FeedbackDedupeKeyV1,
+    FeedbackDiagnosticBaselineV1, FeedbackDiagnosticV1, FeedbackEvaluationInputV1,
+    FeedbackImpactV1,
 };
 
+use crate::context::RequestContext;
 use crate::diagnostics::{DiagnosticProviderIdentity, DiagnosticProviderResult};
 use crate::error::ApplicationContractError;
+
+/// Authoritative current-state boundary for feedback orchestration. The
+/// request caller supplies an intended immutable input, never current runtime
+/// truth. Implementations resolve scope/content/policy/configuration and prior
+/// baseline state against the admitted request context. `None` means the
+/// authority is unavailable; a saved runtime with no prior baseline is a
+/// resolved state whose `baseline_horizon` is `None`.
+pub trait FeedbackRuntimeStatePort {
+    fn resolve(
+        &self,
+        context: &RequestContext,
+        input: &FeedbackEvaluationInputV1,
+    ) -> Option<FeedbackAuthoritativeRuntimeStateV1>;
+}
+
+impl<F> FeedbackRuntimeStatePort for F
+where
+    F: Fn(
+        &RequestContext,
+        &FeedbackEvaluationInputV1,
+    ) -> Option<FeedbackAuthoritativeRuntimeStateV1>,
+{
+    fn resolve(
+        &self,
+        context: &RequestContext,
+        input: &FeedbackEvaluationInputV1,
+    ) -> Option<FeedbackAuthoritativeRuntimeStateV1> {
+        self(context, input)
+    }
+}
 
 /// Immutable diagnostics request supplied to one admitted feedback cycle.
 /// The owning provider runtime remains responsible for execution, freshness,

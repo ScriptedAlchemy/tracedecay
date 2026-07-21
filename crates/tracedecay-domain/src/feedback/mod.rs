@@ -673,15 +673,26 @@ pub enum FeedbackDiagnosticClassificationV1 {
 }
 
 /// Availability of the canonical baseline used to classify a current
-/// diagnostic. A missing or partial baseline never upgrades a finding to
-/// `New`; callers must retain `Unknown` instead.
+/// diagnostic. An unavailable or partial baseline never upgrades a finding
+/// to `New`; only an authoritative `NoPriorBaseline` state may do so without
+/// a baseline record.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackBaselineStateV1 {
     Complete,
     Partial,
     Stale,
+    /// The authoritative runtime confirmed that there is no prior saved
+    /// generation to compare. This is authoritative empty history, not an
+    /// invented horizon and not unavailable/partial coverage.
+    NoPriorBaseline,
     Unavailable,
+}
+
+impl FeedbackBaselineStateV1 {
+    pub const fn supports_complete_comparison(self) -> bool {
+        matches!(self, Self::Complete | Self::NoPriorBaseline)
+    }
 }
 
 /// Exact address of one authoritative diagnostics-history baseline. The
@@ -725,6 +736,9 @@ impl FeedbackBaselineHorizonV1 {
 
 /// Authoritative runtime resolution returned by the runtime-state port. The
 /// watermark makes concurrent changes observable across the two resolutions.
+/// `baseline_horizon: None` means either that an overlay has no durable
+/// baseline or that the authoritative saved-content history has no prior
+/// generation; callers must never manufacture a comparison horizon.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackAuthoritativeRuntimeStateV1 {
@@ -738,6 +752,7 @@ impl FeedbackAuthoritativeRuntimeStateV1 {
         self.snapshot.validate()?;
         self.runtime_watermark.validate()?;
         match (&input.request.content, &self.baseline_horizon) {
+            (FeedbackContentIdentityV1::SavedContent { .. }, None) => Ok(()),
             (
                 FeedbackContentIdentityV1::SavedContent {
                     generation_digest,
@@ -821,6 +836,11 @@ impl FeedbackDiagnosticBaselineV1 {
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.identity.validate()?;
+        if self.state == FeedbackBaselineStateV1::NoPriorBaseline {
+            return Err(DomainError::NonCanonical {
+                field: "feedback baseline no-prior state",
+            });
+        }
         for anchor in &self.diagnostic_anchors {
             anchor.validate()?;
         }
@@ -1100,7 +1120,7 @@ impl FeedbackCycleResultV1 {
                             || self
                                 .baseline_states
                                 .iter()
-                                .any(|state| *state != FeedbackBaselineStateV1::Complete)))
+                                .any(|state| !state.supports_complete_comparison())))
                     || self.impact_state != Some(FeedbackImpactStateV1::Complete)
                     || self.affected_tests_state != Some(FeedbackImpactStateV1::Complete)
                     || self

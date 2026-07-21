@@ -12,7 +12,7 @@ use tracedecay_domain::{
 };
 use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
 
-use crate::authorization::{AuthorizationPort, AuthorizationService};
+use crate::authorization::{AuthorizationAdmission, AuthorizationPort, AuthorizationService};
 use crate::context::RequestContext;
 use crate::diagnostics::{
     DiagnosticProviderIdentity, DiagnosticProviderResult, ProviderSourceIdentity,
@@ -24,7 +24,7 @@ use crate::result::{ApplicationProblem, ApplicationProblemKind, AuthorityReceipt
 use super::ports::{
     FeedbackCycleDedupePort, FeedbackCycleDedupeState, FeedbackDiagnosticsPort,
     FeedbackDiagnosticsRequest, FeedbackImpactPort, FeedbackImpactPortOutcome,
-    FeedbackImpactRequest, FeedbackObservationPort,
+    FeedbackImpactRequest, FeedbackObservationPort, FeedbackRuntimeStatePort,
 };
 
 /// Explicit accounting supplied by the caller/runtime that owns clock, token,
@@ -77,7 +77,6 @@ pub enum FeedbackCycleControl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeedbackCycleExecutionRequest {
     pub input: FeedbackEvaluationInputV1,
-    pub runtime: FeedbackAuthoritativeRuntimeStateV1,
     pub providers: Vec<DiagnosticProviderIdentity>,
     pub maximum_returned_findings: u64,
     pub usage: FeedbackBudgetUsage,
@@ -87,7 +86,6 @@ pub struct FeedbackCycleExecutionRequest {
 impl FeedbackCycleExecutionRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.input.validate()?;
-        self.runtime.validate_for(&self.input)?;
         self.usage.validate_for(&self.input)?;
         if self.maximum_returned_findings == 0 {
             return Err(ApplicationContractError::ZeroValue {
@@ -130,7 +128,8 @@ pub struct FeedbackCycleExecutionResult {
 /// One-shot application service for PR11 feedback. Every external dependency
 /// is a narrow port; the service neither schedules work nor persists a
 /// feedback/dedupe/observation store of its own.
-pub struct FeedbackCycleService<D, I, K, O, A, E> {
+pub struct FeedbackCycleService<R, D, I, K, O, A, E> {
+    runtime: R,
     diagnostics: D,
     impact: I,
     dedupe: K,
@@ -139,8 +138,9 @@ pub struct FeedbackCycleService<D, I, K, O, A, E> {
     operation: ApplicationOperation,
 }
 
-impl<D, I, K, O, A, E> FeedbackCycleService<D, I, K, O, A, E>
+impl<R, D, I, K, O, A, E> FeedbackCycleService<R, D, I, K, O, A, E>
 where
+    R: FeedbackRuntimeStatePort,
     D: FeedbackDiagnosticsPort,
     I: FeedbackImpactPort,
     K: FeedbackCycleDedupePort,
@@ -149,6 +149,7 @@ where
     E: SourceAuthorizationEvaluator,
 {
     pub fn new(
+        runtime: R,
         diagnostics: D,
         impact: I,
         dedupe: K,
@@ -157,6 +158,7 @@ where
         operation: ApplicationOperation,
     ) -> Self {
         Self {
+            runtime,
             diagnostics,
             impact,
             dedupe,
@@ -185,37 +187,7 @@ where
                 None,
             );
         }
-        if !request
-            .runtime
-            .snapshot
-            .has_same_root(&request.input.request)
-        {
-            return self.finish(
-                &request,
-                None,
-                FeedbackCycleTerminationV1::Blocked,
-                Vec::new(),
-                Vec::new(),
-                None,
-                None,
-                Vec::new(),
-                None,
-            );
-        }
 
-        if request.control == FeedbackCycleControl::UserStop {
-            return self.finish(
-                &request,
-                None,
-                FeedbackCycleTerminationV1::UserStop,
-                Vec::new(),
-                Vec::new(),
-                None,
-                None,
-                Vec::new(),
-                None,
-            );
-        }
         let admission =
             match self
                 .authorization
@@ -237,43 +209,51 @@ where
                     );
                 }
             };
-        if !request
-            .runtime
+
+        let initial_runtime = match self.runtime.resolve(context, &request.input) {
+            Some(runtime) => runtime,
+            None => {
+                return self.finish_after_runtime(
+                    context,
+                    &request,
+                    &admission,
+                    None,
+                    None,
+                    FeedbackCycleTerminationV1::DaemonUnavailable,
+                    vec![ProviderEvaluationStateV1::Unavailable],
+                    Vec::new(),
+                    None,
+                    None,
+                    Vec::new(),
+                    &[],
+                );
+            }
+        };
+        if initial_runtime.validate_for(&request.input).is_err() {
+            return self.finish_after_runtime(
+                context,
+                &request,
+                &admission,
+                Some(&initial_runtime),
+                None,
+                FeedbackCycleTerminationV1::DaemonUnavailable,
+                vec![ProviderEvaluationStateV1::Unavailable],
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+                &[],
+            );
+        }
+        if !initial_runtime
             .snapshot
-            .is_current_for(&request.input.request)
+            .has_same_root(&request.input.request)
         {
-            return self.finish(
+            return self.finish_after_runtime(
+                context,
                 &request,
-                None,
-                FeedbackCycleTerminationV1::StaleReplanRequired,
-                vec![ProviderEvaluationStateV1::Stale],
-                Vec::new(),
-                None,
-                None,
-                Vec::new(),
-                Some(admission.receipt().clone()),
-            );
-        }
-
-        self.emit_trigger(&request.input);
-        self.emit_stage(&request.input, FeedbackEvaluationStageV1::Admission);
-
-        if request.usage.exceeds(&request.input) {
-            return self.finish(
-                &request,
-                None,
-                FeedbackCycleTerminationV1::BudgetExceeded,
-                vec![ProviderEvaluationStateV1::TimedOut],
-                Vec::new(),
-                None,
-                None,
-                Vec::new(),
-                Some(admission.receipt().clone()),
-            );
-        }
-        if request.providers.is_empty() {
-            return self.finish(
-                &request,
+                &admission,
+                Some(&initial_runtime),
                 None,
                 FeedbackCycleTerminationV1::Blocked,
                 Vec::new(),
@@ -281,25 +261,134 @@ where
                 None,
                 None,
                 Vec::new(),
-                Some(admission.receipt().clone()),
+                &[],
+            );
+        }
+        if !initial_runtime
+            .snapshot
+            .is_current_for(&request.input.request)
+        {
+            return self.finish_after_runtime(
+                context,
+                &request,
+                &admission,
+                Some(&initial_runtime),
+                None,
+                FeedbackCycleTerminationV1::StaleReplanRequired,
+                vec![ProviderEvaluationStateV1::Stale],
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+                &[],
             );
         }
 
-        self.emit_stage(&request.input, FeedbackEvaluationStageV1::Diagnostics);
+        if request.control == FeedbackCycleControl::UserStop {
+            return self.finish_after_runtime(
+                context,
+                &request,
+                &admission,
+                Some(&initial_runtime),
+                None,
+                FeedbackCycleTerminationV1::UserStop,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+                &[],
+            );
+        }
+
+        let mut completed_stages = vec![FeedbackEvaluationStageV1::Admission];
+        if request.usage.exceeds(&request.input) {
+            return self.finish_after_runtime(
+                context,
+                &request,
+                &admission,
+                Some(&initial_runtime),
+                None,
+                FeedbackCycleTerminationV1::BudgetExceeded,
+                vec![ProviderEvaluationStateV1::TimedOut],
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+                &completed_stages,
+            );
+        }
+        if request.providers.is_empty() {
+            return self.finish_after_runtime(
+                context,
+                &request,
+                &admission,
+                Some(&initial_runtime),
+                None,
+                FeedbackCycleTerminationV1::Blocked,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+                &completed_stages,
+            );
+        }
+
+        completed_stages.push(FeedbackEvaluationStageV1::Diagnostics);
         let diagnostics_request = FeedbackDiagnosticsRequest {
             input: request.input.clone(),
             providers: request.providers.clone(),
         };
-        // Resolve the authoritative pre-evaluation history snapshot before
-        // asking providers for current diagnostics, so provider execution can
-        // never backfill the baseline it is being compared against.
-        let baselines = if request.input.request.durability() == FeedbackDurabilityV1::Durable {
-            self.diagnostics.diagnostic_history(&diagnostics_request)
+        // Resolve authoritative history before asking providers for current
+        // diagnostics. A known absence of prior history stays explicit and does
+        // not manufacture a comparison horizon.
+        let baselines = if request.input.request.durability() == FeedbackDurabilityV1::Durable
+            && initial_runtime.baseline_horizon.is_some()
+        {
+            let baselines = self.diagnostics.diagnostic_history(&diagnostics_request);
+            if let Some(runtime_override) =
+                self.runtime_override(context, &request, Some(&initial_runtime))
+            {
+                return self.finish_after_checked_runtime(
+                    context,
+                    &request,
+                    &admission,
+                    Some(runtime_override),
+                    None,
+                    FeedbackCycleTerminationV1::StaleReplanRequired,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    None,
+                    Vec::new(),
+                    &[],
+                );
+            }
+            baselines
         } else {
             Vec::new()
         };
         let diagnostics = self.diagnostics.diagnostics(&diagnostics_request);
-        let resolved_baselines = resolve_baselines(&request, &baselines)?;
+        if let Some(runtime_override) =
+            self.runtime_override(context, &request, Some(&initial_runtime))
+        {
+            return self.finish_after_checked_runtime(
+                context,
+                &request,
+                &admission,
+                Some(runtime_override),
+                None,
+                FeedbackCycleTerminationV1::StaleReplanRequired,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+                &[],
+            );
+        }
+        let resolved_baselines = resolve_baselines(&request, &initial_runtime, &baselines)?;
         let baseline_states = resolved_baselines
             .iter()
             .map(|resolved| resolved.state)
@@ -307,8 +396,11 @@ where
         let (provider_states, findings) =
             collect_diagnostics(&request, &diagnostics, &resolved_baselines)?;
         if let Some(termination) = terminal_before_impact(&provider_states, &baseline_states) {
-            return self.finish(
+            return self.finish_after_checked_runtime(
+                context,
                 &request,
+                &admission,
+                None,
                 None,
                 termination,
                 provider_states,
@@ -316,37 +408,74 @@ where
                 None,
                 None,
                 Vec::new(),
-                Some(admission.receipt().clone()),
+                &completed_stages,
             );
         }
 
-        self.emit_stage(
-            &request.input,
-            FeedbackEvaluationStageV1::BaselineClassification,
-        );
-        self.emit_stage(&request.input, FeedbackEvaluationStageV1::Impact);
+        completed_stages.push(FeedbackEvaluationStageV1::BaselineClassification);
+        completed_stages.push(FeedbackEvaluationStageV1::Impact);
         let (impact, impact_state) = self.resolve_impact(&request.input);
+        if let Some(runtime_override) =
+            self.runtime_override(context, &request, Some(&initial_runtime))
+        {
+            return self.finish_after_checked_runtime(
+                context,
+                &request,
+                &admission,
+                Some(runtime_override),
+                None,
+                FeedbackCycleTerminationV1::StaleReplanRequired,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+                &[],
+            );
+        }
         let affected_tests_state = impact
             .as_ref()
             .map(|impact| impact.affected_tests_state)
             .unwrap_or(impact_state);
-        self.emit_stage(&request.input, FeedbackEvaluationStageV1::AffectedTests);
-        self.emit_stage(&request.input, FeedbackEvaluationStageV1::ResultAssembly);
+        completed_stages.push(FeedbackEvaluationStageV1::AffectedTests);
+        completed_stages.push(FeedbackEvaluationStageV1::ResultAssembly);
 
         let dedupe_key = if request.input.request.durability() == FeedbackDurabilityV1::Durable {
             let evidence_identity = canonical_sha256(&(
                 "tracedecay.feedback.evidence-identity.v1",
+                &initial_runtime,
                 &diagnostics,
                 &baselines,
                 &impact,
                 impact_state,
             ))?;
             let key = request.input.dedupe_key(&evidence_identity)?;
-            match self.dedupe.check(&key) {
+            let dedupe_state = self.dedupe.check(&key);
+            if let Some(runtime_override) =
+                self.runtime_override(context, &request, Some(&initial_runtime))
+            {
+                return self.finish_after_checked_runtime(
+                    context,
+                    &request,
+                    &admission,
+                    Some(runtime_override),
+                    None,
+                    FeedbackCycleTerminationV1::StaleReplanRequired,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    None,
+                    Vec::new(),
+                    &[],
+                );
+            }
+            match dedupe_state {
                 FeedbackCycleDedupeState::Duplicate => {
-                    self.emit_dedupe(&request.input, key.clone());
-                    return self.finish(
+                    return self.finish_after_checked_runtime(
+                        context,
                         &request,
+                        &admission,
+                        None,
                         Some(key),
                         FeedbackCycleTerminationV1::DuplicateNoop,
                         Vec::new(),
@@ -354,12 +483,15 @@ where
                         None,
                         None,
                         Vec::new(),
-                        Some(admission.receipt().clone()),
+                        &completed_stages,
                     );
                 }
                 FeedbackCycleDedupeState::Unavailable => {
-                    return self.finish(
+                    return self.finish_after_checked_runtime(
+                        context,
                         &request,
+                        &admission,
+                        None,
                         Some(key),
                         FeedbackCycleTerminationV1::DaemonUnavailable,
                         vec![ProviderEvaluationStateV1::Unavailable],
@@ -367,7 +499,7 @@ where
                         None,
                         None,
                         Vec::new(),
-                        Some(admission.receipt().clone()),
+                        &completed_stages,
                     );
                 }
                 FeedbackCycleDedupeState::Unique => Some(key),
@@ -376,28 +508,6 @@ where
             None
         };
 
-        let authority = match self.authorization.recheck_publication(
-            context,
-            &self.operation,
-            &admission,
-            request.usage.completed_at,
-        ) {
-            Ok(authority) => authority,
-            Err(problem) => {
-                let (termination, states) = terminal_for_problem(&problem);
-                return self.finish(
-                    &request,
-                    dedupe_key,
-                    termination,
-                    states,
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    None,
-                );
-            }
-        };
         let termination = determine_termination(
             &provider_states,
             &baseline_states,
@@ -406,8 +516,11 @@ where
             affected_tests_state,
             request.input.request.durability(),
         );
-        self.finish(
+        self.finish_after_checked_runtime(
+            context,
             &request,
+            &admission,
+            None,
             dedupe_key,
             termination,
             provider_states,
@@ -415,7 +528,7 @@ where
             impact,
             Some(impact_state),
             findings,
-            Some(authority),
+            &completed_stages,
         )
     }
 
@@ -450,6 +563,152 @@ where
                 (None, FeedbackImpactStateV1::Unavailable)
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_after_runtime(
+        &self,
+        context: &RequestContext,
+        request: &FeedbackCycleExecutionRequest,
+        admission: &AuthorizationAdmission,
+        initial_runtime: Option<&FeedbackAuthoritativeRuntimeStateV1>,
+        dedupe_key: Option<FeedbackDedupeKeyV1>,
+        termination: FeedbackCycleTerminationV1,
+        provider_states: Vec<ProviderEvaluationStateV1>,
+        baseline_states: Vec<FeedbackBaselineStateV1>,
+        impact: Option<FeedbackImpactV1>,
+        impact_state: Option<FeedbackImpactStateV1>,
+        findings: Vec<FeedbackFindingV1>,
+        completed_stages: &[FeedbackEvaluationStageV1],
+    ) -> Result<FeedbackCycleExecutionResult, ApplicationContractError> {
+        let runtime_override = self.runtime_override(context, request, initial_runtime);
+        self.finish_after_checked_runtime(
+            context,
+            request,
+            admission,
+            runtime_override,
+            dedupe_key,
+            termination,
+            provider_states,
+            baseline_states,
+            impact,
+            impact_state,
+            findings,
+            completed_stages,
+        )
+    }
+
+    fn runtime_override(
+        &self,
+        context: &RequestContext,
+        request: &FeedbackCycleExecutionRequest,
+        initial_runtime: Option<&FeedbackAuthoritativeRuntimeStateV1>,
+    ) -> Option<(FeedbackCycleTerminationV1, Vec<ProviderEvaluationStateV1>)> {
+        match self.runtime.resolve(context, &request.input) {
+            None => Some((
+                FeedbackCycleTerminationV1::DaemonUnavailable,
+                vec![ProviderEvaluationStateV1::Unavailable],
+            )),
+            Some(latest_runtime) if latest_runtime.validate_for(&request.input).is_err() => Some((
+                FeedbackCycleTerminationV1::DaemonUnavailable,
+                vec![ProviderEvaluationStateV1::Unavailable],
+            )),
+            Some(latest_runtime)
+                if !latest_runtime
+                    .snapshot
+                    .has_same_root(&request.input.request) =>
+            {
+                Some((FeedbackCycleTerminationV1::Blocked, Vec::new()))
+            }
+            Some(latest_runtime)
+                if !latest_runtime
+                    .snapshot
+                    .is_current_for(&request.input.request)
+                    || initial_runtime.is_none_or(|initial| initial != &latest_runtime) =>
+            {
+                Some((
+                    FeedbackCycleTerminationV1::StaleReplanRequired,
+                    vec![ProviderEvaluationStateV1::Stale],
+                ))
+            }
+            Some(_) => None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_after_checked_runtime(
+        &self,
+        context: &RequestContext,
+        request: &FeedbackCycleExecutionRequest,
+        admission: &AuthorizationAdmission,
+        runtime_override: Option<(FeedbackCycleTerminationV1, Vec<ProviderEvaluationStateV1>)>,
+        dedupe_key: Option<FeedbackDedupeKeyV1>,
+        termination: FeedbackCycleTerminationV1,
+        provider_states: Vec<ProviderEvaluationStateV1>,
+        baseline_states: Vec<FeedbackBaselineStateV1>,
+        impact: Option<FeedbackImpactV1>,
+        impact_state: Option<FeedbackImpactStateV1>,
+        findings: Vec<FeedbackFindingV1>,
+        completed_stages: &[FeedbackEvaluationStageV1],
+    ) -> Result<FeedbackCycleExecutionResult, ApplicationContractError> {
+        let authority = match self.authorization.recheck_publication(
+            context,
+            &self.operation,
+            admission,
+            request.usage.completed_at,
+        ) {
+            Ok(authority) => authority,
+            Err(problem) => {
+                let (termination, states) = terminal_for_problem(&problem);
+                return self.finish(
+                    request,
+                    None,
+                    termination,
+                    states,
+                    Vec::new(),
+                    None,
+                    None,
+                    Vec::new(),
+                    None,
+                );
+            }
+        };
+        if let Some((termination, states)) = runtime_override {
+            return self.finish(
+                request,
+                None,
+                termination,
+                states,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+                Some(authority),
+            );
+        }
+
+        if !completed_stages.is_empty() {
+            self.emit_trigger(&request.input);
+            for stage in completed_stages {
+                self.emit_stage(&request.input, *stage);
+            }
+        }
+        if termination == FeedbackCycleTerminationV1::DuplicateNoop
+            && let Some(key) = dedupe_key.clone()
+        {
+            self.emit_dedupe(&request.input, key);
+        }
+        self.finish(
+            request,
+            dedupe_key,
+            termination,
+            provider_states,
+            baseline_states,
+            impact,
+            impact_state,
+            findings,
+            Some(authority),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -600,18 +859,20 @@ fn provider_matches_input(
         (
             ProviderSourceIdentity::SessionOverlay {
                 session_id,
+                client_id,
                 document_version,
                 overlay_digest,
-                ..
             },
             tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
                 session_id: expected_session,
+                owner_client_id,
                 document_version: expected_version,
                 overlay_digest: expected_digest,
                 ..
             },
         ) => {
             session_id == expected_session
+                && client_id == owner_client_id
                 && document_version == expected_version
                 && overlay_digest == expected_digest
                 && identity.document.document_version == Some(*expected_version)
@@ -622,13 +883,14 @@ fn provider_matches_input(
 }
 
 struct ResolvedBaseline<'a> {
-    expected: FeedbackDiagnosticBaselineIdentityV1,
+    expected: Option<FeedbackDiagnosticBaselineIdentityV1>,
     baseline: Option<&'a FeedbackDiagnosticBaselineV1>,
     state: FeedbackBaselineStateV1,
 }
 
 fn expected_baseline_identity(
     request: &FeedbackCycleExecutionRequest,
+    runtime: &FeedbackAuthoritativeRuntimeStateV1,
     provider: &DiagnosticProviderIdentity,
 ) -> Result<FeedbackDiagnosticBaselineIdentityV1, ApplicationContractError> {
     let input = &request.input;
@@ -651,7 +913,7 @@ fn expected_baseline_identity(
         current_head_commit_id: input.request.scope.head_commit_id.clone(),
         current_content_digest: file_digest.clone(),
         provider_identity_digest: provider.compute_digest()?,
-        horizon: request.runtime.baseline_horizon.clone().ok_or(
+        horizon: runtime.baseline_horizon.clone().ok_or(
             ApplicationContractError::Inconsistent {
                 field: "feedback baseline horizon",
             },
@@ -661,16 +923,28 @@ fn expected_baseline_identity(
 
 fn resolve_baselines<'a>(
     request: &FeedbackCycleExecutionRequest,
+    runtime: &FeedbackAuthoritativeRuntimeStateV1,
     baselines: &'a [FeedbackDiagnosticBaselineV1],
 ) -> Result<Vec<ResolvedBaseline<'a>>, ApplicationContractError> {
     if request.input.request.durability() == FeedbackDurabilityV1::SessionOnly {
         return Ok(Vec::new());
     }
+    if runtime.baseline_horizon.is_none() {
+        return Ok(request
+            .providers
+            .iter()
+            .map(|_| ResolvedBaseline {
+                expected: None,
+                baseline: None,
+                state: FeedbackBaselineStateV1::NoPriorBaseline,
+            })
+            .collect());
+    }
 
     let mut resolved = Vec::with_capacity(request.providers.len());
     let mut expected_provider_digests = Vec::with_capacity(request.providers.len());
     for provider in &request.providers {
-        let expected = expected_baseline_identity(request, provider)?;
+        let expected = expected_baseline_identity(request, runtime, provider)?;
         expected_provider_digests.push(expected.provider_identity_digest.clone());
         let exact = baselines
             .iter()
@@ -688,7 +962,7 @@ fn resolve_baselines<'a>(
             _ => (None, FeedbackBaselineStateV1::Partial),
         };
         resolved.push(ResolvedBaseline {
-            expected,
+            expected: Some(expected),
             baseline,
             state,
         });
@@ -700,12 +974,12 @@ fn resolve_baselines<'a>(
     }) {
         let expected = resolved
             .first()
-            .map(|resolved| resolved.expected.clone())
+            .and_then(|resolved| resolved.expected.clone())
             .ok_or(ApplicationContractError::Inconsistent {
                 field: "unexpected feedback baseline",
             })?;
         resolved.push(ResolvedBaseline {
-            expected,
+            expected: Some(expected),
             baseline: None,
             state: FeedbackBaselineStateV1::Partial,
         });
@@ -759,11 +1033,22 @@ fn collect_diagnostics(
                     {
                         let classification = baselines
                             .get(provider_index)
-                            .and_then(|resolved| {
-                                resolved.baseline.map(|baseline| {
-                                    baseline
-                                        .classify(&resolved.expected, &diagnostic.diagnostic_anchor)
-                                })
+                            .map(|resolved| {
+                                resolved
+                                    .baseline
+                                    .zip(resolved.expected.as_ref())
+                                    .map(|(baseline, expected)| {
+                                        baseline.classify(expected, &diagnostic.diagnostic_anchor)
+                                    })
+                                    .unwrap_or_else(|| {
+                                        if resolved.state
+                                            == FeedbackBaselineStateV1::NoPriorBaseline
+                                        {
+                                            FeedbackDiagnosticClassificationV1::New
+                                        } else {
+                                            FeedbackDiagnosticClassificationV1::Unknown
+                                        }
+                                    })
                             })
                             .unwrap_or(FeedbackDiagnosticClassificationV1::Unknown);
                         provider_findings.push(FeedbackFindingV1 {
@@ -938,7 +1223,7 @@ fn determine_termination(
             && (baseline_states.is_empty()
                 || baseline_states
                     .iter()
-                    .any(|state| *state != FeedbackBaselineStateV1::Complete)))
+                    .any(|state| !state.supports_complete_comparison())))
         || impact_state != FeedbackImpactStateV1::Complete
         || affected_tests_state != FeedbackImpactStateV1::Complete
     {

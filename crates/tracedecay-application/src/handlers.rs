@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use tracedecay_tool_catalog::{
-    ApplicationHandlerDescriptorV1 as CatalogHandlerDescriptor, CapabilityId, SchemaRef, UseCaseId,
+    ApplicationHandlerDescriptorV1 as CatalogHandlerDescriptor, CapabilityId,
+    CatalogContributionV1, SchemaRef, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
@@ -110,10 +111,8 @@ impl ApplicationHandlerDescriptors {
     ) -> Result<Self, ApplicationContractError> {
         let mut indexed = BTreeMap::new();
         for descriptor in descriptors {
-            if indexed
-                .insert(descriptor.operation.use_case_id().clone(), descriptor)
-                .is_some()
-            {
+            let use_case_id = descriptor.operation.use_case_id().clone();
+            if indexed.insert(use_case_id, descriptor).is_some() {
                 return Err(ApplicationContractError::Duplicate {
                     field: "application handler use case",
                 });
@@ -140,6 +139,73 @@ impl ApplicationHandlerDescriptors {
             .map(ApplicationHandlerDescriptor::catalog_descriptor)
             .collect()
     }
+
+    /// Verifies the application-owned, bidirectional use-case/schema mapping.
+    /// Capability, effect, scope, privacy, and availability remain catalog-owned
+    /// metadata; copying them into these descriptors would make validation
+    /// circular.
+    pub fn validate_against(
+        &self,
+        contributions: &[CatalogContributionV1],
+    ) -> Result<(), ApplicationContractError> {
+        let mut capabilities = BTreeMap::new();
+        for capability in contributions
+            .iter()
+            .flat_map(|contribution| contribution.capabilities())
+        {
+            if capabilities
+                .insert(capability.use_case_id().clone(), capability)
+                .is_some()
+            {
+                return Err(ApplicationContractError::Duplicate {
+                    field: "application catalog use case",
+                });
+            }
+        }
+
+        for descriptor in self.iter() {
+            let operation = descriptor.operation();
+            let Some(capability) = capabilities.get(operation.use_case_id()) else {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "application handler use case",
+                });
+            };
+            validate_descriptor_mapping(descriptor, capability)?;
+        }
+
+        for capability in capabilities.values() {
+            let Some(descriptor) = self.get(capability.use_case_id()) else {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "application capability handler mapping",
+                });
+            };
+            validate_descriptor_mapping(descriptor, capability)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_descriptor_mapping(
+    descriptor: &ApplicationHandlerDescriptor,
+    capability: &tracedecay_tool_catalog::CapabilityManifestV1,
+) -> Result<(), ApplicationContractError> {
+    let operation = descriptor.operation();
+    if operation.use_case_id() != capability.use_case_id() {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "application capability/use-case mapping",
+        });
+    }
+    if descriptor.request_schema() != capability.request_schema()
+        || descriptor.result_schema() != capability.result_schema()
+        || operation.result_contract()
+            != &ResultContractRef::from_schema(capability.result_schema())
+    {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "application capability schema mapping",
+        });
+    }
+    Ok(())
 }
 
 /// Application-owned descriptor source. Root catalog composition remains
