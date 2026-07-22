@@ -50,8 +50,7 @@ pub(crate) fn render(view: CanonicalHumanView) -> MarkdownView {
 fn escape_text(value: &str) -> String {
     value
         .replace('\\', "\\\\")
-        .replace('\n', " ")
-        .replace('\r', " ")
+        .replace(['\n', '\r'], " ")
         .replace('*', "\\*")
         .replace('_', "\\_")
         .replace('`', "\\`")

@@ -227,14 +227,13 @@ fn parse_profile(text: &str) -> std::result::Result<Document, String> {
 // ---- span/text helpers ----
 
 fn line_start(text: &str, pos: usize) -> usize {
-    text[..pos].rfind('\n').map(|index| index + 1).unwrap_or(0)
+    text[..pos].rfind('\n').map_or(0, |index| index + 1)
 }
 
 fn line_end_including_newline(text: &str, pos: usize) -> usize {
     text[pos..]
         .find('\n')
-        .map(|index| pos + index + 1)
-        .unwrap_or(text.len())
+        .map_or(text.len(), |index| pos + index + 1)
 }
 
 fn leading_indent(text: &str, pos: usize) -> String {
@@ -300,7 +299,7 @@ fn ensure_enabled(text: &str) -> std::result::Result<String, String> {
             let Some(enabled) = enabled_node.as_sequence() else {
                 return Err(PLUGINS_ERR.to_string());
             };
-            if sequence_contains(&enabled, "tracedecay") {
+            if sequence_contains(enabled, "tracedecay") {
                 return Ok(text.to_string());
             }
             let range = enabled.byte_range();
@@ -364,7 +363,7 @@ fn ensure_scalar(
         }
         return insert_block_child(text, &root, container, &format!("{key}: {value}"));
     }
-    match string_value(&mapping, key).as_deref() {
+    match string_value(mapping, key).as_deref() {
         Some(current) if current == value => Ok(text.to_string()),
         Some(current) if allow_overwrite.contains(&current) => {
             let entry = mapping
@@ -372,7 +371,7 @@ fn ensure_scalar(
                 .ok_or_else(|| unsupported.to_string())?;
             let range = entry
                 .value_node()
-                .and_then(|node| node.as_scalar().map(|scalar| scalar.byte_range()))
+                .and_then(|node| node.as_scalar().map(yaml_edit::Scalar::byte_range))
                 .ok_or_else(|| unsupported.to_string())?;
             Ok(format!(
                 "{}{}{}",
@@ -496,10 +495,10 @@ fn remove_seq_item(text: &str, path: &[&str], value: &str) -> std::result::Resul
             let Some(sequence) = node.as_sequence() else {
                 return Ok(text.to_string());
             };
-            if !sequence_contains(&sequence, value) {
+            if !sequence_contains(sequence, value) {
                 return Ok(text.to_string());
             }
-            return remove_one_seq_item(text, &sequence, value);
+            return remove_one_seq_item(text, sequence, value);
         }
         let Some(mapping) = node.as_mapping() else {
             return Ok(text.to_string());
@@ -522,7 +521,7 @@ fn remove_one_seq_item(
     };
     let range = item
         .as_scalar()
-        .map(|scalar| scalar.byte_range())
+        .map(yaml_edit::Scalar::byte_range)
         .ok_or_else(|| PLUGINS_ERR.to_string())?;
     let (start, end) = (range.start as usize, range.end as usize);
     if sequence.is_flow_style() {

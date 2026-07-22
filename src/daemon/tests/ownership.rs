@@ -496,13 +496,13 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
     registry.insert_at(
         oldest.clone(),
         Arc::new(1),
-        now - std::time::Duration::from_secs(20),
+        now.checked_sub(std::time::Duration::from_secs(20)).unwrap(),
     );
     registry.bind_route(route("oldest-active"), oldest.clone());
     registry.insert_at(
         idle.clone(),
         Arc::new(2),
-        now - std::time::Duration::from_secs(10),
+        now.checked_sub(std::time::Duration::from_secs(10)).unwrap(),
     );
     registry.bind_route(route("idle"), idle.clone());
     let active_lease = Arc::clone(registry.get(&oldest).expect("oldest server"));

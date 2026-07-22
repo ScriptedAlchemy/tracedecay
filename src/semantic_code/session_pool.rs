@@ -987,7 +987,7 @@ pub(crate) mod tests {
 
     #[test]
     fn acquire_release_reuses_warmed_session() {
-        let pool = fake_pool(2, Duration::from_secs(60), 1 << 20);
+        let pool = fake_pool(2, Duration::from_mins(1), 1 << 20);
         let authority = authority();
         {
             let _guard = pool.acquire(&authority).expect("first acquire");
@@ -1011,7 +1011,7 @@ pub(crate) mod tests {
 
     #[test]
     fn pool_bound_exhaustion_is_typed_not_blocking() {
-        let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
+        let pool = fake_pool(1, Duration::from_mins(1), 1 << 20);
         let authority = authority();
         let held = pool.acquire(&authority).expect("first acquire");
         let result = pool.acquire(&authority);
@@ -1027,7 +1027,7 @@ pub(crate) mod tests {
     #[test]
     fn memory_ceiling_is_enforced_with_typed_error() {
         // Each fake session reports 1024 resident bytes; ceiling allows one.
-        let pool = fake_pool(4, Duration::from_secs(60), 1536);
+        let pool = fake_pool(4, Duration::from_mins(1), 1536);
         let authority = authority();
         let _held = pool.acquire(&authority).expect("first acquire");
         let result = pool.acquire(&authority);
@@ -1054,13 +1054,13 @@ pub(crate) mod tests {
         let pool = SessionPool::new(
             FakeEmbeddingRuntime::new().with_resident_bytes_per_session(2048),
             ManualClock::new(),
-            config(1, Duration::from_secs(60), 1024),
+            config(1, Duration::from_mins(1), 1024),
         )
         .expect("valid pool");
         let error = pool
             .acquire_blocking(
                 &authority(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 &ManualCancellation::new(),
             )
             .err()
@@ -1078,7 +1078,7 @@ pub(crate) mod tests {
 
     #[test]
     fn identity_separation_blocks_cross_privacy_reuse() {
-        let pool = fake_pool(4, Duration::from_secs(60), 1 << 20);
+        let pool = fake_pool(4, Duration::from_mins(1), 1 << 20);
         let domain_a = authority_with_privacy("domain-a", 7);
         let domain_b = authority_with_privacy("domain-b", 7);
         {
@@ -1253,7 +1253,7 @@ pub(crate) mod tests {
         let pool = SessionPool::new(
             runtime,
             ManualClock::new(),
-            config(2, Duration::from_secs(60), 1 << 30),
+            config(2, Duration::from_mins(1), 1 << 30),
         )
         .expect("valid config");
         let err = pool
@@ -1286,7 +1286,7 @@ pub(crate) mod tests {
         let pool = SessionPool::new(
             FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1025),
             ManualClock::new(),
-            config(2, Duration::from_secs(60), 1 << 30),
+            config(2, Duration::from_mins(1), 1 << 30),
         )
         .expect("valid config");
         let err = pool
@@ -1352,7 +1352,7 @@ pub(crate) mod tests {
         let pool = SessionPool::new(
             FakeEmbeddingRuntime::new().with_open_failure(RuntimeFailureKindV1::OutOfMemory),
             ManualClock::new(),
-            config(2, Duration::from_secs(60), 1 << 20),
+            config(2, Duration::from_mins(1), 1 << 20),
         )
         .expect("valid config");
         let result = pool.acquire(&authority());
@@ -1374,7 +1374,7 @@ pub(crate) mod tests {
         let pool = SessionPool::new(
             FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
             SystemMonotonicClock::default(),
-            config(1, Duration::from_secs(60), 1 << 20),
+            config(1, Duration::from_mins(1), 1 << 20),
         )
         .expect("valid config");
         let authority = authority();
@@ -1401,7 +1401,7 @@ pub(crate) mod tests {
         let pool = SessionPool::new(
             runtime,
             SystemMonotonicClock::default(),
-            config(1, Duration::from_secs(60), 1 << 20),
+            config(1, Duration::from_mins(1), 1 << 20),
         )
         .expect("valid config");
         let authority = authority();
@@ -1441,7 +1441,7 @@ pub(crate) mod tests {
         let pool = SessionPool::new(
             FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
             SystemMonotonicClock::default(),
-            config(1, Duration::from_secs(60), 1 << 20),
+            config(1, Duration::from_mins(1), 1 << 20),
         )
         .expect("valid config");
         let authority = authority();
@@ -1509,7 +1509,7 @@ pub(crate) mod tests {
 
     #[test]
     fn blocking_acquire_reports_deadline_on_injected_clock() {
-        let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
+        let pool = fake_pool(1, Duration::from_mins(1), 1 << 20);
         let authority = authority();
         let _held = pool.acquire(&authority).expect("held");
         let cancel = ManualCancellation::new();
@@ -1543,7 +1543,7 @@ pub(crate) mod tests {
 
     #[test]
     fn blocking_acquire_honors_cancellation() {
-        let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
+        let pool = fake_pool(1, Duration::from_mins(1), 1 << 20);
         let authority = authority();
         let _held = pool.acquire(&authority).expect("held");
         let cancel = ManualCancellation::new();
@@ -1551,7 +1551,7 @@ pub(crate) mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 done_tx
-                    .send(pool.acquire_blocking(&authority, Duration::from_secs(600), &cancel))
+                    .send(pool.acquire_blocking(&authority, Duration::from_mins(10), &cancel))
                     .expect("send cancellation result");
             });
             while pool.stats().queued_waiters == 0 {
@@ -1575,7 +1575,7 @@ pub(crate) mod tests {
             SessionPoolConfigV1 {
                 max_sessions: 1,
                 max_queued_waiters: 1,
-                idle_timeout: Duration::from_secs(60),
+                idle_timeout: Duration::from_mins(1),
                 memory_ceiling_bytes: 1 << 20,
             },
         )
@@ -1607,7 +1607,7 @@ pub(crate) mod tests {
 
     #[test]
     fn close_closes_idle_and_rejects_new_acquisitions() {
-        let pool = fake_pool(2, Duration::from_secs(60), 1 << 20);
+        let pool = fake_pool(2, Duration::from_mins(1), 1 << 20);
         let authority = authority();
         {
             let _guard = pool.acquire(&authority).expect("acquire");
@@ -1627,7 +1627,7 @@ pub(crate) mod tests {
 
     #[test]
     fn active_session_closes_on_release_after_pool_close() {
-        let pool = fake_pool(2, Duration::from_secs(60), 1 << 20);
+        let pool = fake_pool(2, Duration::from_mins(1), 1 << 20);
         let authority = authority();
         let guard = pool.acquire(&authority).expect("acquire");
         assert_eq!(pool.close(), 0);
@@ -1646,7 +1646,7 @@ pub(crate) mod tests {
 
     #[test]
     fn pooled_guard_derefs_to_session_and_embeds() {
-        let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
+        let pool = fake_pool(1, Duration::from_mins(1), 1 << 20);
         let authority = authority();
         let id = SessionIdentityV1::from_authority(&authority);
         let mut guard = pool.acquire(&authority).expect("acquire");
@@ -1694,7 +1694,7 @@ pub(crate) mod tests {
 
     #[test]
     fn hard_session_bound_counts_idle_sessions_from_other_identities() {
-        let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
+        let pool = fake_pool(1, Duration::from_mins(1), 1 << 20);
         {
             let _domain_a = pool
                 .acquire(&authority_with_privacy("domain-a", 7))
@@ -1729,7 +1729,7 @@ pub(crate) mod tests {
         let service = SemanticRuntimeService::new_owned(
             Arc::new(authority()),
             factory,
-            config(1, Duration::from_secs(60), 1 << 20),
+            config(1, Duration::from_mins(1), 1 << 20),
         )
         .expect("runtime service");
         {
@@ -1757,7 +1757,7 @@ pub(crate) mod tests {
         let service = SemanticRuntimeService::new_owned(
             Arc::new(authority()),
             initial,
-            config(1, Duration::from_secs(60), 1 << 20),
+            config(1, Duration::from_mins(1), 1 << 20),
         )
         .expect("runtime service");
         {

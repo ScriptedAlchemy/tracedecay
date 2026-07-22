@@ -2160,7 +2160,7 @@ mod tests {
             );
         }
 
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         let controls: Vec<_> = (0..64)
             .map(|_| ExecutionControl::new(Some(deadline)))
             .collect();

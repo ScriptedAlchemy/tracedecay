@@ -49,18 +49,17 @@ async fn run_stdio_bridge(project_root: PathBuf) -> tracedecay::errors::Result<(
             return Ok(());
         }
 
-        if pending_client_frame.is_none() {
-            if let Some(frame) = codec
+        if pending_client_frame.is_none()
+            && let Some(frame) = codec
                 .next_frame()
                 .map_err(|error| bridge_error("decode", error))?
-            {
-                let frame = String::from_utf8(frame).map_err(|_| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: "LSP bridge received a non-UTF-8 JSON-RPC payload".to_owned(),
-                    }
-                })?;
-                pending_client_frame = Some(frame);
-            }
+        {
+            let frame = String::from_utf8(frame).map_err(|_| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message: "LSP bridge received a non-UTF-8 JSON-RPC payload".to_owned(),
+                }
+            })?;
+            pending_client_frame = Some(frame);
         }
 
         if let Some(frame) = pending_client_frame.as_deref() {

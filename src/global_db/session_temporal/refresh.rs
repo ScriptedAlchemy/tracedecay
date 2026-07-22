@@ -1294,28 +1294,27 @@ async fn validate_next_progress(
     }
     let batch_items =
         u64::try_from(batch_items).map_err(|error| storage(PERSIST_REFRESH, error))?;
-    match read_progress(conn, progress.session_id(), progress.operation_id()).await? {
-        Some(previous) => {
-            previous.validate_successor(progress)?;
-            if progress.committed_batches() != previous.committed_batches().saturating_add(1)
-                || progress.committed_records()
-                    != previous.committed_records().saturating_add(batch_items)
-                || progress.updated_at() <= previous.updated_at()
-            {
-                return Err(SessionStoreError::InvalidStateTransition {
-                    context: "refresh progress projection accounting",
-                });
-            }
+    if let Some(previous) =
+        read_progress(conn, progress.session_id(), progress.operation_id()).await?
+    {
+        previous.validate_successor(progress)?;
+        if progress.committed_batches() != previous.committed_batches().saturating_add(1)
+            || progress.committed_records()
+                != previous.committed_records().saturating_add(batch_items)
+            || progress.updated_at() <= previous.updated_at()
+        {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "refresh progress projection accounting",
+            });
         }
-        None => {
-            let materialized_records =
-                session_temporal_projection_record_count(conn, progress.session_id(), generation)
-                    .await?;
-            if batch_ordinal != 0 || progress.committed_records() != materialized_records {
-                return Err(SessionStoreError::InvalidStateTransition {
-                    context: "initial refresh progress projection accounting",
-                });
-            }
+    } else {
+        let materialized_records =
+            session_temporal_projection_record_count(conn, progress.session_id(), generation)
+                .await?;
+        if batch_ordinal != 0 || progress.committed_records() != materialized_records {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "initial refresh progress projection accounting",
+            });
         }
     }
     Ok(())

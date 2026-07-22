@@ -61,7 +61,7 @@ use crate::mcp::McpServer;
 
 const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
 const DAEMON_BINDING: &str = "binding.tracedecay-daemon.project-open";
-const GRANT_HORIZON: Duration = Duration::from_secs(24 * 60 * 60);
+const GRANT_HORIZON: Duration = Duration::from_hours(24);
 const POLICY_REVISION_V1: u64 = 1;
 const LSP_LANGUAGE: &str = "rust";
 const LSP_DIAGNOSTICS_QUIET: Duration = Duration::from_secs(2);
@@ -273,7 +273,7 @@ async fn register_production_lsp_owner(
         supports_diagnostics: true,
         semantic: SemanticCapability::ALL.into_iter().collect(),
     };
-    match invocation
+    invocation
         .lsp_owner_registrar()
         .build_and_register_pr12(
             project_root.to_path_buf(),
@@ -288,10 +288,7 @@ async fn register_production_lsp_owner(
             upstream_capabilities,
         )
         .await
-    {
-        Ok(factory) => Some(factory),
-        Err(_) => None,
-    }
+        .ok()
 }
 
 async fn register_production_advisory_owner(
@@ -401,10 +398,10 @@ fn resolve_production_github_target(project_root: &Path) -> Option<GitHubReposit
         .filter(|value| !value.is_empty())?
         .to_owned();
     let pull = gh_json(project_root, &["pr", "view", "--json", "number,databaseId"])?;
-    let pull_request_number = pull.get("number").and_then(|value| value.as_u64())?;
+    let pull_request_number = pull.get("number").and_then(serde_json::Value::as_u64)?;
     let pull_request_id = pull
         .get("databaseId")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .map(|value| value.to_string())
         .and_then(|value| GitHubPullRequestIdV1::new(value).ok())?;
     let target = GitHubRepositoryTargetV1 {
@@ -634,8 +631,7 @@ fn now_micros() -> UtcMicros {
         i64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_micros())
-                .unwrap_or(0),
+                .map_or(0, |duration| duration.as_micros()),
         )
         .unwrap_or(i64::MAX),
     )

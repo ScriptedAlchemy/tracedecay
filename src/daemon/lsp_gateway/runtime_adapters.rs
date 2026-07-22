@@ -944,9 +944,10 @@ fn parse_document_symbols(value: Value) -> Result<(Vec<DocumentSymbol>, bool), S
     let mut partial = false;
     let symbols = values
         .iter()
-        .filter_map(|value| match parse_document_symbol(value) {
-            Ok(symbol) => Some(symbol),
-            Err(_) => {
+        .filter_map(|value| {
+            if let Ok(symbol) = parse_document_symbol(value) {
+                Some(symbol)
+            } else {
                 partial = true;
                 None
             }
@@ -999,9 +1000,10 @@ fn parse_workspace_symbols(value: Value) -> Result<(Vec<WorkspaceSymbol>, bool),
     let mut partial = false;
     let symbols = values
         .iter()
-        .filter_map(|value| match parse_workspace_symbol(value) {
-            Ok(symbol) => Some(symbol),
-            Err(_) => {
+        .filter_map(|value| {
+            if let Ok(symbol) = parse_workspace_symbol(value) {
+                Some(symbol)
+            } else {
                 partial = true;
                 None
             }

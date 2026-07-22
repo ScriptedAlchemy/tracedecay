@@ -331,49 +331,38 @@ pub(crate) async fn call_tool_with_liveness_poll(
                     .to_string(),
             });
         };
-        let response = match client_deadline {
-            Some(deadline) => {
-                deadline
-                    .run("decode", tool_name, async {
-                        let value: serde_json::Value =
-                            serde_json::from_str(&line).map_err(|error| {
-                                TraceDecayError::Config {
-                                    message: format!(
-                                        "daemon tool response JSON decode failed: {error}"
-                                    ),
-                                }
-                            })?;
-                        if value.get("id") != Some(&id) {
-                            return Ok(None);
-                        }
-                        let response: JsonRpcResponse =
-                            serde_json::from_value(value).map_err(|error| {
-                                TraceDecayError::Config {
-                                    message: format!(
-                                        "daemon tool response JSON-RPC decode failed: {error}"
-                                    ),
-                                }
-                            })?;
-                        Ok(Some(response))
-                    })
-                    .await?
-            }
-            None => {
-                let value: serde_json::Value =
-                    serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
-                        message: format!("daemon tool response JSON decode failed: {error}"),
-                    })?;
-                if value.get("id") == Some(&id) {
-                    Some(serde_json::from_value(value).map_err(|error| {
-                        TraceDecayError::Config {
+        let response = if let Some(deadline) = client_deadline {
+            deadline
+                .run("decode", tool_name, async {
+                    let value: serde_json::Value =
+                        serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
+                            message: format!("daemon tool response JSON decode failed: {error}"),
+                        })?;
+                    if value.get("id") != Some(&id) {
+                        return Ok(None);
+                    }
+                    let response: JsonRpcResponse =
+                        serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
                             message: format!(
                                 "daemon tool response JSON-RPC decode failed: {error}"
                             ),
-                        }
-                    })?)
-                } else {
-                    None
-                }
+                        })?;
+                    Ok(Some(response))
+                })
+                .await?
+        } else {
+            let value: serde_json::Value =
+                serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
+                    message: format!("daemon tool response JSON decode failed: {error}"),
+                })?;
+            if value.get("id") == Some(&id) {
+                Some(
+                    serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
+                        message: format!("daemon tool response JSON-RPC decode failed: {error}"),
+                    })?,
+                )
+            } else {
+                None
             }
         };
         let Some(response) = response else {

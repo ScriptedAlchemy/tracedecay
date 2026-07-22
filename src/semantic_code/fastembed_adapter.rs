@@ -1,4 +1,4 @@
-//! PR10 FastEmbed semantic adapter
+//! PR10 `FastEmbed` semantic adapter
 //! (Plan 31, `docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md`).
 //!
 //! Root-private embedding runtime port surface. This file owns the typed
@@ -8,7 +8,7 @@
 //! the verified manifest descriptor.
 //!
 //! The production adapter is feature-gated so dependency activation remains a
-//! deliberate package decision. It initializes FastEmbed only from bytes
+//! deliberate package decision. It initializes `FastEmbed` only from bytes
 //! opened through the digest-addressed artifact-store capability; it never
 //! selects a catalog model, imports an artifact, or discovers a cache.
 //!
@@ -742,7 +742,7 @@ impl BoundedSanitizedTextBatchV1 {
                 max: max_texts,
             });
         }
-        let total_bytes: usize = texts.iter().map(|t| t.len()).sum();
+        let total_bytes: usize = texts.iter().map(std::string::String::len).sum();
         if total_bytes > max_bytes {
             return Err(EmbedError::BatchBytesExceeded {
                 presented: total_bytes,
@@ -845,8 +845,8 @@ pub(super) trait EmbeddingSession: Send {
 
 /// The root-private embedding runtime port (Plan 31: load verified artifact
 /// → create session → embed bounded sanitized batches). The only production
-/// implementation will be the FastEmbed adapter in this module; every other
-/// crate depends on this trait surface, never on FastEmbed runtime types.
+/// implementation will be the `FastEmbed` adapter in this module; every other
+/// crate depends on this trait surface, never on `FastEmbed` runtime types.
 pub(super) trait EmbeddingRuntime {
     type Session: EmbeddingSession;
 
@@ -891,8 +891,8 @@ fn validate_batch_limits(
     Ok(())
 }
 
-/// The production FastEmbed runtime. Its dependency feature disables model-hub
-/// support, and this adapter uses only FastEmbed's local-byte constructor.
+/// The production `FastEmbed` runtime. Its dependency feature disables model-hub
+/// support, and this adapter uses only `FastEmbed`'s local-byte constructor.
 #[cfg(feature = "semantic-fastembed")]
 #[derive(Default)]
 pub(super) struct FastEmbedEmbeddingRuntime;
@@ -1302,7 +1302,7 @@ fn xorshift64star(state: &mut u64) -> u64 {
 /// Deterministic hash-based pseudo-embedding: FNV-1a seeds a xorshift64*
 /// stream from (model identity, text); each output maps into [-1, 1). L2
 /// normalization is applied when the descriptor pins it. Pure arithmetic —
-/// no HashMap iteration, no clock, no randomness — so results are stable
+/// no `HashMap` iteration, no clock, no randomness — so results are stable
 /// across runs on one platform.
 #[cfg(test)]
 fn pseudo_embedding(
@@ -1738,7 +1738,7 @@ mod tests {
         let result = runtime.verify_artifact_compatibility(&authority(8));
         match result {
             Err(EmbedError::Runtime(failure)) => {
-                assert_eq!(failure.kind, RuntimeFailureKindV1::IncompatibleRuntime)
+                assert_eq!(failure.kind, RuntimeFailureKindV1::IncompatibleRuntime);
             }
             other => panic!("expected typed compatibility failure, got {other:?}"),
         }

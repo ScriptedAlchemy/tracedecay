@@ -894,7 +894,7 @@ pub fn wait_for_installed_service_state(expected: DaemonServiceState) -> Result<
     // cadence) far past what the comment above promises. Bounding by
     // elapsed wall-clock time keeps the overall wait — and how often we
     // report progress — independent of per-probe cost.
-    const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+    const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(3);
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
     const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 

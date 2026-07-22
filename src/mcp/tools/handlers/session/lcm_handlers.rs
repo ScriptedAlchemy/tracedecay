@@ -370,8 +370,8 @@ fn lcm_typed_outcome(
             payload["service_status"] = json!({
                 "last_progress_at_unix_micros": worker.last_progress_at_unix_micros,
                 "backlog": worker.backlog,
-                "blocker": worker.blocker.map(|blocker| blocker.as_str()),
-                "retry_class": worker.retry_class.map(|retry_class| retry_class.as_str()),
+                "blocker": worker.blocker.map(super::message_search::SessionRetrievalWorkerBlocker::as_str),
+                "retry_class": worker.retry_class.map(super::message_search::SessionRetrievalWorkerRetryClass::as_str),
             });
         }
     }
@@ -1080,12 +1080,11 @@ pub(in super::super) async fn handle_lcm_expand_query(
         required_string_arg(&args, "prompt")?,
         MAX_LCM_EXPAND_QUERY_PROMPT_CHARS,
     );
-    let (query, query_truncated) = optional_non_empty_string_arg(&args, "query")?
-        .map(|query| {
+    let (query, query_truncated) =
+        optional_non_empty_string_arg(&args, "query")?.map_or((None, false), |query| {
             let (query, truncated) = truncate_chars(query, MAX_LCM_EXPAND_QUERY_QUERY_CHARS);
             (Some(query), truncated)
-        })
-        .unwrap_or((None, false));
+        });
     let max_results =
         bounded_usize_arg(&args, "max_results", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(5);
     let max_tokens =

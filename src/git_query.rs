@@ -581,8 +581,7 @@ mod tests {
         Command::new(crate::git::git_program())
             .arg("--version")
             .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|output| output.status.success())
     }
 
     struct Fixture {

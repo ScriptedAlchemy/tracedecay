@@ -214,12 +214,13 @@ fn chunk_occurrence(
         symbol: binding.occurrence.symbol.clone(),
         chunk: binding.occurrence.chunk.clone(),
         path: file.logical_path.clone(),
-        span: chunk
-            .map(|chunk| chunk.anchor.source_span.clone())
-            .unwrap_or(tracedecay_domain::SourceSpan {
+        span: chunk.map_or(
+            tracedecay_domain::SourceSpan {
                 start_byte: 0,
                 end_byte: 0,
-            }),
+            },
+            |chunk| chunk.anchor.source_span,
+        ),
     })
 }
 
@@ -360,11 +361,10 @@ fn graph_page(
         let Some(record) = symbol_record(latest, symbol, &evidence.binding.occurrence.file) else {
             continue;
         };
-        let edge_kind = evidence
-            .path
-            .last()
-            .map(|edge| format!("{:?}", edge.edge_kind).to_ascii_lowercase())
-            .unwrap_or_else(|| "unknown".to_owned());
+        let edge_kind = evidence.path.last().map_or_else(
+            || "unknown".to_owned(),
+            |edge| format!("{:?}", edge.edge_kind).to_ascii_lowercase(),
+        );
         items.push(SymbolRelationRecord {
             symbol: record,
             edge_kind,
@@ -430,7 +430,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(base) = base_request(
                 &context,
                 &latest,
-                request.meta.temporal.clone(),
+                request.meta.temporal,
                 request.meta.page.page_size,
             ) else {
                 return unavailable(finished_at);
@@ -451,7 +451,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let lane_request = ExactLaneRequest {
                 literals: authority.parse_literals(&query_view, &base),
                 generation: request.scope.generation.clone(),
-                budget: base.budget.clone(),
+                budget: base.budget,
                 base,
                 query_view: &query_view,
             };
@@ -480,7 +480,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(base) = base_request(
                 &context,
                 &latest,
-                request.meta.temporal.clone(),
+                request.meta.temporal,
                 request.meta.page.page_size,
             ) else {
                 return unavailable(finished_at);
@@ -506,7 +506,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     .expect("static lexical profile"),
                 score_domain: ScoreDomainId::new("score.lexical.daemon.v1")
                     .expect("static lexical score domain"),
-                budget: base.budget.clone(),
+                budget: base.budget,
                 base,
             };
             let Ok(owners) = latest.production_query_owners() else {
@@ -534,7 +534,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(base) = base_request(
                 &context,
                 &latest,
-                request.meta.temporal.clone(),
+                request.meta.temporal,
                 request.meta.page.page_size,
             ) else {
                 return unavailable(finished_at);
@@ -575,7 +575,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 seed_anchors: vec![seed],
                 edge_kinds: vec![RelationEdgeKindV1::Calls],
                 max_depth: request.maximum_depth,
-                budget: base.budget.clone(),
+                budget: base.budget,
                 base,
             };
             let Ok(owners) = latest.production_query_owners() else {

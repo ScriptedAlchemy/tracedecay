@@ -322,7 +322,7 @@ impl DaemonSemanticRuntimeHandleV1 {
         let pool_config = SessionPoolConfigV1 {
             max_sessions,
             max_queued_waiters: 0,
-            idle_timeout: std::time::Duration::from_secs(5 * 60),
+            idle_timeout: std::time::Duration::from_mins(5),
             memory_ceiling_bytes,
         };
         pool_config
@@ -412,7 +412,9 @@ impl DaemonSemanticRuntimeHandleV1 {
                     {
                         return Err(SemanticRuntimeScheduleFailureV1::Publication);
                     }
-                    *runtime.write().unwrap_or_else(|error| error.into_inner()) = Some(
+                    *runtime
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
                         CurrentSemanticQueryRuntimeV1::new(pointer.clone(), candidate),
                     );
                     Ok(())
@@ -449,7 +451,7 @@ impl DaemonSemanticRuntimeHandleV1 {
         let inner = self
             .runtime
             .read()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()?
             .factory_for(source_generation, vector_generation, projection_key)?;
         Some(DaemonSemanticQueryFactoryV1 { inner })
@@ -458,7 +460,7 @@ impl DaemonSemanticRuntimeHandleV1 {
     /// Bind a warmed query runtime to the atomically current pointer.
     ///
     /// Used after publication (and by tests) so application search can obtain a
-    /// `query_factory` without joining FastEmbed download/indexing into the
+    /// `query_factory` without joining `FastEmbed` download/indexing into the
     /// search path. The pointer must already be current and compatible with
     /// the admitted projection authority.
     pub(crate) fn bind_query_runtime_for_current(
@@ -479,7 +481,7 @@ impl DaemonSemanticRuntimeHandleV1 {
         *self
             .runtime
             .write()
-            .unwrap_or_else(|error| error.into_inner()) =
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(CurrentSemanticQueryRuntimeV1::new(pointer, candidate));
         Ok(())
     }
@@ -501,10 +503,9 @@ impl DaemonSemanticRuntimeHandleV1 {
         *self
             .runtime
             .write()
-            .unwrap_or_else(|error| error.into_inner()) = Some(CurrentSemanticQueryRuntimeV1::new(
-            pointer.clone(),
-            candidate,
-        ));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
+            CurrentSemanticQueryRuntimeV1::new(pointer.clone(), candidate),
+        );
         self.scheduling.restore_current(pointer);
         Ok(())
     }
@@ -585,12 +586,11 @@ where
         if self.progress.cancelled() {
             return Err("semantic projection cancelled".to_owned());
         }
-        let session = match self.session.as_mut() {
-            Some(session) => session,
-            None => {
-                self.session = Some(self.runtime.acquire().map_err(|error| error.to_string())?);
-                self.session.as_mut().expect("session was just installed")
-            }
+        let session = if let Some(session) = self.session.as_mut() {
+            session
+        } else {
+            self.session = Some(self.runtime.acquire().map_err(|error| error.to_string())?);
+            self.session.as_mut().expect("session was just installed")
         };
         if session.authority().projection().embedding_key() != key {
             return Err("semantic projection authority changed".to_owned());

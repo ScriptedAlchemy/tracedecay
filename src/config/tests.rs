@@ -937,7 +937,7 @@ mod topology_resolution {
                 ConfigurationValueV1::WorkTopologyPolicy(Box::new(safe_work_topology_policy_v1())),
             )]),
         };
-        assert!(matches!(resolve_configuration(&registry, &[layer]), Err(_)));
+        assert!(resolve_configuration(&registry, &[layer]).is_err());
     }
 
     #[test]
@@ -951,7 +951,7 @@ mod topology_resolution {
                 ConfigurationValueV1::WorkTopologyPolicy(Box::new(safe_work_topology_policy_v1())),
             )]),
         };
-        assert!(matches!(resolve_configuration(&registry, &[layer]), Err(_)));
+        assert!(resolve_configuration(&registry, &[layer]).is_err());
     }
 
     #[test]
@@ -967,7 +967,7 @@ mod topology_resolution {
                 ConfigurationValueV1::Text("permissive".to_owned()),
             )]),
         };
-        assert!(matches!(resolve_configuration(&registry, &[layer]), Err(_)));
+        assert!(resolve_configuration(&registry, &[layer]).is_err());
     }
 
     #[test]

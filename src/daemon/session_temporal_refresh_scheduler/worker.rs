@@ -196,25 +196,24 @@ async fn complete_ready_refresh(
         report.terminal_errors += 1;
         return;
     };
-    let request = match SessionRefreshCompletionRequestV1::new(
+    let request = if let Ok(request) = SessionRefreshCompletionRequestV1::new(
         recovery.operation_id().clone(),
         recovery.session_id().clone(),
         progress.frontier(),
         *progress.coverage(),
     ) {
-        Ok(request) => match progress.source_coverage().cloned().or_else(|| {
+        match progress.source_coverage().cloned().or_else(|| {
             recovery
                 .source_coverage(progress.frontier().committed_through())
                 .ok()
         }) {
             Some(source_coverage) => request.with_source_coverage(source_coverage),
             None => request,
-        },
-        Err(_) => {
-            attempt.retain();
-            report.terminal_errors += 1;
-            return;
         }
+    } else {
+        attempt.retain();
+        report.terminal_errors += 1;
+        return;
     };
     match store.complete_session_refresh(request).await {
         Ok(_) => {
@@ -365,14 +364,14 @@ async fn project_running_refresh(
                 };
                 (frontier, zero_refresh_coverage())
             };
-            let request = match SessionRefreshFailureRequestV1::new(
+            let request = if let Ok(request) = SessionRefreshFailureRequestV1::new(
                 recovery.operation_id().clone(),
                 recovery.session_id().clone(),
                 frontier,
                 coverage,
                 failure_code,
             ) {
-                Ok(request) => match recovery
+                match recovery
                     .progress()
                     .and_then(SessionRefreshProgressV1::source_coverage)
                     .cloned()
@@ -380,11 +379,10 @@ async fn project_running_refresh(
                 {
                     Some(source_coverage) => request.with_source_coverage(source_coverage),
                     None => request,
-                },
-                Err(_) => {
-                    report.terminal_errors += 1;
-                    return;
                 }
+            } else {
+                report.terminal_errors += 1;
+                return;
             };
             SessionTemporalRefreshEffect::Fail(request)
         }

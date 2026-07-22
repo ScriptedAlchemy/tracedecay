@@ -300,7 +300,7 @@ impl CodeIndexPublishedGenerationV1 {
                 })
                 .collect(),
             lineage: self.lineage.clone(),
-            coverage: self.coverage.clone(),
+            coverage: self.coverage,
             capability: self.capability.clone(),
             projection_request: self.projection.request().clone(),
             projection_receipt: self.projection.receipt().clone(),
@@ -678,7 +678,7 @@ where
         let coverage = coverage_summary(&validated.snapshot, &staged.files);
         let capability = BaseCapabilityEmitter::new(
             registry_for_snapshot(&validated.snapshot)?,
-            coverage.clone(),
+            coverage,
             validated.snapshot.sanitization_receipts.clone(),
         )
         .emit(&manifest)
@@ -899,37 +899,35 @@ where
                                 "increment plan refers to a missing prior file".to_owned(),
                             )
                         })?;
-                    match prior.rematerialize_for_generation(
+                    if let Ok(artifact) = prior.rematerialize_for_generation(
                         manifest.generation_id.clone(),
                         file_occurrence_id.clone(),
                     ) {
-                        Ok(artifact) => files.push(artifact),
-                        Err(_) => {
-                            // Opaque exact evidence may refuse generation-local
-                            // occurrence rebinding. Re-extract through the
-                            // parser authority instead of rewriting that evidence.
-                            let file = capability
-                                .snapshot()
-                                .snapshot
-                                .files
-                                .iter()
-                                .find(|file| file.file_occurrence_id == *file_occurrence_id)
-                                .ok_or_else(|| {
-                                    CodeIndexProductionErrorV1::Contract(
-                                        "increment plan refers to a missing current file"
-                                            .to_owned(),
-                                    )
-                                })?;
-                            files.push(self.extract_file(
-                                intake,
-                                capability,
-                                manifest,
-                                file,
-                                captured_files,
-                                control,
-                            )?);
-                            used_reextraction_fallback = true;
-                        }
+                        files.push(artifact)
+                    } else {
+                        // Opaque exact evidence may refuse generation-local
+                        // occurrence rebinding. Re-extract through the
+                        // parser authority instead of rewriting that evidence.
+                        let file = capability
+                            .snapshot()
+                            .snapshot
+                            .files
+                            .iter()
+                            .find(|file| file.file_occurrence_id == *file_occurrence_id)
+                            .ok_or_else(|| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "increment plan refers to a missing current file".to_owned(),
+                                )
+                            })?;
+                        files.push(self.extract_file(
+                            intake,
+                            capability,
+                            manifest,
+                            file,
+                            captured_files,
+                            control,
+                        )?);
+                        used_reextraction_fallback = true;
                     }
                 }
                 FileExtractionActionV1::ReExtract { file } => {

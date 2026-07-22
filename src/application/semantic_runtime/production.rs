@@ -1,7 +1,7 @@
 //! Production bridge between daemon semantic scheduling and application search.
 //!
 //! Saved code generations call [`schedule_saved_code_generation`] without waiting
-//! for FastEmbed download/indexing. Application search admits a semantic lane
+//! for `FastEmbed` download/indexing. Application search admits a semantic lane
 //! only through [`query_factory`] once a complete compatible generation is
 //! atomically current. Status projection carries indexing progress, degraded
 //! reason, and prior generation for Doctor/`tracedecay_runtime`.
@@ -117,7 +117,7 @@ pub fn application_status_from_projection(
     SemanticRuntimeStatusV1::new(configuration, state)
 }
 
-/// Schedule FastEmbed projection for one published code generation.
+/// Schedule `FastEmbed` projection for one published code generation.
 ///
 /// Returns immediately after enqueueing; artifact load, model download, and
 /// indexing run asynchronously and never join into ordinary search.
@@ -692,7 +692,7 @@ pub fn current_query_factory(
 /// [`DaemonSemanticRuntimeHandleV1::query_factory`].
 ///
 /// Non-ready / indexing / degraded states never construct the retriever and
-/// return the frozen PR9 fallback without waiting on FastEmbed download or
+/// return the frozen PR9 fallback without waiting on `FastEmbed` download or
 /// projection. Exact/lexical/graph owners stay independently callable.
 pub fn compose_application_semantic_search<'a, V, C>(
     handle: &DaemonSemanticRuntimeHandleV1,
@@ -824,14 +824,14 @@ impl DaemonSemanticRuntimeBackendV1 {
         *self
             .configuration
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(pin);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pin);
     }
 
     pub fn application_status(&self) -> SemanticRuntimeStatusV1 {
         let configuration = self
             .configuration
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         application_status_from_projection(&self.handle.status_projection(), configuration)
     }
@@ -929,8 +929,7 @@ fn synthesize_current_receipt(
 fn now_micros() -> UtcMicros {
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_micros() as i64)
-        .unwrap_or(0);
+        .map_or(0, |duration| duration.as_micros() as i64);
     UtcMicros(micros)
 }
 
@@ -956,7 +955,7 @@ pub fn register_project_semantic_runtime(
 ) {
     project_semantic_handles()
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(project_root, handle);
 }
 
@@ -964,11 +963,11 @@ pub fn register_project_semantic_runtime(
 pub fn unregister_project_semantic_runtime(project_root: &Path) {
     project_semantic_handles()
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(project_root);
     project_semantic_production_runtimes()
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(project_root);
 }
 
@@ -977,7 +976,7 @@ pub fn project_semantic_production_runtime(
 ) -> Option<ProductionSemanticRuntimeV1> {
     project_semantic_production_runtimes()
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
         .cloned()
 }
@@ -989,7 +988,7 @@ pub fn project_semantic_application_status(project_root: &Path) -> Option<Semant
     }
     let handle = project_semantic_handles()
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
         .cloned()?;
     Some(application_status_from_projection(
@@ -1019,7 +1018,7 @@ pub fn production_saved_generation_schedule_hook(
     ));
     project_semantic_production_runtimes()
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(project_root, runtime.as_ref().clone());
     Arc::new(move |generation| {
         let runtime = Arc::clone(&runtime);
@@ -1398,7 +1397,7 @@ mod tests {
                 },
                 profile_id: FusionProfileId::try_from("profile.semantic.v1".to_owned())
                     .expect("profile"),
-                budget: budget.clone(),
+                budget: budget,
             },
             query_digest,
             query_view: &query_view,

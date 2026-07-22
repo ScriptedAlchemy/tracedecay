@@ -210,7 +210,7 @@ impl DaemonSessionRetrievalRoot {
 struct MessageSearchWordEstimator;
 
 impl VersionedTokenEstimator for MessageSearchWordEstimator {
-    fn version(&self) -> &str {
+    fn version(&self) -> &'static str {
         "words-v1"
     }
 
@@ -953,7 +953,7 @@ fn hydration_state(
         .hydrated
         .iter()
         .find(|hydrated| hydrated.anchor_id() == anchor_id)
-        .map(|hydrated| hydrated.state())
+        .map(crate::query::temporal::TemporalHydratedResult::state)
 }
 
 fn describe_hydration_state(state: HydrationStateV1) -> LcmDescribeServiceOutcome {

@@ -1718,7 +1718,7 @@ pub(crate) async fn handle_install_command(
             std::env::current_dir().map_err(|e| tracedecay::errors::TraceDecayError::Config {
                 message: format!("could not determine current project directory: {e}"),
             })?;
-        let ctx = tracedecay::agents::InstallContext {
+        let _ctx = tracedecay::agents::InstallContext {
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),

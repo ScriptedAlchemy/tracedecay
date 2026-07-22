@@ -298,7 +298,7 @@ pub fn claude_files() -> Vec<(&'static str, &'static str)> {
 }
 
 /// MCP-free Claude core: plugin metadata, hooks, skills, agents, commands, and
-/// the single configured-language TraceDecay LSP bridge.
+/// the single configured-language `TraceDecay` LSP bridge.
 pub fn claude_core_files() -> Vec<(&'static str, &'static str)> {
     claude_files()
         .into_iter()
@@ -407,7 +407,7 @@ pub fn kimi_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// OpenCode Agent component: host-loadable skills, agent definitions, and
+/// `OpenCode` Agent component: host-loadable skills, agent definitions, and
 /// command prompt templates. `AGENTS.md` remains Core instruction content.
 pub fn opencode_agent_files() -> Vec<(&'static str, &'static str)> {
     compose(

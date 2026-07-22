@@ -105,11 +105,8 @@ fn refresh_daemon_service_with_spec(
     let socket_path = tracedecay::daemon::installed_service_socket_path()?
         .unwrap_or_else(|| spec.socket_path.clone());
     Ok(
-        tracedecay::daemon::refresh_installed_service_under_lease_with_state(
-            &spec,
-            previous_state,
-        )?
-        .map(|service_path| (service_path, socket_path)),
+        tracedecay::daemon::refresh_installed_service_under_lease_with_state(spec, previous_state)?
+            .map(|service_path| (service_path, socket_path)),
     )
 }
 

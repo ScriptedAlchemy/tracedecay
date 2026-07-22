@@ -60,11 +60,11 @@ pub const DB_FILENAME: &str = "tracedecay.db";
 /// semantic selection.
 pub const SEMANTIC_RUNTIME_SETTING_KEY: &str = "semantic.runtime.v1";
 
-/// Default FastEmbed catalog model selected on install (offline-safe).
+/// Default `FastEmbed` catalog model selected on install (offline-safe).
 pub const DEFAULT_FASTEMBED_MODEL_ID: &str = "JinaEmbeddingsV2BaseCode";
 
-/// Cataloged FastEmbed model ids settings may select. Membership is validated
-/// here without depending on the semantic_code acquisition module.
+/// Cataloged `FastEmbed` model ids settings may select. Membership is validated
+/// here without depending on the `semantic_code` acquisition module.
 const CATALOGED_FASTEMBED_MODEL_IDS: &[&str] = &[DEFAULT_FASTEMBED_MODEL_ID];
 
 const MAX_SEMANTIC_MODEL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -177,14 +177,14 @@ impl SemanticResourceCeilings {
 /// Pinned semantic runtime selection.
 ///
 /// A catalog model id (default `JinaEmbeddingsV2BaseCode`) selects the
-/// FastEmbed package TraceDecay will acquire in the background. `None`
+/// `FastEmbed` package `TraceDecay` will acquire in the background. `None`
 /// disables the optional semantic lane while exact, lexical, and graph
 /// retrieval remain healthy. Installed local profiles remain explicit and are
 /// never inferred by scanning an ambient model cache.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticConfig {
-    /// Cataloged FastEmbed model id, or `None` to disable semantics.
+    /// Cataloged `FastEmbed` model id, or `None` to disable semantics.
     #[serde(default = "default_selected_fastembed_model")]
     pub selected_model: Option<String>,
     /// When true, first daemon startup / selection queues background download.

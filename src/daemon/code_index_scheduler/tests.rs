@@ -585,7 +585,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
     latest
         .production_query_owners()
         .expect("ordinary lanes remain callable during Jina startup");
-    tokio::time::timeout(Duration::from_secs(180), async {
+    tokio::time::timeout(Duration::from_mins(3), async {
         while handle.current().is_none() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

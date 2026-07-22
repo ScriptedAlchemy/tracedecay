@@ -307,37 +307,34 @@ impl OverlayDiagnosticDebouncer {
         now_ms: u64,
     ) -> bool {
         let requested_due = now_ms.saturating_add(OVERLAY_DIAGNOSTIC_DEBOUNCE_MS);
-        match self.pending.get_mut(&uri) {
-            Some(pending) => {
-                // A close is terminal for the current document version and
-                // must not be overwritten by a stale refresh.
-                if kind == DebouncedDiagnosticKind::Clear
-                    || pending.kind != DebouncedDiagnosticKind::Clear
-                {
-                    pending.kind = kind;
-                    pending.version = version;
-                }
-                let latest_allowed = pending
-                    .first_scheduled_at_ms
-                    .saturating_add(OVERLAY_DIAGNOSTIC_MAX_WAIT_MS);
-                pending.due_at_ms = requested_due.min(latest_allowed);
-                true
+        if let Some(pending) = self.pending.get_mut(&uri) {
+            // A close is terminal for the current document version and
+            // must not be overwritten by a stale refresh.
+            if kind == DebouncedDiagnosticKind::Clear
+                || pending.kind != DebouncedDiagnosticKind::Clear
+            {
+                pending.kind = kind;
+                pending.version = version;
             }
-            None => {
-                if self.pending.len() >= MAX_PENDING_OVERLAY_DIAGNOSTICS {
-                    return false;
-                }
-                self.pending.insert(
-                    uri,
-                    PendingDiagnostic {
-                        first_scheduled_at_ms: now_ms,
-                        due_at_ms: requested_due,
-                        version,
-                        kind,
-                    },
-                );
-                true
+            let latest_allowed = pending
+                .first_scheduled_at_ms
+                .saturating_add(OVERLAY_DIAGNOSTIC_MAX_WAIT_MS);
+            pending.due_at_ms = requested_due.min(latest_allowed);
+            true
+        } else {
+            if self.pending.len() >= MAX_PENDING_OVERLAY_DIAGNOSTICS {
+                return false;
             }
+            self.pending.insert(
+                uri,
+                PendingDiagnostic {
+                    first_scheduled_at_ms: now_ms,
+                    due_at_ms: requested_due,
+                    version,
+                    kind,
+                },
+            );
+            true
         }
     }
 }

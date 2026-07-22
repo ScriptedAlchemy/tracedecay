@@ -1,9 +1,9 @@
 // Rust guideline compliant 2025-10-17
 //! `OpenCode` agent integration.
 //!
-//! Handles TraceDecay's MCP and custom LSP registration in `OpenCode`'s config,
+//! Handles `TraceDecay`'s MCP and custom LSP registration in `OpenCode`'s config,
 //! native TypeScript plugin deployment, and prompt/managed-skill rules.
-//! OpenCode uses interactive runtime approval rather than declarative tool
+//! `OpenCode` uses interactive runtime approval rather than declarative tool
 //! permissions.
 
 use std::path::Path;

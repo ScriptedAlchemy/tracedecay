@@ -601,7 +601,7 @@ mod tests {
         let service = SemanticRuntimeService::new_owned(
             Arc::new(authority()),
             initial,
-            config(1, Duration::from_secs(60), 1 << 20),
+            config(1, Duration::from_mins(1), 1 << 20),
         )
         .expect("initial runtime");
         let (started_tx, started_rx) = mpsc::channel();

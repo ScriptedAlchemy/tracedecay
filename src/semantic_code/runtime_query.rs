@@ -191,7 +191,7 @@ mod tests {
         let service = SemanticRuntimeService::new_owned(
             Arc::clone(&authority),
             factory,
-            config(1, std::time::Duration::from_secs(60), 1 << 20),
+            config(1, std::time::Duration::from_mins(1), 1 << 20),
         )
         .expect("runtime service");
         let source_generation =
@@ -238,7 +238,7 @@ mod tests {
         let service = SemanticRuntimeService::new_owned(
             Arc::clone(&authority),
             factory,
-            config(1, std::time::Duration::from_secs(60), 1 << 20),
+            config(1, std::time::Duration::from_mins(1), 1 << 20),
         )
         .expect("runtime service");
         let embedder_factory = PooledSemanticQueryEmbedderFactory::new(service);
@@ -277,7 +277,7 @@ mod tests {
         let service = SemanticRuntimeService::new_owned(
             Arc::clone(&authority),
             factory,
-            config(1, std::time::Duration::from_secs(60), 1 << 20),
+            config(1, std::time::Duration::from_mins(1), 1 << 20),
         )
         .expect("runtime service");
         let held = service.acquire().expect("occupy the only session");

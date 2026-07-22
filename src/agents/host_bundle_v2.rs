@@ -35,7 +35,7 @@ const HOST_BUNDLE_LOCK_FILE: &str = "writer.v1.lock";
 const MAX_CONTROL_FILE_BYTES: usize = 256 * 1024;
 static HOST_BUNDLE_TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
 
-/// Resolve the lifecycle authority from the active TraceDecay user profile.
+/// Resolve the lifecycle authority from the active `TraceDecay` user profile.
 /// Host homes contain deployed artifacts only; receipts, journals, locks, and
 /// rollback backups are owned by this profile-scoped root.
 pub fn resolved_host_bundle_lifecycle_root() -> crate::errors::Result<PathBuf> {
@@ -1107,7 +1107,7 @@ pub struct HostComponentSetExecutionRequestV1 {
     pub operation_id: [u8; 16],
 }
 
-/// A third-party host extension claiming a surface TraceDecay would register.
+/// A third-party host extension claiming a surface `TraceDecay` would register.
 /// The digest points to bounded discovery evidence; raw host config is never
 /// retained in lifecycle requests or receipts.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1624,17 +1624,17 @@ pub fn inspect_installed_host_bundle_components_at(
                 continue;
             }
         };
-        let receipt = match serde_json::from_slice::<HostBundleInstallReceiptV1>(&bytes) {
-            Ok(receipt) => receipt,
-            Err(_) => {
+        let receipt =
+            if let Ok(receipt) = serde_json::from_slice::<HostBundleInstallReceiptV1>(&bytes) {
+                receipt
+            } else {
                 components.push(corrupt_component_result(
                     receipt_path,
                     receipt_identity.map(|identity| identity.0),
                     receipt_identity.map(|identity| identity.1),
                 ));
                 continue;
-            }
-        };
+            };
         if validate_receipt(&receipt).is_err() {
             components.push(corrupt_component_result(
                 receipt_path,

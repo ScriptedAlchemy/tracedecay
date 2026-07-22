@@ -21,8 +21,7 @@ pub struct ClineIntegration;
 fn cline_data_dir(home: &Path) -> PathBuf {
     env::var_os("CLINE_DATA_DIR")
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".cline/data"))
+        .map_or_else(|| home.join(".cline/data"), PathBuf::from)
 }
 
 /// Current Cline CLI/IDE user MCP settings path.

@@ -1,4 +1,4 @@
-//! Versioned catalog of first-party host components compiled into TraceDecay.
+//! Versioned catalog of first-party host components compiled into `TraceDecay`.
 //!
 //! No external or third-party bundle loading is supported by PR13. SHA-256 digests provide only
 //! corruption detection and idempotent content identity.
@@ -374,10 +374,10 @@ fn component_assets(
 }
 
 fn render_compiled_asset(body: &str) -> String {
-    let executable = std::env::current_exe()
-        .ok()
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "tracedecay".to_string());
+    let executable = std::env::current_exe().ok().map_or_else(
+        || "tracedecay".to_string(),
+        |path| path.to_string_lossy().into_owned(),
+    );
     let encoded =
         serde_json::to_string(&executable).unwrap_or_else(|_| "\"tracedecay\"".to_string());
     let sync = serde_json::to_string(&super::hook_command(&executable, "hook-kimi-event"))
