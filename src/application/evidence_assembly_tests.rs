@@ -154,10 +154,7 @@ fn canonical_sets_ignore_input_permutation_but_spans_preserve_source_order() {
         .unwrap();
     assert_eq!(
         run.occurrence_ids,
-        vec![
-            first.occurrence_id.clone(),
-            second.occurrence_id.clone()
-        ]
+        vec![first.occurrence_id.clone(), second.occurrence_id.clone()]
     );
     assert_eq!(
         EvidenceSpanRun::verify(

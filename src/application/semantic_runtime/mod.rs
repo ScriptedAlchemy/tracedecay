@@ -6,6 +6,7 @@
 
 mod owner;
 mod ports;
+mod production;
 
 pub use owner::SemanticRuntimeOwnerV1;
 pub use ports::{
@@ -15,6 +16,14 @@ pub use ports::{
     SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1, SemanticRuntimeContractErrorV1,
     SemanticRuntimeControlErrorV1, SemanticRuntimeFuture, SemanticRuntimeIntegrationPortV1,
     SemanticRuntimeRouteV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
+};
+pub use production::{
+    DaemonSemanticRuntimeBackendV1, SavedCodeGenerationScheduleHookV1,
+    application_status_from_projection, current_query_factory,
+    production_saved_generation_schedule_hook, project_semantic_application_status,
+    register_project_semantic_runtime, saved_generation_schedule_hook,
+    schedule_saved_code_generation, semantic_lane_readiness_for_request,
+    unregister_project_semantic_runtime,
 };
 
 #[cfg(test)]
