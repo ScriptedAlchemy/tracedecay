@@ -330,7 +330,7 @@ fn occurrence(
         .facts()
         .iter()
         .find_map(|fact| match fact {
-            CanonicalObservationFactV1::Message { role, .. } => Some(role.clone()),
+            CanonicalObservationFactV1::Message { role, .. } => Some(*role),
             CanonicalObservationFactV1::ToolInvocation { .. } => {
                 Some(tracedecay_domain::CanonicalMessageRoleV1::Assistant)
             }

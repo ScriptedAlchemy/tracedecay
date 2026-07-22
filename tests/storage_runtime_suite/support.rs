@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -128,27 +128,62 @@ pub(crate) fn rusqlite_parity_binary() -> PathBuf {
     )
 }
 
+/// Owns a spawned helper and kills it if the parent unwinds before reaping.
+struct KillOnDrop(Option<Child>);
+
+impl KillOnDrop {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn wait_with_output(mut self) -> io::Result<std::process::Output> {
+        self.0
+            .take()
+            .expect("JSON subprocess child must still be owned")
+            .wait_with_output()
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// Sends one JSON value to an explicitly named executable and parses one JSON response.
 pub(crate) fn invoke_json<T: Serialize>(binary: &Path, request: &T) -> Value {
     let binary = validate_binary_path(binary, "JSON subprocess binary");
     let request = serde_json::to_vec(request).expect("serialize JSON subprocess request");
-    let mut child = Command::new(&binary)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("spawn JSON subprocess '{}': {error}", binary.display()));
-    child
-        .stdin
-        .take()
-        .expect("JSON subprocess stdin must be piped")
-        .write_all(&request)
-        .unwrap_or_else(|error| {
+    let mut child = KillOnDrop::new(
+        Command::new(&binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| {
+                panic!("spawn JSON subprocess '{}': {error}", binary.display())
+            }),
+    );
+    {
+        let stdin = child
+            .0
+            .as_mut()
+            .expect("JSON subprocess child must still be owned")
+            .stdin
+            .take()
+            .expect("JSON subprocess stdin must be piped");
+        // Drop closes stdin so the helper sees EOF and can exit.
+        let mut stdin = stdin;
+        stdin.write_all(&request).unwrap_or_else(|error| {
             panic!(
                 "write JSON request to subprocess '{}': {error}",
                 binary.display()
             )
         });
+    }
     let output = child
         .wait_with_output()
         .unwrap_or_else(|error| panic!("wait for JSON subprocess '{}': {error}", binary.display()));

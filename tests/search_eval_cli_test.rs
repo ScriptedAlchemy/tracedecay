@@ -6,8 +6,10 @@ use serde_json::Value;
 use tracedecay_domain::{EvidenceIndexV1, RunManifestV1};
 
 fn evaluator_bin() -> &'static str {
-    option_env!("CARGO_BIN_EXE_tracedecay-search-eval")
-        .expect("Cargo must build the canonical tracedecay-search-eval binary")
+    match option_env!("CARGO_BIN_EXE_tracedecay-search-eval") {
+        Some(path) => path,
+        None => panic!("Cargo must build the canonical tracedecay-search-eval binary"),
+    }
 }
 
 fn fixture_root() -> PathBuf {

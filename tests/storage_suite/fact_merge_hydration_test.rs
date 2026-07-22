@@ -305,6 +305,7 @@ async fn commit_initial(
 
 /// Appends one assertion (correction, merge, or additional initial) to an
 /// existing fact, referencing already-committed anchors.
+#[allow(clippy::too_many_arguments)]
 async fn commit_assertion(
     store: &DatabaseFactStore<'_>,
     owner: &FactOwnerV1,
@@ -787,7 +788,7 @@ async fn contradictions_are_recorded_explicitly_in_lineage() {
         .unwrap();
     assert_eq!(
         current_response.contradiction().contradicted_by(),
-        &[second.fact_id.clone()]
+        std::slice::from_ref(&second.fact_id)
     );
     let lineage_response = store
         .query_fact_lineage_response(
@@ -797,7 +798,7 @@ async fn contradictions_are_recorded_explicitly_in_lineage() {
         .unwrap();
     assert_eq!(
         lineage_response.contradiction().contradicted_by(),
-        &[second.fact_id.clone()]
+        std::slice::from_ref(&second.fact_id)
     );
 
     // A contradiction against a fact the authority does not retain is rejected
@@ -1684,7 +1685,7 @@ async fn contradiction_metadata_transitions_at_the_as_of_cutoff() {
         .unwrap();
     assert_eq!(
         at_first.contradiction().contradicted_by(),
-        &[first_target.fact_id.clone()]
+        std::slice::from_ref(&first_target.fact_id)
     );
 
     let second_contradiction = FactLineageEventV1::new(

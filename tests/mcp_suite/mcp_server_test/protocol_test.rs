@@ -2,9 +2,7 @@
 
 use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
-use std::fmt::Write as _;
 use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
@@ -12,8 +10,8 @@ use tracedecay::mcp::handle_tool_call;
 use tracedecay::mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
-use tracedecay::storage::{resolve_layout_for_current_profile, resolve_response_handle_root};
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
+use tracedecay::storage::resolve_response_handle_root;
+use tracedecay::tracedecay::{TraceDecay, current_timestamp};
 
 // ---------------------------------------------------------------------------
 // 1. test_initialize

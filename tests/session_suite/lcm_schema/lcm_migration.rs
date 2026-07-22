@@ -204,7 +204,10 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
     drop(conn);
     drop(raw_db);
 
-    assert!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION > 6);
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION > 6);
+    }
     let migrated = GlobalDb::open_at(&db_path)
         .await
         .expect("v6 database should migrate");

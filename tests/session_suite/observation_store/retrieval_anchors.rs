@@ -78,25 +78,27 @@ async fn repository_provenance_survives_restart_rebuild_and_owner_checks() {
     .unwrap();
     let write = ObservationWrite::new(candidate.clone(), None, next_cursor).unwrap();
 
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
-    let receipt = match store
-        .persist_observation(known_repository_provenance_write(write))
-        .await
-        .unwrap()
-    {
-        ObservationPersistOutcome::Committed(receipt) => receipt,
-        other => panic!("repository provenance write must commit, got {other:?}"),
+    let (repository_anchor_id, expected_attachment, receipt_sequence) = {
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbObservationStore::new(&db);
+        let receipt = match store
+            .persist_observation(known_repository_provenance_write(write))
+            .await
+            .unwrap()
+        {
+            ObservationPersistOutcome::Committed(receipt) => receipt,
+            other => panic!("repository provenance write must commit, got {other:?}"),
+        };
+        let repository_anchor_id = receipt
+            .repository_provenance_attachment()
+            .anchor()
+            .expect("known repository provenance must retain its retrieval anchor")
+            .anchor_id()
+            .clone();
+        let expected_attachment = receipt.repository_provenance_attachment().clone();
+        let receipt_sequence = receipt.sequence();
+        (repository_anchor_id, expected_attachment, receipt_sequence)
     };
-    let repository_anchor_id = receipt
-        .repository_provenance_attachment()
-        .anchor()
-        .expect("known repository provenance must retain its retrieval anchor")
-        .anchor_id()
-        .clone();
-    let expected_attachment = receipt.repository_provenance_attachment().clone();
-    drop(store);
-    drop(db);
 
     let db = open_lcm_db(&tmp).await;
     let store = GlobalDbObservationStore::new(&db);
@@ -112,7 +114,7 @@ async fn repository_provenance_survives_restart_rebuild_and_owner_checks() {
 
     let mut rebuild_complete = false;
     for _ in 0..32 {
-        let outcome = store.rebuild_projection(receipt.sequence()).await.unwrap();
+        let outcome = store.rebuild_projection(receipt_sequence).await.unwrap();
         if outcome.is_complete() {
             rebuild_complete = true;
             break;

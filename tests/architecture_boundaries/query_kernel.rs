@@ -67,16 +67,6 @@ const QUERY_ALLOWED_DERIVES: &[&str] = &[
     "PartialEq",
     "PartialOrd",
 ];
-// PR8's manifest guard now admits the two private storage-parity manifests and
-// their targets in its exact snapshot. Keep only the remaining process-isolated
-// storage-runtime targets here; the core guard still rejects every other
-// missing or additional target.
-const STORAGE_RUNTIME_PR8_ADMISSIONS: &[&str] = &[
-    "additional PR8 Cargo target is forbidden: tracedecay-store|storage_runtime_contract|test|crates/tracedecay-store/tests/storage_runtime_contract.rs",
-    "additional PR8 Cargo target is forbidden: tracedecay|storage_runtime_suite|test|tests/storage_runtime_suite/main.rs",
-    "additional PR8 Cargo target is forbidden: tracedecay|tracedecay-rusqlite-parity|bin|src/bin/tracedecay-rusqlite-parity.rs",
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UseBinding {
     pub(crate) path: Vec<String>,
@@ -376,10 +366,11 @@ fn is_local_module_root(root: &str, current_module: &[String], graph: &QueryModu
 fn graph_module_symbols(graph: &QueryModuleGraph, module: &[String]) -> BTreeSet<String> {
     let mut symbols = graph.symbols.get(module).cloned().unwrap_or_default();
     for candidate in &graph.modules {
-        if candidate.len() == module.len() + 1 && candidate.starts_with(module) {
-            if let Some(name) = candidate.last() {
-                symbols.insert(name.clone());
-            }
+        if candidate.len() == module.len() + 1
+            && candidate.starts_with(module)
+            && let Some(name) = candidate.last()
+        {
+            symbols.insert(name.clone());
         }
     }
     symbols
@@ -1501,7 +1492,7 @@ fn temporal_kernel_sources_respect_dependency_boundary() {
         physical_manifest_layout(&repository).expect("inspect tracked physical Cargo manifests");
     assert!(
         physical.violations.is_empty(),
-        "PR8 permits only its exact first-party manifest snapshot, including the two private storage-parity crates:\n{}",
+        "PR8 permits only its exact first-party manifest snapshot, including the private storage parity and runtime crates:\n{}",
         physical
             .violations
             .iter()
@@ -1511,19 +1502,9 @@ fn temporal_kernel_sources_respect_dependency_boundary() {
     );
 
     let layout = cargo_source_layout(&repository).expect("inspect Cargo workspace membership");
-    let admitted_layout: BTreeSet<_> = STORAGE_RUNTIME_PR8_ADMISSIONS
-        .iter()
-        .map(|violation| (*violation).to_string())
-        .collect();
-    assert_eq!(
-        layout.pr8_violations,
-        admitted_layout,
-        "PR8 workspace/dependency/target contract must retain exactly the frozen storage-runtime additions:\nexpected:\n{}\nactual:\n{}",
-        admitted_layout
-            .iter()
-            .map(|violation| format!("  - {violation}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+    assert!(
+        layout.pr8_violations.is_empty(),
+        "PR8 workspace/dependency/target contract must match the exact frozen storage-runtime snapshot:\n{}",
         layout
             .pr8_violations
             .iter()

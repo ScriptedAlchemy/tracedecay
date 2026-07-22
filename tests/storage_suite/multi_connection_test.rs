@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
