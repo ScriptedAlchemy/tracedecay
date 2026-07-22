@@ -730,16 +730,28 @@ pub(crate) async fn router(cg: &TraceDecay, state: DashboardState) -> Result<Rou
         }
     }
 
-    let application = ActiveProjectApplicationRoutes::for_active_project(cg)?;
+    // PR12 application routes are bound to the active-project daemon. When the
+    // daemon authority record is unavailable (standalone `tracedecay dashboard`
+    // or the in-process test server), mounting them would otherwise fail the
+    // whole server before it binds. Degrade gracefully instead — serve the core
+    // dashboard and skip the `/api/application` surface, mirroring the
+    // best-effort derived-memory repair above.
+    let application = match ActiveProjectApplicationRoutes::for_active_project(cg) {
+        Ok(application) => Some(application),
+        Err(error) => {
+            tracing::warn!("Active-project application routes skipped: {error}");
+            None
+        }
+    };
     Ok(router_with_active_application(state, application))
 }
 
 fn router_with_active_application(
     state: DashboardState,
-    application: ActiveProjectApplicationRoutes,
+    application: Option<ActiveProjectApplicationRoutes>,
 ) -> Router {
     let runtime = projects::DashboardRuntime::new(state, project_api_router());
-    Router::new()
+    let router = Router::new()
         .route("/", get(assets::index_html))
         .route("/shell/{file}", get(assets::shell_asset))
         .route(
@@ -758,8 +770,11 @@ fn router_with_active_application(
         .route("/api/automation/{*tail}", any(active_api_gateway))
         .route("/api/settings", any(active_api_gateway))
         .route("/api/settings/{*tail}", any(active_api_gateway))
-        .with_state(runtime)
-        .nest("/api/application", application.0)
+        .with_state(runtime);
+    match application {
+        Some(application) => router.nest("/api/application", application.0),
+        None => router,
+    }
 }
 
 fn project_api_router() -> Router<DashboardState> {
@@ -1321,7 +1336,7 @@ mod authority_tests {
         let application = ActiveProjectApplicationRoutes(
             Router::new().route("/probe", get(|| async { StatusCode::NO_CONTENT })),
         );
-        let app = router_with_active_application(state, application);
+        let app = router_with_active_application(state, Some(application));
 
         let active = app
             .clone()
