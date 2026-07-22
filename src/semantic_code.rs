@@ -38,7 +38,7 @@ mod model_lifecycle;
 pub(crate) mod projector;
 mod runtime_query;
 mod runtime_service;
-mod session_pool;
+pub(crate) mod session_pool;
 mod trust_roots;
 
 pub(crate) use crate::config::DEFAULT_FASTEMBED_MODEL_ID;

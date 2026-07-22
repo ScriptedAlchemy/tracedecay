@@ -392,7 +392,7 @@ impl AdmittedProjectionArtifactV1 {
         })
     }
 
-    pub(super) fn projection(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
+    pub(crate) fn projection(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
         &self.runtime_artifact.projection
     }
 
