@@ -1,5 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -135,10 +136,7 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub(super) fn take_requests(&self, limit: usize) -> Vec<SessionRefreshBeginOrJoinRequestV1> {
-        let mut requests = self
-            .requests
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
         let count = limit.min(requests.len());
         let drained = requests.drain(..count).collect();
         let remaining = requests.len();
@@ -148,10 +146,7 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub(super) fn requeue_request(&self, request: SessionRefreshBeginOrJoinRequestV1) {
-        let mut requests = self
-            .requests
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
         if !requests
             .iter()
             .any(|pending| pending.is_equivalent_to(&request))
@@ -165,10 +160,7 @@ impl SessionTemporalRefreshWakeState {
 
     pub(super) fn transfer_requests_to(&self, target: &Self) {
         let requests = {
-            let mut requests = self
-                .requests
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
+            let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
             requests.drain(..).collect::<Vec<_>>()
         };
         for request in requests {
@@ -184,21 +176,21 @@ impl SessionTemporalRefreshWakeState {
         !self
             .requests
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .is_empty()
     }
 
     pub(super) fn claim_terminal_attempt(&self, recovery: &SessionRefreshRecoveryV1) -> bool {
         self.terminal_attempts
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(recovery.operation_id().as_str().to_string())
     }
 
     pub(super) fn release_terminal_attempt(&self, recovery: &SessionRefreshRecoveryV1) {
         self.terminal_attempts
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .remove(recovery.operation_id().as_str());
     }
 
@@ -211,7 +203,7 @@ impl SessionTemporalRefreshWakeState {
         let mut telemetry = self
             .telemetry
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         telemetry.blocker = None;
         telemetry.retry_class = None;
         telemetry.unavailable_reason = None;
@@ -225,7 +217,7 @@ impl SessionTemporalRefreshWakeState {
         let mut telemetry = self
             .telemetry
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         telemetry.blocker = Some(blocker);
         telemetry.retry_class = Some(retry_class);
         telemetry.unavailable_reason = Some(SessionTemporalRefreshUnavailableReason::Recovering);
@@ -235,7 +227,7 @@ impl SessionTemporalRefreshWakeState {
         let mut telemetry = self
             .telemetry
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         telemetry.blocker = Some(SessionTemporalRefreshBlocker::WorkerStopped);
         telemetry.retry_class = None;
         telemetry.unavailable_reason = Some(SessionTemporalRefreshUnavailableReason::Stopped);
@@ -244,7 +236,7 @@ impl SessionTemporalRefreshWakeState {
     pub(super) fn observe_durable_backlog(&self, backlog: usize) {
         self.telemetry
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .durable_backlog = backlog;
     }
 
@@ -252,7 +244,7 @@ impl SessionTemporalRefreshWakeState {
         let mut telemetry = self
             .telemetry
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         telemetry.durable_backlog = durable_backlog;
         if made_progress {
             let micros = SystemTime::now()
@@ -267,7 +259,7 @@ impl SessionTemporalRefreshWakeState {
     fn observe_queued_backlog(&self, backlog: usize) {
         self.telemetry
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .queued_backlog = backlog;
     }
 
@@ -275,7 +267,7 @@ impl SessionTemporalRefreshWakeState {
         let telemetry = self
             .telemetry
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         SessionTemporalRefreshWorkerStatus {
             last_progress_at_unix_micros: telemetry.last_progress_at_unix_micros,
             backlog: telemetry
@@ -288,10 +280,7 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub(super) fn cancel(&self) {
-        let _requests = self
-            .requests
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
         if !self.cancelled.swap(true, Ordering::AcqRel) {
             self.mark_stopped();
             self.cancellation.notify_waiters();
@@ -409,7 +398,7 @@ impl Drop for RecoverySelectionGuard<'_> {
             .state
             .recovery_cycle_pending
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         while let Some(operation) = self.pending.pop_back() {
             if !cycle.contains(&operation) {
                 cycle.push_front(operation);
@@ -448,7 +437,7 @@ impl SessionTemporalRefreshWake {
         self.route
             .target
             .read()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .upgrade()
     }
 
@@ -457,7 +446,7 @@ impl SessionTemporalRefreshWake {
             .route
             .target
             .write()
-            .unwrap_or_else(|error| error.into_inner()) = Arc::downgrade(state);
+            .unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(state);
     }
 
     #[cfg(test)]
@@ -490,7 +479,7 @@ impl SessionTemporalRefreshWake {
             let mut requests = state
                 .requests
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(PoisonError::into_inner);
             let disposition = if state.cancelled.load(Ordering::Acquire) {
                 SessionTemporalRefreshWakeDisposition::Saturated
             } else if requests

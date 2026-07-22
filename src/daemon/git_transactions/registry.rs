@@ -51,7 +51,6 @@ impl GitIndexTransactionStoreRegistry {
     pub(crate) fn contains(&self, path: &std::path::Path) -> bool {
         self.stores
             .lock()
-            .map(|stores| stores.contains_key(path))
-            .unwrap_or(false)
+            .is_ok_and(|stores| stores.contains_key(path))
     }
 }

@@ -735,8 +735,7 @@ fn forward_only_service_spec(
     service_path: &Path,
 ) -> Result<DaemonServiceSpec> {
     let service_is_symlink = std::fs::symlink_metadata(service_path)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false);
+        .is_ok_and(|metadata| metadata.file_type().is_symlink());
     let existing_unit = if service_is_symlink {
         String::new()
     } else {

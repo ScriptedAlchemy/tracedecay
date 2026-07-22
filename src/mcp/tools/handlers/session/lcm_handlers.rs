@@ -1561,28 +1561,28 @@ mod compatibility_tests {
     }
 
     impl SessionRetrievalServicePort for RecordingService {
-        fn execute<'a>(
-            &'a self,
+        fn execute(
+            &self,
             command: SessionRetrievalCommand,
-        ) -> SessionRetrievalServiceFuture<'a> {
+        ) -> SessionRetrievalServiceFuture<'_> {
             self.commands.lock().unwrap().push(command);
             let outcome = self.outcome.clone();
             Box::pin(async move { outcome })
         }
 
-        fn describe_lcm<'a>(
-            &'a self,
+        fn describe_lcm(
+            &self,
             command: LcmDescribeServiceCommand,
-        ) -> LcmDescribeServiceFuture<'a> {
+        ) -> LcmDescribeServiceFuture<'_> {
             self.describe_commands.lock().unwrap().push(command);
             let outcome = self.describe_outcome.lock().unwrap().clone();
             Box::pin(async move { outcome })
         }
 
-        fn expand_lcm<'a>(
-            &'a self,
+        fn expand_lcm(
+            &self,
             command: LcmExpandServiceCommand,
-        ) -> LcmExpandServiceFuture<'a> {
+        ) -> LcmExpandServiceFuture<'_> {
             self.expand_commands.lock().unwrap().push(command);
             let outcome = self.expand_outcome.lock().unwrap().clone();
             Box::pin(async move { outcome })

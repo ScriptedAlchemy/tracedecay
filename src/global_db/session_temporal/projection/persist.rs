@@ -128,12 +128,6 @@ pub(crate) async fn seed_active_projection_in_transaction(
     conn: &Connection,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<()> {
-    if batch.batch_ordinal() != 0 || batch.watermarks().active_generation() == batch.generation() {
-        return Ok(());
-    }
-    let session_id = batch.session_id().as_str();
-    let candidate = generation_i64(batch.generation(), PERSIST_OPERATION)?;
-    let active = generation_i64(batch.watermarks().active_generation(), PERSIST_OPERATION)?;
     const COPIES: &[&str] = &[
         "INSERT INTO session_turns (
             session_id, generation, turn_id, ordinal, grouping_provenance, created_at
@@ -212,6 +206,12 @@ pub(crate) async fn seed_active_projection_in_transaction(
                 current_assertion_id, current_occurrence_id, coverage_json
          FROM session_current_entities WHERE session_id = ?1 AND generation = ?3",
     ];
+    if batch.batch_ordinal() != 0 || batch.watermarks().active_generation() == batch.generation() {
+        return Ok(());
+    }
+    let session_id = batch.session_id().as_str();
+    let candidate = generation_i64(batch.generation(), PERSIST_OPERATION)?;
+    let active = generation_i64(batch.watermarks().active_generation(), PERSIST_OPERATION)?;
     for sql in COPIES {
         conn.execute(sql, params![session_id, candidate, active])
             .await
@@ -384,12 +384,12 @@ pub(super) async fn persist_occurrence(
                 occurrence.source_observation_id.as_str(),
                 i64::from(occurrence.projection_output_ordinal.value()),
                 occurrence.retrieval_anchor_id.as_str(),
-                occurrence.thread_id.as_ref().map(|value| value.as_str()),
+                occurrence.thread_id.as_ref().map(tracedecay_domain::ThreadId::as_str),
                 thread_grouping,
-                occurrence.turn_id.as_ref().map(|value| value.as_str()),
+                occurrence.turn_id.as_ref().map(tracedecay_domain::TurnId::as_str),
                 turn_grouping,
-                occurrence.message_id.as_ref().map(|value| value.as_str()),
-                occurrence.agent_id.as_ref().map(|value| value.as_str()),
+                occurrence.message_id.as_ref().map(tracedecay_domain::MessageId::as_str),
+                occurrence.agent_id.as_ref().map(tracedecay_domain::AgentInstanceId::as_str),
                 role,
                 occurrence.knowledge_at.0,
                 valid_time,
@@ -492,12 +492,12 @@ pub(super) async fn canonical_occurrence(
         "projection_output_ordinal": output_ordinal,
         "retrieval_anchor_id": expected_anchor,
         "session_id": relations.session_id(),
-        "thread_id": relations.thread_id().map(|id| id.as_str()),
+        "thread_id": relations.thread_id().map(tracedecay_domain::ObservationId::as_str),
         "thread_grouping": relations.thread_id().map(|_| grouping()),
-        "turn_id": relations.turn_id().map(|id| id.as_str()),
+        "turn_id": relations.turn_id().map(tracedecay_domain::ObservationId::as_str),
         "turn_grouping": relations.turn_id().map(|_| grouping()),
         "message_id": output.message().message_id,
-        "agent_id": relations.agent_id().map(|id| id.as_str()),
+        "agent_id": relations.agent_id().map(tracedecay_domain::ObservationId::as_str),
         "role": output.message().role,
         "knowledge_at": anchor.ingested_at(),
         "valid_time": valid_time,
@@ -651,12 +651,12 @@ pub(super) async fn require_exact_occurrence(
         "source_observation_id": occurrence.source_observation_id.as_str(),
         "projection_output_ordinal": occurrence.projection_output_ordinal.value(),
         "retrieval_anchor_id": occurrence.retrieval_anchor_id.as_str(),
-        "thread_id": occurrence.thread_id.as_ref().map(|value| value.as_str()),
+        "thread_id": occurrence.thread_id.as_ref().map(tracedecay_domain::ThreadId::as_str),
         "thread_grouping_json": occurrence.thread_grouping,
-        "turn_id": occurrence.turn_id.as_ref().map(|value| value.as_str()),
+        "turn_id": occurrence.turn_id.as_ref().map(tracedecay_domain::TurnId::as_str),
         "turn_grouping_json": occurrence.turn_grouping,
-        "message_id": occurrence.message_id.as_ref().map(|value| value.as_str()),
-        "agent_id": occurrence.agent_id.as_ref().map(|value| value.as_str()),
+        "message_id": occurrence.message_id.as_ref().map(tracedecay_domain::MessageId::as_str),
+        "agent_id": occurrence.agent_id.as_ref().map(tracedecay_domain::AgentInstanceId::as_str),
         "role": role,
         "knowledge_at": occurrence.knowledge_at.0,
         "valid_time_json": occurrence.valid_time,

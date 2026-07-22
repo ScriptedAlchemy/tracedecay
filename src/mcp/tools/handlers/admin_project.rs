@@ -336,7 +336,7 @@ pub(super) async fn handle_admin_project(
                 "proposals": proposals,
                 "next_after_proposal_id": page
                     .next_after_proposal_id()
-                    .map(|proposal_id| proposal_id.as_str()),
+                    .map(ProvenanceId::as_str),
             })
         }
         AdminProjectAction::FactView { id } => {

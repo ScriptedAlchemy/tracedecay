@@ -619,7 +619,7 @@ struct HealthCheck {
 }
 
 /// Produces a redacted temporal health snapshot through a truly non-mutating
-/// SQLite open.
+/// `SQLite` open.
 ///
 /// The path is opened with `file:…?immutable=1&mode=ro` and `PRAGMA query_only`.
 /// It never acquires `DatabaseAuthority` / lock / owner files, never creates
@@ -1146,7 +1146,5 @@ fn unavailable_report_with_reason(
 fn non_empty_wal_sidecar(db_path: &Path) -> bool {
     let mut wal = db_path.as_os_str().to_os_string();
     wal.push("-wal");
-    std::fs::metadata(PathBuf::from(wal))
-        .map(|metadata| metadata.len() > 0)
-        .unwrap_or(false)
+    std::fs::metadata(PathBuf::from(wal)).is_ok_and(|metadata| metadata.len() > 0)
 }

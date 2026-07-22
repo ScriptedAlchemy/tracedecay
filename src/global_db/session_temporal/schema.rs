@@ -1490,7 +1490,7 @@ async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::
 }
 
 /// Upgrade pre-v3 copy edges to carry bitemporal columns while preserving
-/// legacy unknown validity and the prior created_at knowledge watermark.
+/// legacy unknown validity and the prior `created_at` knowledge watermark.
 async fn migrate_logical_copy_bitemporality(
     conn: &Connection,
     version: Option<i64>,

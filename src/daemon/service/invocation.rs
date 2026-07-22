@@ -39,7 +39,7 @@ use tracedecay_application::{
 use tracedecay_domain::{
     ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId, GitIndexPreviewV1,
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, ManifestDigest, ProjectId, RefId,
-    RetrievalAnchorId, SourceKindV1, UtcMicros, canonical_sha256,
+    RetrievalAnchorId, UtcMicros, canonical_sha256,
 };
 use tracedecay_policy::{AnalyzerAdmissionInputV1, TruthFreshnessRequirementV1};
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, UseCaseId};

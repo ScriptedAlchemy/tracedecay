@@ -2,6 +2,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::PoisonError;
 
 #[cfg(unix)]
 use serde_json::Value;
@@ -116,9 +117,7 @@ async fn wait_for_finished_task(
 #[cfg(unix)]
 fn remaining_test_budget(deadline: tokio::time::Instant, message: &str) -> std::time::Duration {
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    if remaining.is_zero() {
-        panic!("{message}");
-    }
+    assert!(!remaining.is_zero(), "{message}");
     remaining
 }
 
@@ -132,7 +131,7 @@ struct NoncooperativeTaskRelease {
 impl NoncooperativeTaskRelease {
     fn release(&self) {
         let (released, changed) = &*self.state;
-        *released.lock().unwrap_or_else(|error| error.into_inner()) = true;
+        *released.lock().unwrap_or_else(PoisonError::into_inner) = true;
         changed.notify_all();
     }
 }
@@ -160,11 +159,9 @@ fn spawn_noncooperative_test_task() -> (
     let task = tokio::task::spawn_blocking(move || {
         let _ = started_tx.send(());
         let (released, changed) = &*task_release.state;
-        let mut ready = released.lock().unwrap_or_else(|error| error.into_inner());
+        let mut ready = released.lock().unwrap_or_else(PoisonError::into_inner);
         while !*ready {
-            ready = changed
-                .wait(ready)
-                .unwrap_or_else(|error| error.into_inner());
+            ready = changed.wait(ready).unwrap_or_else(PoisonError::into_inner);
         }
         let _ = completed_tx.send(());
     });

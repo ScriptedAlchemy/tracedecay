@@ -1850,8 +1850,10 @@ mod tests {
         let lock = runner.acquire_index_lock().expect("wrong ref lock");
         assert!(matches!(
             runner.commit_index(&lock, &wrong_ref_preview, &unsigned_intent),
-            Err(NativeGitIndexError::StaleRepositoryState)
-                | Err(NativeGitIndexError::CommitStateUnsupported)
+            Err(
+                NativeGitIndexError::StaleRepositoryState
+                    | NativeGitIndexError::CommitStateUnsupported
+            )
         ));
         drop(lock);
         assert_eq!(

@@ -300,7 +300,7 @@ pub(in crate::global_db) async fn record_canonical_observation_effect(
             })
         })
         .collect::<Vec<_>>();
-    outputs.sort_unstable_by_key(|value| value.to_string());
+    outputs.sort_unstable_by_key(ToString::to_string);
     let effect_digest = digest_bytes(
         &serde_json::to_vec(&json!({
             "observation_id": observation.observation_id().as_str(),

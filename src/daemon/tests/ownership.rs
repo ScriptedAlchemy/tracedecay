@@ -683,7 +683,7 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
         &engine,
         tokio::time::Instant::now() + std::time::Duration::from_secs(1),
         "shutdown automation ownership drain",
-        |schedulers| schedulers.is_empty(),
+        std::collections::HashMap::is_empty,
     )
     .await;
 

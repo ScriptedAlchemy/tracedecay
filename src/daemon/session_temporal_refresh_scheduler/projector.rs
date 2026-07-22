@@ -175,12 +175,10 @@ fn canonical_noop_complete_effect(
         .map_err(|_| SessionTemporalRefreshProjectorError::terminal("projector_failed"))?;
     let coverage = recovery
         .progress()
-        .map(|progress| *progress.coverage())
-        .unwrap_or_else(zero_refresh_coverage);
+        .map_or_else(zero_refresh_coverage, |progress| *progress.coverage());
     let committed_records = recovery
         .progress()
-        .map(SessionRefreshProgressV1::committed_records)
-        .unwrap_or(0);
+        .map_or(0, SessionRefreshProgressV1::committed_records);
     let progress = SessionRefreshProgressV1::new(
         recovery.operation_id().clone(),
         recovery.session_id().clone(),

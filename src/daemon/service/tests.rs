@@ -566,7 +566,7 @@ fn atomic_service_write_faults_preserve_the_forward_boundary() {
         }
         let leftovers = std::fs::read_dir(dir.path())
             .expect("service parent")
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .filter(|entry| entry.path() != service_path)
             .count();
         assert_eq!(leftovers, 0, "temporary unit must be cleaned up");

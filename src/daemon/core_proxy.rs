@@ -239,8 +239,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
             // Never revive legacy-file fallback here: absent a published
             // snapshot, auto-init stays disabled.
             let allow_init = crate::config::cached_sync_config(&git_root)
-                .map(|config| config.auto_init)
-                .unwrap_or(false);
+                .is_ok_and(|config| config.auto_init);
             return Some(InitializeRouteMetadata {
                 project_path: git_root,
                 allow_init,

@@ -25,8 +25,8 @@ fn log_startup_transcript_ingest_failure(
         source = failure.source,
         reason_code = failure.reason_code,
         retryable = failure.retryable,
-        source_offset = ?failure.source_locator.map(|range| range.start()),
-        source_end_offset = ?failure.source_locator.map(|range| range.end()),
+        source_offset = ?failure.source_locator.map(tracedecay_domain::ObservationSourceRangeV1::start),
+        source_end_offset = ?failure.source_locator.map(tracedecay_domain::ObservationSourceRangeV1::end),
         "startup transcript ingest incomplete"
     );
 }

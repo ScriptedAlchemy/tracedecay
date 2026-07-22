@@ -357,8 +357,10 @@ fn bounded_lcm_expand_query_floor_text(
                 .get("status")
                 .and_then(Value::as_str)
                 .filter(|status| !status.is_empty())
-                .map(|status| Value::String(truncate_chars(status, FLOOR_SCALAR_CHARS).0))
-                .unwrap_or_else(|| json!("partial")),
+                .map_or_else(
+                    || json!("partial"),
+                    |status| Value::String(truncate_chars(status, FLOOR_SCALAR_CHARS).0),
+                ),
             "needs_synthesis": value
                 .get("needs_synthesis")
                 .cloned()
@@ -730,8 +732,9 @@ fn insert_lcm_expand_query_status(
         .get("status")
         .and_then(Value::as_str)
         .filter(|status| !status.is_empty())
-        .map(|status| truncate_chars(status, max_chars).0)
-        .unwrap_or_else(|| "partial".to_string());
+        .map_or_else(|| "partial".to_string(), |status| {
+            truncate_chars(status, max_chars).0
+        });
     object.insert("status".to_string(), json!(status));
 }
 

@@ -271,8 +271,8 @@ pub(super) fn derived_temporal_assertion_id(
     )
 }
 
-/// Prefer ProviderLinkage when the parent message id is the source observation's
-/// stable provider record id; otherwise emit ParentMessageLinkage.
+/// Prefer `ProviderLinkage` when the parent message id is the source observation's
+/// stable provider record id; otherwise emit `ParentMessageLinkage`.
 pub(super) async fn canonical_parent_copy_proof(
     conn: &Connection,
     session_id: &SessionId,
@@ -294,25 +294,23 @@ pub(super) async fn canonical_parent_copy_proof(
             )
             .await
             .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-        match rows
+        let Some(row) = rows
             .next()
             .await
             .map_err(|error| storage(MATERIALIZE_REFRESH, error))?
-        {
-            Some(row) => tracedecay_domain::CanonicalObservationIdV1::new(
-                row.get::<String>(0)
-                    .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
-            )
-            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
-            None => {
-                let parent_message = MessageId::new(parent_message_id.to_owned())
-                    .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-                return Ok(CopyProofV1::ParentMessageLinkage {
-                    source_occurrence_id: parent_occurrence_id.clone(),
-                    parent_message_id: parent_message,
-                });
-            }
-        }
+        else {
+            let parent_message = MessageId::new(parent_message_id.to_owned())
+                .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+            return Ok(CopyProofV1::ParentMessageLinkage {
+                source_occurrence_id: parent_occurrence_id.clone(),
+                parent_message_id: parent_message,
+            });
+        };
+        tracedecay_domain::CanonicalObservationIdV1::new(
+            row.get::<String>(0)
+                .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
+        )
+        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?
     };
     let (_, observation) = read_observation(conn, &observation_id).await?;
     let envelope: CanonicalObservationEnvelopeV1 =

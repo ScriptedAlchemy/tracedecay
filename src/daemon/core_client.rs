@@ -361,9 +361,7 @@ pub(crate) async fn call_tool_with_liveness_poll(
                     serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
                         message: format!("daemon tool response JSON decode failed: {error}"),
                     })?;
-                if value.get("id") != Some(&id) {
-                    None
-                } else {
+                if value.get("id") == Some(&id) {
                     Some(serde_json::from_value(value).map_err(|error| {
                         TraceDecayError::Config {
                             message: format!(
@@ -371,6 +369,8 @@ pub(crate) async fn call_tool_with_liveness_poll(
                             ),
                         }
                     })?)
+                } else {
+                    None
                 }
             }
         };

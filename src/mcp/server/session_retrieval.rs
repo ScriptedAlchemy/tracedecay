@@ -912,7 +912,7 @@ impl DaemonSessionRetrievalService {
             {
                 Ok(cursor) => temporal.cursor = Some(cursor),
                 Err(error) => return expand_execution_error(error),
-            };
+            }
         }
         LcmExpandServiceOutcome::Complete {
             expansion,
@@ -924,21 +924,21 @@ impl DaemonSessionRetrievalService {
 }
 
 impl SessionRetrievalServicePort for DaemonSessionRetrievalService {
-    fn execute<'a>(
-        &'a self,
+    fn execute(
+        &self,
         command: SessionRetrievalCommand,
-    ) -> SessionRetrievalServiceFuture<'a> {
+    ) -> SessionRetrievalServiceFuture<'_> {
         Box::pin(async move { self.execute_command(command).await })
     }
 
-    fn describe_lcm<'a>(
-        &'a self,
+    fn describe_lcm(
+        &self,
         command: LcmDescribeServiceCommand,
-    ) -> LcmDescribeServiceFuture<'a> {
+    ) -> LcmDescribeServiceFuture<'_> {
         Box::pin(async move { self.execute_lcm_describe(command).await })
     }
 
-    fn expand_lcm<'a>(&'a self, command: LcmExpandServiceCommand) -> LcmExpandServiceFuture<'a> {
+    fn expand_lcm(&self, command: LcmExpandServiceCommand) -> LcmExpandServiceFuture<'_> {
         Box::pin(async move { self.execute_lcm_expand(command).await })
     }
 }

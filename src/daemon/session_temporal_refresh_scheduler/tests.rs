@@ -4,6 +4,7 @@ use super::wake::*;
 use super::worker::*;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -892,7 +893,7 @@ impl RecordingDeferredProjector {
     fn observed_session_count(&self) -> usize {
         self.sessions
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .len()
     }
 }
@@ -905,7 +906,7 @@ impl SessionTemporalRefreshProjector for RecordingDeferredProjector {
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.sessions
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(recovery.session_id().as_str().to_string());
         Box::pin(async { Ok(SessionTemporalRefreshEffect::Deferred) })
     }
@@ -1240,7 +1241,7 @@ fn recovery_selection_completes_by_identity_when_keys_are_skipped() {
     let pending = state
         .recovery_cycle_pending
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(PoisonError::into_inner);
     assert_eq!(
         pending.iter().cloned().collect::<Vec<_>>(),
         vec!["session.b\0op.b".to_string()]

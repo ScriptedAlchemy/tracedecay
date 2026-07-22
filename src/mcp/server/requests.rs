@@ -42,8 +42,9 @@ fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
     tracedecay_domain::UtcMicros(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
-            .unwrap_or(i64::MAX),
+            .map_or(i64::MAX, |duration| {
+                i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
+            }),
     )
 }
 
@@ -745,7 +746,7 @@ impl McpServer {
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
                 automation_writer: self.dashboard_automation_writer.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
-                diagnostics_lsp: Some(&self.diagnostics_lsp),
+                diagnostics_lsp: Some(self.diagnostics_lsp.as_ref()),
                 application_invocation_client,
                 application_request_id,
                 application_deadline,

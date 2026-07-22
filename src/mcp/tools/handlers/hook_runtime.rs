@@ -156,9 +156,10 @@ fn hook_v2_binding_snapshot(
             tracedecay_hooks::hook_configuration_path(&layout.data_root, envelope.producer),
         ),
     );
-    let snapshot = match subscriber.load_current(envelope.producer, now) {
-        tracedecay_hooks::HookConfigurationReadOutcomeV1::Bound(snapshot) => snapshot,
-        _ => return Ok(None),
+    let tracedecay_hooks::HookConfigurationReadOutcomeV1::Bound(snapshot) =
+        subscriber.load_current(envelope.producer, now)
+    else {
+        return Ok(None);
     };
     envelope
         .validate(&snapshot.binding)
@@ -328,8 +329,7 @@ async fn hook_v2_cancel(cg: &TraceDecay, args: &Value) -> Result<Value> {
     let status = owner
         .cancel(work)
         .await
-        .map(scout_store_outcome)
-        .unwrap_or("unavailable");
+        .map_or("unavailable", scout_store_outcome);
     Ok(json!({ "status": status }))
 }
 

@@ -353,9 +353,7 @@ async fn cold_doctor_runtime_value_for_paths(
     value["database"]["authority_audit_ok"] = json!(null);
     value["database"]["authority_audit_reason"] = json!("authority_audit_not_run");
     value["database"]["authority_audit_error"] = json!("authority_audit_not_run");
-    value["session_temporal_health"] = if !session_path.is_file() {
-        doctor_runtime_temporal_unavailable("session_store_missing")
-    } else {
+    value["session_temporal_health"] = if session_path.is_file() {
         match timeout(
             Duration::from_secs(8),
             crate::global_db::session_temporal::session_temporal_doctor_health_at(session_path),
@@ -365,6 +363,8 @@ async fn cold_doctor_runtime_value_for_paths(
             Ok(report) => doctor_runtime_temporal_report(report),
             Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
         }
+    } else {
+        doctor_runtime_temporal_unavailable("session_store_missing")
     };
     value["cursor_session_ingest"] = json!({
         "status": "unavailable",
@@ -403,11 +403,8 @@ async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> 
             return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
         }
     };
-    let schema_version = match doctor_database_i64(&graph, "PRAGMA user_version").await {
-        Some(version) => version,
-        None => {
-            return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
-        }
+    let Some(schema_version) = doctor_database_i64(&graph, "PRAGMA user_version").await else {
+        return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
     };
     if schema_version != DOCTOR_GRAPH_SCHEMA_VERSION {
         return doctor_runtime_unavailable(Some(project_path), "project_store_schema_unsupported");
@@ -619,9 +616,7 @@ mod doctor_runtime_route_tests {
     fn has_non_empty_wal(path: &Path) -> bool {
         let mut wal_path = path.as_os_str().to_os_string();
         wal_path.push("-wal");
-        std::fs::metadata(PathBuf::from(wal_path))
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false)
+        std::fs::metadata(PathBuf::from(wal_path)).is_ok_and(|metadata| metadata.len() > 0)
     }
 
     #[test]

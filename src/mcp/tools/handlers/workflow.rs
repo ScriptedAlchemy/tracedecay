@@ -609,7 +609,7 @@ async fn begin_test_run(cg: &TraceDecay) -> Result<OperationEmitter> {
             message: format!("managed test-run root is unavailable: {error}"),
         })?;
     let root_uri = Url::from_directory_path(root)
-        .map_err(|_| TraceDecayError::Config {
+        .map_err(|()| TraceDecayError::Config {
             message: "managed test-run root URI is invalid".to_owned(),
         })?
         .to_string();

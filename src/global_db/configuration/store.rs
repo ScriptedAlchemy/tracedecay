@@ -9,7 +9,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use hmac::{Hmac, KeyInit, Mac};
-use libsql::{Connection, TransactionBehavior};
+use libsql::Connection;
 use libsql::{Row, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -71,7 +71,7 @@ pub enum ConfigurationStorageError {
     Encoding(String),
 }
 
-/// Connection-local SQL helper used only behind GlobalDb's owned writer and
+/// Connection-local SQL helper used only behind `GlobalDb`'s owned writer and
 /// read-snapshot lanes. It is deliberately not a public authority surface.
 #[cfg(test)]
 struct ConfigurationSqlStore<'a> {

@@ -644,8 +644,7 @@ impl DaemonInvocationClient {
             else {
                 return Err(crate::errors::TraceDecayError::Config {
                     message: format!(
-                        "daemon closed the invocation connection after '{}' was sent; the outcome is unknown",
-                        request_label
+                        "daemon closed the invocation connection after '{request_label}' was sent; the outcome is unknown"
                     ),
                 });
             };

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::PoisonError;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::ProjectId;
@@ -119,7 +120,7 @@ impl DaemonSessionRefreshService {
         match self
             .handles
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .get(token)
             .cloned()
         {
@@ -138,7 +139,7 @@ impl DaemonSessionRefreshService {
         let mut handles = self
             .handles
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         if handles.len() >= MAX_SESSION_REFRESH_HANDLES
             && !handles.contains_key(&token)
             && let Some(evicted) = handles.keys().next().cloned()

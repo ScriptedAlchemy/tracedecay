@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -186,7 +187,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         if self
             .retired_project_owners
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .contains(&owner)
         {
             return inert_session_temporal_refresh_wake();
@@ -278,7 +279,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             let mut retired = self
                 .retired_project_owners
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(PoisonError::into_inner);
             retired.insert(old_owner.clone());
             retired.remove(&new_owner);
         }

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
 use tracedecay_store::{
@@ -458,7 +459,7 @@ pub(super) async fn run_session_temporal_refresh_pass(
         let mut pending = state
             .recovery_cycle_pending
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         pending.retain(|operation| current_keys.contains(operation));
         if pending.is_empty() {
             pending.extend(ordered_keys);

@@ -457,6 +457,7 @@ where
     /// Mounts the daemon-owned analyzer cancellation adapter. Session
     /// cancellation remains authoritative even when the provider reports that
     /// its upstream work could not be interrupted.
+    #[must_use]
     pub fn with_cancellation_port<C>(mut self, cancellation: C) -> Self
     where
         C: AnalyzerCancellationPort + Send + Sync + 'static,
@@ -465,6 +466,7 @@ where
         self
     }
 
+    #[must_use]
     pub fn with_context_projection_port<C>(mut self, context: C) -> Self
     where
         C: ContextProjectionPort + Send + Sync + 'static,
@@ -2817,7 +2819,7 @@ mod tests {
             uri: &str,
             overlay: Option<&OverlaySnapshot>,
         ) -> DiagnosticSnapshotOutcome {
-            assert!(overlay.is_none() || overlay.is_some_and(|overlay| overlay.ephemeral));
+            assert!(overlay.is_none_or(|overlay| overlay.ephemeral));
             DiagnosticSnapshotOutcome::Ready {
                 diagnostics: GenerationDiagnostics {
                     generation: 9,
