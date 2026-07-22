@@ -8,6 +8,14 @@ Role: PR7 establishes stable evidence anchors for captured observations. Later q
 search, API, and UI slices preserve and resolve those anchors. This plan does not
 create a research-management system.
 
+Earlier type/file names, table and index inventories, migration labels, fixture
+paths, packet gates, and implementation allocations are historical evidence,
+not prerequisites or artifacts that later work must recreate. Published wire
+types and persisted records retain compatibility and migration obligations;
+all other retention is judged by the direct anchor identity, resolution,
+authorization, lineage, deletion, Git, platform, and regression behavior
+below.
+
 ## Outcome
 
 Any authorized result can lead back to the exact retained observation or entity that
@@ -165,158 +173,24 @@ observations, Plan 24 owns task decisions and task-to-evidence links, and Plan
 32 owns admitted effects and terminal runtime receipts. Plan 13 stores
 immutable, payload-free references to those owner records.
 
-The exact domain types are in
-`crates/tracedecay-domain/src/research/git_anchor.rs` and are exported from
-`crates/tracedecay-domain/src/research/mod.rs`:
+The public V3 anchor target retains one Git-topology variant beneath
+`RetrievalAnchorId`. It can reference repository and worktree captures, ref
+snapshots, native objects, pull-request/check snapshots, conflict and preflight
+observations, and integration receipts. These persisted wire records use the
+canonical identities owned by Plans 03, 16, 20, 27, 32, and 36; Plan 13 does
+not derive substitutes or create a parallel public lookup family.
 
-```rust
-pub enum GitTopologyAnchorRefV1 {
-    RepositoryCapture(RepositoryCaptureAnchorRefV1),
-    WorktreeCapture(WorktreeCaptureAnchorRefV1),
-    RefSnapshot(RefSnapshotAnchorRefV1),
-    NativeObject(NativeGitObjectAnchorRefV1),
-    PullRequest(PullRequestSnapshotAnchorRefV1),
-    Check(CheckSnapshotAnchorRefV1),
-    Conflict(ConflictSnapshotAnchorRefV1),
-    Preflight(TopologyPreflightAnchorRefV1),
-    IntegrationReceipt(IntegrationReceiptAnchorRefV1),
-}
-
-pub struct RepositoryCaptureAnchorRefV1 {
-    pub repository_id: RepositoryId,
-    pub repository_snapshot_id: RepositorySnapshotId,
-    pub repository_snapshot_digest: RepositorySnapshotDigest,
-    pub object_format: GitObjectFormat,
-    pub native_common_dir_id: NativeGitCommonDirId,
-}
-
-pub struct WorktreeCaptureAnchorRefV1 {
-    pub repository_capture_anchor_id: RetrievalAnchorId,
-    pub worktree_id: WorktreeId,
-    pub native_worktree_admin_id: NativeWorktreeAdminId,
-    pub repository_snapshot_id: RepositorySnapshotId,
-    pub head_state_digest: GitHeadStateDigest,
-    pub index_tree_object_id: Option<GitObjectId>,
-    pub capture_receipt_id: RepositoryCaptureReceiptId,
-}
-
-pub struct RefSnapshotAnchorRefV1 {
-    pub repository_capture_anchor_id: RetrievalAnchorId,
-    pub full_ref_name: CanonicalGitRefName,
-    pub ref_kind: GitRefKind,
-    pub target_object_anchor_id: Option<RetrievalAnchorId>,
-    pub symbolic_target: Option<CanonicalGitRefName>,
-}
-
-pub struct NativeGitObjectAnchorRefV1 {
-    pub repository_capture_anchor_id: RetrievalAnchorId,
-    pub object_format: GitObjectFormat,
-    pub object_kind: NativeGitObjectKind,
-    pub object_id: GitObjectId,
-}
-
-pub struct PullRequestSnapshotAnchorRefV1 {
-    pub repository_capture_anchor_id: RetrievalAnchorId,
-    pub pull_request_snapshot_id: PullRequestSnapshotId,
-    pub base_object_anchor_id: RetrievalAnchorId,
-    pub head_object_anchor_id: RetrievalAnchorId,
-    pub merge_base_object_anchor_id: Option<RetrievalAnchorId>,
-    pub provider_observation_anchor_id: RetrievalAnchorId,
-    pub snapshot_digest: PullRequestSnapshotDigest,
-}
-
-pub struct CheckSnapshotAnchorRefV1 {
-    pub connector_id: SourceConnectorId,
-    pub root_id: SourceRootId,
-    pub object_id: SourceObjectId,
-    pub object_version: SourceObjectVersion,
-    pub observation_anchor_id: RetrievalAnchorId,
-    pub repository_capture_anchor_id: RetrievalAnchorId,
-    pub commit_object_anchor_id: RetrievalAnchorId,
-    pub record_digest: CheckSnapshotDigest,
-}
-
-pub struct ConflictSnapshotAnchorRefV1 {
-    pub worktree_capture_anchor_id: RetrievalAnchorId,
-    pub repository_snapshot_id: RepositorySnapshotId,
-    pub unmerged_stage_digest: UnmergedStageDigest,
-    pub operation_state_digest: GitOperationStateDigest,
-}
-
-pub struct TopologyPreflightAnchorRefV1 {
-    pub source_worktree_anchor_id: RetrievalAnchorId,
-    pub destination_worktree_anchor_id: RetrievalAnchorId,
-    pub source_object_anchor_ids: Vec<RetrievalAnchorId>,
-    pub destination_ref_anchor_id: RetrievalAnchorId,
-    pub configuration_snapshot_id: ConfigurationSnapshotId,
-    pub topology_policy_digest: TopologyPolicyDigest,
-    pub normalized_operation_digest: GitOperationDigest,
-    pub native_preflight_receipt_id: GitReadOnlyPlanReceiptId,
-    pub native_preflight_receipt_digest: GitReadOnlyPlanReceiptDigest,
-}
-
-pub enum IntegrationOwnerReceiptRefV1 {
-    Plan03CanonicalObservation {
-        observation_anchor_id: RetrievalAnchorId,
-        observation_digest: CanonicalObservationDigest,
-    },
-    Plan32RuntimeEffect {
-        receipt_id: WorkflowTerminalReceiptId,
-        receipt_digest: WorkflowTerminalReceiptDigest,
-    },
-    Plan36NativeGitOperation {
-        receipt_id: GitOperationReceiptId,
-        receipt_digest: GitOperationReceiptDigest,
-    },
-}
-
-pub struct IntegrationReceiptAnchorRefV1 {
-    pub integration_request_id: TopologyIntegrationRequestId,
-    pub preflight_anchor_id: RetrievalAnchorId,
-    pub source_worktree_anchor_id: RetrievalAnchorId,
-    pub destination_worktree_anchor_id: RetrievalAnchorId,
-    pub source_object_anchor_ids: Vec<RetrievalAnchorId>,
-    pub destination_ref_anchor_id: RetrievalAnchorId,
-    pub configuration_snapshot_id: ConfigurationSnapshotId,
-    pub topology_policy_digest: TopologyPolicyDigest,
-    pub task_decision_anchor_id: Option<RetrievalAnchorId>,
-    pub owner_receipt: IntegrationOwnerReceiptRefV1,
-}
-```
-
-`RepositorySnapshotId`, `RepositorySnapshotDigest`, `GitObjectFormat`,
-`NativeGitCommonDirId`, `NativeWorktreeAdminId`, `GitHeadStateDigest`,
-`RepositoryCaptureReceiptId`, `CanonicalGitRefName`, `GitRefKind`,
-`NativeGitObjectKind`, `GitObjectId`, `PullRequestSnapshotId`,
-`PullRequestSnapshotDigest`, `UnmergedStageDigest`,
-`GitOperationStateDigest`, `GitOperationDigest`,
-`GitReadOnlyPlanReceiptId`, and `GitReadOnlyPlanReceiptDigest` are Plan 36
-native-capture/read-only-plan newtypes.
-Plan 13 imports them and cannot derive substitutes. `RepositoryId` and
-`WorktreeId` are Plan 16 scope identities. `SourceConnectorId`, `SourceRootId`,
-`SourceObjectId`, and `SourceObjectVersion` are Plan 27 observation-decoder
-identities; their sanitized durable record resolves through Plan 03.
-`ConfigurationSnapshotId` and `TopologyPolicyDigest` are Plan 20 identities.
-`CanonicalObservationDigest` is a Plan 03 identity.
-`WorkflowTerminalReceiptId`/`WorkflowTerminalReceiptDigest` are Plan 32
-identities; `GitOperationReceiptId`/`GitOperationReceiptDigest` are Plan 36
-identities. `CheckSnapshotDigest` is the canonical Plan 27 check-observation
-record digest.
-`RetrievalAnchorTargetV3` adds only
-`GitTopology(GitTopologyAnchorRefV1)`; every public lookup still starts with
-`RetrievalAnchorId`.
-
-The PR/check/conflict/preflight structs contain only the exact references shown.
-None contains a copied Git object, patch, provider body, CI log, task record,
-command line, credential, grant, or host summary.
-Preflight and integration source-object vectors are nonempty, ordered, and
-duplicate-free. A task-linked integration requires
-`task_decision_anchor_id`; a non-task manual observation leaves it absent
-rather than manufacturing a task relation.
-Constructors reject owner/privacy/repository/capture/object-format mismatch,
-cross-repository native apply, a destination ref outside the destination
-capture, a preflight that does not bind the same source set, or an owner receipt
-whose typed owner and digest do not match the referenced record.
+Those records contain only exact owner references, immutable object/snapshot
+identity, configuration/policy bindings, ordered source-object anchors, and
+typed receipt identities and digests. They contain no copied Git object,
+patch, provider body, CI log, task record, command line, credential, grant, or
+host summary. Task-linked integration evidence requires the owning task
+decision reference; non-task observations leave it absent. Validation rejects
+owner/privacy/repository/capture/object-format mismatch, cross-repository
+native apply, destinations outside the bound capture, changed source sets, and
+owner receipts whose identity or digest does not match the referenced record.
+Historical Rust type and source-file names remain evidence for wire migration,
+not an implementation layout requirement.
 
 `RepositoryCaptureAnchorRefV1` identity is the Plan 16 `RepositoryId` plus the
 exact Plan 36 native repository snapshot identity, object format, and common-Git-
@@ -369,99 +243,30 @@ redacted, deleted, expired, drifted, ambiguous, or unavailable source remains a
 typed omission; a summary cannot collapse it into success. Receipt possession
 grants no policy, runtime, Git, provider, or host authority.
 
-### Implementation allocation and migration
+### Persistence, migration, and direct acceptance
 
-- `crates/tracedecay-domain/src/research/{git_anchor,anchor,id,resolution,mod}.rs`
-  owns `GitTopologyAnchorRefV1`, payload-free owner references,
-  `TopologyIntegrationRequestId`, `IntegrationOwnerReceiptRefV1`, identity
-  derivation, and closed validation errors. It does not define
-  Plan 16/20/24/27/32/36 owner records.
-- `crates/tracedecay-store/src/evidence/git_anchor.rs` defines
-  `GitTopologyAnchorWriteV1`, `GitTopologyAnchorResolutionV1`, and
-  `GitTopologyAnchorStore`. `src/application/evidence/git_anchor.rs` resolves
-  current authorization and owner receipts through typed read ports. Neither
-  layer invokes Git, GitHub, CI, host processes, task mutation, or workflow
-  execution.
-- `src/global_db/evidence_assembly/git_anchor.rs` owns the SQLite adapter.
-  Migration `20260719_git_topology_anchor_v1` creates
-  `git_anchor_targets(anchor_id, target_kind, owner_kind, owner_record_id,
-  owner_record_digest)`,
-  `git_anchor_repository_captures(anchor_id, repository_id,
-  repository_snapshot_id, repository_snapshot_digest, object_format,
-  native_common_dir_id)`,
-  `git_anchor_worktree_captures(anchor_id, repository_capture_anchor_id,
-  worktree_id, native_worktree_admin_id, repository_snapshot_id,
-  head_state_digest, index_tree_object_id, capture_receipt_id)`,
-  `git_anchor_ref_snapshots(anchor_id, repository_capture_anchor_id,
-  full_ref_name, ref_kind, target_object_anchor_id, symbolic_target)`,
-  `git_anchor_objects(anchor_id, repository_capture_anchor_id, object_format,
-  object_kind, object_id)`,
-  `git_anchor_pull_requests(anchor_id, repository_capture_anchor_id,
-  pull_request_snapshot_id, base_object_anchor_id, head_object_anchor_id,
-  merge_base_object_anchor_id, provider_observation_anchor_id,
-  snapshot_digest)`,
-  `git_anchor_checks(anchor_id, connector_id, root_id, object_id,
-  object_version, observation_anchor_id, repository_capture_anchor_id,
-  commit_object_anchor_id, record_digest)`,
-  `git_anchor_conflicts(anchor_id, worktree_capture_anchor_id,
-  repository_snapshot_id, unmerged_stage_digest, operation_state_digest)`,
-  `git_anchor_preflights(anchor_id, source_worktree_anchor_id,
-  destination_worktree_anchor_id, configuration_snapshot_id,
-  topology_policy_digest, native_preflight_receipt_id,
-  native_preflight_receipt_digest, normalized_operation_digest)`, and
-  `git_anchor_integration_receipts(anchor_id, integration_request_id,
-  preflight_anchor_id, source_worktree_anchor_id,
-  destination_worktree_anchor_id, destination_ref_anchor_id,
-  configuration_snapshot_id, topology_policy_digest, task_decision_anchor_id,
-  owner_kind, owner_receipt_id, owner_receipt_digest)`.
-- All tables are append-only, every ID/digest column is `NOT NULL` except
-  `symbolic_target`, `target_object_anchor_id`, `index_tree_object_id`,
-  `merge_base_object_anchor_id`, and `task_decision_anchor_id`; every anchor
-  reference has `ON UPDATE RESTRICT ON DELETE RESTRICT`, and preflight/
-  integration source-object membership is stored in
-  `git_anchor_source_objects(anchor_id, source_ordinal,
-  source_object_anchor_id)` with primary key `(anchor_id, source_ordinal)`.
-  Required indexes are
-  `idx_git_anchor_object(repository_capture_anchor_id, object_kind, object_id)`,
-  `idx_git_anchor_worktree(repository_capture_anchor_id,
-  native_worktree_admin_id)`,
-  `idx_git_anchor_owner(owner_kind, owner_record_id)`, and
-  `idx_git_anchor_integration_owner(owner_kind, owner_receipt_id)`. Ordered
-  summary drilldown reuses Plan 13's existing
-  `retrieval_anchor_lineage_reverse` and `idx_lineage_reverse_source`; this
-  migration creates no second lineage table. Exact immutable update/delete
-  triggers cover every new table.
-- Backfill requires an exact Plan 36 capture/snapshot, native object/ref or
-  Plan 27 provider-observation identity, and complete owner/privacy binding.
-  Legacy path-, branch-, timestamp-, GitHub-label-, check-name-, or digest-only
-  records remain `UnverifiableLegacy`. Migration and consolidation never query
-  current `HEAD`, follow a symlink, fetch a provider, copy an owner receipt, or
-  synthesize a target. Any identity mismatch rolls back the whole transaction.
+Domain validation owns identity and closed errors; the store owns append-only
+publication and resolution; the application reauthorizes and resolves owner
+receipts; and the infrastructure adapter owns persistence. None invokes Git,
+GitHub, CI, host processes, task mutation, or workflow execution.
 
-### Tests and acceptance
+Persisted records remain immutable, owner/privacy-bound, payload-free, and
+ordered where source membership is meaningful. Migration and backfill require
+exact Plan 36 capture/object or Plan 27 provider-observation identity and
+complete owner/privacy binding. Path-, branch-, timestamp-, label-, name-, or
+digest-only legacy records remain `UnverifiableLegacy`; migration never
+consults ambient `HEAD`, follows a symlink, fetches a provider, copies an owner
+receipt, or synthesizes identity. Mismatch rolls back atomically, and published
+persisted formats remain readable through their compatibility window.
 
-- `crates/tracedecay-domain/tests/git_anchor_contract.rs` proves deterministic
-  target IDs, repository/object-format separation, exact commit/tree/blob
-  binding, ref-movement rekeying, receipt-owner separation, ordered source
-  membership, and rejection of path/CWD/ref/timestamp/content-hash authority.
-- `crates/tracedecay-store/tests/git_anchor_contract.rs` proves atomic
-  publish/replay/rollback, immutable rows, current authorization and disposition
-  parity, owner routing, no copied owner payload, and no receipt-as-capability.
-- `tests/git_suite/anchor_provenance.rs` covers linked, moved, removed, symlinked,
-  escaped, detached, unborn, dirty, and conflicted worktrees; rewritten refs;
-  missing objects; SHA-1/SHA-256 repositories; exact PR/check observations;
-  Plan 27 GitHub stack capability and Plan 37 stack snapshots without
-  task/local-stack identity conflation; and exact preflight/integration receipt
-  references.
-- `tests/work_suite/task_topology_drilldown.rs` starts from an authorized
-  `TaskId`, traverses `TaskEvidenceLinkRevision` and every ordered anchor to the
-  same Plan 16/24/27/32/36 owner records, preserves typed omissions, rejects
-  missing or reordered sources, and proves summary text and copied host/task/
-  Git/provider payloads cannot satisfy drilldown.
-- `tests/storage_suite/git_topology_anchor_migration.rs` proves exact schema,
-  indexes, triggers, idempotent exact-only backfill, moved/symlink non-inference,
-  dispositions-first consolidation, rollback, and absence of payload-bearing
-  columns.
+Direct tests prove deterministic IDs, repository/object-format separation,
+exact object and receipt binding, ref-movement rekeying, ordered membership,
+atomic publish/replay/rollback, immutable records, authorization/disposition
+parity, moved and symlinked worktree non-inference, SHA-1/SHA-256 separation,
+exact PR/check/preflight/integration evidence, TaskId-rooted drilldown with
+typed omissions, idempotent exact-only migration, and absence of copied or
+payload-bearing owner data. Historical schema, index, trigger, migration, and
+test-file names are not mandatory recreation targets.
 
 ## Immutable evidence-span contract
 
@@ -471,40 +276,15 @@ tool-result, and code-chunk occurrences. It does not reuse observation-level anc
 lineage as an ordering model: those collections cannot distinguish multiple projected
 outputs from one observation or preserve assembly order.
 
-The exact domain types are:
-
-- `ProfileId`, `SourceOccurrenceIdV1`, `CanonicalSourceOccurrenceSetIdV1`,
-  `EvidenceSpanIdV1`, `RetrieverContributionIdV1`,
-  `RetrievalAnchorDispositionIdV1`, `EvidenceAssemblyIdempotencyKeyV1`, and
-  `PrivacyBoundRequestDigestV1` in
-  `crates/tracedecay-domain/src/research/id.rs`. The existing application
-  `ProfileId` moves to this domain newtype and `src/application/context.rs` uses it;
-  there is one profile identity type.
-- `AnchorOwnerBindingV1 { profile_id, project_id, owner_shard,
-  privacy_domain_id }` in `crates/tracedecay-domain/src/research/anchor.rs`.
-  `project_id` is absent only for explicitly profile-owned evidence; a path, CWD,
-  store filename, project label, host profile, PID, branch, or ref cannot fill it.
-- `SourceOccurrenceKindV1::{Message, ToolInvocation, ToolResult, CodeChunk}`,
-  `SourceOccurrenceRelationV1`, `SourceTimelineKeyV1`,
-  `SanitizedObservationByteRangeV1`, `SourceOccurrenceCoordinateV1`,
-  `ProjectorSnapshotV1`, `SourceOccurrenceRecordV1`,
-  `SourceOccurrenceRecordV1Parts`, `SourceOccurrenceSanitizationV1`,
-  `EvidenceSpanProjectionReceiptV1`, `VerifiedSourceOrderingProofV1`,
-  `CanonicalSourceOccurrenceSetV1`, `EvidenceSpanRunV1`,
-  `SourceCapabilityCatalogBindingV1`, `EvidenceSpanCatalogBindingV1`,
-  `EvidenceSpanHorizonV1`, `EvidenceSpanRecordV1Parts`,
-  `EvidenceSpanIdentityMaterialV1`, `EvidenceSpanRecordV1`, and
-  `EvidenceSpanError` in
-  `crates/tracedecay-domain/src/research/evidence_span.rs`.
-- `RetrieverIdentityV1`, `RetrieverWatermarkBindingV1`,
-  `RetrieverContributionRecordV1Parts`, and `RetrieverContributionRecordV1` in
-  `crates/tracedecay-domain/src/research/retriever_contribution.rs`.
-- `AnchorLineageRefV3` in `crates/tracedecay-domain/src/research/anchor.rs`.
-  It adds explicit `AnchorOwnerBindingV1` for child and source while preserving
-  byte-for-byte V2 decoding.
-- `RetrievalAnchorDispositionRecordV1`, `RetrievalAnchorTombstoneV1`, and
-  `EvidenceAssemblyResolutionStateV1` in
-  `crates/tracedecay-domain/src/research/resolution.rs`.
+The persisted V3 contract retains one profile identity type; opaque occurrence,
+set, span, contribution, disposition, replay, and privacy-bound request
+identities; explicit owner binding for child and source lineage; immutable
+source occurrence and evidence-span records; retriever contribution and
+watermark records; and disposition, tombstone, and resolution states. It
+preserves byte-compatible V2 decoding. A project may be absent only for
+explicitly profile-owned evidence; path, CWD, store filename, project label,
+host profile, PID, branch, or ref can never fill owner identity. Historical
+Rust module and helper-type names do not constrain the current implementation.
 
 `SourceTimelineKeyV1` contains the provider/source identity,
 `ObservationScopeV1`, `ObservationSourceGenerationV1`, and
@@ -578,9 +358,8 @@ set; constructors do not perform store or catalog I/O.
 
 `EvidenceSpanRunV1::new(timeline, proof: VerifiedSourceOrderingProofV1, members)`
 is pure, preserves caller order, and requires one timeline key and strictly
-source-ordered members. `SourceCapabilityEvidenceVerifier::verify` in
-`src/application/evidence/ports.rs` is the only factory for
-`VerifiedSourceOrderingProofV1`; it checks the Plan 08 catalog digest, Plan 27
+source-ordered members. The application evidence verifier is the only authority
+that can produce a verified source-ordering proof; it checks the Plan 08 catalog digest, Plan 27
 connector/root/capability binding, integration-manifest digest, configuration and
 authorization-scope digests, projector revision, source watermark, and adjacency
 claim before construction. Numeric-looking IDs, timestamps, adjacent byte ranges,
@@ -743,199 +522,34 @@ tombstone or existence distinction. Restore, consolidation, replay, and migratio
 apply current dispositions before importing or rebuilding derivatives, so stale
 copies cannot resurrect payload access.
 
-## Implementation allocation and migration gates
+## Persistence and migration behavior
 
-PR7 implementation is allocated exactly as follows:
+Domain records own immutable identity and structural validation; the store
+owns atomic publish-or-replay and payload-free resolution; application
+operations own current authorization, sanitization-receipt and source-order
+verification, and transactional orchestration; infrastructure owns physical
+persistence and dispositions-first consolidation. No layer copies snippets,
+summary or FTS text, hydrated payloads, query text, paths, arguments, results,
+or embeddings into evidence-assembly records.
 
-- `crates/tracedecay-domain/src/research/evidence_span.rs` owns occurrence-set,
-  run, span, horizon, catalog-binding, identity derivation, and validation types.
-- `crates/tracedecay-domain/src/research/retriever_contribution.rs` owns immutable
-  contribution records and structural validation.
-- `crates/tracedecay-domain/src/research/{id,anchor,resolution,subjects,mod}.rs`
-  owns the new IDs, V3 targets/records, owner binding, dispositions/tombstones,
-  entity kinds, and exports.
-- `crates/tracedecay-store/src/evidence/{mod,write,read,migration}.rs` owns
-  `EvidenceAssemblyWriteV1::new`, `EvidenceAssemblyReceiptV1`,
-  `EvidenceAssemblyStoreError`, and the `EvidenceAssemblyStore`
-  `publish_or_replay`/payload-free resolve port. It never accepts payload fields.
-- `src/application/evidence/{mod,ports,publication,resolution}.rs` owns the Plan 09
-  authorized commands and the `SourceCapabilityEvidenceVerifier` port.
-  `PublishEvidenceAssembly::execute` resolves anchors, verifies both sanitization
-  receipt roles and source-order proof, then atomically writes the source-occurrence
-  set, ordered span, projection receipt, contribution, anchors, V3 reverse lineage,
-  and replay receipt; `ResolveEvidenceAssembly::execute` reauthorizes every hop.
-- `src/global_db/evidence_assembly/{mod,schema,write,read,migration}.rs` owns the
-  physical adapter. `src/global_db/schema_stages.rs`,
-  `src/global_db/schema_contract/definitions.rs`,
-  `src/global_db/schema_contract/invariants/rows.rs`, and
-  `src/global_db/schema_contract/invariants/triggers.rs` register and audit it.
-- `src/migrate/consolidate/sqlite/evidence_assembly.rs` merges dispositions first
-  and then eligible immutable records; it never copies snippets, summary text, FTS
-  text, or hydrated payload.
+Persisted occurrence, canonical-set, span, projection-receipt, contribution,
+lineage, disposition, and replay records preserve the published V3 wire and
+reader compatibility. They enforce owner/privacy binding, immutable membership
+and order, referential integrity, append-only dispositions, canonical digests,
+and efficient reverse resolution. Physical table, column, index, trigger,
+migration, and source-file names are implementation history rather than
+features to recreate.
 
-The additive migration is named `20260718_evidence_assembly_v1`. Its
-`MIGRATION_NAME` is `"evidence-assembly"` and
-`EVIDENCE_ASSEMBLY_SCHEMA_VERSION` is `1`. It creates
-`evidence_assembly_schema_migrations(name TEXT PRIMARY KEY, version INTEGER NOT
-NULL, applied_at INTEGER NOT NULL)` before:
-`source_occurrences`, `evidence_span_projection_receipts`,
-`evidence_span_projection_receipt_members`,
-`canonical_source_occurrence_sets`,
-`canonical_source_occurrence_set_members`, `evidence_spans`,
-`evidence_span_runs`, `evidence_span_members`, `retriever_contributions`,
-`retriever_contribution_sources`, `retrieval_anchor_dispositions`,
-`retrieval_anchor_lineage_reverse`, and `evidence_assembly_replay_receipts`.
-
-The schema manifest in `src/global_db/evidence_assembly/schema.rs` declares these
-exact columns below. Every listed column is `NOT NULL`; digest, ID, enum, and JSON
-columns are `TEXT`; ordinal, epoch, time, and version columns are `INTEGER`; and
-every foreign key uses `ON UPDATE RESTRICT ON DELETE RESTRICT`.
-
-- `source_occurrences(occurrence_id TEXT PRIMARY KEY, anchor_id TEXT UNIQUE,
-  owner_json TEXT, owner_digest TEXT, privacy_domain_id TEXT, timeline_json TEXT,
-  timeline_digest TEXT, source_anchor_id TEXT, kind TEXT, coordinate_json TEXT,
-  relations_json TEXT, projector_version TEXT, record_digest TEXT)`;
-- `evidence_span_projection_receipts(receipt_id TEXT PRIMARY KEY, span_id TEXT,
-  projection_generation TEXT, projection_watermark_json TEXT, record_digest TEXT,
-  UNIQUE(receipt_id, span_id))` and
-  `evidence_span_projection_receipt_members(receipt_id TEXT, span_id TEXT,
-  member_ordinal INTEGER, occurrence_id TEXT, capture_receipt_id TEXT,
-  projection_receipt_id TEXT, PRIMARY KEY(receipt_id, member_ordinal),
-  UNIQUE(receipt_id, occurrence_id))`;
-- `canonical_source_occurrence_sets(set_id TEXT PRIMARY KEY, owner_json TEXT,
-  owner_digest TEXT, privacy_domain_id TEXT, record_digest TEXT)` and
-  `canonical_source_occurrence_set_members(set_id TEXT,
-  canonical_ordinal INTEGER, occurrence_id TEXT,
-  PRIMARY KEY(set_id, canonical_ordinal), UNIQUE(set_id, occurrence_id))`;
-- `evidence_spans(span_id TEXT PRIMARY KEY, anchor_id TEXT UNIQUE, set_id TEXT,
-  owner_json TEXT, owner_digest TEXT, privacy_domain_id TEXT,
-  projector_version TEXT, horizon_json TEXT, catalog_binding_json TEXT,
-  record_digest TEXT)`, `evidence_span_runs(span_id TEXT, run_ordinal INTEGER,
-  timeline_json TEXT, timeline_digest TEXT, ordering_proof_digest TEXT,
-  PRIMARY KEY(span_id, run_ordinal))`, and
-  `evidence_span_members(span_id TEXT, run_ordinal INTEGER,
-  member_ordinal INTEGER, occurrence_id TEXT,
-  PRIMARY KEY(span_id, run_ordinal, member_ordinal),
-  UNIQUE(span_id, occurrence_id))`;
-- `retriever_contributions(contribution_id TEXT PRIMARY KEY,
-  anchor_id TEXT UNIQUE, owner_json TEXT, owner_digest TEXT,
-  privacy_domain_id TEXT, connector_id TEXT, root_id TEXT, capability_id TEXT,
-  component_version TEXT, catalog_digest TEXT,
-  integration_manifest_digest TEXT, configuration_digest TEXT,
-  authorization_scope_digest TEXT, projector_revision TEXT,
-  source_watermark_json TEXT, request_digest TEXT, request_key_epoch INTEGER,
-  scope_resolution_id TEXT, temporal_mode TEXT, span_id TEXT, set_id TEXT,
-  watermarks_json TEXT, coverage_json TEXT, record_digest TEXT,
-  created_at INTEGER)` and
-  `retriever_contribution_sources(contribution_id TEXT,
-  source_ordinal INTEGER, source_anchor_id TEXT,
-  PRIMARY KEY(contribution_id, source_ordinal),
-  UNIQUE(contribution_id, source_anchor_id))`;
-- `retrieval_anchor_dispositions(disposition_id TEXT PRIMARY KEY,
-  anchor_id TEXT, disposition TEXT, reason_class TEXT, effective_at INTEGER,
-  authority_epoch INTEGER, receipt_digest TEXT,
-  UNIQUE(anchor_id, authority_epoch))`;
-- `retrieval_anchor_lineage_reverse(child_anchor_id TEXT,
-  source_anchor_id TEXT, relation TEXT, child_owner_digest TEXT,
-  source_owner_digest TEXT, privacy_binding_digest TEXT,
-  PRIMARY KEY(child_anchor_id, source_anchor_id, relation))`; and
-- `evidence_assembly_replay_receipts(owner_digest TEXT, privacy_domain_id TEXT,
-  key_epoch INTEGER, idempotency_key_digest TEXT, assembly_digest TEXT,
-  contribution_id TEXT, committed_at INTEGER,
-  PRIMARY KEY(owner_digest, privacy_domain_id, key_epoch,
-  idempotency_key_digest))`.
-
-The exact foreign keys are:
-`source_occurrences.anchor_id -> retrieval_anchors.anchor_id`;
-`source_occurrences.source_anchor_id -> retrieval_anchors.anchor_id`;
-`evidence_span_projection_receipts.span_id -> evidence_spans.span_id`;
-`evidence_span_projection_receipt_members.(receipt_id, span_id) ->
-evidence_span_projection_receipts.(receipt_id, span_id)`;
-`evidence_span_projection_receipt_members.(span_id, occurrence_id) ->
-evidence_span_members.(span_id, occurrence_id)`;
-`canonical_source_occurrence_set_members.set_id ->
-canonical_source_occurrence_sets.set_id`;
-`canonical_source_occurrence_set_members.occurrence_id ->
-source_occurrences.occurrence_id`;
-`evidence_spans.anchor_id -> retrieval_anchors.anchor_id`;
-`evidence_spans.set_id -> canonical_source_occurrence_sets.set_id`;
-`evidence_span_runs.span_id -> evidence_spans.span_id`;
-`evidence_span_members.(span_id, run_ordinal) ->
-evidence_span_runs.(span_id, run_ordinal)`;
-`evidence_span_members.occurrence_id -> source_occurrences.occurrence_id`;
-`retriever_contributions.anchor_id -> retrieval_anchors.anchor_id`;
-`retriever_contributions.span_id -> evidence_spans.span_id`;
-`retriever_contributions.set_id -> canonical_source_occurrence_sets.set_id`;
-`retriever_contribution_sources.contribution_id ->
-retriever_contributions.contribution_id`;
-`retriever_contribution_sources.source_anchor_id ->
-retrieval_anchors.anchor_id`;
-`retrieval_anchor_dispositions.anchor_id -> retrieval_anchors.anchor_id`;
-`retrieval_anchor_lineage_reverse.(child_anchor_id, source_anchor_id) ->
-retrieval_anchors.anchor_id` as two separate foreign keys; and
-`evidence_assembly_replay_receipts.contribution_id ->
-retriever_contributions.contribution_id`.
-
-Required indexes are
-`idx_source_occurrences_source_anchor(source_anchor_id)`,
-`idx_span_projection_receipts_span(span_id, projection_generation)`,
-`idx_span_members_occurrence(occurrence_id)`,
-`idx_contribution_sources_anchor(source_anchor_id)`,
-`idx_lineage_reverse_source(source_anchor_id)`, and
-`idx_anchor_dispositions_current(anchor_id, authority_epoch DESC)`.
-The exact immutable deny triggers are
-`source_occurrences_immutable_update`,
-`source_occurrences_immutable_delete`,
-`evidence_span_projection_receipts_immutable_update`,
-`evidence_span_projection_receipts_immutable_delete`,
-`evidence_span_projection_receipt_members_immutable_update`,
-`evidence_span_projection_receipt_members_immutable_delete`,
-`canonical_source_occurrence_sets_immutable_update`,
-`canonical_source_occurrence_sets_immutable_delete`,
-`canonical_source_occurrence_set_members_immutable_update`,
-`canonical_source_occurrence_set_members_immutable_delete`,
-`evidence_spans_immutable_update`,
-`evidence_spans_immutable_delete`,
-`evidence_span_runs_immutable_update`,
-`evidence_span_runs_immutable_delete`,
-`evidence_span_members_immutable_update`,
-`evidence_span_members_immutable_delete`,
-`retriever_contributions_immutable_update`,
-`retriever_contributions_immutable_delete`,
-`retriever_contribution_sources_immutable_update`,
-`retriever_contribution_sources_immutable_delete`,
-`retrieval_anchor_lineage_reverse_immutable_update`,
-`retrieval_anchor_lineage_reverse_immutable_delete`,
-`evidence_assembly_replay_receipts_immutable_update`, and
-`evidence_assembly_replay_receipts_immutable_delete`;
-`retrieval_anchor_dispositions` has
-`retrieval_anchor_dispositions_append_only_update` and
-`retrieval_anchor_dispositions_append_only_delete`. No table has
-payload-bearing text, snippet, query, path, argument, result, summary, embedding,
-or hydrated-payload columns.
-
-Migration enables writes only after all of these gates pass:
-
-1. reject a database newer than the supported evidence-assembly schema;
-2. verify exact table, column, foreign-key, index, and trigger shapes;
-3. backfill only occurrences with an exact source anchor, owner/privacy binding,
-   source generation/order, projector version, coordinate, and verified receipts;
-4. backfill a multi-member run only when adjacency is provable; a verifiable single
-   occurrence may become a singleton run, while other legacy rows remain
-   `UnverifiableLegacy` and never receive a synthetic content-hash span;
-5. verify every flattened span exactly equals its canonical occurrence set; every
-   Plan 08 `CatalogDigest` matches the recorded capability; every Plan 27 integration
-   manifest/configuration/authorization/projector revision matches the ordering
-   proof; every projection receipt's member set exactly equals its referenced span
-   member set; and every canonical digest replays identically;
-6. run dispositions-first restore/consolidation and prove no ineligible derivative
-   payload or index row survives; and
-7. activate reads and writes only after atomicity, authorization, replay-conflict,
-   tombstone-whitelist, and payload-free schema audits pass.
-
-Any failure leaves the old read path authoritative and rolls back every new
-set/span/contribution/lineage/receipt row. Rollback never re-enables a deleted or
-redacted payload.
+Migration rejects newer unsupported schemas; backfills only exact anchored,
+owner/privacy-bound, source-ordered occurrences with verified receipt roles;
+creates multi-member runs only from proved adjacency; leaves other legacy
+records `UnverifiableLegacy`; verifies flattened span/set equality, catalog and
+integration bindings, projection-receipt membership, and deterministic digest
+replay; applies dispositions before restore or consolidation; and enables
+reads/writes only after atomicity, authorization, replay-conflict,
+tombstone-whitelist, and payload-free persistence checks pass. Any failure
+leaves the prior read path authoritative and rolls back new records without
+re-enabling deleted or redacted payloads.
 
 ## Cross-plan ownership
 
@@ -943,8 +557,8 @@ redacted payload.
   occurrence-set/span/
   contribution identity, owner-bound lineage, replay semantics, resolution states,
   dispositions, and minimum-safe tombstones. Plan 02 owns generic persistence and
-  migration policy/primitives; Plan 13's PR7 owns the evidence-assembly schema
-  contract and adapter listed above. Plan 09 owns current authorization and
+  migration policy/primitives; Plan 13's PR7 owns the evidence-assembly
+  persistence contract and adapter behavior above. Plan 09 owns current authorization and
   transaction orchestration; Plan 18 owns sanitization and disposition policy.
 - Plan 23 owns candidate generation, ranking, temporal selection, summary DAG
   payloads, and context assembly. It calls the Plan 13 constructors after freezing
@@ -998,39 +612,37 @@ workflow automation outside this contract.
 - PR7 tests atomic observation-and-anchor creation, idempotent replay, rollback, native
   alias collisions, copied-prompt attribution, and unauthorized resolution.
 - Rebuilding projections preserves anchor IDs and source lineage.
-- `crates/tracedecay-domain/tests/evidence_span_contract.rs` proves deterministic
+- Evidence-span contract tests prove deterministic
   source-occurrence/set/span IDs, mixed message/tool/code runs, exact ordering,
   cross-source assembly-only semantics, horizon validation, V3 wire compatibility,
   byte-identical canonical-set normalization across input permutations, catalog
   binding, same-timeline tool-result pairing, UTF-8/CRLF coordinate stability, and
   rejection of gaps, duplicates, owner/generation/timeline mismatch, bare offsets,
   content hashes, summaries, embeddings, rank, and query identity.
-- `crates/tracedecay-domain/tests/retriever_contribution_contract.rs` proves exact
+- Retriever-contribution contract tests prove exact
   replay, changed immutable-input rekeying, idempotency conflicts, source-set/span
   equality, owner/request privacy-domain and key-epoch equality, payload-free
   serialization, and independent Plan 08 catalog plus Plan 27 connector/root/
   manifest/configuration/authorization/projector/source-watermark tamper rejection.
-- `crates/tracedecay-store/tests/evidence_assembly_contract.rs` proves one atomic
+- Evidence-assembly store tests prove one atomic
   set/span/contribution/anchor/lineage/receipt transaction, rollback on every
   conflict, immutable-table triggers, exact drill-down, authorization parity, and
   round-trip isolation for multiple rebuild receipts on two spans that share an
   occurrence; missing, extra, duplicate, and cross-span receipt members are rejected.
   The same raw idempotency key in two owner/privacy domains does not collide or reveal
   occupancy, while same-scope changed material returns `ReplayConflict`.
-- `tests/session_suite/evidence_span_projection.rs` and
-  `tests/session_suite/temporal_retriever_contributions.rs` prove same-version
+- Session projection and temporal-retrieval tests prove same-version
   rebuild identity, new-projector `DerivedFrom` lineage, verified adjacency,
   singleton legacy handling, ranking-independent replay, and contribution -> span
   -> set -> exact source expansion.
-- `tests/session_suite/anchor_tombstone_expiry.rs` and
-  `tests/session_suite/lcm_summary_lineage_review.rs` prove strict tombstone fields,
+- Tombstone-expiry and summary-lineage tests prove strict tombstone fields,
   authorization revocation, possession-only denial, and transitive source deletion
   through span -> contribution -> nested summary -> FTS/context.
-- `tests/storage_suite/evidence_assembly_migration.rs` proves
-  `20260718_evidence_assembly_v1` exact columns, nullability, foreign keys, indexes,
-  trigger names, shape/version refusal, exact-only backfill, dispositions-first
-  restore/consolidation, repeatable migration receipts, rollback, and no payload
-  resurrection.
+- Migration tests prove reader compatibility, integrity and immutability
+  constraints, shape/version refusal, exact-only backfill, dispositions-first
+  restore/consolidation, repeatable migration receipts, rollback, and no
+  payload resurrection. Historical migration and schema-object names are not
+  acceptance artifacts.
 - Moving refs, rewriting a branch, or removing a checkout does not retarget retained
   commit/tree/blob or captured-state anchors; unavailable objects return a safe typed
   state rather than resolving against ambient `HEAD`.
@@ -1054,7 +666,7 @@ workflow automation outside this contract.
 - Summary text, copied text, model prose, embedding/vector identity, rank, score,
   mutable payload hashes, query/cursor/response handles, paths, and timestamps cannot
   substitute for a canonical source-occurrence set in domain, store, migration, or
-  product fixtures.
+  product behavior tests.
 - The same native locator in two profiles/projects/privacy domains or key epochs
   produces unlinkable aliases, and an unauthorized caller cannot distinguish a
   tombstone from an unknown anchor.

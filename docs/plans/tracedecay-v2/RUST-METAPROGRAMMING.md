@@ -2,6 +2,12 @@
 
 Status: accepted architecture decision.
 
+Names of retired generators, manifests, packets, inventories, and generated
+files are historical evidence, not metaprogramming requirements or artifacts
+to recreate. Published generated APIs and persisted formats remain
+compatibility contracts; otherwise a future audit evaluates the authority,
+determinism, stock-Cargo portability, and direct conformance rules below.
+
 ## Decision
 
 Use ordinary Rust first. Custom macros or generators are allowed only when one

@@ -50,250 +50,104 @@ consumer.
 - Provider-exposed reasoning may be represented with visibility and retention;
   hidden reasoning is never inferred or reconstructed.
 
-## Generic external-source contracts
+## External-source semantic contract
 
-The first external-source vertical slice adds the following files; it does not
-land an unused connector framework:
+The canonical domain owner preserves the external-source distinctions consumed
+by Plans 02, 03, 04, 09, 16, 20, 23, and 27. It does not prescribe a file
+layout or require an unused connector framework.
 
-- `crates/tracedecay-domain/src/source/mod.rs`
-- `crates/tracedecay-domain/src/source/identity.rs`
-- `crates/tracedecay-domain/src/source/definition.rs`
-- `crates/tracedecay-domain/src/source/binding.rs`
-- `crates/tracedecay-domain/src/source/frontier.rs`
-- `crates/tracedecay-domain/src/source/lineage.rs`
-- `crates/tracedecay-domain/tests/source_contract.rs`
-- `crates/tracedecay-domain/tests/fixtures/source/*.json`
+- Source, binding, partition, partition-cursor, snapshot, native-object, and
+  object-revision identities remain opaque and canonically encoded. Native
+  object identity is a privacy-domain-bound digest inside one immutable
+  binding, never a raw URL, path, repository name, provider key, or credential.
+  Object revision and partition cursor remain separate, and object revisions
+  have no invented total order.
+- A provider-neutral definition pins a nonzero revision, canonical digest,
+  capture mode (`Event`, `Poll`, or `Hybrid`), refetch strategy (whole root,
+  incremental revision, or explicitly supported incremental-with-whole-root
+  fallback), deletion semantics, and bounded partitioning. It is derived by one
+  validated conversion from Plan 27's acquisition contract, and its canonical
+  digest (computed without the digest field) pins that acquisition contract. It
+  does not redefine envelopes, refreshes, cursors, scheduling, or host
+  registration.
+- The definition contains no owner, endpoint, executable, credential, mutable
+  path, scheduler, lifecycle, or UI state. Validation rejects digest mismatch,
+  zero partition limits, mode mismatch, complete-snapshot absence without a
+  whole-root contract, and fallback not supported by the pinned acquisition
+  contract; mismatch is typed failure, never best-effort downgrade.
+- Bindings separately carry exact typed `ProjectId` or `UserProfileId`
+  authority, source and definition revision, binding revision/digest, native
+  root, and privacy domain. Owner, source, native root, and privacy domain are
+  immutable across revisions. CWD, checkout paths, labels, collection
+  membership, and native identifiers never create or widen authority.
+- Binding identity is deterministically derived from source, exact typed owner,
+  privacy domain, and the privacy-bound canonical root locator before native
+  objects are admitted. Identical provider keys in different projects,
+  profiles, or privacy domains cannot collapse.
+- Partition frontiers retain cursor, snapshot, continuation, and
+  `Complete | Partial | Unknown` coverage. The aggregate digest is
+  domain-separated over sorted canonical partition/frontier encodings,
+  including coverage; coverage-only changes alter the digest. Aggregate
+  coverage is complete only when every active partition is complete. The digest
+  is snapshot identity, not a scalar cursor or cross-partition ordering claim.
+- Successor, correction, and tombstone lineage cannot cross owner, source,
+  binding, privacy domain, or native object. Replay creates neither duplicate
+  revisions nor duplicate edges, and lineage remains acyclic.
+- Immutable sanitized observations, receipts, anchors, and projections are
+  authoritative only for what TraceDecay observed at a committed frontier; the
+  external system remains authoritative for current external content.
+  `Live`, `AuthoritativeDeleted`, `Partial`, and
+  `TemporarilyUnavailable` are content states. `PolicyExcluded` and
+  `Unauthorized` are current access states and never rewrite a frontier.
+  Explicit provider deletion, or absence in a complete snapshot whose contract
+  declares absence semantics, is the only proof of authoritative deletion.
+  Partial/unknown coverage, exclusion, access loss, and temporary failure
+  cannot prove deletion or a clean empty result.
+- Plan 09 composes access and content deterministically: non-disclosing
+  exclusion or unauthorized status takes precedence; otherwise exact content
+  status passes through, while both axes remain available for audit and replay.
 
-`identity.rs` defines opaque, canonical-encoding newtypes `SourceId`,
-`SourceBindingId`, `SourcePartitionId`, `SourcePartitionCursorV1`,
-`SourceSnapshotIdV1`, `NativeObjectId`, and `SourceRevisionId`.
-`NativeObjectId` is derived inside one immutable `SourceBindingId` and is never
-compared across bindings; it is a privacy-domain-bound digest, never a raw URL,
-path, repository name, provider key, or credential. `SourceRevisionId`
-identifies one external object revision; it is not a partition cursor,
-definition, configuration, projection-generation, or policy revision and
-deliberately has no total-order implementation.
+Historical source type names and module/test paths recorded by earlier versions
+of this plan are evidence of these distinctions, not current declaration or
+scaffold requirements. An audit must locate the current domain owner and verify
+the callable behavior and regressions below before calling any old name missing.
 
-`definition.rs` defines these exact version-one contracts:
+## Delivery, migration, and regression evidence
 
-```rust
-pub struct SourceDefinitionV1 {
-    pub source_id: SourceId,
-    pub definition_revision: u64,
-    pub definition_digest: Digest,
-    pub connector: ConnectorContractV1,
-}
-
-pub struct ConnectorContractV1 {
-    pub connector_id: SourceConnectorId,
-    pub source_connector_contract_digest: Digest,
-    pub mode: SourceCaptureModeV1,
-    pub strategy: SourceRefetchStrategyV1,
-    pub deletion_semantics: SourceDeletionSemanticsV1,
-    pub partitioning: SourcePartitioningV1,
-}
-
-pub enum SourceCaptureModeV1 { Event, Poll, Hybrid }
-pub enum SourceRefetchStrategyV1 {
-    WholeRoot,
-    IncrementalRevision,
-    IncrementalWithWholeRootFallback,
-}
-pub enum SourceDeletionSemanticsV1 {
-    ExplicitOnly,
-    CompleteSnapshotAbsence,
-}
-pub enum SourcePartitioningV1 {
-    Single,
-    ConnectorDeclared { max_partitions: u32 },
-}
-```
-
-`ConnectorContractV1` is the canonical capture/storage classification derived
-by one validated conversion from Plan 27's richer
-`SourceConnectorContractV1`; its digest pins that acquisition contract.
-`Event`, `Poll`, and `Hybrid` map respectively from event-only,
-poll-only, and event-plus-repair-poll acquisition modes, while the refetch
-strategy maps from Plan 27 consistency semantics. It does not redefine Plan
-27 envelopes, refresh requests, cursors, scheduling, or host registration.
-Validation requires a nonzero definition revision, a digest matching the
-canonical bytes excluding the digest field, a nonzero declared partition
-limit, `CompleteSnapshotAbsence` only with `WholeRoot`, and
-`IncrementalWithWholeRootFallback` only when the pinned Plan 27 contract
-supports both incremental polling and whole-root reconciliation. Event-only,
-poll-only, and hybrid classifications must match the pinned acquisition modes;
-conversion mismatch is a typed domain error, not a best-effort downgrade.
-
-A definition describes provider-neutral behavior and contains no owner,
-endpoint, executable, credential, mutable path, scheduler, lifecycle, or UI
-state. `binding.rs` separately defines these exact contracts:
-
-```rust
-pub enum SourceOwnerV1 {
-    Profile(UserProfileId),
-    Project(ProjectId),
-}
-
-pub struct ProjectSourceBindingV1 {
-    pub binding_id: SourceBindingId,
-    pub project_id: ProjectId,
-    pub source_id: SourceId,
-    pub definition_revision: u64,
-    pub binding_revision: u64,
-    pub binding_digest: Digest,
-    pub native_root_id: NativeObjectId,
-    pub privacy_domain_id: PrivacyDomainId,
-}
-
-pub struct ProfileSourceBindingV1 {
-    pub binding_id: SourceBindingId,
-    pub user_profile_id: UserProfileId,
-    pub source_id: SourceId,
-    pub definition_revision: u64,
-    pub binding_revision: u64,
-    pub binding_digest: Digest,
-    pub native_root_id: NativeObjectId,
-    pub privacy_domain_id: PrivacyDomainId,
-}
-
-pub enum SourceBindingSnapshotV1 {
-    Project(ProjectSourceBindingV1),
-    Profile(ProfileSourceBindingV1),
-}
-```
-
-Owner, source, native root, and privacy domain are immutable across binding
-revisions. Project and Profile bindings carry exact typed `ProjectId` and
-`UserProfileId` authorities. CWD, checkout paths, display labels, collection
-membership, and native identifiers never create or widen authority.
-`SourceBindingId` is deterministically derived from source, exact typed owner,
-privacy domain, and the privacy-bound canonical root locator digest before any
-object ID is admitted. `NativeObjectId` is then derived in that binding domain,
-so identical provider keys in two projects, profiles, or privacy domains cannot
-collapse.
-
-`frontier.rs` defines:
-
-```rust
-pub struct SourceFrontierSetV1 {
-    pub binding_id: SourceBindingId,
-    pub definition_revision: u64,
-    pub binding_revision: u64,
-    pub binding_digest: Digest,
-    pub partitions: BTreeMap<SourcePartitionId, SourcePartitionFrontierV1>,
-    pub coverage: SourceFrontierCoverageV1,
-    pub aggregate_digest: Digest,
-}
-
-pub struct SourcePartitionFrontierV1 {
-    pub cursor: Option<SourcePartitionCursorV1>,
-    pub snapshot_id: Option<SourceSnapshotIdV1>,
-    pub continuation_digest: Option<Digest>,
-    pub coverage: SourceFrontierCoverageV1,
-}
-
-pub enum SourceFrontierCoverageV1 { Complete, Partial, Unknown }
-pub enum ExternalContentStatusV1 {
-    Live,
-    AuthoritativeDeleted,
-    Partial,
-    TemporarilyUnavailable,
-}
-pub enum ExternalAccessStatusV1 { PolicyExcluded, Unauthorized }
-pub enum ExternalSourceResultStatusV1 {
-    Live,
-    AuthoritativeDeleted,
-    PolicyExcluded,
-    Unauthorized,
-    Partial,
-    TemporarilyUnavailable,
-}
-```
-
-The aggregate digest is the domain-separated digest of canonical,
-length-prefixed partition IDs and partition-frontier encodings sorted by
-partition ID, including each partition's coverage. Aggregate coverage is
-derived from all partition states and is `Complete` only when every active
-partition is complete. A coverage-only transition changes both partition and
-aggregate digests. The digest is snapshot identity, not a scalar cursor or
-cross-partition ordering claim. `Partial` and `Unknown` cannot prove deletion
-or a clean empty result. `lineage.rs` defines
-`SourceLineageKindV1::{Successor, Correction,
-Tombstone}`, `SourceObjectRevisionRefV1 { binding_id, source_id,
-native_object_id, revision_id }`, and `SourceLineageEdgeV1 { predecessor,
-successor, kind }`; edges cannot cross owner, source, binding, privacy domain,
-or native object, and replay creates neither a duplicate revision nor a
-duplicate edge.
-
-Immutable sanitized observations, receipts, anchors, and projections remain
-local evidence of what TraceDecay observed at a committed frontier. They never
-replace the external system as authority for its current content. Content state
-and access state are separate axes: capture/projection may persist only
-`Live`, `AuthoritativeDeleted`, `Partial`, or `TemporarilyUnavailable`;
-current policy/application evaluation may return `PolicyExcluded` or
-`Unauthorized` without rewriting a source frontier. Only explicit provider
-deletion or absence in a complete snapshot with declared absence semantics
-yields `AuthoritativeDeleted`; exclusion, access loss, partial coverage, and
-temporary failure never do.
-Plan 09 deterministically composes the two axes into
-`ExternalSourceResultStatusV1`: `PolicyExcluded` and `Unauthorized` take
-non-disclosing access precedence; otherwise the exact content status passes
-through. The underlying decision retains both axes for audit and replay.
-
-## Delivery, migration, and TDD
-
-Dependency order is fixed: identities and canonical encoding; validated Plan 27
-connector conversion and definition validation; exact owner bindings;
-partition/aggregate frontiers; lineage; then Plan 02 storage, Plan 03 capture,
-and Plan 04 projection consumers. Existing Plan 13 anchors participate in the
-first retained-evidence transaction. Plan 09 owns authorized bind/refresh use
-cases, Plan 16 owns scope resolution, Plan 20 is the sole source-binding
-configuration mutation authority, Plan 23 owns temporal interpretation, and
-Plan 27 owns acquisition contracts, scheduling, host packaging, and lifecycle.
-Consumers import these canonical source/storage identities while Plan 27's
-existing connector envelope and refresh types retain their acquisition role.
+The owning product path preserves this dependency direction: domain identities,
+definition/binding validation, frontiers, and lineage feed Plan 02 persistence,
+Plan 03 capture, and Plan 04 projection. Plan 13 anchors join the first
+retained-evidence transaction; Plan 09 owns authorized bind/refresh use cases,
+Plan 16 scope resolution, Plan 20 binding configuration mutation, Plan 23
+temporal interpretation, and Plan 27 acquisition, scheduling, packaging, and
+lifecycle.
 
 The additive migration seeds the first shipped source definition and maps
 existing profile/project observations to bindings without changing observation
 or anchor identity. It hashes legacy native identity in the existing privacy
-domain and writes `Unknown` coverage whenever an exact predecessor frontier
-cannot be proven; rerun returns the same migration receipt.
+domain, records `Unknown` coverage when an exact predecessor frontier cannot be
+proven, and returns the same receipt on rerun.
 
-TDD order:
-
-1. Add failing canonical-JSON and unknown-field tests for every V1 value.
-2. Add digest tamper, raw-identifier, scope-ambiguity, and invalid-capability
-   failures.
-3. Add binding stability and project/profile non-collapse tests.
-4. Add object-revision/partition-cursor separation, partition-order-independent
-   aggregate-digest, binding-revision CAS, and partial-coverage tests.
-5. Add correction/tombstone lineage, cycle, and replay tests.
-6. Replay checked-in native provider fixtures through the consuming capture
-   path; hand-authored lookalike protocol fields are not acceptance evidence.
-
-Run:
-
-```bash
-cargo test -p tracedecay-domain --test source_contract
-cargo test -p tracedecay-domain --test observation_contract
-cargo check -p tracedecay-domain --all-features
-cargo test --test architecture_boundaries domain
-```
+Direct regression evidence must prove canonical encoding and unknown-field
+handling; digest tamper, raw-identifier, ambiguous-scope, and invalid-capability
+rejection; stable binding and project/profile non-collapse; revision/cursor
+separation; partition-order-independent aggregate digests; binding-revision
+compare-and-set; partial-coverage non-deletion; acyclic
+correction/tombstone lineage; and replay idempotency. Provider evidence comes
+from checked-in native fixtures replayed through the consuming capture path;
+hand-authored lookalike protocol fields are not acceptance evidence.
 
 ## Acceptance
 
-- PR4: an architecture test proves `tracedecay-domain` has no I/O, database,
-  transport, provider, or root dependency.
-- PR5: golden tests prove stable observation identity and canonical encoding.
-- PR5: negative tests reject unclassified durable payloads, receipt/digest
-  mismatch, invalid source position, and scope ambiguity.
-- PR5: serde round trips preserve unknown provider evidence without making it an
-  indexed or executable field.
-- Every PR changing a public value includes its consuming test in that same PR;
-  unused public vocabulary fails review.
-- Source fixtures prove byte-stable encoding and aggregate digests, definition
-  and binding separation, typed `ProjectId` and `UserProfileId` authority, no
-  raw native identifier or secret, partial-frontier non-deletion, and acyclic
-  correction/tombstone lineage.
-- Architecture tests prove these contracts add no I/O, settings, credential,
-  lifecycle, transport, UI, or provider dependency.
+- Direct architecture regression proves the domain boundary has no I/O,
+  database, transport, provider, settings, credential, lifecycle, UI, or root
+  dependency.
+- Direct observation regressions prove stable identity and canonical encoding;
+  reject unclassified durable payloads, receipt/digest mismatch, invalid source
+  positions, and scope ambiguity; and preserve unknown provider evidence
+  without making it indexed or executable.
+- Every public-value change ships with its consuming behavior test; unused
+  vocabulary is not a milestone.
+- Native-fixture regressions prove byte-stable encoding and aggregate digests,
+  definition/binding separation, exact project/profile authority, no raw native
+  identifier or secret, partial-frontier non-deletion, and acyclic lineage.

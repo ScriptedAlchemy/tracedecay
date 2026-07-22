@@ -9,6 +9,13 @@ the existing daemon-owned store, capture, query, API, settings, and
 health surfaces; it does not ship distributed-authority scaffolding that is
 unusable until a later PR.
 
+Earlier enrollment, topology, spool, replica, backup, failover, fixture, and
+packet artifact names are historical evidence, not standalone prerequisites
+or mandatory recreation targets. Published APIs and persisted remote records
+retain compatibility and migration obligations; all other retention is judged
+by the direct offline capture, fenced replay, query, backup/restore, failover,
+platform, and regression behavior below.
+
 ## User outcome
 
 An enrolled machine can keep capturing permitted observations while

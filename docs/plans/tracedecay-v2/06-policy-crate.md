@@ -7,11 +7,18 @@ application authorization core. It evaluates immutable facts and returns
 versioned, explainable decisions; it never performs storage, provider, runtime,
 Git, configuration, or delivery effects.
 
+The canonical mechanism is the callable evaluator API consumed directly by
+`tracedecay-application`, together with the decision revision and explanation
+carried in the application result. Historical type names, module layouts, and
+contract fixtures are implementation evidence, not an inventory to recreate.
+An evaluator required by a production journey but not callable from that
+journey is a gap; a renamed or deleted scaffold is not.
+
 PR17 extends that existing kernel only where the executable work loop needs a
 decision: task-shape and decomposition assessment, provider/model/effort
 recommendation, deterministic fallback, and evidence-driven replanning.
 
-## Existing policy capabilities retained
+## Retained callable policy behavior
 
 The rewrite retains pure evaluators for hint eligibility/delivery, retrieval
 selection, capability and Git routing, analyzer routing, local/live
@@ -39,11 +46,13 @@ provider, or changes the graph.
 1. The application assembles an authorized immutable snapshot containing the
    selected work version, exact evidence references and coverage, eligible
    provider capabilities, configuration, content-location limits, budgets, prior
-   outcomes, and any human override.
+   outcomes, any human override, and separate watermarks for local
+   code/session evidence and live Git evidence.
 2. Policy returns an explained recommendation, deterministic fallback, or
    abstention. The result records the evaluator and input revisions, ranked
    eligible routes, exclusions, reason codes, evidence horizon, coverage, and
-   uncertainty.
+   uncertainty, preserves both watermarks, and reports whether the two
+   frontiers agree, disagree, or cannot be compared completely.
 3. The application presents the proposal for explicit review. Accepting it is
    a separate version-checked graph command; admitting a provider step is a
    separate Plan 32 command.
@@ -61,6 +70,12 @@ registry, scoring service, or configuration source.
 - Identical canonical inputs and evaluator/configuration revisions produce the
   same decision. Clocks, availability, randomness, and host state arrive only
   as explicit inputs.
+- Local code/session evidence and live Git evidence retain independent
+  watermarks, freshness, and coverage through evaluation and explanation.
+  Agreement is recorded without collapsing identity; disagreement is
+  preserved and reported. The evaluator never advances, substitutes, or
+  silently merges either frontier from the other, and stale or partial state
+  on either side remains explicit.
 - Every decision has exactly one disposition: `allow`, `deny`, `abstain`,
   `not_applicable`, or `indeterminate`. Natural-language explanation renders
   the recorded trace and adds no authority.
@@ -140,6 +155,12 @@ calibration, deterministic fallback, human override, cancellation, unknown
 outcome, self-grading attempts, and idempotent replay. The aggregate gate also
 proves that policy performs no I/O or runtime/graph/Git effect and that no
 provider-local default or hidden model selection exists.
+
+A direct local/live-correlation regression supplies distinct local
+code/session and live Git watermarks and proves both are returned unchanged
+when evidence agrees, disagreement is preserved and explained without
+frontier substitution, and stale or partial state on either source remains
+independently visible rather than becoming a merged current result.
 
 ## Not in PR17
 

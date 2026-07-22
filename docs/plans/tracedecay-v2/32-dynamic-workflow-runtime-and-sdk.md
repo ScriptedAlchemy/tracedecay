@@ -4,6 +4,13 @@
 SDK names for the same callable operations; it does not add a second runtime or
 defer missing lifecycle semantics.
 
+Earlier runtime type/file inventories, operation registries, fixture corpora,
+phase names, and packet gates are historical evidence, not prerequisites or
+features that PR17 must recreate. Published operations and persisted
+definition, run, attempt, effect, and receipt records retain compatibility and
+migration obligations; all other retention is judged by the direct runtime,
+provider, recovery, platform, and regression behavior below.
+
 ## Decision
 
 TraceDecay workflows compose existing typed application operations. The daemon

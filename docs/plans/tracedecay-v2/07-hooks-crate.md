@@ -9,6 +9,13 @@ that signal one daemon-owned feedback path. Hooks are transport adapters; they
 do not own product state, synchronization, Git, feedback policy, or peer
 coordination.
 
+PR6 artifact names, inventories, matrices, packets, and intermediate file
+layouts are historical implementation evidence, not prerequisites or
+requirements to recreate. Only an artifact that remains a published or
+persisted compatibility contract is retained by name; current and future
+audits assess the host behavior, wire compatibility, migration, safety, and
+regressions specified here.
+
 ## PR13 user outcome
 
 After a supported saved edit or agent stop boundary, the host can receive the
@@ -166,9 +173,11 @@ state; it never contains the result of work started by that hook.
 
 - Remove the reserved pre-PR17 task-placement and ready-commit fields and
   variants from the PR13 event contract.
-- Remove generated host matrices, exact schema/file inventories, milestone
-  gates, and placeholder hook benchmarks. Keep only checked-in native events
-  needed to prove every supported behavior and capability difference.
+- Treat generated host matrices, exact schema/file inventories, milestone
+  gates, and placeholder hook benchmarks as retired historical scaffolding.
+  Checked-in native events remain evidence where needed to prove supported
+  behavior and capability differences, but obsolete artifact names are not
+  mandatory recreation targets.
 - Remove hook-local sync, Git inference, conflict/proximity calculation,
   policy fallback, and writable-store access as each provider cuts over.
 - This pruning removes no native event family, host capability, replay mode,

@@ -6,6 +6,12 @@
 - Mandatory for every later ingestion, storage, indexing, retrieval, logging, and export path.
 - Delivered as product behavior, remediation, Doctor checks, and UI state; none is deferred.
 
+Historical detector-corpus names, sink inventories, remediation packets, and
+intermediate gate layouts are evidence, not mechanisms that later work must
+recreate. Persisted safety markers and published safety states retain their
+compatibility and migration obligations; acceptance otherwise follows the
+direct prevention, remediation, disclosure, and regression behavior below.
+
 ## Outcome
 
 TraceDecay does not persist or disclose known secrets and private values through derived data.

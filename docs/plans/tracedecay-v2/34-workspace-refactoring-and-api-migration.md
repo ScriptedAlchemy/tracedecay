@@ -7,6 +7,15 @@ edit, diagnostics, formatting, verification, catalog, and Git transaction
 owners. PR19 uses the API-migration journey for complete forward source/API
 convergence while retaining deliberate stable compatibility surfaces.
 
+The canonical apply mechanism is Plan 09's journaled application edit
+transaction, fed by graph-backed preview evidence and followed by the owning
+formatter, diagnostics, verification, and optional Plan 36 Git operations.
+The currently published `tracedecay_rename_preview` name remains a supported
+surface. Other operation/type/module names in implementation history are
+examples until separately shipped as public or persisted API; auditors should
+verify the journeys and safety properties, not recreate a former refactor
+schema registry or file inventory.
+
 ## User outcome
 
 A user can preview and atomically apply either:
@@ -39,7 +48,7 @@ history, tags, or remotes.
 3. The immutable preview records graph/repository revisions, per-file
    preconditions, every site and disposition, impact, hazards, formatter,
    diagnostics, affected tests, verification, and stable-value assertions.
-4. `tracedecay_rename_symbol` consumes the exact preview ID and digest.
+4. The callable rename-apply operation consumes the exact preview ID and digest.
    `dry_run` performs the same revalidation and planning with zero writes.
 5. One project-scoped edit transaction revalidates identity and freshness,
    materializes non-overlapping edits, captures all preimages, writes, formats,
@@ -48,10 +57,11 @@ history, tags, or remotes.
 
 ### Compatibility-aware API migration
 
-1. `tracedecay_api_migration_plan` creates one dependency-ordered family using
-   only explicit operations: `promote_primary`, `compat_type_alias`,
-   `compat_wrapper`, `replace_definition`, `rename_bound_symbol`,
-   `replace_term`, `remove_delivery_name`, and `assert_stable_value`.
+1. The callable API-migration planner creates one dependency-ordered family
+   using explicit operations for primary promotion, deliberate compatibility
+   aliases or wrappers, whole-definition replacement, bound-symbol rename,
+   selected terminology or delivery-name replacement, and protected stable
+   values. It does not infer an untyped rewrite language.
 2. Every compatibility alias/wrapper declares
    `stable_public_contract | temporary`, external consumer, owner, deprecation
    policy, and—when temporary—the exact PR19 deletion condition. Missing
@@ -60,9 +70,9 @@ history, tags, or remotes.
    approved compatibility boundaries. Type aliases are used only when language
    semantics preserve compatibility; otherwise an explicit wrapper/conversion
    is required.
-4. `tracedecay_api_migration_apply` consumes the immutable plan and digest
-   through the same edit transaction, rollback, diagnostics, formatting, and
-   verification path as rename.
+4. The callable API-migration apply operation consumes the immutable plan and
+   digest through the same edit transaction, rollback, diagnostics,
+   formatting, and verification path as rename.
 5. Replanning may classify operations already satisfied, still pending, or
    invalidated and issues a new preview/digest. It never silently rebases stale
    evidence. Each deliberately sliced apply is atomic for its declared scope.
@@ -103,11 +113,12 @@ history, tags, or remotes.
 
 ### Manifest and dispositions
 
-The typed manifest includes preview/schema/logical-operation identity and
-digest; project/worktree/repository/graph revisions; file modes and digests;
-scope, exclusions, keep/compatibility rules; old/new symbol identities; impact
-and capability limits; each site/range/binding/expected/proposed text; stable
-values; and formatter/diagnostics/verification work.
+The typed manifest carries enough immutable identity to reauthorize and
+revalidate the preview: operation and digest, project/worktree/repository/graph
+revisions, affected file state, scope and keep/compatibility rules, old/new
+symbol identity, impact and capability limits, every planned site and expected
+change, protected values, and formatter/diagnostics/verification work. This is
+a behavioral contract, not a mandate for an exact field or type inventory.
 
 Each known site is exactly one of:
 
@@ -205,15 +216,13 @@ source-level dual-write/shadow/lazy store migration.
 
 ## Direct acceptance
 
-- Rust fixtures cover local/public definitions; imports/renamed imports/
-  glob-adjacent cases/re-exports; aliases; annotations/generics; constructors/
-  patterns; trait and inherent methods/calls; variants; constants; tests,
-  examples, rustdoc, selected prose; supported and unsupported macros;
-  generated/unlinked files; wrappers; stable and temporary compatibility;
-  family dependencies; terminology and delivery-name removal; protected values;
-  collisions, shadowing, ambiguity and invalid names; stale graph/file/symbol
-  identity; concurrent edit/replan/resume; overlap; cancellation/faults; and
-  formatter/diagnostics/verification rollback.
+- Focused Rust cases cover the supported bound-site families, compatibility
+  forms, family dependencies, selected terminology changes, protected values,
+  unsupported/generated/unlinked syntax, ambiguity/collision/shadowing,
+  stale or overlapping evidence, concurrent replan, cancellation/faults, and
+  formatter/diagnostics/verification rollback. The suite may evolve with the
+  implementation; no Cartesian packet matrix or fixed fixture inventory is
+  required.
 - Graph-only, analyzer-only, disagreement, stale-analyzer, overlay-vs-clean,
   provenance-preserving dedupe, and cross-project merge fixtures preserve graph
   authority and analyzer provenance.

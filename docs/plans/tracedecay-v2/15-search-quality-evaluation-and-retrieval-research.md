@@ -2,7 +2,9 @@
 
 ## Status / Role
 
-Status: active product plan.
+Status: active product plan and quality authority. PR9 and PR10 remain
+unfinished until their respective callable behavior, direct regressions, and
+locked acceptance gates pass; this document does not mark either complete.
 
 PR9 ships the typed federated-retrieval contract, independent exact and lexical
 retrievers, adapters for authorities available at that dependency point, deterministic
@@ -17,6 +19,13 @@ remains evidence-gated and lexical-only operation remains fully supported.
 This plan is the quality and composition authority. It does not replace the canonical
 stores, the Plan 23 temporal query kernel, the Plan 24 task/work graph, the Plan 25 code
 graph, Plan 13 diagnostic anchors, or their authorization rules.
+
+Plan 15 owns retrieval quality, composition, evaluation, and promotion
+semantics. Plan 25 is the current PR9 delivery owner and Plan 31 the later PR10
+semantic delivery owner. The application, dashboard, task/work, and public
+surface plans are later consumers. They depend on accepted callable behavior
+and evidence, not exact historical module, type, fixture, benchmark, command,
+or suite-spine names.
 
 ## Outcome
 
@@ -67,8 +76,11 @@ The implementation ranks compact authorized candidates before hydrating payloads
 
 ## Ownership and module boundaries
 
-The following paths are delivery paths; each is created by the dependency-sequence step
-that names its owning PR.
+The boundaries below are normative; the paths and type spellings record the
+original delivery design and are non-normative. Current owners may move,
+rename, or consolidate them when direct boundary regressions preserve the same
+authority, lane isolation, rank-before-hydrate ordering, and authorization
+behavior.
 
 - `crates/tracedecay-domain/src/retrieval.rs` owns pure typed contracts:
   `RetrievalRequest`, `RetrieverKind`, `CompactCandidate`, `RetrieverBatch`,
@@ -111,17 +123,19 @@ that names its owning PR.
   rollback profile pointers under the configuration-control-plane mutation capability.
   PR14's `src/dashboard/` work renders profile, freshness, fallback, and report state; it
   does not decide promotion.
-- `src/bin/tracedecay-search-eval.rs`, `tests/search_quality_suite/`, and
-  `benchmarks/search-quality/` own the hermetic harness, contract tests, sanitized
-  manifests, aggregate artifacts, and evidence index. They do not create a service or
-  evaluation database.
+- The hermetic evaluation harness, direct contract regressions, checked-in
+  sanitized manifests, aggregate evidence, and evidence map remain evaluation
+  infrastructure. Their current owners do not create a service or evaluation
+  database, and their historical paths are not acceptance criteria.
 - MCP, CLI, dashboard, and agent surfaces remain thin consumers of the application
   contract. Public operation naming remains with the transport/catalog plans.
 
 ## Typed retrieval contract
 
-PR9 adds equivalent Rust types to `crates/tracedecay-domain/src/retrieval.rs`; field
-names may change only with the contract tests and this behavior preserved.
+PR9 must provide an equivalent typed contract with the behavior and information
+below. The Rust sketch is explanatory, not an artifact-name or source-layout
+requirement; field/type names may change when direct contract tests preserve
+the semantics.
 
 ```rust
 pub enum RetrieverKind {
@@ -334,7 +348,8 @@ reports, and timing classes must not distinguish denied evidence from absent evi
 
 ## Deterministic retrieval pipeline
 
-`src/application/retrieval/pipeline.rs` executes this order:
+The authoritative application retrieval operation executes this order,
+regardless of its current file or symbol name:
 
 1. Authentication resolves the principal, privacy domain, and maximum scope; public
    callers cannot assert those fields. Resolve authoritative project/worktree/branch,
@@ -418,47 +433,50 @@ order and a typed reason. No unmeasured substitute model is permitted.
 
 ## Evaluation artifacts and fixtures
 
-PR9 creates these checked-in sanitized artifacts:
+PR9 creates checked-in sanitized evidence with the following content. Artifact
+names and directory layout may evolve; schema validation, immutable
+content/revision identity, direct fixture coverage, and traceability are the
+acceptance criteria.
 
-- `benchmarks/search-quality/fixture-manifest-v1.json` freezes corpus and label hashes,
+- A fixture manifest freezes corpus and label hashes,
   partitions, contamination groups, seeds, baseline revision, exact-admission rules,
   metric definitions, support floors, practical margins, adjudication policy, stopping
   rules, and decision owners before tuning.
-- `benchmarks/search-quality/queries-v1.jsonl` contains `query_id`, partition,
+- The query corpus contains query identity, partition,
   query family, provider, language, repository-family cluster, snapshot commit, `as_of`,
   principal class, privacy-domain class, allowed-scope IDs, sanitized query or
   authorized private-query locator digest, and contamination-group IDs.
-- `benchmarks/search-quality/snapshots-v1.jsonl` defines each snapshot ID by repository
+- Snapshot fixtures define each snapshot ID by repository
   commit, branch/worktree identity, canonical-store generations, source and projection
   watermarks, authorization-policy revision, and wall-clock cutoff.
-- `benchmarks/search-quality/judgments-development-v1.jsonl` contains development-only
+- Development judgments contain development-only
   judged anchor IDs, relevance,
   evidence role, validity interval, supersession relation, logical-copy group,
   forbidden-anchor IDs, abstention oracle, task oracle, labeler provenance, adjudication,
   and correction/supersession lineage.
-- `benchmarks/search-quality/locked-judgments-v1.json` contains only the signed sealed
+- Locked-judgment metadata contains only the signed sealed
   holdout digest, authorized-store locator, access policy, and reveal audit contract.
   Locked labels are not checked in or readable during tuning.
-- `benchmarks/search-quality/temporal-events-v1.jsonl` contains stable event ID, valid
+- Temporal-event fixtures contain stable event ID, valid
   time, observed/ingest time, arrival sequence, source generation, source and projection
   watermarks, supersession relation, and expected eligibility for each snapshot ID.
-- `benchmarks/search-quality/context-spans-v1.jsonl` binds payload revision and tokenizer
+- Context-span fixtures bind payload revision and tokenizer
   revision to judged relevant byte and token spans, stale/forbidden spans, citation
   support, and contradiction groups.
-- `benchmarks/search-quality/tasks-v1.jsonl` freezes initial repository state, sanitized
+- Task fixtures freeze initial repository state, sanitized
   prompt or authorized-store prompt locator plus content digest, verifier or blinded
   rubric, agent/model/tool revisions, decoding parameters, attempt seeds, budgets,
   timeout, workspace reset procedure, and blinded assignment.
-- `benchmarks/search-quality/evidence-index.json` maps every report claim to the fixture,
+- An evidence map links every report claim to the fixture,
   run, aggregate, and immutable TraceDecay result anchors that support it.
-- `benchmarks/search-quality/run-v1.json` is frozen after development-only tuning and
+- A run manifest is frozen after development-only tuning and
   before access to locked outcomes. It declares resolved candidate, profile, model,
   tokenizer, runtime, and command revisions; the exact profile matrix; candidate and
   context budgets; cache state; randomized execution order; sample-size rationale;
   measurement tools; statistical procedures; output schema; and one executable terminal
   decision expression. Any post-lock change creates a new append-only run revision and
   cannot reuse revealed locked outcomes for selection.
-- `benchmarks/search-quality/promotion-v1.json` records the accepted profile, prior
+- Promotion evidence records the accepted profile, prior
   accepted rollback profile, report digest, approvals, activation stage, and atomic
   rollback instruction. It is created only for an `accepted` run.
 
@@ -469,7 +487,7 @@ duplicates, forks, generated copies, repeated issue families, and repository-fam
 clusters cannot cross development, locked chronological, repository-disjoint, or
 forward-confirmation partitions unnoticed.
 
-The harness signs and freezes `run-v1.json` before the locked-label access capability is
+The harness signs and freezes the run manifest before the locked-label access capability is
 granted. The reveal produces an audited access receipt bound to the run digest. Any
 pre-freeze access, digest mismatch, unrecorded reveal, or reuse of revealed labels for
 selection makes the run `invalid_run`. Forward confirmation uses a separately sealed
@@ -563,7 +581,7 @@ Required measurements are:
 - Task completion: paired completion rate over all attempts, deterministic verifier pass
   where available, blinded rubric otherwise, timeout/failure rate, turns, tool calls,
   latency, tokens, cost, recovery after fallback, and abstention correctness, all bound
-  to `tasks-v1.jsonl` initial state, revisions, seeds, budgets, resets, and assignments.
+  to the task fixtures' initial state, revisions, seeds, budgets, resets, and assignments.
 
 Raw similarity, logits, score margins, fused scores, and model confidence strings are not
 confidence. Every code-quantifier descriptor used by evaluation also carries a metric
@@ -574,10 +592,10 @@ abstention, and worst-stratum results. Aggregate correlation does not establish 
 
 ## Decision policy and terminal outcomes
 
-`fixture-manifest-v1.json` freezes every metric direction, denominator, stratum, support
+The fixture manifest freezes every metric direction, denominator, stratum, support
 floor, practical margin, and stopping rule before candidate tuning.
 A margin must cite a product SLO, correctness invariant, or baseline repeatability study.
-`run-v1.json` freezes all resolved revisions, statistical algorithms, and one executable
+The run manifest freezes all resolved revisions, statistical algorithms, and one executable
 decision expression before locked outcomes are opened. That expression names one primary
 endpoint or ordered objective, its superiority margin, every guardrail and
 non-inferiority margin, protected-stratum requirements, missingness treatment, and
@@ -600,7 +618,7 @@ The harness returns exactly one typed outcome:
 - `accepted`: every invariant passes, every required protected stratum is supported, and
   the frozen executable decision expression evaluates true.
 
-Only `accepted` creates `promotion-v1.json`. Zero authorization leakage, exact-tier
+Only `accepted` creates promotion evidence. Zero authorization leakage, exact-tier
 precedence, temporal eligibility, source-scope correctness, and byte-identical
 PR9 fallback subpayload
 are hard invariants. Quality, latency, RSS, tokens, cost, completion, learned weights,
@@ -626,34 +644,22 @@ change creates a new append-only fixture, run, report, and promotion revision;
 it cannot reinterpret an already revealed result or redefine the accepted
 lexical fallback.
 
-## Tests, commands, and gates
+## Behavioral tests and gates
 
-PR9/PR10 add and keep these commands green:
+PR9/PR10 must keep direct domain/store retrieval contracts, every lane's
+regressions, the hermetic quality suite, profile activation/rollback
+regressions, and the applicable all-feature gate green. The current harness
+must expose validation and locked comparison operations, but historical binary
+names, command lines, test-target names, and artifact paths are not rebuild
+requirements.
 
-```bash
-cargo test -p tracedecay-domain --test retrieval_contract
-cargo test -p tracedecay-store --test retrieval_contract
-cargo test --test search_quality_contract
-cargo test --test search_quality_suite
-cargo run --release --bin tracedecay-search-eval -- validate \
-  --manifest benchmarks/search-quality/fixture-manifest-v1.json \
-  --run benchmarks/search-quality/run-v1.json
-cargo run --release --bin tracedecay-search-eval -- compare \
-  --manifest benchmarks/search-quality/fixture-manifest-v1.json \
-  --run benchmarks/search-quality/run-v1.json \
-  --output target/search-quality/run-v1 \
-  --require-outcome accepted
-cargo test --test search_profile_activation
-cargo test --all-features
-```
-
-`validate` is hermetic and fails on fixture/hash drift, private payload inclusion,
+Validation is hermetic and fails on fixture/hash drift, private payload inclusion,
 unresolved profile or model revisions, absent support floors or margins, unsupported
 fixed constants, invalid temporal or authorization oracles, insufficient p99 sampling,
-or missing decision owners. `compare` uses distinct exit codes for every terminal
+or missing decision owners. Locked comparison uses distinct outcomes for every terminal
 outcome and fails the promotion gate unless the required outcome is `accepted`; it also
 fails unless it emits raw samples, aggregates, decision JSON, fallback observations, and
-an evidence index whose digests validate.
+an evidence map whose digests validate.
 
 Contract fixtures cover every retriever independently, exact technical strings, typo
 recovery, copies and echoes, contradictions, stale and superseded evidence, wrong
@@ -690,16 +696,9 @@ Promotion requires a successful rollback drill. Unauthorized callers, tampered e
 stale and concurrent updates, crash atomicity, incompatible rollback targets, pinned
 cursors, and audit completeness are integration-tested. An incompatible rollback fails
 closed instead of activating an unvalidated profile. Activation, status verification,
-and rollback use:
-
-```bash
-cargo run --bin tracedecay -- search-profile activate \
-  --evidence benchmarks/search-quality/promotion-v1.json
-cargo run --bin tracedecay -- search-profile status \
-  --require-evidence benchmarks/search-quality/promotion-v1.json
-cargo run --bin tracedecay -- search-profile rollback \
-  --evidence benchmarks/search-quality/promotion-v1.json
-```
+and rollback must be callable production operations that consume validated
+promotion evidence. Their historical CLI spelling and evidence path are not
+acceptance requirements.
 
 Rollback writes an audit event containing the failed profile, restored profile, trigger,
 freshness vector, and report anchor. It does not delete vectors, rewrite fixtures, or
@@ -732,8 +731,9 @@ evaluated profile budget.
   second corpus database, or cross-privacy-domain vector authority exists.
 - No fixed RRF constant, fusion weight, quality threshold, diversity quota, ANN choice,
   model, or reranker is promoted without locked TraceDecay evidence.
-- `validate`, `compare --require-outcome accepted`, focused contracts, activation tests,
-  the suite, and `cargo test --all-features` pass; the evidence index validates; and the
-  authorized rollback drill restores the prior accepted profile atomically.
+- Hermetic validation, locked comparison requiring `accepted`, focused direct
+  contracts, activation tests, the quality suite, and the applicable
+  all-feature gate pass; the evidence map validates; and the authorized
+  rollback drill restores the prior accepted profile atomically.
 - No public leaderboard, universal rollout count, uncalibrated score, LLM-only judgment,
   or aggregate correlation is treated as promotion authority.

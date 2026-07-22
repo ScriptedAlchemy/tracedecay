@@ -1,11 +1,19 @@
 # PR10: Native FastEmbed semantic code search
 
-**Status:** planned PR10 implementation authority. PR8 is active; PR9 ships
-and accepts the exact lexical/graph fallback and exact-tier evidence before
-PR10 begins its locked semantic work. Those PR9 results become immutable
-runtime prerequisites only after PR9 acceptance. All implementation,
+**Status:** planned PR10 implementation authority. PR8 temporal delivery is
+active and remains an in-progress prerequisite. PR9 remains unfinished and
+must ship and accept the exact lexical/graph fallback and exact-tier evidence
+before PR10 begins its locked semantic work. Those PR9 results become
+immutable runtime prerequisites only after PR9 acceptance. All implementation,
 evaluation, activation, rollback, and direct-acceptance work below remains
 required for PR10.
+
+Plan 31 owns the PR10 semantic adapter, projection/runtime, and direct
+acceptance. Plan 15 owns quality promotion, while Plan 25 owns the PR9 code
+generation and lexical/graph prerequisite. Plans 09/10/11/12/14 are later
+application and surface consumers. Consumers audit accepted callable behavior,
+quality fixtures, and direct regressions; they do not rebuild PR9/PR10 by old
+module, type, fixture, benchmark, or suite-spine names.
 
 ## Outcome
 
@@ -25,7 +33,7 @@ Exact results remain authoritative without a model; similarity alone never prove
   daemon-owned writer authority.
 - Plans 05/15 own the common `CompactCandidate`, independent lane, deterministic
   fusion, contribution, diversity, rerank, hydration, cursor, fallback,
-  explanation, and redundancy contracts shipped in PR9. PR10 adds one semantic
+  explanation, and redundancy contracts to be shipped in PR9. PR10 adds one semantic
   adapter; it does not create a parallel code-search kernel.
 - Plan 20 owns signed model/reranker profile definitions, trust roots,
   configuration precedence, and atomic active/rollback profile pointers. This
@@ -47,10 +55,15 @@ Only one root-private adapter depends on `fastembed`. Crates for indexing, store
 query, API, and UI depend on ports and stable domain values, never
 FastEmbed runtime types.
 
-## Required files and typed contracts
+## Behavioral contracts and historical layout
 
-PR10 adds these files; ownership follows the plan list above even when the
-files land in the current root crate:
+The semantic boundary must preserve the ownership and fields below. The listed
+paths and Rust names are a historical design sketch, not artifact-name parity
+requirements. Current owner-approved names and locations are valid when direct
+contract regressions prove the same lane isolation, generation compatibility,
+authorization, coverage, fallback, and receipt behavior.
+
+The original PR10 design proposed these files:
 
 - `crates/tracedecay-domain/src/code_intelligence/search.rs`:
   `EmbeddingProjectionKeyV1`, `SemanticSearchIndexKeyV1`,
@@ -382,45 +395,43 @@ Legacy vectors are never trusted or republished. Migration records
 `rebuild_from_retained_eligible_code | drop_with_receipt | quarantine_unreadable`
 and proves every active generation was rebuilt from canonical documents.
 
-## Planned implementation and direct verification
+## Planned behavioral delivery and direct verification
 
-`tests/semantic_search_suite/main.rs` is the Cargo integration-test entrypoint
-and declares every `tests/semantic_search_suite/*.rs` module named below.
+PR10 remains unfinished. The checkpoints below are behavioral delivery gates.
+Paths, type spellings, fixture filenames, benchmark entrypoints, and test-suite
+registration are non-normative historical suggestions. Acceptance follows the
+callable semantic operation, checked-in quality evidence, direct regressions,
+and Plan 15's locked result.
 
 1. **Contracts and capability admission:** add semantic-only domain values,
    ports, manifest validators, ephemeral query-view rules, and split in-memory
-   adapters. Reuse PR9's generic retrieval/fusion/hydration types. Tests:
-   `tests/semantic_search_suite/contracts.rs`,
-   `capabilities.rs`, and `storage_independence.rs`.
-2. **Artifact and runtime foundation:** add
-   `src/semantic_code/{artifacts.rs,manifest.rs,fastembed_adapter.rs,session_pool.rs}`.
-   Test signature/trust-root verification, local and explicit HTTPS import,
+   adapters. Reuse PR9's generic retrieval/fusion/hydration behavior. Direct
+   regressions cover contract validation, capability admission, and storage
+   independence.
+2. **Artifact and runtime foundation:** implement one root-private artifact
+   verifier, manifest validator, FastEmbed adapter, and bounded session pool.
+   Direct regressions cover signature/trust-root verification, local and explicit HTTPS import,
    traversal/expansion rejection, interrupted staging, atomic install,
    revocation/quarantine/GC, cold and warm sessions, OOM, cancellation,
    offline startup, no ambient cache, and Linux/Windows native-runtime
    compatibility.
-3. **Incremental vector projection:** add the projector and vector-generation
+3. **Incremental vector projection:** implement the projector and vector-generation
    store against Plan 04 projection/checkpoint semantics, Plan 02
    receipt/publication authority, and PR10 runtime ports. Daemon/service
-   orchestration owns scheduling; do not assign it to Plan 04.
-   Tests: `tests/semantic_search_suite/projection.rs`,
-   `model_replay.rs`, `atomic_publication.rs`, and `offline_lifecycle.rs`.
-4. **Exact-flat semantic retrieval and shadow composition:** add only
-   `src/query/retrieval/semantic.rs`, emit
-   `RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>`, and compose it
-   with the frozen PR9 lane outputs through the existing
-   fusion/diversity/cursor implementation. Tests:
-   `tests/semantic_search_suite/channel_isolation.rs`,
-   `fusion_provenance.rs`, `protected_exact.rs`,
-   `diversity_pagination.rs`, and `fallback.rs`.
+   orchestration owns scheduling; do not assign it to Plan 04. Direct
+   regressions cover projection, model-key replay, atomic publication, and
+   offline lifecycle.
+4. **Exact-flat semantic retrieval and shadow composition:** implement one
+   independent semantic outcome and compose it with frozen PR9 lane outputs
+   through the shared fusion/diversity/cursor behavior. Direct regressions
+   cover lane isolation, contribution provenance, protected exact results,
+   diversity/pagination, and byte-identical fallback.
 5. **Late hydration, privacy, and rollback:** reuse PR9 hydration with semantic
    profile admission, generation checks, authorization recheck, revocation,
    domain-keyed caches, payload-safe receipts, active/rollback pointer CAS, and
-   cold offline rollback. Tests:
-   `tests/semantic_search_suite/hydration.rs`,
-   `authorization.rs`, `privacy_domains.rs`, and `activation_rollback.rs`.
-6. **Locked evaluation:** add
-   `benchmarks/pr10-semantic/{workload-v1.json,expected-v1.json,README.md}`,
+   cold offline rollback. Direct regressions cover hydration, authorization,
+   privacy-domain isolation, activation, and rollback.
+6. **Locked evaluation:** use reproducible checked-in workloads,
    rebuild-only migration, saved PR9 and semantic candidate lists, immutable
    Plan 15 report inputs, exact-flat oracle comparisons, channel/fusion/
    calibration/rerank ablations, privacy/non-interference checks, and current/
@@ -434,10 +445,10 @@ and declares every `tests/semantic_search_suite/*.rs` module named below.
    is accepted through the production semantic service; PR10 does not create a
    temporary public semantic endpoint or reserve later surface contracts.
 
-`benches/semantic_code_projection.rs` measures clean, warm one-symbol,
-deletion, no-op, model-key replay, cancellation, and incompatible rebuild.
-`benches/semantic_code_query.rs` reports lexical, graph, semantic, fusion,
-rerank, and hydration time separately at current and 10x corpus sizes,
+A reproducible projection workload measures clean, warm one-symbol, deletion,
+no-op, model-key replay, cancellation, and incompatible rebuild. A query
+workload reports lexical, graph, semantic, fusion, rerank, and hydration time
+separately at current and 10x corpus sizes,
 including p50/p95/p99, CPU, peak RSS, model/vector/cache bytes, candidates per
 channel, chunks embedded/reused/deleted, hydration fetch count, and fallback.
 Channel ablations use equal candidate budgets; exact flat-vector search is the
@@ -449,16 +460,19 @@ Each workload manifest pins corpus/query digests, exact file/chunk/query counts,
 language/source strata, seed, model/projection/fusion revisions, hardware and
 runtime manifest, cache state, and concurrency. The 10x workload contains
 exactly ten times the eligible chunks of the current workload without copying
-quality labels across partitions. Query benchmarks run 10 untimed warmups then
-1,000 measured queries at concurrency 1 and the declared saturation
-concurrency; projection cases run 5 warmups and 30 measured repetitions.
-Reports retain all samples needed to recompute percentiles.
+quality labels across partitions. The frozen evaluation method requires enough
+independent warm and measured samples at concurrency 1 and the declared
+saturation concurrency to support p50/p95/p99 and uncertainty claims. Reports
+retain all samples needed to recompute percentiles.
 
 ### Hard activation barrier
 
-No locked semantic comparison starts until PR9's accepted profile, exact-tier
-contract, saved candidate lists, fallback-subpayload bytes, fixture validation, and
-accepted lexical evidence are frozen. No activation occurs unless Plan 15 returns
+No locked semantic comparison starts until callable PR9 exact/lexical/graph
+behavior passes direct regressions and its accepted profile, exact-tier
+contract, saved candidate lists, fallback-subpayload bytes, validated quality
+fixtures, and accepted lexical evidence are frozen by content and revision.
+Historical artifact-name parity is not part of this barrier. No activation
+occurs unless Plan 15 returns
 `accepted`, authorization/scope leakage is zero, protected exact results are
 unchanged, the PR9 fallback subpayload is byte-identical, generation
 compatibility holds, all

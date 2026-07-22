@@ -8,11 +8,24 @@ existing application core continues to provide request context, authorization,
 scope, evidence envelopes, cursors, cancellation, idempotency, receipts, and
 stable problems for shipped operations.
 
+Completion and activity status is owned solely by
+[the plan-set index](00-plan-set-index.md). This component plan defines
+retained delivery requirements and does not infer milestone status from branch
+artifacts.
+
+PR11 requires this boundary to be the canonical owner of typed operation
+semantics. Root composition and surface adapters may wire those operations but
+do not become alternate use-case owners. Feedback-read, retrieval,
+configuration, edit, and Git handlers visible on a branch and their direct
+parity tests are implementation evidence; their present module, port, or type
+names are not a contract inventory. PR12 delivery requires every required
+surface to invoke the canonical operation and preserve its result.
+
 PR17 extends that core only through the user-visible work loop shared with
 [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) and
 [Plan 32](32-dynamic-workflow-runtime-and-sdk.md).
 
-## Existing application capabilities retained
+## Retained callable application behavior
 
 The rewrite retains every existing application use case and boundary,
 including capture, search, source/graph/test retrieval, context, sessions,

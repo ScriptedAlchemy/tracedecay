@@ -1,6 +1,7 @@
 # TraceDecay V2 CLI, MCP, LSP, and output unification
 
-**Delivery:** PR12 core; PR17 executable work loop; PR18 public SDK/name freeze.
+**Delivery scope:** PR12 core requirements; PR17 executable work loop; PR18
+public SDK/name freeze.
 
 ## Status / role
 
@@ -9,15 +10,24 @@ Dashboard uses the same application results only when its first binding ships
 in PR14. LSP remains a stateful sibling adapter over the same typed code and
 diagnostic operations; it is not a generic workflow transport.
 
-The existing PR12 output, cursor, cancellation, daemon-capacity, and semantic
-parity behavior remains the foundation. PR17 adds only the surface needed to
-complete the Plan 24/32 user journey.
+Completion and activity status is owned solely by
+[the plan-set index](00-plan-set-index.md). This component plan defines
+retained delivery requirements and does not infer milestone status from branch
+artifacts.
 
-## Existing surface capabilities retained
+PR11 requires the canonical application surface; PR12 requires every CLI, MCP,
+HTTP/SSE, feedback, Git, and LSP binding to route through it while preserving
+output, cursor, cancellation, daemon-capacity, and semantic parity. Dispatcher,
+binding, schema, and fixture names visible on a branch are implementation
+evidence rather than a spine to reconstruct. A missing callable operation or
+lost semantic is a gap; a renamed/deleted scaffold is not. PR17 adds only the
+surface needed to complete the Plan 24/32 user journey.
+
+## Retained and required surface capabilities
 
 The delivery-first rewrite changes sequencing and removes duplicate
-implementation prose; it does not remove or narrow shipped or planned surface
-capabilities:
+implementation prose; it does not remove or narrow retained or required
+surface capabilities:
 
 - paired CLI/MCP bindings remain for symbol, source, graph, test attribution,
   temporal/session, project, configuration, health, storage/runtime, memory,
@@ -75,8 +85,8 @@ context extension without turning LSP into a generic tool proxy.
 ## PR12 end-to-end production path
 
 1. A CLI command, MCP tool, HTTP operation, standard LSP method, or negotiated
-   TraceDecay context request resolves one Plan 08 BindingId and decodes into
-   the same typed application request and `RequestContext`.
+   TraceDecay context request resolves the applicable Plan 08 binding and
+   decodes into the same typed application request and `RequestContext`.
 2. The daemon checks capability, exact project/user scope, generation,
    deadline, cancellation, and capacity, then calls the one cataloged
    application handler. No adapter opens a writable business store or supplies
@@ -99,8 +109,9 @@ context extension without turning LSP into a generic tool proxy.
 ## PR12 implementation slices
 
 1. Bind representative read, write, administrative, streaming, and
-   long-running application operations through the revisioned catalog and one
-   dispatcher, first proving CLI/MCP/HTTP semantic parity.
+   long-running application operations through the revisioned catalog and the
+   canonical application invocation path, first proving CLI/MCP/HTTP semantic
+   parity.
 2. Bind the canonical diagnostics/impact feedback readers, affected tests,
    test results, get/list, and exact expansion as callable operations and
    delete placeholder/unavailable PR12 handlers.
@@ -141,8 +152,9 @@ context extension without turning LSP into a generic tool proxy.
   expansion semantics, and an uncallable producer remains a typed unavailable
   contribution rather than a reserved field.
 - PR14 first binds dashboard actions and feedback reads and proves dashboard
-  parity over the already shipped application results.
-- PR17 adds the task/work and runtime loop below through the same dispatcher;
+  parity over the already callable application results.
+- PR17 adds the task/work and runtime loop below through the same canonical
+  application path;
   PR18 freezes supported public names and SDK bindings. Neither milestone
   turns LSP into arbitrary forwarding or makes a surface the data owner.
 

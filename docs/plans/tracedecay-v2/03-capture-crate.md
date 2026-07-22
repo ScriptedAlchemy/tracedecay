@@ -2,10 +2,10 @@
 
 ## Status / Role
 
-PR5 sanitized Claude capture is complete. This boundary now owns PR6 provider
-expansion. It moves
-existing product ingestion behind one deterministic privacy boundary; it is not
-a crate-first framework project. Shared sequence and ownership rules are in
+PR5 sanitized Claude capture and PR6 provider expansion are complete. This
+boundary records the deterministic privacy and admission behavior retained by
+current product ingestion; it is not a crate-first framework project. Shared
+sequence and ownership rules are in
 [the plan index](00-plan-set-index.md) and [the V2 overview](README.md).
 
 ## Outcome
@@ -58,197 +58,100 @@ never skip a suffix.
 - Provider-exposed reasoning follows its explicit retention and search policy;
   capture never infers hidden reasoning.
 
-## Generic external-source convergence
+## External-source convergence behavior
 
-The first external-source admission path ships with
-`crates/tracedecay-capture/src/source/{mod,contract,ports,state,admission}.rs`,
-`src/capture/source_daemon.rs`, and `tests/external_source_capture.rs`. It
-consumes Plan 02's `crates/tracedecay-store/src/source/{mod,records,traits}.rs`
-and Plan 27's existing acquisition envelopes, refresh requests, cursors,
-scheduling, and concrete adapters; capture defines no second connector or store
-module.
+The current capture owner consumes Plan 02 persistence and Plan 27 acquisition
+envelopes, refreshes, cursors, scheduling, and concrete adapters. It defines no
+second connector, store, scheduler, or source authority. Earlier module, trait,
+DTO, state, use-case, test, and fixture names are implementation evidence, not
+scaffold or declaration requirements.
 
-```rust
-pub trait CanonicalSourceAdmission: Send + Sync {
-    async fn admit_envelope(
-        &self,
-        authority: SinkAdmissionProofV1,
-        request: CanonicalPageAdmissionV1,
-    ) -> Result<SourceCommitReceiptV1, SourceAdmissionErrorV1>;
-}
+- Canonical page admission carries pinned definition/binding authority, the
+  owning refresh receipt, provider envelope, exact partition, expected and next
+  cursor or stable whole-root snapshot, and coverage. Incremental admission
+  requires and compare-and-sets the next partition cursor. Whole-root admission
+  may be cursorless but requires one stable provider snapshot. Mode mismatch is
+  rejected before sanitization or persistence.
+- An external event is content-free wake-up evidence, never canonical content.
+  Event admission derives a stable content-free key and returns an
+  enqueued/coalesced/duplicate receipt tied to the binding and refresh. The
+  receipt contains no title, body, excerpt, path, URL, native payload, or
+  provider-rendered content and cannot substitute for a sanitization receipt,
+  retrieval anchor, observation, or effect receipt. It authorizes canonical
+  refetch through Plan 27; only the refetched, sanitized provider envelope may
+  become durable or searchable. A duplicate refers to the original and reuses
+  its refresh without scheduling another.
+- Delivery is at least once. Stable admission/source/native-object/revision
+  identity, sanitized digests, and frontier compare-and-set provide
+  idempotency; no source or transport path claims exactly-once delivery.
+  Plan 27 permits at most one active refresh and one coalesced successor per
+  owner/binding. Capture deduplicates overlapping envelopes/pages, while Plan
+  27 coalesces acquisition. Reusing an event identity with different safe
+  metadata is a typed conflict.
+- The pure admission lifecycle is received, sanitizing, committing, and
+  complete; retryable admission/commit failure returns to received; identity,
+  authority, privacy, unsupported-revision, cursor-gap, or completeness
+  violations block. Plan 27 owns pending, lease, fetch, retry, event
+  coalescing, and polling. Cancellation or failure before atomic store commit
+  advances no partition frontier.
+- Event, poll, and hybrid modes and whole-root, incremental, or explicitly
+  supported fallback strategies remain the normalized Plan 27 acquisition
+  classification. Whole-root pages share one provider snapshot. Capture admits
+  complete-snapshot and absence evidence, but Plan 04 alone derives absence
+  tombstones. Partial, cancelled, mixed-revision, unauthorized, or unavailable
+  scans cannot prove absence. Incremental cursors are gap-free; object revision
+  never serves as cursor; omission never means deletion; duplicate pages are
+  no-ops; and a reused revision with a different digest blocks only that
+  partition without frontier advance. Incremental-to-whole-root fallback
+  requires explicit support in the pinned contract.
+- Upserts, corrections, and tombstones are distinct canonical changes.
+  Corrections and tombstones append immutable sanitized observations and
+  lineage and never rewrite prior evidence.
+- Replayable external sources persist bounded operations, receipts, and
+  frontiers, never a raw-content spool. Plan 27 owns refresh durability and the
+  bounded local non-replayable host-admission spool; Plan 28 owns remote offline
+  capture/replay. Neither spool defines source identity or substitutes its
+  receipt for a source revision.
 
-pub struct CanonicalPageAdmissionV1 {
-    pub definition: SourceDefinitionV1,
-    pub binding: SourceBindingSnapshotV1,
-    pub refresh_receipt_id: SourceRefreshReceiptId,
-    pub envelope: SourceRecordEnvelopeV1,
-    pub partition_id: SourcePartitionId,
-    pub expected_cursor: Option<SourcePartitionCursorV1>,
-    pub next_cursor: Option<SourcePartitionCursorV1>,
-    pub snapshot_id: Option<SourceSnapshotIdV1>,
-    pub coverage: SourceFrontierCoverageV1,
-}
-```
+## Ownership and regression evidence
 
-Incremental admissions require `next_cursor = Some(_)` and compare it to the
-expected partition cursor. Whole-root admissions may be cursorless but require
-a stable `snapshot_id`; mode-inconsistent requests are rejected before
-sanitization or persistence.
+The retained dependency direction is Plan 27 acquisition and native evidence;
+Plan 01 identities/definitions; Plan 16 owner resolution; Plan 20 protected
+binding configuration; Plan 13 anchors; Plan 06 proof; Plan 02 atomic store
+commit; Plan 03 admission and sanitizer; Plan 04 projection; Plan 09
+orchestration; then Plan 23 temporal interpretation. Plan 27 owns adapters,
+network acquisition, scheduling/retries, packaging, lifecycle, and host UI;
+capture owns none of those concerns.
 
-An external event is wake-up evidence, never canonical content. Event admission
-computes a stable content-free key and returns a receipt that Plan 09 uses to
-authorize a Plan 27 `SourceRefreshRequestV1` against the pinned definition,
-binding, configuration, and grant:
+Plan 09 activates acquisition only after Plan 06 authorization. Before the
+first provider fetch, every continuation, and canonical admission, application
+rechecks source grant, requester grant, resolved owner scope, sink policy, and
+mandatory local privacy against pinned definition, binding, configuration, and
+sink revisions. Capture receives non-forgeable admission authority; missing or
+stale authority blocks before network access or persistence.
 
-```rust
-pub struct EventAdmissionReceiptV1 {
-    pub receipt_id: EventAdmissionReceiptId,
-    pub binding_id: SourceBindingId,
-    pub refresh_id: SourceRefreshId,
-    pub disposition: EventAdmissionDispositionV1,
-    pub duplicate_of: Option<EventAdmissionReceiptId>,
-}
+The application owner retains callable behavior to publish definitions;
+dry-run/apply protected binding changes; admit events; request, inspect, and
+cancel refreshes; rebuild projections; and validate, publish, roll back, and
+retire generations. Plan 20 implements protected binding changes, Plan 27 the
+refresh lifecycle, Plan 03 canonical admission, and Plan 04 projection
+rebuild/publication. These are internal application contracts, not automatic
+new CLI/MCP/HTTP/UI surfaces.
 
-pub enum EventAdmissionDispositionV1 { Enqueued, Coalesced, Duplicate }
-```
+Checked-in native Plan 27 bytes with recorded origin, native version, and digest
+are the sole acquisition evidence. Sanitized expectations reference those same
+bytes; synthetic lookalike protocol fields are rejected. Direct regressions
+must cover poison-event/refetch authority, content-free receipts and logs,
+admission lifecycle, duplicate/storm coalescing and conflict, whole-root
+completeness, incremental gaps/fallback, correction/tombstone/reappearance,
+partition isolation, independent revocation of every authority before fetch,
+continuation, and commit, failure at every admission-to-acknowledgement
+boundary, restart convergence, dropped-event repair by polling, and native
+fixture parity.
 
-The receipt contains no title, body, excerpt, path, URL, native payload, or
-provider-rendered content and cannot implement or substitute for a
-`SanitizationReceiptV1`, retrieval anchor, observation, or effect receipt. It
-triggers canonical refetch through Plan 27; only
-`SourceRecordEnvelopeV1` values produced by that canonical read may enter
-`CanonicalSourceAdmission`. A duplicate receipt references the original and
-reuses its refresh ID without scheduling another refresh. A poison-event test
-makes event content disagree with refetched content and proves only refetched
-sanitized content can become durable or searchable.
-
-Delivery is at least once. Stable admission keys, `SourceId`,
-`NativeObjectId`, `SourceRevisionId`, sanitized digests, and compare-and-set
-frontiers provide idempotency; no source or transport path claims exactly-once
-delivery. One `(owner, SourceBindingId)` may have at most one active refresh and
-one coalesced successor under Plan 27's refresh scheduler. Capture deduplicates
-overlapping envelopes and pages; Plan 27 coalesces event/poll acquisition.
-Reuse of an event identity with different safe metadata is a typed conflict.
-The Plan 01 `Event`, `Poll`, and `Hybrid` classifications map to Plan 27
-`EventHint`, polling modes, and event-plus-repair-poll behavior.
-
-The pure state machine in `state.rs` is:
-
-```rust
-pub enum SourceAdmissionStateV1 {
-    Received,
-    Sanitizing,
-    Committing,
-    Retryable,
-    Blocked,
-    Complete,
-}
-```
-
-Legal transitions are `Received -> Sanitizing -> Committing -> Complete`,
-retryable admission/commit failure to `Retryable -> Received`, and identity,
-authority, privacy, unsupported-revision, cursor-gap, or completeness
-violations to `Blocked`. Plan 27 owns `Pending`, lease, fetch, retry, event
-coalescing, and polling transitions. Cancellation or failure before the atomic
-store commit advances no partition frontier.
-
-`ConnectorContractV1` selects `Event`, `Poll`, or `Hybrid` and declares
-`WholeRoot`, `IncrementalRevision`, or
-`IncrementalWithWholeRootFallback` as the normalized classification of Plan
-27's acquisition contract. Whole-root pages must share one provider snapshot;
-capture admits complete-snapshot and absence evidence but Plan 04 alone derives
-and publishes absence tombstones. Partial, cancelled, mixed-revision,
-unauthorized, or unavailable scans carry incomplete coverage and cannot prove
-absence. Incremental partition cursors must be gap-free; object
-`SourceRevisionId` values never serve as cursors, omission never means deletion,
-duplicate pages are no-ops, and a revision reused with a different digest
-blocks that partition without frontier advance. Plan 27 may fall back from
-incremental to whole-root only when the pinned contract explicitly permits it.
-
-Canonical changes are typed as `Upsert`, `Correction { predecessor }`, and
-`Tombstone { predecessor: Option<_> }`. Corrections and tombstones append
-immutable sanitized observations and lineage and never rewrite prior evidence.
-Replayable external sources persist bounded operations, receipts, and frontiers
-only; they do not persist a raw-content spool. Refresh operation durability
-remains in Plan 27's acquisition state/receipts rather than a capture-owned
-scheduler table. The existing bounded local
-non-replayable host-admission spool remains Plan 27 scope, while
-[the remote shared-Brain plan](28-remote-multi-machine-shared-brain.md) owns
-offline capture and replay. Neither spool
-defines source identity or substitutes its receipt for a source revision.
-
-## Implementation and verification
-
-Dependency order is: existing Plan 27 acquisition contracts and native
-fixtures; Plan 01 normalized identities/definitions; Plan 16 owner resolution
-and Plan 20 protected binding configuration; existing Plan 13 anchor contracts;
-Plan 06 proof contracts; Plan 02 source transaction; the Plan 03 pure admission
-transition and sanitizer; Plan 04 projection ports; Plan 09 effect
-orchestration; then Plan 23 temporal interpretation. Plan 13 anchors join
-retained evidence in the Plan 02 transaction. Plan 27 owns adapters,
-network acquisition, event/poll scheduling, refresh retries, packaging,
-install/update/repair/uninstall, and host UI. Capture owns none of those
-lifecycle or public-surface concerns.
-
-Plan 09 activates a connector only after Plan 06 authorization. Before the
-first provider fetch, every page continuation, and canonical admission,
-application rechecks source grant ∩ requester grant ∩ resolved owner scope ∩
-sink policy, including mandatory local privacy, against pinned definition,
-binding, configuration, and sink revisions. Capture receives a non-forgeable
-`SinkAdmissionProofV1`; missing or stale authority blocks before network
-access or persistence.
-
-The consuming Plan 09 application slice owns the exact typed use cases
-`PublishSourceDefinitionV1`, `DryRunSourceBindingChangeV1`,
-`ApplySourceBindingChangeV1`,
-`AdmitSourceEventV1`, `RequestSourceRefreshV1`, `GetSourceRefreshV1`,
-`CancelSourceRefreshV1`, `RebuildSourceProjectionV1`, and
-`ValidateSourceGenerationV1`, `PublishSourceGenerationV1`,
-`RollbackSourceGenerationV1`, and `RetireSourceGenerationV1`. Plan 20
-implements the protected binding change; Plan 27 executes refresh lifecycle;
-Plan 03 performs canonical admission; and Plan 04 rebuilds/publishes local
-projections. These are internal application contracts, not new
-CLI/MCP/HTTP/UI surfaces.
-
-Plan 27's checked-in native bytes under
-`tests/fixtures/source_connectors/<source>/` are the sole acquisition fixture
-authority. `tests/fixtures/source_connectors/manifest.json` records origin,
-native version, path, and SHA-256; Plan 03 adds expected sanitized outputs that
-reference the same bytes and hashes. The first source uses
-`tests/fixtures/source_connectors/github_review/`, including the existing
-event/incremental/whole-root files and the required
-`explicit-delete.jsonl`, `corrected-version.jsonl`,
-`partial-pagination.jsonl`, and `malformed-record.jsonl`, each paired with an
-`*.sanitized.golden.jsonl`. Synthetic lookalike protocol fields are rejected.
-
-TDD order:
-
-1. Fail the event-poison, receipt-content, and raw-log/privacy tests.
-2. Fail pure admission-state, duplicate-receipt, storm-coalescing integration,
-   and conflict tests.
-3. Fail whole-root completeness-evidence and incremental
-   object-revision/partition-cursor gap/fallback tests.
-4. Fail correction, tombstone, reappearance, and partition-isolation tests.
-5. Revoke source grant, requester grant, owner scope, and sink policy
-   independently after event admission and before fetch, each continuation,
-   and commit.
-6. Inject failure at admission, page, observation, receipt, frontier, commit,
-   and acknowledgement boundaries; Plan 27 separately tests lease/fetch faults.
-7. Prove restart convergence, dropped-event repair by polling, and native
-   fixture parity.
-
-Run:
-
-```bash
-cargo test -p tracedecay-capture --test event_refetch_contract
-cargo test -p tracedecay-capture --test source_admission_state
-cargo test --test source_connector_suite
-cargo test -p tracedecay-store --test source_contract
-cargo test --test external_source_capture
-cargo test --test architecture_boundaries capture
-cargo check --all-features
-cargo nextest run --workspace --all-features --no-fail-fast
-```
+An audit must map these requirements to current callable owners and direct
+regressions before reporting a gap. A renamed or deleted historical mechanism
+does not require reconstruction.
 
 ## Acceptance
 
@@ -262,8 +165,8 @@ cargo nextest run --workspace --all-features --no-fail-fast
   redacted, stale-owner, ambiguous-worktree, and unavailable-daemon inputs.
 - PR6: every added provider has direct golden and incremental/restart tests over
   the shared contracts; adding an adapter creates no database or sanitizer path.
-- Linux and Windows-capable focused tests plus workspace format and clippy pass
-  for each capture PR.
+- Focused Linux and Windows-capable regressions preserve the same capture
+  behavior.
 - Poison event bytes occur nowhere in durable rows, anchors, receipts, logs,
   errors, caches, spools, or projections; the canonical refetch is the only
   content source.

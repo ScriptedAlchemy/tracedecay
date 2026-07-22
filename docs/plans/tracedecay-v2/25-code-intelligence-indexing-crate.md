@@ -2,7 +2,9 @@
 
 ## Status / role
 
-Implementation authority for PR9. PR9 is one complete single-root vertical:
+Status: planned PR9 implementation authority. PR9 is not complete until the
+direct behavioral and locked quality gates in this plan and Plan 15 pass.
+PR9 must deliver one complete single-root vertical:
 deterministic code indexing, immutable generations, generation-bound Git/
 diagnostic/test evidence, and accepted exact/lexical/graph retrieval. Start as
 a focused module; extract `tracedecay-code-index` only when independent reuse,
@@ -17,6 +19,13 @@ owns retrieval-research design, corpus/label policy, quality metrics, candidate
 profile comparison, thresholds, and promotion decisions. PR9 implements the
 frozen lexical/chunk contracts and emits measurements; it does not tune or
 promote retrieval policy.
+
+Plan 25 owns code-generation, chunking, graph, and generation-bound evidence
+semantics for PR9. Plan 15 owns quality acceptance. Plan 31 is the later PR10
+consumer of accepted chunks and lexical/graph fallback behavior; application,
+transport, and dashboard plans consume the accepted operations later. None of
+those consumers must reproduce an old module path, Rust type spelling, suite
+spine, fixture filename, or benchmark script.
 
 ## Outcome
 
@@ -137,11 +146,18 @@ when semantics are unavailable.
 
 ### Code-search chunk and projection contract
 
-PR9 lands the stable values in
-`crates/tracedecay-domain/src/code_intelligence/search.rs` and the initial
-implementation in `src/code_index/`. If the Plan 19 extraction gate approves a
-separate crate, move that module tree to
-`crates/tracedecay-code-index/src/` without changing these values or ports.
+The required contract is behavioral: generation-bound storage-neutral
+documents and chunks, deterministic identity and coverage, explicit
+changed/reused/deleted manifests, projection compatibility, receipts, and
+truthful invalidation. The following Rust names and layout are a historical
+design sketch, not artifact-name parity requirements. PR9 may realize the
+contract through current owner-approved names and paths when direct contract
+regressions prove all fields and invariants below.
+
+The original design placed stable values in the domain layer and the initial
+implementation in the root package, with optional later crate extraction. That
+physical placement remains evidence for boundary review, not a required
+reconstruction.
 
 The domain contract is:
 
@@ -408,39 +424,30 @@ pub struct ProjectionBatchReceiptV1 {
 - Preserve source generation and migration provenance, rebuild deterministic V2 identities, and verify counts and digests before publication.
 - Never open a V1 database from the indexer.
 
-## PR9 implementation phases and verification
+## PR9 behavioral delivery and verification
 
-`tests/code_index_suite/main.rs` is the Cargo integration-test entrypoint and
-declares every `tests/code_index_suite/*.rs` module named below.
+PR9 remains unfinished. The checkpoints below describe required product
+behavior and direct evidence. Paths, symbol names, test-module registration,
+fixture filenames, benchmark entrypoints, and aggregate-acceptance spine names
+are historical implementation suggestions only. The gate audits callable
+index/search behavior, checked-in quality fixtures, direct regressions, and the
+locked Plan 15 outcome.
 
-1. **Contract spine and intake:** add
-   `crates/tracedecay-domain/src/code_intelligence/{mod.rs,search.rs,index.rs}`
-   with the search values above plus `SanitizedCodeSnapshotV1`,
-   `CodeGenerationManifestV1`, `ExtractionBatchV1`, `SymbolLineageCandidateV1`,
-   and `GenerationTestAttributionV1`. Plan 35's
-   `crates/tracedecay-domain/src/diagnostics.rs` owns
-   `GenerationDiagnosticV1`; `code_intelligence/index.rs` stores only typed
-   references to that contract. Add
-   `src/code_index/intake.rs` with
-   `CodeIndexIntake::validate(SanitizedCodeSnapshotV1)
-   -> ValidatedCodeSnapshotV1`. Tests:
-   `crates/tracedecay-domain/tests/code_search_contract.rs` and
-   `tests/code_index_suite/sanitized_intake.rs`. In the same checkpoint, add
-   Plan 15's common retrieval types to
-   `crates/tracedecay-domain/src/retrieval.rs`, create module/suite spines, and
-   decide the Plan 05 physical query-crate extraction from measured reuse and
-   compile evidence. That decision changes location only, not contracts.
-2. **Language registry, extraction, and chunks:** add
-   `src/code_index/{languages.rs,extract.rs,chunks.rs,capabilities.rs}`.
-   `languages.rs` owns `LanguageDescriptorV1` and the complete extractor port
-   `LanguageExtractor::extract(&ValidatedCodeFileV1,
-   &LanguageDescriptorV1, &CancellationToken)
-   -> Result<ExtractionBatchV1, ExtractionFailureV1>`; descriptors, not
-   extractors, select grammars and capabilities. Tests:
-   `tests/code_index_suite/language_registry.rs`,
-   `deterministic_extraction.rs`, and `search_chunks.rs`, covering descriptor
-   aliases, parse errors, cancellation, caps, every chunk grain, exact terms,
-   structural fallback, unsupported ranges, ordering, and capability digests.
+1. **Contract and intake behavior:** define typed sanitized snapshots,
+   generation manifests, extraction batches, lineage candidates, test
+   attribution, and typed references to Plan 35 diagnostic evidence. A
+   validated intake rejects unsanitized, stale, mixed, or malformed input.
+   Direct contracts cover serialization, malformed values, intake rejection,
+   and authority separation. In the same checkpoint, provide Plan 15's common
+   retrieval contract and decide the Plan 05 physical query-crate extraction
+   from measured reuse and compile evidence. That decision changes location
+   only, not contracts.
+2. **Language registry, extraction, and chunks:** implement one versioned
+   descriptor authority and one bounded extractor interface; descriptors, not
+   ad hoc extractors, select grammars and capabilities. Direct regressions
+   cover aliases, parse errors, cancellation, caps, every chunk grain, exact
+   terms, structural fallback, unsupported ranges, ordering, and capability
+   digests.
 3. **Independent authorities:** implement three disjoint authorities:
    Plan 36 read-only Git status/diff/history/blame/`HunkRef` ports and native
    adapters; generation-bound clean diagnostic persistence/query fixtures; and
@@ -448,62 +455,48 @@ declares every `tests/code_index_suite/*.rs` module named below.
    admission oracles, authorization canaries, and raw baseline
    instrumentation. Synthetic fixtures may prove contracts but cannot stand in
    for locked quality or resource evidence.
-4. **Generations, incrementality, and lineage:** add
-   `src/code_index/{generation.rs,incremental.rs,lineage.rs}` with
-   `GenerationPlannerV1`, `GenerationSealV1`, and `LineageEvidenceV1`. Tests:
-   `tests/code_index_suite/generations.rs`,
-   `chunk_incremental.rs`, and `lineage.rs`, covering no-op, one-symbol and
-   preamble edits, rename, move, deletion, split/merge, ambiguity/abstention,
-   chunker/grammar/privacy invalidation, sealing, and mixed-snapshot rejection.
-5. **Git, diagnostics, and test joins:** add
-   `src/code_index/{git_join.rs,diagnostics.rs,test_attribution.rs}` with
-   `GenerationGitJoinV1`, `GenerationDiagnosticJoinV1`, and
-   `GenerationTestJoinV1`. Tests:
-   `tests/code_index_suite/git_joins.rs`,
-   `diagnostic_generation.rs`, and `test_attribution.rs`, covering
-   working/staged/range hunks, mismatch/binary/rename/deletion cases, current/
-   stale/cleared diagnostics, and every declared attribution evidence class.
-6. **Projection boundary and V1 migration:** add
-   `src/code_index/projection.rs`; implement
-   in-memory conformance fixtures that return reordered, duplicate, missing,
-   extra, wrong-generation, and wrong-digest receipts in
-   `tests/code_index_suite/projection_receipts.rs`. These tests must pass
-   without importing `fastembed` or a concrete store adapter. Add
-   `src/code_index/v1_import.rs` with
-   `V1CodeBatchConsumer::rebuild(V1SanitizedCodeBatchV1)
-   -> Result<CodeGenerationManifestV1, V1CodeImportErrorV1>`. Test counts,
-   digests, duplicates, unsupported rows, cancellation, and the no-database-
-   open boundary in `tests/code_index_suite/v1_migration.rs`.
-7. **Exact, lexical, and graph retrieval:** add
-   `src/query/retrieval/{exact.rs,lexical.rs,graph.rs,fusion.rs,dedupe.rs,diversity.rs,hydrate.rs}`.
-   Exact and lexical are independently disableable. Graph consumes only
-   generation-matched Plan 25 evidence. Tests under
-   `tests/search_quality_suite/` cover exact admission, whole identifiers
-   versus subtokens, phrases, errors, paths, bounded fuzzy terms, field
-   filters, shuffled producer order, fixed-point fusion, source/file caps,
-   pagination, denial non-interference, partial coverage, and rank-before-
-   hydrate behavior.
+4. **Generations, incrementality, and lineage:** implement immutable planning,
+   sealing, incremental change classification, and evidence-backed lineage.
+   Direct regressions cover no-op, one-symbol and preamble edits, rename, move,
+   deletion, split/merge, ambiguity/abstention, chunker/grammar/privacy
+   invalidation, sealing, and mixed-snapshot rejection.
+5. **Git, diagnostics, and test joins:** implement generation-exact joins with
+   independent provenance. Direct regressions cover working/staged/range
+   hunks, mismatch/binary/rename/deletion cases, current/stale/cleared
+   diagnostics, and every declared attribution evidence class.
+6. **Projection boundary and V1 migration:** prove receipt conformance with
+   reordered, duplicate, missing, extra, wrong-generation, and wrong-digest
+   fixtures without a model runtime or concrete store adapter. Prove migration
+   counts, digests, duplicates, unsupported rows, cancellation, and the
+   no-database-open boundary.
+7. **Exact, lexical, and graph retrieval:** implement independently disableable
+   exact and lexical lanes; graph consumes only generation-matched Plan 25
+   evidence. Quality fixtures and direct regressions cover exact admission,
+   whole identifiers versus subtokens, phrases, errors, paths, bounded fuzzy
+   terms, field filters, shuffled producer order, fixed-point fusion,
+   source/file caps, pagination, denial non-interference, partial coverage, and
+   rank-before-hydrate behavior.
 8. **Locked lexical evaluation and promotion:** freeze the run manifest before
    holdout access, save each lane's compact candidate list, execute Plan 15's
    PR9 ablations, and emit exactly one terminal outcome. Only `accepted`
-   creates `benchmarks/search-quality/promotion-v1.json`. Freeze the accepted
+   creates promotion evidence. Freeze the accepted
    exact-tier rules, profile digest, named fallback-subpayload bytes, saved
    candidate lists, and result/evidence anchors as PR10 inputs.
-9. **Measurement and aggregate acceptance:** add `benches/code_index_chunks.rs` and
-   `benchmarks/pr9-code-index/{workload-v1.json,expected-v1.json,README.md}`.
-   Record clean, warm one-file, deletion, no-op, chunker/model-key replay, and
+9. **Measurement and aggregate acceptance:** use a reproducible checked-in
+   workload and retained raw evidence to record clean, warm one-file, deletion,
+   no-op, chunker/model-key replay, and
    incompatible full-rebuild cases at current and 10x corpus sizes. Report
    files parsed, chunks added/changed/deleted/reused, projection calls, bytes,
    wall time, CPU, and peak RSS separately; end-to-end performance work owns
    product resource budgets and Plan 15 owns quality interpretation. The
    workload manifest pins
    exact file/byte/chunk counts, content and descriptor digests, language
-   strata, seed, runtime/hardware manifest, and cache state. Each case runs 5
-   untimed warmups plus 30 measured repetitions and retains all samples. Run
-   focused suites at each checkpoint, then formatting, architecture
-   boundaries, `cargo check --all-features`, `cargo test --all-features`, the
-   relevant Linux/Windows and migration/privacy gates, and the accepted Plan 15
-   comparison before freezing `pr9/49-aggregate-acceptance`.
+   strata, seed, runtime/hardware manifest, and cache state. The frozen
+   evaluation method retains enough raw independent repetitions to support its
+   reported quantiles and uncertainty. Run focused direct regressions,
+   architecture boundaries, relevant platform and migration/privacy gates, the
+   applicable all-feature gate, and the accepted Plan 15 comparison before
+   declaring PR9 complete.
 
 ## Acceptance
 
@@ -562,12 +555,11 @@ declares every `tests/code_index_suite/*.rs` module named below.
   through capture and publication.
 - Crash, cancellation, disk-full, stale-snapshot, and concurrent-build tests publish either one complete generation or none.
 - V1 fixtures migrate through logical batches with no indexer database open and no lost or duplicate supported records.
-- `tests/code_index_suite/architecture_boundaries.rs` constructs the indexer
-  only through `CodeIndexIntake` and `CodeChunkProjectionSink`, while
-  `tests/architecture_boundaries.rs` rejects filesystem, database, model-
-  runtime, and transport imports from the module; together they enforce capture
-  as the only intake and store/projector composition as the only publication
-  path.
+- Boundary regressions construct the indexer only through its validated intake
+  and projection interfaces and reject filesystem, database, model-runtime,
+  and transport authority in the indexing boundary; together they enforce
+  capture as the only intake and store/projector composition as the only
+  publication path.
 - Focused non-indexing package checks do not compile Tree-sitter grammars or
   structural-search implementation, and PR9 retains the production compilation
   measurements used by end-to-end performance comparison.
@@ -580,9 +572,11 @@ declares every `tests/code_index_suite/*.rs` module named below.
   compiler/runtime error, CLI flag, tool name, configuration key, and commit
   identifier precedes every approximate-only result. Exact admission
   precision, false promotion, and protected-stratum support are reported.
-- The accepted PR9 exact+lexical+graph baseline is frozen with its profile,
-  manifests, saved candidate lists, fallback-subpayload bytes, evidence index, and
-  rollback profile. A `blocked`, `rejected`, `inconclusive`, `invalid_run`, or
+- The accepted PR9 exact+lexical+graph baseline is frozen by content and
+  revision with its profile, manifests, saved candidate lists,
+  fallback-subpayload bytes, evidence mapping, and rollback profile. Acceptance
+  depends on validated callable behavior and evidence content, not a historical
+  artifact filename. A `blocked`, `rejected`, `inconclusive`, `invalid_run`, or
   `runtime_fallback_observed` result does not complete PR9.
 - Working/staged/range Git, history, blame, rename, binary, merge, and
   `HunkRef` fixtures retain native Git identity and independent Git/code/

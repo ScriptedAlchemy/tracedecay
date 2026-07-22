@@ -2,8 +2,14 @@
 
 **Delivery:** PR 8
 
-**Status:** active PR8 product work
-**Depends on:** [01 domain](01-domain-crate.md), [02 store](02-store-crate.md), [03 capture](03-capture-crate.md), [04 projectors](04-projectors-crate.md), [05 query](05-query-crate.md), [09 application](09-application-crate.md), [13 anchors](13-research-provenance-and-context-anchors.md), and [18 privacy](18-secret-detection-redaction-and-private-data-safety.md). PR8 ships against explicitly resolved current-project/single-root scope and address contracts available by then; the [multi-root scope plan](16-cross-project-repository-worktree-scope.md) composes this same retrieval kernel with canonical cross-project/repository/worktree resolution and is not a PR8 implementation prerequisite.
+**Status:** active PR8 product work and temporal retrieval authority.
+**Depends on:** [01 domain](01-domain-crate.md), [02 store](02-store-crate.md), [03 capture](03-capture-crate.md), [04 projectors](04-projectors-crate.md), [05 query](05-query-crate.md), [09 application](09-application-crate.md), [13 anchors](13-research-provenance-and-context-anchors.md), and [18 privacy](18-secret-detection-redaction-and-private-data-safety.md). PR8 implements against explicitly resolved current-project/single-root scope and address contracts available by then; the [multi-root scope plan](16-cross-project-repository-worktree-scope.md) later composes this same retrieval kernel with canonical cross-project/repository/worktree resolution and is not a PR8 implementation prerequisite.
+
+Plan 23 remains the owner of the behavior in this document. Plans 15, 24, and
+37 and the application/public-surface plans are later consumers. They must
+reuse PR8's behavior after its direct acceptance gates pass; they do not have
+to recreate PR8's original module tree, Rust type spellings, schema names,
+suite registration, fixture filenames, benchmark scripts, or command list.
 
 ## Outcome
 
@@ -59,12 +65,11 @@ sources. [Plan 05](05-query-crate.md) opaque cursors page typed collections only
   assertions, copy/supersession edges, derived evidence, summaries, and their
   manifests. Rebuilds write and atomically activate a new generation.
 
-The normative domain contracts remain in
-`crates/tracedecay-domain/src/session.rs`: `TemporalModeV1`,
-`TemporalValidityV1`, `MessageOccurrenceRecordV1`,
-`TemporalAssertionRecordV1`, `TemporalAssertionKindV1`,
-`LogicalCopyRecordV1`, `SessionSummaryRecordV1`,
-`SummarySourceHorizonV1`, and `TemporalCoverageCountsV1`.
+The normative domain contract is the callable behavior above: independent
+knowledge and valid time, immutable occurrences and assertions, explicit copy
+evidence, summary source horizons, and truthful coverage. Historical type and
+module names are provenance for the original delivery, not parity targets for
+a later implementation.
 
 ## Immutable derived evidence spans and bursts
 
@@ -81,24 +86,13 @@ occurrences:
 - neither is source authority, a summary, a replacement occurrence, or an
   external evidence store.
 
-`crates/tracedecay-domain/src/session.rs` adds
-`DerivedEvidenceKindV1::{Span, Burst}`, `DerivedEvidenceIdV1`,
-`EvidenceSpanIdV1`, `EvidenceBurstIdV1`,
-`SessionDerivedEvidenceRecordV1`, `DerivedEvidenceMemberV1`, and
-`RetrievalGrainV1::{EvidenceSpan, EvidenceBurst}`.
-`SessionDerivedEvidenceRecordV1` binds its typed ID, `RetrievalAnchorId`,
-session and optional thread IDs, first and last occurrence IDs, member count
-and digest, algorithm and configuration versions, source horizon, and
-`SessionAuthorityClassV1::DerivedProjection`. It stores no copied message, tool
-payload, concatenated span text, GitHub, CI, diagnostic, Git, receipt, task, or
-`rh_` payload.
-
-`crates/tracedecay-domain/src/research/subjects.rs` adds
-`EntityKind::{EvidenceSpan, EvidenceBurst}`.
-`crates/tracedecay-domain/src/research/anchor.rs` represents each derived item
-as `RetrievalAnchorTargetV2::Entity`; its manifest contains one
-`AnchorLineageRefV2 { relation: DerivedFrom, ... }` for every member occurrence
-anchor.
+Each derived span or burst binds a typed identity and retrieval anchor, session
+and optional thread identity, first and last occurrence identity, member count
+and digest, algorithm/configuration revision, source horizon, and an explicit
+derived-projection authority class. It stores no copied message, tool payload,
+concatenated span text, GitHub, CI, diagnostic, Git, receipt, task, or `rh_`
+payload. Each derived item is an anchored entity with one `DerivedFrom`
+lineage edge for every member occurrence anchor.
 
 The projection rejects cross-session or cross-generation members, duplicate or
 noncontiguous ordinals, and endpoint/manifest mismatches. The derived ID and
@@ -396,7 +390,16 @@ coverage, and continuation anchors. It never dumps a transcript or unrelated
 agent activity. Expansion from a span, burst, or summary is lossless to every
 authorized occurrence and preserves unavailable members by ordinal.
 
-## Exact file and port ownership
+## PR8 implementation sketch (non-normative)
+
+The paths, type names, schema objects, and adapter locations below record how
+PR8's design divided ownership. They are not a request to recreate an obsolete
+module tree or database shape. The maintained requirement is the authority
+boundary and callable behavior described above. Refactors may move, rename, or
+replace these artifacts when direct regressions continue to prove one temporal
+kernel, immutable evidence, rank-final hydration, canonical pagination,
+truthful source coverage, lossless authorized expansion, and side-effect-free
+reads.
 
 ### Domain
 
@@ -535,9 +538,10 @@ legacy tables only after zero production legacy reads/writes and validated
 parity. Compatibility tables never rank, hydrate, paginate, or report
 freshness.
 
-## Implementation order
+## PR8 delivery sequence (non-normative)
 
-Each step finishes with its focused tests passing before the next starts.
+This sequence explains one intended way to deliver the active vertical. It is
+not an artifact-by-artifact implementation checklist or prerequisite spine.
 
 1. Add and validate domain bitemporal, derived evidence, contribution,
    freshness, and refresh-key types.
@@ -568,10 +572,14 @@ Each step finishes with its focused tests passing before the next starts.
 11. Run the complete correctness, privacy, cursor, restart, side-effect, and
     all-feature gates below.
 
-## Verification matrix
+## Historical evidence map and current regression audit
 
-The listed test modules and named cases are required PR8 deliverables. A missing
-named case is a failed gate, not deferred work.
+The names below identify the original evidence locations. Current acceptance
+audits the same behavior through the callable session/LCM operations, current
+quality fixtures, and direct regressions. Renaming a test, consolidating a
+suite, replacing a fixture, changing a benchmark harness, or moving an
+implementation does not fail acceptance by itself. Acceptance fails when the
+behavioral coverage below is absent or regresses.
 
 ### Temporal and derived evidence
 
@@ -689,9 +697,13 @@ named case is a failed gate, not deferred work.
   Plan 37 consumes it without adding a second LCM engine, summary store,
   ranking path, cursor, or hydration path.
 
-## Commands and expected outcomes
+## PR8 command sketch (non-normative)
 
-Run ordinary Cargo commands from the repository root:
+These commands document proposed delivery evidence. Current implementation and
+later consumers use
+the current focused regressions and applicable feature gate; they do not have
+to restore an obsolete command, suite prefix, benchmark script, or test-module
+spine merely to satisfy this non-normative command sketch.
 
 ```bash
 cargo test -p tracedecay-domain --test session_contract --all-features
@@ -782,7 +794,7 @@ cargo test --workspace --all-features
 Expected: zero compiler errors and zero test failures across the all-feature
 workspace gate.
 
-## PR 8 deliverables and acceptance gates
+## PR8 behavioral acceptance
 
 - Immutable occurrence, logical-copy, Turn/thread, temporal-assertion,
   evidence-span/burst, ordered-member, and summary-lineage contracts exist with
@@ -813,5 +825,7 @@ workspace gate.
 - PR8 remains task-agnostic and single-root. The scope plan owns cross-project
   composition, Plan 24 owns TaskId composition, the dashboard journey owns its
   binding cutover, and final migration owns physical legacy-table removal.
-- All focused commands and the final `cargo test --workspace --all-features`
-  gate complete with the expected outcomes above.
+- Current direct regressions exercise every behavior above through the
+  callable temporal retrieval, compatibility, refresh, and expansion paths,
+  and the applicable feature gate passes. Obsolete artifact-name or command
+  parity is not an acceptance criterion.

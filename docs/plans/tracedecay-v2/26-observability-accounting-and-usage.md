@@ -15,6 +15,13 @@ telemetry events, rollout states, planning authority, or a generated delivery
 tracker. Product owners emit through this plan's existing schemas, and Plan 33
 never changes Plan 26 labels.
 
+Earlier event-file layouts, implementation ownership lists, fixture matrices,
+benchmark packets, panel paths, and aggregate gate manifests are historical
+evidence, not prerequisites or artifacts that later work must recreate.
+Published event/metric names and persisted observability records remain
+compatibility contracts; all other retention is judged by the direct
+measurement, privacy, lifecycle, platform, and regression behavior below.
+
 ## Outcome
 
 Every operational and product metric states what was measured, over which population and horizon, at which watermark, with what coverage. Unknown, partial, stale, sampled, or capped data stays visible and can never render as a trustworthy zero.
@@ -190,8 +197,7 @@ behavior, or unavailable state is reduced or deferred by this framing.
 
 Plans 24, 32, 36, and 37 emit source facts through the one observability
 application boundary; this plan owns only the schemas, joins, descriptors, and
-read models. The exact event payloads in
-`crates/tracedecay-domain/src/observability/execution_topology.rs` are:
+read models. The persisted execution-topology event family is:
 
 - `ExecutionTopologySampledV1`
   (`work.execution_topology.sampled.v1`);
@@ -388,25 +394,14 @@ version-monotone. A branch/worktree deletion may close or censor a metric
 interval but cannot erase a retained aggregate or rewrite a historical
 denominator.
 
-Exact implementation and test ownership is:
-
-- `crates/tracedecay-domain/src/observability/execution_topology.rs` owns the
-  event payloads, closed enums, descriptor values, and validation;
-- `crates/tracedecay-store/src/observation/execution_topology_projection.rs`
-  owns interval coalescing, prediction/outcome linkage, bounded cells,
-  idempotent late correction, and rebuild;
-- `src/application/observability/execution_topology.rs` owns authorized local
-  record/query use cases and delegates persistence to the existing telemetry
-  store;
-- `dashboard/observatory/src/ExecutionTopologyPanel.tsx` and
-  `dashboard/costs/src/ExecutionEfficiencyPanel.tsx` render the application
-  read model without formulas;
-- `crates/tracedecay-domain/tests/observability_execution_topology_contract.rs`,
-  `crates/tracedecay-store/tests/observability_execution_topology_projection.rs`,
-  `tests/observability_suite/execution_topology.rs`,
-  `tests/dashboard_api_test/execution_topology.rs`, and
-  `dashboard/test/observatory-execution-topology.vitest.tsx` cover binding,
-  rebuild, payload safety, parity, and rendering.
+The domain contract owns event payloads, closed enums, descriptors, and
+validation; the existing telemetry store owns interval coalescing,
+prediction/outcome linkage, bounded cells, late correction, retention, and
+rebuild; the application boundary owns authorized local record/query use
+cases; and Observatory/Costs render the application read model without local
+formulas. Direct tests cover binding, rebuild, payload safety, cross-surface
+parity, and rendering. Historical file and test names do not constrain that
+ownership.
 
 This contract ships through the PR17 executable Work loop: the domain event
 types, canonical serialization, exhaustive enum handling, prohibited-field
@@ -426,22 +421,13 @@ blocks acceptance.
 
 ### Concrete event and type contract
 
-The canonical domain contract lives in
-`crates/tracedecay-domain/src/observability/mod.rs`,
-`crates/tracedecay-domain/src/observability/retrieval.rs`,
-`crates/tracedecay-domain/src/observability/adoption.rs`,
-`crates/tracedecay-domain/src/observability/performance.rs`,
-`crates/tracedecay-domain/src/observability/execution_topology.rs`.
-`crates/tracedecay-store/src/observation/telemetry.rs` persists the common
-envelope, `crates/tracedecay-store/src/observation/telemetry_projection.rs`
-builds shared denominator-safe read models,
-`crates/tracedecay-store/src/observation/execution_topology_projection.rs`
-builds the bounded execution-topology read model, and
-`crates/tracedecay-store/src/observation/telemetry_retention.rs` applies the
-retention policy.
-`src/application/observability/{mod,record,query,execution_topology}.rs`
-is the only application write/query boundary. Product owners instrument their
-own paths and emit these types; they do not add another counter store.
+The canonical domain contract owns retrieval, adoption, performance, and
+execution-topology events. The existing observation store persists the common
+envelope, builds denominator-safe read models, and applies retention. The
+observability application operation is the only write/query boundary. Product
+owners instrument their own paths and emit these types; they do not add
+another counter store. Historical module locations are not part of the
+contract.
 
 `ObservabilityEnvelopeV1` contains `event_id`, `event_kind`,
 `schema_revision`, `idempotency_key`, opaque local `trace_id`, authorized
@@ -452,9 +438,9 @@ retention class, and emitted/delayed/dropped counts. `CoverageStateV1` is
 exactly `Known | Partial | Stale | Unknown | Sampled | Capped`. Attempts and
 terminal events have different idempotency identities.
 
+The persisted performance contract includes
 `PerformanceMeasurementDescriptorV1`, `BenchmarkRunAggregateV1`,
-`PairedEffectEstimateV1`, and `PerformanceDispositionV1` are defined in
-`performance.rs`.
+`PairedEffectEstimateV1`, and `PerformanceDispositionV1`.
 
 The minimum cross-cutting V1 event payloads added by this plan are:
 
@@ -491,10 +477,9 @@ The minimum cross-cutting V1 event payloads added by this plan are:
 Plans 35–37 and every other owning slice define their additional exhaustive
 source-event enum in that slice while using `ObservabilityEnvelopeV1`; omission
 from this minimum list is not permission to emit an untyped counter.
-Every listed event has canonical serialization and digest fixtures in
-`crates/tracedecay-domain/tests/observability_contract.rs`; persistence,
-replay, late arrival, and retention fixtures live in
-`crates/tracedecay-store/tests/observability_projection.rs`.
+Every listed event has canonical serialization/digest and persistence,
+replay, late-arrival, and retention coverage. The historical fixture paths are
+not required.
 Each producer has a saturating in-memory atomic drop count and one reserved
 control-lane slot outside the fixed data queue. The next accepted envelope and
 shutdown flush carry the accumulated count; `TelemetryDropObservedV1` uses the
@@ -561,10 +546,9 @@ deduplicated, stale, and final authorized counts; operation-level denied lane
 outcomes without candidate counts; per-retriever final contribution; fan-out
 wait, merge, dedupe, rerank, hydration, render,
 synthesis, critical-path, and total duration; cancellation; and partial/budget
-state. Instrumentation is implemented in
-`src/application/retrieval/pipeline.rs`,
-`src/query/retrieval/{exact,lexical,semantic,graph,temporal,task_session,diagnostic,fusion,dedupe,diversity,rerank,hydrate}.rs`,
-and the existing `src/query/temporal/` kernel through its temporal adapter.
+state. Instrumentation remains on the canonical application retrieval pipeline
+and its existing retriever and temporal adapters rather than a parallel
+measurement path.
 
 Source availability, authorization, and coverage are orthogonal.
 `RetrievalSourceAvailabilityV1` is `Unsupported | Absent | Indexing |
@@ -606,8 +590,8 @@ no-answer precision, duplicate/wrong-scope rates, risk/coverage, AURC,
 candidate oracle Recall@N before reranking, p50/p95/p99 latency, process-tree
 RSS/PSS and separately named cgroup/container high-water evidence, support,
 interval, coverage, and disposition. Exact flat-vector scan remains the ANN
-oracle. Fixtures live in
-`tests/observability_suite/{retrieval,context_outcomes,ablation}.rs`.
+oracle. Retrieval, context-outcome, and ablation tests retain these behaviors;
+their fixture paths are historical implementation detail.
 
 ### Adoption analytics and retention
 
@@ -843,20 +827,13 @@ decision with collision, ambiguity, and maintenance review.
 - PR14 exposes shared typed read models through application queries and the
   then-shipped CLI, MCP, HTTP, and dashboard adapters. PR18 adds SDK adapters
   and parity when the official SDKs ship.
-- PR17 extends those same adapters with `ExecutionTopologyMetricsV1`,
-  `ExecutionTopologyPanel.tsx`, and `ExecutionEfficiencyPanel.tsx`; it does
-  not add a telemetry store, formula, or transport-local projection.
-- Backend adapters are `src/dashboard/observatory_api.rs` and
-  `src/dashboard/costs_api.rs`. The UI implementations are
-  `dashboard/observatory/src/{entry,api,types,ObservatoryPage}.tsx`,
-  `dashboard/observatory/src/{Retrieval,Adoption,Performance,ExecutionTopology}Panel.tsx`,
-  `dashboard/costs/src/{entry,api,types,CostsPage}.tsx`, and
-  `dashboard/costs/src/ExecutionEfficiencyPanel.tsx`. Dashboard formulas are
-  prohibited; these files render application read models.
-- Dashboard/API parity fixtures are
-  `tests/dashboard_api_test/{observatory,costs,execution_topology}.rs`,
-  `dashboard/test/{observatory,costs}.vitest.tsx`, and
-  `dashboard/test/observatory-execution-topology.vitest.tsx`.
+- PR17 extends those same adapters with `ExecutionTopologyMetricsV1` and
+  Observatory/Costs execution-topology views; it does not add a telemetry
+  store, formula, or transport-local projection.
+- Backend and UI adapters render application read models; dashboard formulas
+  are prohibited. Direct dashboard/API tests preserve Observatory, Costs, and
+  execution-topology parity. Historical adapter, panel, and fixture names are
+  not mandatory recreation targets.
 - Every card, chart, and export shows scope, horizon, freshness, coverage, unit, and denominator.
 - Users can drill from an aggregate to safe trace or retrieval anchors and see why data is partial or unknown.
 - UI and transports consume the same values; none recompute business metrics locally.
@@ -872,11 +849,11 @@ decision with collision, ambiguity, and maintenance review.
   SDK.
 - Product-path tests prove events and drill-down anchors contain no prohibited
   raw content.
-- Execution-topology contract fixtures serialize and round-trip every exact
-  event kind and enum above; schema scans reject every prohibited identity/
-  content field and every free-form metric label. Each Plan 14 topology,
-  operation, event, platform, and retention case contributes at
-  least one source-event assertion and one expected-rollup assertion.
+- Execution-topology contract tests serialize and round-trip every persisted
+  event kind and enum above; schema checks reject every prohibited identity/
+  content field and every free-form metric label. Product-path coverage proves
+  topology, operation, event, supported-platform, retention, source-event, and
+  rollup behavior without requiring a one-row-per-case matrix.
 - Concurrency/fanout fixtures reconcile requested, Plan 24-accepted, Plan
   32-admitted, active, useful, serialized, blocked, and capacity-deferred
   widths over event-time intervals. Heartbeats, queue presence, duplicate
@@ -1022,3 +999,8 @@ decision with collision, ambiguity, and maintenance review.
   no metric claims a posted, updated, dismissed, or replied GitHub comment,
   while observed read-only `resolved` remains a required lifecycle value.
 - Repository checks reject alternate counter writers, UI-local formulas, and meta-plan instrumentation.
+
+Tests may consolidate fixtures and reorganize harnesses when they retain every
+observable state, denominator, platform, lifecycle, privacy, correction,
+retention, rebuild, and cross-surface regression above. Historical fixture
+counts, names, and matrix layouts are not acceptance artifacts.

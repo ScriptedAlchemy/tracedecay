@@ -2,12 +2,16 @@
 
 ## Status and existing foundation
 
-PR9 supplies canonical branch/commit snapshots and read-only diff/hunk
-intelligence. PR11 supplies Plan 09's transport-neutral one-shot feedback
-request/result. PR12 exposes post-edit diagnostics and impact through
+Completion and activity status is owned solely by
+[the plan-set index](00-plan-set-index.md). This component plan defines
+retained delivery requirements and does not infer milestone status from branch
+artifacts.
+
+PR9 provides the required canonical branch/commit snapshot and read-only
+diff/hunk contract. PR11 requires Plan 09's transport-neutral one-shot feedback
+request/result. PR12 requires post-edit diagnostics and impact through
 LSP/MCP/CLI/HTTP, including the negotiated TraceDecay LSP context extension.
-PR13 completes the first product milestone by shipping all four
-advisory pillars together through real host surfaces:
+PR13 requires all four advisory pillars together through real host surfaces:
 
 1. branch-aware post-edit diagnostics and impact;
 2. CI-failure localization;
@@ -18,17 +22,22 @@ Plan 09 remains the sole result/orchestration authority. Plans 05, 13, 21, 22,
 27, 35, and 36 continue to own query evidence, durable anchors, rendering and
 expansion, suggestions, host delivery, semantic/LSP providers, and Git
 identity. This plan does not replace any accepted capability from those plans.
+Plan 09's feedback cycle and canonical feedback-read application owner are the
+required mechanism. Implementations visible on a branch are evidence of that
+contract without establishing milestone status. Historical packet/type names,
+exact source layouts, schema registries, and fixture matrices are evidence only
+unless separately declared public or persisted API.
 
 ## PR12 baseline reader and LSP context contract
 
-PR12 makes canonical diagnostics, impact, affected-test, test-result,
+PR12 must make canonical diagnostics, impact, affected-test, test-result,
 feedback get/list, and exact-expansion reads callable; no placeholder or
 advertised-unavailable handler satisfies that milestone. CLI, MCP, and HTTP
 share the same reader semantics. Dashboard binding starts in PR14.
 
 Plan 35 owns the versioned TraceDecay LSP context extension and carries it over
 standard LSP/JSON-RPC framing after explicit experimental capability
-negotiation. PR12 projects current diagnostics, impact, affected tests, and
+negotiation. PR12 must project current diagnostics, impact, affected tests, and
 test results in compact envelopes that retain exact authorized scope,
 content/graph generation, producer state, coverage, omissions, and opaque
 expansion handles. Handles reauthorize into Plan 21's canonical reads and are
@@ -162,7 +171,7 @@ The four pillars share one Plan 09 result across:
 
 - hooks at edit/stop boundaries;
 - the explicit MCP operation;
-- the HTTP feedback read operations shipped in PR12;
+- the HTTP feedback read operations required in PR12;
 - LSP Problems or Cursor native diagnostics where a current range exists;
 - dashboard/Doctor consumption in PR14; and
 - the CLI operation shared with MCP.
@@ -215,9 +224,11 @@ evidence only and never becomes a correctness label.
 - Connect real edit/stop events and explicit requests to the one Plan 09
   operation.
 - Add GitHub refresh/remap, CI localization, and tiered proximity producers.
-- Produce one reference-only `FeedbackEvidencePacket` carrying exact scope,
-  generation, finding IDs, Plan 13 anchors, source state, freshness, coverage,
-  watermark, counts, omissions, budgets, and cursor.
+- Produce one reference-only canonical feedback evidence result carrying exact
+  scope, generation, finding IDs, Plan 13 anchors, source state, freshness,
+  coverage, watermark, counts, omissions, budgets, and cursor. Its concrete
+  type and module placement follow the current Plan 09 result owner rather
+  than reviving a deleted packet contract.
   It copies no source, review body, CI log, diagnostic payload, or private
   session content.
 - Produce a reference-only proximity contribution with warning/risk/threshold
@@ -427,7 +438,7 @@ to exact anchored authored or reviewed commits, causally resolved diagnostics,
 independently accepted task outcomes, and anchored discussion contributions,
 with attribution ambiguity, coverage, lifecycle, purpose, and consent
 provenance intact. It never enters this plan's canonical feedback retrieval,
-evidence packets, fusion/ranking, proximity score, task links, or completion
+evidence envelopes, fusion/ranking, proximity score, task links, or completion
 state.
 
 Plan 24 owns invocation authorization, consent/revocation, actor-safe

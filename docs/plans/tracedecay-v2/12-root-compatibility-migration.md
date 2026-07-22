@@ -6,6 +6,13 @@ Normative PR19 plan. PR19 performs the complete forward migration from released
 V1 data and root wiring, atomically makes V2 authoritative, provides bounded
 recovery, and deletes migration-only and superseded V1 paths.
 
+Earlier migration fixture names, family inventories, packet layouts, and
+intermediate cutover scaffolding are historical evidence, not prerequisites
+or artifacts that PR19 must recreate. Published API aliases and persisted data
+formats remain compatibility contracts until their declared migration or
+retirement completes; acceptance otherwise follows the direct upgrade,
+recovery, platform, and regression behavior below.
+
 ## User outcome
 
 An existing user upgrades without losing supported data or changing the

@@ -2,10 +2,18 @@
 
 ## Status / Role
 
-Normative PR12 plan. `tracedecay-api` is a thin Axum HTTP, SSE, and
-static-dashboard adapter over `tracedecay-application`. The executable-work
-journey adds typed Plan 24 task/work and Plan 32 runtime routes through this
-same adapter only when their application operations ship.
+Normative PR12 delivery contract; completion status is owned solely by
+`00-plan-set-index.md`. `tracedecay-api` is the canonical thin Axum
+HTTP, SSE, and static-dashboard adapter over `tracedecay-application`. The
+executable-work journey adds typed Plan 24 task/work and Plan 32 runtime routes
+through this same adapter only when their application operations ship.
+
+Existing callable HTTP conversion and application-surface paths are the
+starting implementation, not proof that the PR12 route family is complete.
+Current handler, DTO, module, and fixture names are evidence only unless a DTO
+or route is explicitly published and versioned. A required application
+operation with no callable HTTP/SSE journey is a gap; the absence of an older
+endpoint registry, packet schema, or planned file is not.
 
 ## Outcome
 
@@ -67,7 +75,7 @@ Local and remote clients receive one stable, bounded, observable public service 
 - Static assets use immutable caching when fingerprinted; the HTML shell revalidates; API paths never fall through to the SPA.
 - Health and readiness distinguish process health from daemon/store readiness without performing destructive repair.
 - OpenAPI or equivalent documentation is derived from shipped handlers and DTOs, not a parallel source of truth.
-- PR12 moves root HTTP behavior into this crate and deletes duplicate legacy handler logic.
+- PR12 must move root HTTP behavior into this crate and delete duplicate legacy handler logic.
 - The executable-work journey adds concrete workflow product routes plus bounded task/work reads,
   graph/history/projection reads,
   explicit versioned graph commands, route-review reads, and task-step runtime
@@ -77,6 +85,10 @@ Local and remote clients receive one stable, bounded, observable public service 
 
 ## Acceptance
 
+- A direct PR12 journey invokes the canonical feedback and representative
+  read/write operations over HTTP, compares their typed semantics with the
+  application and CLI/MCP paths, and exercises an SSE stream through terminal
+  outcome, disconnect, resume, gap, cancellation, and backpressure behavior.
 - Contract tests cover authentication, scope, canonical problem mapping,
   pagination, limits, caching, SSE ordering, duplicate convergence,
   resume gaps/expiry, disconnect, cancellation races, backpressure,

@@ -2,18 +2,20 @@
 
 ## Status / Role
 
-- Status: modules first after the completed PR4 authoritative store boundary.
+- Status: contract authority for the active PR8 temporal-kernel delivery. PR8
+  remains in progress until its current behavioral requirements and direct
+  acceptance gates pass. PR9 lexical/code retrieval and PR10 semantic
+  retrieval remain unfinished under their delivery plans.
 - PR5 added only the observation read/replay needed by its capture vertical in
   existing store and application modules. Extract `tracedecay-query` only when
   PR8-or-later reuse, dependency isolation, or compile-time savings justify the
   boundary.
-- PR8 builds the temporal kernel as root-package modules that honor this
-  crate's ownership contract in place: typed domain requests, read-only port
-  traits implemented by root store/projector adapters, no SQL/transport/policy
-  imports in kernel modules, and architecture tests asserting those boundaries
-  from PR8 onward. At PR8 the kernel has no consumer outside the root package,
-  so a physical crate isolates nothing yet; the in-place contract keeps later
-  extraction mechanical.
+- Active PR8 work must establish the temporal kernel's behavior and ownership contract:
+  typed domain requests, read-only storage/projector boundaries, and no
+  SQL/transport/policy authority in the kernel. Its proposed module layout,
+  type spellings, suite spine, fixture names, and benchmark paths describe how
+  that delivery may be proven; acceptance audits the callable behavior and
+  direct regressions rather than requiring those artifacts by name.
 - The extraction decision is re-evaluated at PR9, when lexical code retrieval
   becomes the first second consumer of the shared execution primitives. It
   proceeds only with the Plan 19 evidence: named reuse across slices and a
@@ -24,6 +26,11 @@
 - PR11 composes query use cases in application and policy. PR12 exposes them
   through CLI, MCP, HTTP, LSP, export, and live non-dashboard adapters.
   PR14 first ships dashboard binding and dashboard parity.
+- Plan 05 owns the shared execution semantics. Plan 23 remains the current
+  owner of temporal retrieval semantics; Plans 25 and 31 own the unfinished
+  PR9 lexical/code and PR10 semantic deliveries. Plans 09/10/11/12/14 and Plan
+  24 are later consumers and may depend on behavior after PR8 acceptance, not
+  a superseded implementation shape.
 - The task/work delivery journey reuses these shared scope, budget,
   cancellation, cursor, watermark, merge, and coverage primitives to execute
   Plan 24 requests. Plan 24 owns those typed requests, graph
@@ -103,6 +110,10 @@ Every product surface can run the same bounded query use case and receive determ
 - **PR8 — compatibility:** compatibility bindings translate inputs and results
   only. They preserve the kernel's scope, temporal mode, watermarks, ordering,
   cursors, coverage, authorization, and cancellation without private fallback.
+  Audit this through each currently callable compatibility operation and direct
+  regressions against the shared kernel. Historical handler paths, type names,
+  fixture filenames, benchmark scripts, and test-module registration are not
+  independent rebuild requirements.
 
 - **PR5 — observation read:** add one typed observation point-read plus bounded
   sequence replay from the already resolved canonical profile or project store.
@@ -231,4 +242,7 @@ Every product surface can run the same bounded query use case and receive determ
   cohort/shard/profile identity, and task summaries cannot replace exact Plan
   13 anchors.
 - Benchmarks record corpus and watermark with p50/p95, candidate counts, allocations, peak RSS, shard opens, and quality deltas. No ranking change ships without direct held-out evidence and worst-stratum checks.
-- Architecture tests reject storage, transport, UI, policy, task-executor, and model-runtime dependencies from tracedecay-query, plus any LSP-private query engine or fallback.
+- Boundary regressions reject storage, transport, UI, policy, task-executor,
+  and model-runtime authority in the query kernel, plus any LSP-private query
+  engine or fallback. The gate follows the current owner boundary whether the
+  implementation remains a module or is extracted into a crate.

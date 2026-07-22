@@ -2,39 +2,53 @@
 
 ## Status / role
 
-Status: delivered incrementally in PR7, PR9, PR11, and PR12; PR15 adds the
-safe native-integration journey.
+Completion and activity status is owned solely by
+[the plan-set index](00-plan-set-index.md). This component plan defines
+retained PR11 native-Git/application requirements, PR12 CLI/MCP parity
+requirements, and the PR15 safe native-integration journey without inferring
+milestone status from branch artifacts.
 
 Native Git remains authoritative for objects, refs, working trees, indexes,
 attributes, ignore rules, hooks, signatures, and commit creation. TraceDecay
 adds typed evidence and a narrow preview/apply/receipt boundary; it is not a
 Git implementation or unrestricted command runner.
 
-## Shipped foundation retained
+The canonical owners are native Git for repository truth, the daemon Git
+transaction owner for serialized mutation and recovery, and Plan 09 for typed
+preview/apply application behavior. `HunkRef`, immutable preview identity, CAS
+evidence, and durable receipts are contract-bearing because callers and stored
+effects depend on them. Other historical Rust type names, files, schema
+registries, and packet fixtures are implementation evidence rather than
+artifacts to recreate.
 
-- PR7 records generation-bound repository/worktree/ref/HEAD/index provenance,
+## Retained PR11 and PR12 delivery requirements
+
+- PR7 delivery records generation-bound repository/worktree/ref/HEAD/index
+  provenance,
   native Git/object-format/adapter/options evidence, attributes/filters,
   sparse/submodule state, path and dirty-state classification, and distinct
   author/committer/provider/capture/topological time/order evidence. Missing,
   detached, unborn, conflicted, or partial state remains explicit. Paths and
   timestamps are observations, never identity or causality; no Git object is
   copied into TraceDecay storage.
-- PR9 exposes typed read-only status; staged/unstaged structured diff; bounded
-  history/object metadata; blame/line provenance; hunk-to-symbol/caller/
+- PR9 delivery exposes typed read-only status; staged/unstaged structured
+  diff; bounded history/object metadata; blame/line provenance; hunk-to-symbol/caller/
   diagnostics/test/ownership intelligence; branch-relative origin/destination
   impact with independent coverage; and read-only plans for excluded Git
   operations. The fixed adapter accepts typed inputs rather than raw flags and
   preserves native path, encoding, traversal, rename/follow, mailmap,
   attributes, and unavailable-state behavior.
-- PR9 also retains immutable `PullRequestSnapshot`, `ReviewThreadAnchor`, and
-  `CommentAnchor` evidence with provider IDs, base/head/merge-base, exact hunk,
+- PR9 delivery also retains immutable `PullRequestSnapshot`,
+  `ReviewThreadAnchor`, and `CommentAnchor` evidence with provider IDs,
+  base/head/merge-base, exact hunk,
   blob/content and original/current coordinates, lifecycle, URL, cursor/ETag,
   remap lineage, and complete/partial/unavailable/conflicted coverage. Diff or
   symbol remapping preserves source lineage and cannot fuzzily upgrade stale
   evidence to current without exact content-and-anchor identity. These
   operations never perform GitHub ingress themselves or post, update, reply
   to, resolve, dismiss, or otherwise mutate GitHub.
-- PR11 exposes only `stage_hunks`, `unstage_hunks`, and `commit_index`.
+- PR11 delivery exposes only `stage_hunks`, `unstage_hunks`, and
+  `commit_index`.
   Immutable `HunkRef` and repository snapshots bind the exact repository,
   worktree, base/index/worktree content, selected lines, attributes, and
   preview. The daemon serializes each operation, compare-and-swap revalidates
@@ -47,9 +61,11 @@ Git implementation or unrestricted command runner.
   rename/copy, filter, sparse-path, and other special hunk kinds retain
   explicit capability states; a kind without a proven native round trip stays
   read-only rather than yielding an applicable `HunkRef`.
-- PR12 exposes the same application operations, exact project scope,
+- PR12 must expose the same application operations, exact project scope,
   schemas, errors, rendering, and receipts through CLI and MCP. Transports
-  contain no Git logic or fallback mutation path.
+  contain no Git logic or fallback mutation path. This requirement is complete
+  only when the direct preview/apply parity journey passes; a catalog
+  declaration or schema alone is insufficient.
 
 ## PR15 user outcome
 
@@ -243,10 +259,11 @@ provable terminal outcome.
    mechanics. An unavailable daemon or capability leaves the operation
    explicitly preview-only or unavailable; no transport falls back to local
    mutation.
-5. **Preserve published compatibility.** Existing PR7/PR9/PR11/PR12 APIs,
-   stored provenance and anchors, CLI/MCP names, `HunkRef`/receipt behavior,
-   and supported rendering remain compatible delegates to the production
-   kernels. Forward migration imports only prior read-only evidence whose typed
+5. **Preserve published compatibility.** Existing supported APIs and any PR12
+   binding callable on the branch under review, together with
+   stored provenance and anchors, supported CLI/MCP names,
+   `HunkRef`/receipt behavior, and rendering, remain compatible delegates to
+   the production kernels. Forward migration imports only prior read-only evidence whose typed
    Plan 16 identity, object format, exact ref/commit relationship, and content
    digest validate; unverifiable path/ref/SHA, inferred topology, cached
    conflict, or mutable-log rows remain quarantined. Migration never invents a

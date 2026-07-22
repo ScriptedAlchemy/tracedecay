@@ -7,6 +7,13 @@ complete forward migration and atomic product cutover, then deletes superseded
 V1 implementations and temporary convergence machinery. This plan constrains
 that production journey; it is not a second product model.
 
+Names of superseded wrappers, ownership inventories, scorecards, ledgers,
+route registries, packets, and migration scaffolds are historical evidence,
+not prerequisites or features to recreate. Stable published aliases and
+persisted formats remain compatibility contracts until their declared
+migration or retirement; all other convergence is judged by the direct
+behavior and architecture boundaries below.
+
 ## User outcome
 
 After upgrading, every supported surface reaches one coherent V2 system.

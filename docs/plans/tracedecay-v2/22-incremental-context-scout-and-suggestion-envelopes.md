@@ -2,6 +2,13 @@
 
 **Delivery:** PR13
 
+Earlier Scout envelope names, conformance packets, fixture matrices, timing
+baselines, and file layouts are historical evidence, not prerequisites or
+artifacts that PR13 must recreate. Published or persisted suggestion fields
+retain their compatibility and migration obligations; acceptance otherwise
+follows the deterministic and model-assisted behavior, delivery controls,
+overlay safety, and regressions below.
+
 ## User outcome
 
 After a meaningful saved edit or host boundary, Context Scout can deliver one

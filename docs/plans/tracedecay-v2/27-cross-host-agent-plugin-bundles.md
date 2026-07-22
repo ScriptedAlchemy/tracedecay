@@ -9,6 +9,13 @@ verified Kimi Code and OpenCode capabilities and turns that foundation into
 installable, repairable host integrations that deliver the working feedback
 journey. It does not add a second catalog or a generic connector framework.
 
+PR6 bundle names, generated matrices, packet gates, exact file inventories,
+and intermediate registration scaffolding are historical evidence, not
+prerequisites or artifacts to recreate. Installed/persisted lifecycle state
+and published host contracts retain compatibility and migration obligations;
+all other retention is evaluated through install, repair, delivery,
+cross-platform, rollback, and conformance behavior below.
+
 ## PR13 user outcome
 
 A user can install TraceDecay into every supported host, make an edit or stop

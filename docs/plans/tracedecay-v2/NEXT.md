@@ -12,6 +12,12 @@ PR8 now implements the temporally correct Session/LCM retrieval path defined by
 [Plan 23](23-session-lcm-temporal-retrieval-and-evaluation.md) under the shared
 execution boundary in [Plan 05](05-query-crate.md).
 
+Names retained from completed foundation work are historical evidence, not
+instructions to restore an old type, file layout, fixture, milestone, or gate.
+Audits map retained behavior, migration, and recovery requirements to current
+canonical owners and direct regressions before declaring a gap; renamed or
+deleted machinery alone is not missing product behavior.
+
 ## Product slice
 
 Replace fragmented message search and LCM lookup with one bounded temporal

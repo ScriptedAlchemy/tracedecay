@@ -2,13 +2,18 @@
 
 ## Status and existing foundation
 
-PR9 established generation-bound diagnostic identity. PR11 established
-analyzer policy and configuration. PR12 ships the single-project daemon LSP
-3.17 gateway, stdio bridge, analyzer broker, typed routing operations,
-navigation/semantic methods, managed diagnostics, and the owned versioned
-TraceDecay LSP context extension. Those accepted capabilities remain intact.
+Completion status is owned solely by `00-plan-set-index.md`. This plan requires
+generation-bound diagnostic identity, analyzer policy and configuration, and
+the single-project daemon LSP 3.17 gateway, stdio bridge, analyzer broker,
+typed routing operations, navigation/semantic methods, managed diagnostics,
+and the owned versioned TraceDecay LSP context extension. These are required PR12
+behavior, not a historical declaration milestone; currently callable pieces
+must remain intact and missing callable pieces remain gaps.
 
-PR13 makes that gateway a real host-feedback surface: Claude Code packaging
+The daemon gateway/session/broker and the application LSP runtime are the
+canonical implementation path. Existing structs, files, protocol fixtures, and
+compile packets are evidence, not a contract spine to recreate. PR13 must make
+that gateway a real host-feedback surface: Claude Code packaging
 and protocol conformance, OpenCode custom LSP configuration and conformance,
 Cursor desktop native diagnostics, duplicate-analyzer handling, Plan 37
 finding projection, and one-root worktree feedback. Plan 27 owns installation
@@ -64,7 +69,7 @@ emulating LSP.
    diagnostic.
 4. LSP data contains only the bounded allowlist needed to identify, clear, and
    expand the finding. Bodies, diffs, logs, source, task narrative, histories,
-   cursors, receipts, and evidence packets remain behind authorized Plan 21
+   cursors, receipts, and full evidence remain behind authorized Plan 21
    reads.
 5. Resolution, deletion, authorization loss, head/content/generation drift, or
    supersession clears or republishes monotonically. Missing coverage never
@@ -80,12 +85,11 @@ Git, readiness, conflict, and proximity state before projection.
 
 ## Retained PR12 gateway capabilities
 
-- Retain the current gateway, protocol, capability, correlation, and
-  cancellation structs as the PR12 implementation default. This avoids a
-  parallel protocol model or conversion layer and preserves the negotiated
-  TraceDecay extension, field-level projection, stale-result suppression,
-  broker ownership, and host conformance already required below. Add no
-  otherwise-unused `lsp-types` dependency.
+- Extend the current daemon gateway implementation in place rather than
+  creating a parallel protocol model or conversion layer. Preserve negotiated
+  TraceDecay extension behavior, field-level projection, stale-result
+  suppression, broker ownership, and host conformance. Add no otherwise-unused
+  protocol dependency merely to mirror a historical type layout.
 - `async-lsp` remains a future candidate only if a measured conversion deletes
   gateway code, unifies rather than duplicates `lsp-types` versions, and
   passes the existing lifecycle, cancellation, reconnect, diagnostics, and

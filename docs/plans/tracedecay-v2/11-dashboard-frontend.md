@@ -9,6 +9,13 @@ lanes, dependency-commit and merge-order rails,
 conflict/proximity evidence, integration proposals and receipts, test/CI state,
 and temporal replay over the same canonical Work selection.
 
+Earlier component names, route inventories, fixture matrices, packet names,
+script lists, and frontend gate layouts are historical implementation evidence,
+not prerequisites or artifacts that PR14 or PR17 must recreate. Published URLs
+and persisted deep links retain compatibility and migration obligations; all
+other retention is judged by the user journeys, behavior, accessibility,
+performance, platform, and regression requirements below.
+
 ## Outcome
 
 The dashboard is TraceDecay's world-class flagship product surface: a polished,
@@ -114,90 +121,29 @@ deferred by this framing.
   route's bundle and interaction budget. No renderer becomes graph, query,
   health, readiness, ranking, or action authority.
 
-## Binding implementation map
+## Frontend ownership and compatibility
 
-PR14 keeps `dashboard/` as the single npm package and adds these exact shared
-surfaces rather than another dashboard package or route-local contract:
+The dashboard remains one product package with one responsive shell, one
+generated daemon contract boundary, one revision-monotone HTTP/SSE state path,
+one reusable evidence surface, and one renderer-neutral projection model.
+Workspaces and inspectors may be reorganized without changing those ownership
+boundaries. No workspace may ship as a navigation stub or fixture-only page,
+and presentation code must not import or reproduce Git, runtime, task-policy,
+CI, persistence, ranking, readiness, health, or remediation authority.
 
-- `dashboard/shell/src/router.tsx`, `WorkspaceShell.tsx`,
-  `PrimaryNavigation.tsx`, `ScopeBar.tsx`, and `DeepLinkCodec.ts` own the route
-  manifest, responsive shell, active scope, and versioned URL encoding.
-- `dashboard/lib/contracts/generated.ts` contains generated daemon DTOs;
-  `dashboard/lib/contracts/dashboard.ts`, `planner.ts`, `evidence.ts`, and
-  `visualization.ts` contain exhaustive frontend view contracts and runtime
-  decoders. Components never define narrower copies of those unions.
-- `dashboard/lib/state/DomainStateBoundary.tsx`,
-  `MonotoneEventReducer.ts`, and `LinkedSelectionStore.ts` own exhaustive state
-  rendering, revision-monotone HTTP/SSE application, and stable-ID selection.
-- `dashboard/lib/evidence/EvidencePacketPanel.tsx`,
-  `EvidenceTruthStrip.tsx`, `WhyThisResult.tsx`,
-  `RetrieverContributionTable.tsx`, `EvidenceCoverage.tsx`,
-  `EvidenceCitationList.tsx`, and `EvidenceExpansionDialog.tsx` form the one
-  reusable provenance surface.
-- `dashboard/lib/visualization/ProjectionViewport.tsx`,
-  `ProjectionTable.tsx`, `TemporalPlayback.tsx`, `FilterBar.tsx`,
-  `SelectionInspector.tsx`, `rendererAdapter.ts`,
-  `defaultCanvasAdapter.ts`, and `projectionManifest.ts` form the
-  renderer-neutral interaction surface.
-- `dashboard/brain/src/BrainWorkspace.tsx`,
-  `dashboard/explorer/src/ExplorerWorkspace.tsx`,
-  `dashboard/explorer/src/PlannerQueryPanel.tsx`,
-  `dashboard/explorer/src/ParallelSourceProgress.tsx`,
-  `dashboard/loom/src/LoomWorkspace.tsx`,
-  `dashboard/code-diagnostics/src/CodeDiagnostics.tsx`, and
-  `dashboard/observatory/src/{ObservatoryWorkspace,DoctorRoute,RecoveryRoute}.tsx`
-  own the flagship investigation journey.
-- `dashboard/sessions/src/SessionsWorkspace.tsx`,
-  `dashboard/agents/src/AgentsWorkspace.tsx`,
-  `dashboard/knowledge/src/KnowledgeWorkspace.tsx`,
-  `dashboard/delivery/src/DeliveryWorkspace.tsx`,
-  `dashboard/automations/src/AutomationsWorkspace.tsx`,
-  `dashboard/costs/src/CostsWorkspace.tsx`, and
-  `dashboard/settings/src/SettingsPanel.tsx` own the remaining PR14
-  workspaces. Their route contract/DOM cases live in
-  `dashboard/test/workspace-route-contracts.vitest.tsx`; no workspace may ship
-  as a navigation stub or fixture-only page.
-- PR17 adds `dashboard/lib/contracts/executionTopology.ts`,
-  `dashboard/work/src/WorkWorkspace.tsx`,
-  `projections/{WorkKanban,WorkDag,WorkTimeline,WorkCausal,WorkloadProjection,ExecutionTopologyProjection}.tsx`,
-  `WorkItemInspector.tsx`, `TaskProposalPreview.tsx`,
-  `AuxiliaryAttemptInspector.tsx`, and the exact topology components under
-  `dashboard/work/src/topology/`: `ExecutionTopologyToolbar.tsx`,
-  `TopologyLaneBoard.tsx`, `ExecutionPlacementLane.tsx`,
-  `BranchTopologyLane.tsx`, `ReviewTopologyLane.tsx`,
-  `IntegrationStrategyLane.tsx`,
-  `DependencyCommitRail.tsx`, `MergeOrderRail.tsx`,
-  `ConflictProximityHeatmap.tsx`, `ExecutionTruthStrip.tsx`,
-  `ExecutionTopologyInspector.tsx`, `IntegrationProposalPanel.tsx`,
-  `IntegrationOperationDialog.tsx`, and `IntegrationReceiptPanel.tsx`.
-  `dashboard/work/src/topology/topologyManifest.ts` normalizes the visual,
-  table, and playback representations; `topologyEventReducer.ts` applies the
-  generated event union monotonically. All projections consume one Plan 24
-  selection and graph version. None of these files imports a Git adapter,
-  process/runtime provider, Plan 24 evaluator, Plan 32 scheduler, CI client, or
-  persistence API.
-
-The route manifest is `/brain`, `/explorer`, `/loom`, `/sessions`,
-`/agents`, `/code`, `/knowledge`, `/delivery`, `/automations`,
-`/observatory`, `/costs`, `/settings`, and PR17 `/work`. Entity inspectors use
-child routes such as `/code/diagnostics/:findingId`,
-`/observatory/doctor/:findingId`, `/observatory/recovery/:operationId`,
-`/work/items/:workItemId`, `/work/proposals/:proposalId`, and
-`/work/attempts/:attemptId`. A deep link carries opaque scope, selection,
-entity/graph version, valid time, observation time, filter revision, lens, and
-evidence-anchor IDs. It never carries source/prompt/output bytes, card indexes,
-screen coordinates, PID, CWD, mutable labels, or renderer serialization.
-Expired, revoked, ambiguous, denied, and stale links render typed states and
-never fall back to the active checkout or current version.
-The execution-topology lens uses the existing `/work/items/:workItemId` route
-with `lens=execution-topology`; operation receipts use
-`/work/operations/:operationId`. A topology deep link additionally pins the
-work-item version, work-plan/graph version, topology revision,
-repository-snapshot digest, worktree generation, branch/ref plus
-base/head/merge-base object IDs when available, valid/observation time,
-source-watermark digest, and evidence-anchor IDs. Missing or unauthorized
-identity renders a typed state; it never resolves by title, branch label,
-filesystem path, stack position, card order, or current checkout.
+Published workspace and entity URLs remain supported compatibility surfaces,
+including Brain, Explorer, Loom, Sessions, Agents, Code, Knowledge, Delivery,
+Automations, Observatory, Costs, Settings, Work, and their diagnostic,
+Doctor/recovery, work-item, proposal, attempt, and operation inspectors. A
+deep link carries opaque scope, selection, entity/graph version, valid and
+observation time, filter revision, lens, and evidence-anchor identity. The
+execution-topology lens additionally pins the work-item/plan/topology and exact
+repository/worktree/ref snapshot identities needed by its contract. Links
+never carry private payloads, card or screen coordinates, process/CWD state,
+mutable labels, or renderer serialization. Expired, revoked, ambiguous,
+denied, stale, missing, or unauthorized identity renders a typed state and
+never falls back to title, path, branch label, lane order, active checkout, or
+latest version.
 
 ## Typed presentation contracts
 
@@ -290,8 +236,8 @@ evaluators, provider/runtime adapters, or persistence.
 
 ## Execution-topology presentation contract
 
-`dashboard/lib/contracts/executionTopology.ts` exhaustively decodes the
-application-owned `ExecutionTopologyViewV1` and
+The frontend contract boundary exhaustively decodes the application-owned
+`ExecutionTopologyViewV1` and
 `ExecutionTopologyEventV1` generated DTOs. It does not redefine Plan 24,
 Plan 32, Plan 36, or Plan 37 enums. The view pins one
 `WorkProjectionSelection`, graph version, topology revision,
@@ -344,23 +290,23 @@ MergeOrderChanged | ConflictProximityChanged | IntegrationProposalChanged |
 IntegrationOperationChanged | ReviewTopologyCapabilityChanged |
 TestCheckChanged | TopologyFrameAppended`.
 Every event carries stream/run identity, event and entity revision, scope,
-observation time, source watermark, and coverage. `topologyEventReducer.ts`
+observation time, source watermark, and coverage. The monotone event reducer
 deduplicates by stream/event/revision, rejects stale generations, retains
 receipts already observed, and triggers one canonical refetch on a revision
 gap. It never derives a branch stack, merge order, conflict result, readiness,
 or legal action.
 
-`TopologyLaneBoard` is a synchronized grouping of the canonical selection,
+The topology lane board is a synchronized grouping of the canonical selection,
 not another board. A work item has one stable selection identity even when
 referenced by task, worktree, and stack lanes. Worktree and stack grouping can
 be independently enabled only when their lane-family state is `available`;
 their off state does not remove entities or change canonical totals.
-`DependencyCommitRail` distinguishes required, present, missing, stale,
-denied, and unknown commits. `MergeOrderRail` distinguishes proposed,
+The dependency-commit rail distinguishes required, present, missing, stale,
+denied, and unknown commits. The merge-order rail distinguishes proposed,
 accepted-graph, observed-native, superseded, and unknown order; spatial order
 never becomes an instruction.
 
-`ConflictProximityHeatmap` exposes a synchronized accessible matrix with
+The conflict/proximity view exposes a synchronized accessible matrix with
 separate mechanical and semantic columns, relationship paths, freshness,
 coverage, omitted counts, and exact evidence expansion. Exact same-range or
 symbol overlap remains distinct from configured-threshold proximity.
@@ -368,7 +314,7 @@ Denied/private cells expose neither hidden actor, root, address, count, nor
 content. Partial or unknown mechanical coverage cannot render “clean merge”;
 partial or unknown semantic coverage cannot render “no overlap.”
 
-`ExecutionTopologyInspector` is rooted in the opaque Plan 24 `TaskId`
+The execution-topology inspector is rooted in the opaque Plan 24 `TaskId`
 (`WorkItemId`) and exact `WorkItemVersionId`. Every lane, rail, heat cell,
 proposal, event, receipt, test, and check pivots through that root while
 preserving graph/topology/scope/time/watermark/anchor identity. Expansion
@@ -377,7 +323,7 @@ unauthorized/denied/stale/revoked/expired/missing/corrupt/partial/error
 states. A compact card, summary, truncated event tail, or stack alias never
 substitutes for the lossless TaskId drill-down.
 
-`IntegrationOperationDialog` renders only legal actions returned for the
+The integration operation dialog renders only legal actions returned for the
 selected exact version. `RequestDryRun` is always effect-free and returns a
 new immutable preview or a typed stale/denied/locked/unsupported result.
 `RequestApply` is present only where an owning application operation has
@@ -498,12 +444,12 @@ effect-unknown, failed, or recovered receipt state without redispatch.
   through the typed application API, and never derives remediation from
   diagnosis. Reload by operation ID resumes preview, dispatch, receipt, or
   verification without redispatch.
-- Pinned Hermes dashboard and delegation UI evidence at `c48d53413aa2c`
-  (`plugins/kanban/dashboard/plugin_api.py`,
-  `ui-tui/src/components/agentsOverlay.tsx`) establishes useful visibility:
-  familiar task lanes, task/run drawers, delegation trees, worker inspection,
-  bounded output/event tail, termination, diagnostics, dispatch status, and
-  live updates. The Work workspace provides those outcomes over canonical
+- Historical Hermes dashboard and delegation UI evidence established useful
+  visibility patterns: familiar task lanes, task/run drawers, delegation
+  trees, worker inspection, bounded output/event tail, termination,
+  diagnostics, dispatch status, and live updates. The old commit and file
+  names are evidence, not dependencies or assets to recreate. The Work
+  workspace provides those outcomes over canonical
   Plan 24/32 identities, plus explicit stale/partial/recovery state. Kanban is
   one synchronized projection; the delegation tree and attempt timeline are
   linked projections, not alternate task stores.
@@ -528,10 +474,10 @@ effect-unknown, failed, or recovered receipt state without redispatch.
 
 ## Renderer-neutral interaction and fallback contract
 
-The required default renderer is `defaultCanvasAdapter.ts` under the
-repository's permissive license and works offline. `rendererAdapter.ts` has
-only `mount`, `render`, `setViewport`, `setTransientSelection`, `focus`, and
-`destroy`; callbacks emit stable-ID presentation intents. Semantic cluster
+The required default renderer ships under the repository's permissive license
+and works offline. Its adapter exposes only mounting, rendering, viewport,
+transient-selection, focus, and destruction behavior; callbacks emit stable-ID
+presentation intents. Semantic cluster
 membership, labels, explanations, causal edges, rank, critical path, legal
 actions, readiness, and coverage arrive in `ProjectionView`. An adapter may
 position or visually bundle entities but may not create or persist those
@@ -551,8 +497,8 @@ and return-to-live. The browser does not interpolate events into canonical
 history or infer causality from proximity. Search, filter, linked selection,
 cluster expansion, playback, evidence expansion, and lens changes preserve
 scope and deep-link identity.
-Execution-topology playback reuses this controller and
-`topologyEventReducer.ts`. It can replay graph versions, worktree/stack
+Execution-topology playback reuses the shared controller and monotone event
+reducer. It can replay graph versions, worktree/stack
 observations, dependency-commit and merge-order changes, conflict/proximity
 evidence, leases/attempts, proposals, operation receipts, tests, and CI
 observations. Playback controls are presentation-only: pausing or seeking does
@@ -680,90 +626,34 @@ TaskId drill-down, and dual-time playback; and governed dry-run/apply/cancel
 controls with stale, denied, locked, unsupported, effect-unknown, crash-safe
 receipt, performance, authority-negative, and Plan 26 parity coverage.
 
-The contracts and fixtures are prerequisites inside those production slices,
-not standalone completion phases.
+Supporting contracts and tests land inside those production slices rather than
+as standalone completion phases. Their historical names and layouts are not a
+prerequisite spine.
 
-Fixtures live under `dashboard/test/fixtures/` and include
-`dashboard-state-taxonomy.json`, `planner-parallel-source-progress.json`,
-`evidence-packet-matrix.json`, `evidence-expansion-states.json`,
-`late-context.ndjson`, `deep-link-state-matrix.json`,
-`projection-parity.json`, `renderer-fallback.json`,
-`work-projection-matrix.json`, `auxiliary-attempt-matrix.json`,
-`execution-topology-matrix.json`, `execution-topology-events.ndjson`,
-`integration-operation-matrix.json`,
-`doctor-source-disagreements.json`, `github-feedback-matrix.json`,
-`dashboard/test/fixtures/generators/graphScale.mjs`, and
-`dashboard/test/fixtures/generators/sseChurn.mjs`. Plan 14 defines their exact
-fixture IDs and assertions; these names are the one canonical manifest.
-Generated load bytes are never a product authority.
+Behavioral tests cover the state taxonomy, planner progress, evidence
+expansion, late context, deep links, visual/table parity, renderer fallback,
+all Work projections, auxiliary attempts, execution topology, integration
+operations, Doctor disagreements, GitHub feedback, graph scale, and SSE churn.
+Fixture names and layouts may evolve or consolidate; generated load data is
+never product authority, and zero-case or zero-sample runs fail visibly.
 
-Vitest + Testing Library own contract/DOM tests, MSW owns HTTP/SSE fault
-injection, Playwright Chromium/Firefox/WebKit owns keyboard/responsive/smoke
-and ARIA snapshots, `@axe-core/playwright` owns automated WCAG checks,
-Lighthouse CI owns startup/bundle gates, and CDP Performance/Tracing/
-HeapProfiler owns frame/long-task/memory gates. Manual NVDA/Firefox and
-VoiceOver/Safari records are required; axe and screenshots cannot substitute
-for semantic assertions or assistive-technology completion.
+Vitest and Testing Library cover contract and DOM behavior, MSW covers
+HTTP/SSE faults, Playwright covers supported-browser keyboard, responsive,
+smoke, and semantic accessibility behavior, automated accessibility tooling
+covers WCAG checks, Lighthouse covers startup and bundles, and browser
+performance tooling covers frame, long-task, and memory behavior. Manual
+NVDA/Firefox and VoiceOver/Safari completion remains required; screenshots or
+automated checks cannot substitute for semantic assertions or assistive-
+technology use.
 
-PR14 retains `build`, `test:node`, `test:dom`, `smoke`, and `smoke:mobile`;
-adds exact dev dependencies `msw`, `@playwright/test`,
-`@axe-core/playwright`, and `@lhci/cli`; and adds
-`dashboard/playwright.config.ts`, `dashboard/lighthouserc.cjs`,
-`dashboard/test/msw/handlers.ts`, `dashboard/test/perf/reference-profile.json`,
-`dashboard/test/perf/dashboard.perf.spec.ts`,
-`dashboard/test/perf/runner.mjs`, `dashboard/test/acceptance.mjs`,
-`dashboard/test/manual/nvda-firefox-protocol.md`,
-`dashboard/test/manual/voiceover-safari-protocol.md`,
-`dashboard/test/manual/result.schema.json`,
-`dashboard/test/manual/results/nvda-firefox-pr14.json`,
-`dashboard/test/manual/results/voiceover-safari-pr14.json`,
-`dashboard/test/usability/protocol.md`,
-`dashboard/test/usability/result.schema.json`, and
-`dashboard/test/usability/results/pr14.json`. PR17 adds
-`dashboard/test/execution-topology-matrix.vitest.tsx`,
-`dashboard/test/execution-topology-actions.vitest.tsx`,
-`dashboard/test/execution-topology-playback.vitest.tsx`, and
-`dashboard/test/e2e/execution-topology.spec.ts`.
-`test:acceptance` executes, in
-order, build, test:node, the narrowed legacy test:dom suite, contracts, a11y,
-responsive, renderer parity, authority-negative, work-topology, performance,
-Lighthouse, SSE, e2e, smoke, and smoke:mobile, then validates both manual
-records and the usability results against their schemas and thresholds. The
-Playwright configuration includes an exact `work-topology` project on
-Chromium, Firefox, and WebKit with the responsive and keyboard matrices above.
-Test and measurement
-scripts fail when zero cases or samples execute and print fixture/state/sample
-counts; build and Cargo check fail on compile or validation error.
-
-The implementation adds these exact script bodies to
-`dashboard/package.json`:
-
-```json
-{
-  "test:dom": "vitest run test/code-graph-explorer-hooks.vitest.tsx test/curation-data.vitest.tsx test/curation-panel.vitest.tsx test/pending-automation-counts.vitest.tsx test/semantic-map-interactions.vitest.ts test/settings-panel-patches.vitest.ts test/settings-panel.vitest.tsx",
-  "test:contracts": "vitest run test/dashboard-contracts.vitest.ts test/dashboard-state-matrix.vitest.tsx test/workspace-route-contracts.vitest.tsx",
-  "test:a11y": "playwright test --config=playwright.config.ts --project=a11y",
-  "test:responsive": "playwright test --config=playwright.config.ts --project=responsive",
-  "test:renderer-parity": "vitest run test/projection-parity.vitest.tsx && playwright test --config=playwright.config.ts --project=renderer",
-  "test:authority-negative": "vitest run test/authority-negative.vitest.ts",
-  "test:work-topology": "vitest run test/execution-topology-matrix.vitest.tsx test/execution-topology-actions.vitest.tsx test/execution-topology-playback.vitest.tsx && playwright test --config=playwright.config.ts --project=work-topology",
-  "test:perf": "node test/perf/runner.mjs",
-  "test:lighthouse": "lhci autorun --config=lighthouserc.cjs",
-  "test:sse": "vitest run test/monotone-events.vitest.ts test/late-context.vitest.tsx && node test/perf/runner.mjs --suite=sse",
-  "test:e2e": "playwright test --config=playwright.config.ts --project=chromium --project=firefox --project=webkit",
-  "test:acceptance": "node test/acceptance.mjs"
-}
-```
-
-The individual scripts above are focused developer entrypoints.
-`test:acceptance` is the sole aggregate frontend invocation and does not invoke
-itself. The release gate is exactly:
-
-```bash
-npm --prefix dashboard run test:acceptance
-cargo test --all-features --test dashboard_api_test
-cargo check --all-features
-```
+Focused developer commands and the aggregate frontend/repository gate may be
+reorganized as the test layout evolves. The aggregate must execute build,
+contract/DOM, accessibility, responsive, renderer parity, authority-negative,
+Work topology, performance, SSE, cross-browser end-to-end, smoke, manual
+assistive-technology, and usability checks; fail when required cases or samples
+do not execute; and preserve the direct all-feature integration checks. Old
+script bodies, fixture manifests, and command ordering are historical evidence,
+not mandatory recreation.
 
 ## Acceptance
 
@@ -773,9 +663,10 @@ cargo check --all-features
   and PR17 Work.
 - Unit, DOM, accessibility, and smoke tests cover critical journeys and all state classes.
 - Performance tests bound initial payloads, long lists, graph rendering, and live-update churn.
-- `npm --prefix dashboard run test:acceptance` executes contract, DOM,
+- The aggregate frontend acceptance path executes contract, DOM,
   accessibility, responsive, renderer/semantic parity, authority-negative,
-  performance, SSE, and end-to-end gates and reports fixture/state counts.
+  performance, SSE, and end-to-end behavior and reports nonzero case/state
+  counts.
 - Representative graph-size acceptance measures interaction latency for zoom,
   pan, filter, search, brushing, linked selection, clustering, playback, and
   evidence expansion. Renderer parity compares semantic selection, scope,
@@ -785,16 +676,16 @@ cargo check --all-features
   finding to exact evidence, resuming a handoff, understanding uncertainty,
   applying and overriding only legal actions, and distinguishing dispatch from
   verified recovery.
-- PR17 DOM/accessibility/parity fixtures cover decomposition review, routing
+- PR17 DOM/accessibility/parity tests cover decomposition review, routing
   explanation, fallback/abstention, independent-review status, calibration,
   exact model-version drift, censored/unknown outcomes, stale live proposals,
   and explicit human override without browser-local scoring.
-- PR17 auxiliary-attempt fixtures cover provider negotiation, request versus
+- PR17 auxiliary-attempt tests cover provider negotiation, request versus
   attempt lineage, progress/stream truncation, explicit fallback,
   cancellation escalation, restart/resume, artifacts, and all terminal states
   without browser-local process execution, output parsing, provider selection,
   or graph/runtime mutation.
-- PR17 execution-topology fixtures cover no-Git tasks, optional/unsupported
+- PR17 execution-topology tests cover no-Git tasks, optional/unsupported
   worktree and local-stack lanes, all four independent dimensions,
   local-stack-without-PR and PR-stack-without-worktree, all four GitHub stack
   capability states plus generic fallback, exact dependency commits, proposed
@@ -815,12 +706,12 @@ cargo check --all-features
   clicks return one receipt, stale previews cannot apply, cancellation never
   rewrites a committed receipt, and an ineligible/unsupported native
   integration, rebase, or force operation never gains an apply control.
-- PR17 dashboard fixtures render each canonical auxiliary-provider finding and
+- PR17 dashboard tests render each canonical auxiliary-provider finding and
   cross-owner disagreement from Plan 14, preserve Plan 20 desired/observed
   revisions and Plan 27/32/26 provenance, and invoke only the supplied typed
   remediation reference. No component-local health formula, implicit config
   write, host repair, lease reclaim, or attempt cancellation is allowed.
-- Pinned-Hermes-derived DOM/accessibility fixtures cover familiar derived
+- DOM/accessibility tests retain the historically validated familiar derived
   lanes, task/run/delegation drill-down, event tail, diagnostics,
   capacity/blocker reasons, terminal protocol violation, termination,
   skills/hints discoverability, and deterministic restart/recovery without

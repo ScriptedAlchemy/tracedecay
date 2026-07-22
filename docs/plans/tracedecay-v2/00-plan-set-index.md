@@ -57,8 +57,14 @@ provenance, corrections and trust, curation, migration, deletion lineage,
 dogfood hardening, and accepted aggregate evidence. PR8 now owns the active
 Session/LCM temporal-retrieval slice.
 
-The removed planning/evidence machinery is not unfinished product work and must
-not be rebuilt.
+Completed-slice names are historical implementation evidence, not instructions
+to recreate a type, file layout, fixture filename, milestone, or gate. A deleted
+or renamed mechanism does not mean the feature is missing. Later audits must
+first map every retained product, semantic, migration, and recovery requirement
+to its current canonical owner and direct behavior/regression evidence; only
+missing callable behavior or a missing direct regression is a product gap.
+Removed planning/evidence machinery is not unfinished product work and must not
+be rebuilt.
 
 ## Delivery rules and practical safety baseline
 
@@ -147,7 +153,7 @@ delivery phases:
 | PR9 | Code intelligence and lexical retrieval: deterministic extraction with typed edge authority and coverage, exact occurrence identity plus evidenced/abstaining lineage, generation-bound managed diagnostics/tests, a non-demotable exact/phrase/BM25 tier, typed quantifier inputs, V1 parity, and typed read-only Git status/diff/history/blame/hunk intelligence enriched by graph impact. |
 | PR10 | Native semantic retrieval and ranking: gated FastEmbed artifacts, immutable vector generations, exact flat-vector baseline/oracle, measured hybrid/reranking candidates, calibrated abstention, redundancy augmentation, and byte-stable lexical fallback; ANN, late interaction, and quantization are optional only after locked admission evidence. |
 | PR11 | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, analyzer policy/settings, one runtime configuration authority, daemon-serialized `stage_hunks`/`unstage_hunks`/`commit_index` transactions with `HunkRef` compare-and-swap and receipts, and the typed branch-aware feedback-cycle request/result and orchestration ([Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)) — first pillar of the PR11–PR13 read-only/advisory milestone (post-edit diagnostics and impact). |
-| PR12 | CLI, MCP, HTTP API, LSP gateway, and output convergence: one revisioned schema registry, dispatcher, binding taxonomy, semantic problem model, capability intersection, and executable lifecycle/stream/cancellation contract; stable errors/cursors, compact Markdown, canonical JSON, managed diagnostics, semantic surface parity, shared Git preview/apply bindings, callable canonical feedback diagnostics/impact reads with HTTP parity, and [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s PR12 slice — [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)'s standard projections plus a negotiated, versioned TraceDecay LSP context extension for diagnostics, impact, affected tests, and test results, and the explicit diagnostics-call trigger/surface bound once through [Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) — completing the post-edit diagnostics-and-impact pillar for LSP/MCP/CLI/HTTP surfaces. Dashboard binding starts in PR14. |
+| PR12 | CLI, MCP, HTTP API, LSP gateway, and output convergence: one revisioned schema authority, dispatcher, binding taxonomy, semantic problem model, capability intersection, and executable lifecycle/stream/cancellation contract; stable errors/cursors, compact Markdown, canonical JSON, managed diagnostics, semantic surface parity, shared Git preview/apply bindings, callable canonical feedback diagnostics/impact reads with HTTP parity, and [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s PR12 slice — [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)'s standard projections plus a negotiated, versioned TraceDecay LSP context extension for diagnostics, impact, affected tests, and test results, and the explicit diagnostics-call trigger/surface bound once through [Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) — completing the post-edit diagnostics-and-impact pillar for LSP/MCP/CLI/HTTP surfaces. Dashboard binding starts in PR14. |
 
 ## PR13 — feedback in every supported host
 

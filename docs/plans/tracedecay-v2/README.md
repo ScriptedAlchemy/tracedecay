@@ -88,6 +88,14 @@ not prove product behavior. Performance instrumentation ships with the
 production path it measures, and optimization keeps only reproducible practical
 gains with equivalent results.
 
+For completed slices, historical type names, file layouts, fixture names,
+milestones, and gates are implementation evidence rather than rebuild
+obligations. A deleted or renamed mechanism does not mean the feature is
+missing. Before reporting a gap, later audits must map each retained product,
+semantic, migration, and recovery requirement to the current canonical owner
+and direct behavior/regression evidence. Only missing callable behavior or a
+missing direct regression is a gap.
+
 High-confidence architecture and explicit rejection findings are normative.
 Medium-confidence models, algorithms, topology choices, renderers, ranking
 profiles, calibration methods, and performance mechanisms remain versioned
@@ -129,8 +137,9 @@ placement never become repository or hosted-CI requirements.
 Long-running product operations never acquire an automatic no-progress timeout,
 rewrite, or hidden agent decision. Real product generation is allowed when it
 removes duplicate authorities and follows
-[RUST-METAPROGRAMMING.md](RUST-METAPROGRAMMING.md); generated planning models
-remain non-product.
+[RUST-METAPROGRAMMING.md](RUST-METAPROGRAMMING.md). Planning documents,
+inventories, registries, matrices, and generated declarations remain
+non-product and never justify implementation or CI by themselves.
 
 The current executable slice is always [NEXT.md](NEXT.md). This roadmap is
 contributor documentation, never daemon input, workflow input, product state, or

@@ -8,6 +8,13 @@ public operation, including the PR12 base and all later accepted additions, and
 publishes working Rust, TypeScript, and Python SDKs. No operation family or
 language is deferred.
 
+Earlier operation inventories, compatibility matrices, generated declarations,
+package fixtures, and conformance packets are historical evidence, not
+prerequisites or artifacts that PR18 must recreate. Published operation names,
+wire schemas, SDK APIs, and persisted cursors or receipts remain compatibility
+contracts; all other retention is judged by the direct cross-language,
+lifecycle, platform, and regression behavior below.
+
 ## User outcome
 
 An external developer can install any supported SDK, connect to a local daemon
@@ -82,15 +89,15 @@ Equivalent SDK, CLI, MCP, and HTTP calls have equivalent authorization,
 meaning, stable error codes, redaction, effects, and lifecycle behavior even
 when their syntax is idiomatic to the surface.
 
-### Compatibility and lifecycle matrix
+### Compatibility and lifecycle behavior
 
-Each accepted operation has an executable compatibility row across CLI, MCP,
-HTTP, Rust, TypeScript, and Python. The row identifies supported syntax,
+Each accepted operation proves compatibility across CLI, MCP, HTTP, Rust,
+TypeScript, and Python. Conformance covers supported syntax,
 protocol/capability range, required authorization, paging or stream shape,
 retry class, cancellation support, reconnect/resume behavior, stable errors,
-and any explicit transport limitation. The matrix is generated from and tested
-against callable adapters; it is not a manually maintained inventory or an
-acceptance artifact by itself.
+and explicit transport limitations through callable adapters. A generated or
+manually maintained matrix is optional implementation evidence, not a product
+requirement or acceptance artifact.
 
 Within a major protocol version, additive changes preserve compatibility.
 Breaking changes negotiate a new major version and return an actionable error.
@@ -152,7 +159,7 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
   idempotency, reconnect/resume, problems, and receipts rather than generating
   client-side product behavior.
 - Use `oasdiff` and ecosystem semver tooling to detect structural and published
-  compatibility changes, then keep the behavioral/lifecycle matrix below as
+  compatibility changes, then keep direct behavioral/lifecycle tests as the
   authority. If Aide or generated bindings lose an accepted union, error,
   stream, or cancellation semantic, reject that path or repair the handwritten
   façade; do not weaken the operation or accept schema/compilation parity as

@@ -10,6 +10,13 @@ a benchmark service, performance protocol, execution ledger, leaderboard, or
 parallel product path. Accepted production observability and comparison
 artifacts are the only durable evidence for optimization disposition.
 
+Names and layouts of earlier benchmarks, baselines, soak packets, matrices,
+scorecards, and profiling harnesses are historical evidence, not prerequisites
+or artifacts that PR20 must recreate. Persisted measurement descriptors and
+published performance profiles retain compatibility obligations; acceptance
+otherwise follows the production-journey measurements, semantic guardrails,
+platform coverage, and regression behavior below.
+
 ## User outcome
 
 TraceDecay's shipped workflows become materially faster or less

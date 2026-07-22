@@ -9,6 +9,13 @@ LSP, inventory, and safe native Git integration. This plan owns scope identity,
 resolution, and coverage. [Plan 36](36-git-aware-change-context-and-index-transactions.md)
 owns Git preflight, apply, receipts, and recovery over the exact resolved scope.
 
+Earlier collection, stack, resolver, fixture, and migration artifact names are
+historical evidence, not prerequisites or mandatory recreation targets.
+Published selectors and persisted collection or stack records retain their
+compatibility and migration obligations; all other retention is evaluated
+through the direct scope, inventory, Git, platform, and regression behavior
+below.
+
 ## User outcome
 
 A user can name several repositories or worktrees directly or through a saved

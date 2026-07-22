@@ -8,6 +8,13 @@ references, and desired-versus-observed activation. CLI, MCP, HTTP, dashboard,
 Doctor, policy, runtime, and provider discovery consume the same daemon-owned
 resolution.
 
+The canonical mechanism is the daemon-owned configuration authority and its
+callable application reads and mutations. Stored revisions, redacted audit,
+snapshot digests, and activation evidence are durable contracts; historical
+schema-registry names, exact setting-definition files, migration packets, and
+fixture inventories are not. Missing effective behavior or an unreachable
+mutation is a gap; a renamed/deleted declaration scaffold is not.
+
 PR17 adds only the settings needed by the executable work loop. It does not
 create a workflow-specific registry or provider-local configuration source.
 
@@ -37,7 +44,7 @@ reroute or reinterpret an active attempt.
    or accepting a replan is a separate authorized operation; neither happens
    implicitly.
 
-## Existing control-plane behavior retained
+## Retained control-plane behavior
 
 - Each setting has one typed definition with key, value type, default,
   validation, sensitivity, scope, deprecation, and documentation.

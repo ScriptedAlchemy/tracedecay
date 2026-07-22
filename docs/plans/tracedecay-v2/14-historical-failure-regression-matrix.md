@@ -9,6 +9,12 @@ ledger, exact fixture inventory, compatibility catalog, Doctor kernel, plan
 parser, generated gate, or requirement that PR descriptions reference this
 file.
 
+Names of retired fixtures, matrices, packets, files, and intermediate
+milestones are historical evidence only and are not features to recreate.
+Published or persisted contracts keep their compatibility obligations;
+otherwise retention is judged by the observable behavior, platform coverage,
+migration outcome, and regression classes in this plan.
+
 ## Outcome
 
 No slice is complete merely because its happy path passes. Its direct product

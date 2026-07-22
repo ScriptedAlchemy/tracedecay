@@ -73,161 +73,87 @@ the same rows, order, provenance, coverage, and checkpoint.
   recovery, and repair receipts; they do not manufacture findings from source
   code or documentation metadata.
 
-## External-source projection contract
+## External-source projection behavior
 
-The first external-source view adds
-`crates/tracedecay-projectors/src/{lib,projector,frontier,external,lineage,error}.rs`,
-`crates/tracedecay-projectors/tests/{frontier_contract,source_state,replay_convergence}.rs`,
-`crates/tracedecay-store/src/projection/{frontier,commit}.rs`, and
-`crates/tracedecay-store/tests/projection_contract.rs`, plus
-`src/global_db/observation_projection/{frontier,commit}.rs`. It consumes
-`SourceId`, `NativeObjectId`, `SourceRevisionId`, `SourceFrontierSetV1`, and the
-owner binding from Plan 01.
+The canonical projection owner consumes Plan 01 source/native-object/revision,
+frontier, and binding semantics and Plan 02's atomic projection persistence. It
+does not prescribe a module tree, trait declaration, table family, fixture
+filename, or generated inventory.
 
-```rust
-pub trait Projector {
-    type State;
-    type Effect;
+- Projection is a pure transition from prior view state plus a committed
+  sanitized observation or payload-free partition-snapshot completion event.
+  Inputs pin exact binding, partition, expected projection frontier, and source
+  frontier. Output contains next state, concrete view effects, explicit
+  lineage, next frontier, and applied/duplicate-no-op/blocked disposition.
+- The daemon store adapter atomically verifies projector/version, exact
+  project/profile owner, source partition, expected projection frontier, source
+  definition revision, binding revision/digest, and source frontier;
+  insert-or-verifies concrete effects; appends lineage; updates current
+  pointers or tombstones and partition/aggregate frontiers; and records an
+  idempotent receipt. Any failure rolls all of it back.
+- Snapshot completion is payload-free evidence emitted only after all staged
+  observations for that provider snapshot. Complete coverage may compare the
+  staged object set with the prior published set and derive absence tombstones.
+  Partial or unknown completion derives none. Duplicate completion, including
+  an authoritative empty root, is a no-op.
+- Each partition frontier retains projector/version, binding revision/digest,
+  partition, source cursor, sanitized observation sequence, content state,
+  coverage, continuation, last complete snapshot, and input/output digests.
+  The aggregate frontier is a sorted mapping of binding/partition frontiers plus
+  its digest; it never collapses incomparable partitions to a scalar maximum or
+  treats the digest as an external cursor.
+- `Live` means committed sanitized local evidence at a receipt/frontier.
+  `AuthoritativeDeleted` requires explicit deletion or declared absence in a
+  complete authoritative snapshot and appends a tombstone while retaining
+  history. `Partial` commits admitted evidence and an explicit
+  gap/continuation without advancing the last-complete snapshot.
+  `TemporarilyUnavailable` retains the prior projection and complete frontier
+  while recording unavailable coverage.
+- Plan 06 access results (`PolicyExcluded` and `Unauthorized`) are composed by
+  Plan 09 and are never persisted as source truth or used to advance a
+  frontier. Exclusion blocks use/disclosure but does not execute retention.
+  Receipt-bearing local retention expiry is separate and never becomes
+  provider deletion. Unauthorized, excluded, partial, and unavailable states
+  never emit provider tombstones.
+- Corrections append a new occurrence and correction/successor lineage.
+  Explicit or complete-snapshot-derived deletion appends tombstone lineage.
+  Cycles, cross-owner lineage, unknown-predecessor substitution, or conflicting
+  content for one native revision block only the affected partition.
+  Reappearance after deletion is a new revision and explicit transition, not
+  revival of superseded evidence.
+- Projectors consume only committed immutable sanitized observations. They
+  never fetch, parse, sanitize, authorize, schedule, infer deletion from
+  incomplete absence, or mutate the provider. Capture and projection are
+  separate atomic local commits; no distributed transaction or exactly-once
+  delivery is claimed.
 
-    fn descriptor(&self) -> ProjectorDescriptorV1;
-    fn transition(
-        &self,
-        prior: Option<&Self::State>,
-        input: &ProjectionInputV1<'_>,
-    ) -> Result<ProjectionTransitionV1<Self::State, Self::Effect>, ProjectionErrorV1>;
-}
+Historical projector/frontier type names and file/test layouts are evidence of
+these requirements, not future rebuild obligations. Later audits must locate
+the current projection and store owners and direct regressions before declaring
+an old artifact missing.
 
-pub struct ProjectionInputV1<'a> {
-    pub event: ProjectionEventV1<'a>,
-    pub binding: &'a SourceBindingSnapshotV1,
-    pub partition_id: &'a SourcePartitionId,
-    pub expected_frontier: &'a PartitionProjectionFrontierV1,
-    pub source_frontier: &'a SourceFrontierSetV1,
-}
+## Migration and regression evidence
 
-pub enum ProjectionEventV1<'a> {
-    Observation(&'a DurableObservationV1),
-    PartitionSnapshotCompleted(&'a PartitionSnapshotCompletedV1),
-}
-
-pub struct PartitionSnapshotCompletedV1 {
-    pub partition_id: SourcePartitionId,
-    pub snapshot_id: SourceSnapshotIdV1,
-    pub coverage: SourceFrontierCoverageV1,
-    pub observed_native_objects_digest: Digest,
-    pub observed_count: u64,
-}
-```
-
-The transition is pure and returns next state, concrete view effects, explicit
-lineage assertions, next partition frontier, and a
-`Applied | DuplicateNoop | Blocked` disposition. Store integration uses only
-`SourceProjectionStore::commit_projection`; that operation atomically verifies
-projector/version, exact Project/Profile owner, source partition, expected
-frontier digest, source definition revision, binding revision, and binding
-digest; insert-or-verifies effects;
-appends lineage; updates current pointers or tombstones; updates the partition
-frontier; recomputes the sorted aggregate digest; and persists the idempotent
-receipt. A failure rolls all of it back.
-`PartitionSnapshotCompletedV1` is payload-free finalization evidence after all
-staged observations for that snapshot. A complete event may compare the staged
-object set with the prior published set and derive absence tombstones; partial
-or unknown completion publishes no absence tombstones. Duplicate completion is
-a no-op, including for an authoritative empty root.
-
-`PartitionProjectionFrontierV1` records projector/version, binding revision and
-digest, partition, source partition cursor, sanitized observation sequence,
-`ExternalContentStatusV1`, coverage, continuation digest, last complete
-snapshot, input digest, and output digest.
-`AggregateProjectionFrontierV1` records the projector ID/version, a sorted map
-from `(SourceBindingId, SourcePartitionId)` to partition-frontier digest, and
-one aggregate digest. It never collapses incomparable partitions to a scalar
-maximum and never treats the aggregate digest as an external cursor.
-
-The projector-owned content-status state machine is:
-
-- `Live`: committed sanitized evidence from a canonical provider read was
-  observed; it is authoritative only as local evidence at its receipt/frontier.
-- `AuthoritativeDeleted`: only an explicit deletion or declared absence in a
-  complete authoritative snapshot; append a tombstone and retain history.
-- `Partial`: commit admitted evidence and an explicit gap/continuation, but do
-  not advance the last-complete snapshot.
-- `TemporarilyUnavailable`: retain prior projection and complete frontier while
-  recording unavailable coverage.
-
-`PolicyExcluded` and `Unauthorized` are fresh Plan 06 access results composed
-by Plan 09 with the content projection; they are never persisted as source
-truth or used to advance a frontier. Policy exclusion blocks use/disclosure by
-this projection but does not itself execute retention. Receipt-bearing local
-retention expiry is a separate owning path and never produces
-`AuthoritativeDeleted`. `Unauthorized`, `PolicyExcluded`, `Partial`, and
-`TemporarilyUnavailable` never emit provider tombstones. Corrections append a
-new occurrence plus `Correction`/`Successor` lineage; explicit or complete-
-snapshot-derived deletion appends `Tombstone`. Cycles, cross-owner lineage,
-unknown predecessor substitution, or one native revision with conflicting
-content blocks that partition without blocking independent partitions.
-Reappearance after deletion is a new revision and explicit lineage transition,
-not revival of superseded evidence.
-
-Projectors consume only committed immutable sanitized observations. Those rows
-and projections are local evidence of what TraceDecay observed at a receipt and
-frontier; the external provider remains authoritative for its current state.
-Projectors never fetch, parse, sanitize, authorize, schedule, infer deletion
-from incomplete absence, or mutate the provider. Capture and projection use
-separate atomic local commits; no distributed transaction or exactly-once
-delivery is claimed.
-
-## Migration, fixtures, and TDD
-
-The additive migration creates `projection_partition_frontiers_v1`,
-`projection_frontier_heads_v1`, `projection_lineage_v1`, and
-`projection_commit_receipts_v1`. It freezes the old scalar checkpoint, replays
+The additive migration preserves versioned partition and aggregate frontiers,
+lineage, and commit receipts. It freezes the old scalar checkpoint, replays
 immutable observations into a staged generation with real source partitions,
-validates rows/ordering/anchors/lineage/coverage/digests, catches up the bounded
-suffix, and atomically publishes the new aggregate frontier. Failed validation
-leaves the old generation active; old writes stop at cutover and retirement is
-performed only by the owning view PR's Plan 09 typed rebuild, validate, publish,
-rollback, and later retire commands, each with an idempotent generation
-receipt.
+validates rows, ordering, anchors, lineage, coverage, and digests, catches up a
+bounded suffix, and atomically publishes the new aggregate frontier. Failed
+validation leaves the old generation active. Old writes stop only at cutover;
+the owning view's Plan 09 behavior alone rebuilds, validates, publishes, rolls
+back, and later retires generations, with idempotent receipts.
 
-Canonical fixtures under `crates/tracedecay-projectors/tests/fixtures/source/`
-are `live_then_corrected.jsonl`, `live_then_deleted.jsonl`,
-`partial_then_complete.jsonl`,
-`temporarily_unavailable_then_live.jsonl`, and
-`duplicate_reordered_partitions.jsonl`, each with a golden result. Provider
-acceptance additionally replays the exact checked-in Plan 27 bytes and hashes
-under `tests/fixtures/source_connectors/<source>/` through the real Plan 03
-sanitizer; provider-shaped synthetic fixtures are insufficient. Plan 06/09
-integration fixtures separately cover `PolicyExcluded` and `Unauthorized`
-overlays without rewriting projector state.
-
-TDD order:
-
-1. Fail canonical frontier encoding and partition-order-independent digest
-   tests.
-2. Fail the four content-status transitions plus the cross-layer six-result
-   composition and non-deletion tests.
-3. Fail correction/tombstone lineage, cycle, and cross-owner tests.
-4. Fail duplicate/reorder/permutation convergence plus empty-complete,
-   empty-partial, and duplicate-snapshot-completion tests.
-5. Fail `GlobalDb` CAS, atomic commit, and every effect/lineage/frontier/receipt
-   kill point.
-6. Fail staged rebuild equality and failed-publication preservation.
-7. Fail native-fixture parity, stale-binding CAS, Project/Profile
-   non-disclosure, policy-overlay independence, and restart.
-
-Run:
-
-```bash
-cargo test -p tracedecay-projectors --test frontier_contract
-cargo test -p tracedecay-projectors --test source_state
-cargo test -p tracedecay-projectors --test replay_convergence
-cargo test -p tracedecay-store --test projection_contract
-cargo test --test architecture_boundaries projector
-cargo check -p tracedecay-projectors --all-features
-cargo clippy -p tracedecay-projectors --all-targets --all-features -- -D warnings
-cargo test --all-features
-```
+Direct regression evidence covers canonical frontier encoding and
+partition-order-independent digests; every content-state transition plus
+access/content composition and non-deletion; correction/tombstone lineage,
+cycles, and cross-owner rejection; duplicate/reorder/permutation convergence;
+empty complete versus partial snapshots and duplicate completion; atomic
+compare-and-set and every effect/lineage/frontier/receipt failure point; staged
+rebuild equality and failed-publication preservation; stale binding,
+project/profile non-disclosure, policy-overlay independence, and restart.
+Provider acceptance replays exact checked-in Plan 27 bytes and digests through
+the real Plan 03 sanitizer; provider-shaped synthetic fixtures are
+insufficient.
 
 Plan [09](09-application-crate.md) orchestrates authorized projection/rebuild
 operations, Plan [13](13-research-provenance-and-context-anchors.md) owns

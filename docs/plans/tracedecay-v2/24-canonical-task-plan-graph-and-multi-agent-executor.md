@@ -5,6 +5,13 @@ journey with [Plan 32](32-dynamic-workflow-runtime-and-sdk.md). PR18 stabilizes
 public SDK names for the same accepted operations; it does not add missing
 semantics.
 
+Earlier task-schema names, operation registries, fixture catalogs, packet
+gates, and milestone/file inventories are historical evidence, not
+prerequisites or features that PR17 must recreate. Published operations and
+persisted task/work records retain compatibility and migration obligations;
+all other retention is judged by the direct Work journey, lifecycle,
+platform, and regression behavior below.
+
 ## Decision
 
 TraceDecay owns one host-neutral, typed task/work graph for user and agent work.
