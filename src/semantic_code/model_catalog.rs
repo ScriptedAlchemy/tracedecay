@@ -1,4 +1,4 @@
-//! Immutable `FastEmbed` model catalog for TraceDecay semantic selection.
+//! Immutable `FastEmbed` model catalog for `TraceDecay` semantic selection.
 //!
 //! Catalog entries pin source revision, license, member lengths, and SHA-256
 //! digests. There are no signatures or trust roots — integrity is the

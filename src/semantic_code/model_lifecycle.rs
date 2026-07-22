@@ -354,7 +354,7 @@ impl SemanticModelLifecycleOwnerV1 {
             .durable
             .state
             .as_ref()
-            .map_or(true, SemanticModelLifecycleStateV1::omits_semantics);
+            .is_none_or(SemanticModelLifecycleStateV1::omits_semantics);
         SemanticModelLifecycleStatusV1 {
             selected_model: guard.durable.selected_model.clone(),
             auto_download: guard.durable.auto_download,
@@ -501,33 +501,33 @@ impl SemanticModelLifecycleOwnerV1 {
         let Some(state) = guard.durable.state.clone() else {
             return Err(ModelLifecycleErrorV1::Rejected);
         };
-        let (model_id, revision, digest, install_path) = match state {
-            SemanticModelLifecycleStateV1::Installed {
-                model_id,
-                revision,
-                artifact_digest,
-                install_path,
-            }
-            | SemanticModelLifecycleStateV1::Loading {
-                model_id,
-                revision,
-                artifact_digest,
-                install_path,
-            }
-            | SemanticModelLifecycleStateV1::Indexing {
-                model_id,
-                revision,
-                artifact_digest,
-                install_path,
-                ..
-            }
-            | SemanticModelLifecycleStateV1::Ready {
-                model_id,
-                revision,
-                artifact_digest,
-                install_path,
-            } => (model_id, revision, artifact_digest, install_path),
-            _ => return Err(ModelLifecycleErrorV1::Rejected),
+        let (SemanticModelLifecycleStateV1::Installed {
+            model_id,
+            revision,
+            artifact_digest: digest,
+            install_path,
+        }
+        | SemanticModelLifecycleStateV1::Loading {
+            model_id,
+            revision,
+            artifact_digest: digest,
+            install_path,
+        }
+        | SemanticModelLifecycleStateV1::Indexing {
+            model_id,
+            revision,
+            artifact_digest: digest,
+            install_path,
+            ..
+        }
+        | SemanticModelLifecycleStateV1::Ready {
+            model_id,
+            revision,
+            artifact_digest: digest,
+            install_path,
+        }) = state
+        else {
+            return Err(ModelLifecycleErrorV1::Rejected);
         };
         if total_units == 0 || completed_units > total_units {
             return Err(ModelLifecycleErrorV1::Rejected);
@@ -595,32 +595,32 @@ impl SemanticModelLifecycleOwnerV1 {
         let Some(state) = guard.durable.state.clone() else {
             return Err(ModelLifecycleErrorV1::Rejected);
         };
-        let (model_id, revision, artifact_digest) = match state {
-            SemanticModelLifecycleStateV1::Installed {
-                model_id,
-                revision,
-                artifact_digest,
-                ..
-            }
-            | SemanticModelLifecycleStateV1::Loading {
-                model_id,
-                revision,
-                artifact_digest,
-                ..
-            }
-            | SemanticModelLifecycleStateV1::Indexing {
-                model_id,
-                revision,
-                artifact_digest,
-                ..
-            }
-            | SemanticModelLifecycleStateV1::Ready {
-                model_id,
-                revision,
-                artifact_digest,
-                ..
-            } => (model_id, revision, artifact_digest),
-            _ => return Err(ModelLifecycleErrorV1::Rejected),
+        let (SemanticModelLifecycleStateV1::Installed {
+            model_id,
+            revision,
+            artifact_digest,
+            ..
+        }
+        | SemanticModelLifecycleStateV1::Loading {
+            model_id,
+            revision,
+            artifact_digest,
+            ..
+        }
+        | SemanticModelLifecycleStateV1::Indexing {
+            model_id,
+            revision,
+            artifact_digest,
+            ..
+        }
+        | SemanticModelLifecycleStateV1::Ready {
+            model_id,
+            revision,
+            artifact_digest,
+            ..
+        }) = state
+        else {
+            return Err(ModelLifecycleErrorV1::Rejected);
         };
         guard.durable.state = Some(SemanticModelLifecycleStateV1::Failed {
             model_id,
