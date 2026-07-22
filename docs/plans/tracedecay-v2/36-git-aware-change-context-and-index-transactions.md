@@ -200,6 +200,22 @@ provable terminal outcome.
   response handles and Plan 05 cursors are not canonical evidence identity or
   mutation inputs.
 
+## PR15 implementation defaults
+
+- Retain existing `gix` for Git object/ref intelligence, `notify` for bounded
+  filesystem observation, and Tokio for cancellation-aware async
+  coordination. They replace new Git parsers, watcher loops, and executor
+  mechanics while preserving stable repository/worktree identity, exact
+  native snapshots, immutable previews, queue bounds, and restart behavior.
+- Use `petgraph` only for branch-stack DAG traversal, topological order, and
+  SCC detection. Plan 16/36 still own edge meaning, authorization, visibility,
+  readiness, preflight, apply, and receipts; graph-library nodes or paths are
+  never authority.
+- If `gix` or the fixed native Git plumbing cannot prove a required state,
+  retain useful read-only evidence and block apply. Do not add `git2`; an
+  unsupported object format, operation, or platform remains typed unsupported
+  rather than selecting a second Git semantic model.
+
 ## Implementation slices
 
 1. **Connect Plan 16 selection and topology to preflight.** Extend the shipped

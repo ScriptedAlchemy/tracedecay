@@ -180,6 +180,26 @@ changing their transport.
 - Remove provider-local feedback logic and duplicate diagnostic/suggestion
   routes once each host delegates to the production cycle.
 
+**Library-first implementation defaults.** Keep the shipped PR12 LSP gateway
+and protocol structs; add no otherwise-unused `lsp-types` dependency.
+`async-lsp` remains a later candidate only if a measured conversion deletes
+gateway code and leaves one `lsp-types` version. GitHub/CI acquisition uses
+existing `ureq`, shared typed Serde DTOs, and static allowlisted GraphQL query
+text; `gh api` is the manual troubleshooting fallback, not a runtime
+dependency. This replaces new provider clients, dynamic GraphQL parsing, and
+source-local JSON models while retaining read-only methods, exact provider
+identity, pagination, freshness, coverage, rate-limit, and typed failure
+states; schema drift or missing required fields yields typed unavailable or
+the manual fallback, never Octocrab, `backon`, or `graphql-parser`. Context
+Scout reuses existing provider adapters before admitting `genai`; `genai` must
+delete multiple transports without AWS-LC/Reqwest duplication and pass
+cancellation, schema, and cost fixtures, otherwise the adapters and
+deterministic Scout remain. Hermes configuration uses `yaml-edit`, supported
+hosts use their official SDK/plugin APIs, and all hosts retain the existing
+atomic-write/lifecycle kernel; an unproven host API or lossless edit blocks
+mutation and reports typed unavailable instead of falling back to bespoke
+text rewriting.
+
 **Direct acceptance.** Exercise real edit/stop events in each supported host,
 including Kimi Code `PostToolUse`/`Stop` and OpenCode `file.edited`,
 `tool.execute.after`, `session.idle`/`session.status`, and LSP event paths;
@@ -225,6 +245,20 @@ authorized configuration or remediation commands back through the daemon.
 - Delete dashboard-local health, configuration, and action logic replaced by
   canonical application operations.
 
+**Library-first implementation defaults.** Use React Router for route/deep-link
+mechanics, TanStack Query for canonical HTTP/SSE-backed server state, Zustand
+only for bounded presentation/selection state, Zod at generated wire
+boundaries, selected Radix primitives for accessible interaction, TanStack
+Virtual for large lists, and the existing `d3-force` renderer. These replace
+custom routing, request/cache lifecycles, ad hoc global stores, handwritten
+runtime decoding, home-grown accessibility primitives, and manual
+virtualization while retaining exhaustive domain states, stable IDs,
+renderer-neutral projections, accessible table/text equivalents, and
+server-owned health/action semantics. Keep a small native implementation when
+a library would own product semantics or miss an accessibility/offline/bundle
+gate. Observable Plot is admitted only for a concrete chart journey that the
+existing renderer does not serve and only when its lazy-loaded budget passes.
+
 **Direct acceptance.** Starting from a real PR13 finding, navigate to retained
 evidence, diagnose an injected operational fault, apply an authorized
 remediation or setting change, observe the resulting state, and verify
@@ -260,6 +294,16 @@ preflight/preview/apply/receipt through the same authorized scope.
 - Delete CWD inference, path identity, client-side fanout, mutable pagination,
   and any Git operation that bypasses canonical preflight and receipts.
 
+**Library-first implementation defaults.** Retain existing `gix`, `notify`,
+and Tokio for Git object/ref intelligence, filesystem observation, and bounded
+async work; use `petgraph` only for branch-stack DAG/SCC mechanics. This
+replaces new Git parsers, watcher loops, async coordination, and bespoke
+topological/SCC code while retaining TraceDecay's stable identities, frozen
+scope, exact native snapshots, preflight/apply separation, compare-and-swap,
+journaling, and receipts. If `gix` or the fixed native plumbing cannot prove a
+state, keep it read-only or block apply; do not add `git2`, and do not let
+`petgraph` become Git or authorization authority.
+
 **Direct acceptance.** Query and diagnose across multiple authorized roots,
 resume against frozen state, follow evidence to its owning root, reject scope
 or watermark drift, then preview and perform each legal clean Git operation.
@@ -294,6 +338,18 @@ failover under a higher fence.
   canonical mutation.
 - Delete provisional remote writers, unfenced publication, and caches that
   cannot identify their generation and current authority.
+
+**Library-first implementation defaults.** Build on the existing HTTP/SSE,
+rustls, and libSQL paths. At a concrete delivery integration, consider
+`reqwest` plus `eventsource-stream`, `tokio-util`, `zstd`/`tar`,
+`object_store`, or Hickory only when the dependency deletes identified stream,
+cancellation, compression/archive, object-backend, or discovery mechanics and
+passes compile-time and resource admission. TraceDecay's authentication,
+revocation, fencing, single-writer admission, replay identity, coverage,
+backup/restore verification, and failover semantics remain above those
+libraries. If admission fails or the integration is not yet concrete, retain
+the existing path or report the capability unavailable; do not add
+HMAC/attestation layers or speculative transport abstractions.
 
 **Direct acceptance.** Capture offline, reconnect with duplicates and gaps,
 observe exactly-once admitted effects, query from another enrolled node, then
@@ -349,6 +405,22 @@ retry, review, outcome, and calibration, and returns a non-auto-applied replan.
   task-specific databases/projector runtimes, board query DSLs, and universal
   query ASTs.
 
+**Library-first implementation defaults.** Use `petgraph` for task/workflow
+DAG and SCC mechanics, `tokio-util` for cancellation, existing Tokio timers
+and `DelayQueue` only for mechanical waiting, Serde plus
+`schemars`/`jsonschema` for definition validation, rusqlite transactions for
+atomic claims/effects/publication, `process-wrap` for admitted child-process
+containment, and `d3-dag` for dashboard layout. These replace bespoke graph
+algorithms, cancellation tokens, waiting queues, schema walkers, transaction
+choreography, process-tree handling, and DAG layout while retaining Plan 24
+task semantics, explicit admission, one runtime clock, cumulative budgets,
+leases/fences, exact provider identity, effect receipts, and non-auto-applied
+replans. Retry eligibility, attempts, caps, jitter, and receipts remain
+TraceDecay-owned. Reject a library when it requires a second scheduler, state
+machine, journal, or authority model; add no workflow platform, PTY layer,
+`statig`, retry library, or outbox framework, and keep the existing atomic
+outbox publication semantics.
+
 **Direct acceptance.** Create and evolve work, drill from compact context to
 exact evidence, review decomposition/sizing/model proposals, admit steps against
 real supported provider adapters, inspect progress/effects/artifacts/outcomes,
@@ -387,6 +459,19 @@ reauthorize exact scope, and never carry or apply an edit.
   semantics server-side. Delete handwritten or generated client behavior that
   competes with the production kernel.
 
+**Library-first implementation defaults.** Derive accepted wire contracts from
+Serde plus `schemars`; admit Aide only after typed DTOs exist and only when it
+removes route/OpenAPI glue without creating parallel models. Generate
+TypeScript and Python wire models, then keep handwritten lifecycle façades
+over Rust `reqwest`, browser/Node `fetch`, and Python `httpx-sse`; use
+`oasdiff` and ecosystem semver tooling for compatibility checks. This replaces
+hand-copied wire types, route schema glue, SSE framing, and bespoke
+compatibility comparison while retaining server-owned authorization, retry
+directives, paging, cancellation, reconnect/resume, receipts, and idiomatic
+client lifecycle. If generation loses required union/error/stream semantics,
+keep or repair the typed façade and reject the generator/Aide path rather than
+weakening conformance.
+
 **Direct acceptance.** Run behavioral/lifecycle conformance for every
 supported public operation through all three published SDKs against local and
 PR16-enrolled remote authority, including representative complete journeys for
@@ -421,6 +506,16 @@ window, superseded V1 and migration-only paths are deleted.
   production shadow reads, or V1 as renewed authority.
 - Remove superseded V1 implementations, adapters, flags, branches, and
   migration-only machinery when their recovery boundary closes.
+
+**Library-first implementation defaults.** Use the existing SQLite
+`VACUUM INTO`/backup path, migration and fault-injection seams, and proptest
+coverage. They replace a new backup copier, migration orchestration framework,
+and separate crash/property harness while retaining maintenance fencing,
+isolated staged import, bounded transactions, durable checkpoints, semantic
+verification, atomic cutover, and forward-only recovery. If a source or
+platform cannot produce and verify the required snapshot, block cutover and
+use the existing explicit backup fallback; do not add a migration framework or
+claim success from schema-only evidence.
 
 **Direct acceptance.** Migrate representative released data, interrupt and
 resume every phase, compare direct product journeys, cut over atomically,
@@ -459,6 +554,15 @@ practical gain.
   remains valid.
 - Delete ineffective candidates, obsolete slow paths, and one-off measurement
   code that is not production instrumentation or a reproducible regression.
+
+**Library-first implementation defaults.** Reuse existing `tracing`,
+`sysinfo`, and Criterion diagnostics, with `psutil` only in the Python soak
+harness. This replaces custom telemetry collectors, process sampling, and
+microbenchmark plumbing while retaining real-journey oracles, A/A noise,
+paired comparisons, platform/resource strata, tail behavior, and semantic/
+recovery equivalence. Missing child-process or platform coverage yields
+`insufficient_evidence`; it does not justify a benchmark service, performance
+protocol, or new measurement authority.
 
 **Direct acceptance.** Re-run representative shipped journeys before and after
 each retained change, reproduce the gain and equivalent result, then pass the

@@ -140,6 +140,24 @@ carry no edit, task body, source, raw path/ID/query/arguments, credential, or
 durable evidence. Consumption cannot invoke `workspace/applyEdit`, Git,
 provider execution, work mutation, or an arbitrary daemon/LSP method.
 
+## PR18 implementation defaults
+
+- Use Serde plus `schemars` as the accepted wire-model source. Admit Aide only
+  after typed DTOs exist and only when it deletes route/OpenAPI glue without
+  creating parallel request, response, error, or lifecycle models.
+- Generate TypeScript and Python wire models, then build reviewed handwritten
+  lifecycle façades over Rust `reqwest`, browser/Node `fetch`, and Python
+  `httpx-sse`. Generation replaces hand-copied DTOs; the façades retain
+  idiomatic paging, streaming, backpressure, cancellation, retry directives,
+  idempotency, reconnect/resume, problems, and receipts rather than generating
+  client-side product behavior.
+- Use `oasdiff` and ecosystem semver tooling to detect structural and published
+  compatibility changes, then keep the behavioral/lifecycle matrix below as
+  authority. If Aide or generated bindings lose an accepted union, error,
+  stream, or cancellation semantic, reject that path or repair the handwritten
+  façade; do not weaken the operation or accept schema/compilation parity as
+  conformance.
+
 ## Implementation slices
 
 ### Stabilize every supported public operation

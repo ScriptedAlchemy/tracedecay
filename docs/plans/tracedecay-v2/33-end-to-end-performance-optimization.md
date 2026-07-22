@@ -111,6 +111,22 @@ or fill a baseline with sentinel values.
   counts through reserved control capacity. Paths, prompts, source, symbols,
   argv/stdin, provider output, environment, errors, and secrets are forbidden.
 
+## PR20 implementation defaults
+
+- Reuse existing `tracing` instrumentation, `sysinfo` process/resource
+  diagnostics, and Criterion measurement support; use `psutil` only in the
+  Python soak harness for process-tree observations. These replace custom
+  telemetry collectors, resource sampling, and microbenchmark plumbing while
+  retaining the real-journey oracle and production observability ownership.
+- Keep the frozen workload, A/A noise, paired comparison, practical margins,
+  platform and resource strata, tail support, cancellation/retry accounting,
+  and semantic/recovery equivalence rules below. If process-tree, platform, or
+  profiler-overhead coverage is missing, report `insufficient_evidence`.
+- Do not create a benchmark service, performance protocol, execution ledger,
+  or new measurement authority. A library or harness that cannot feed the
+  existing bounded redacted diagnostics and reproducible comparison artifacts
+  is rejected in favor of the current path.
+
 ## Implementation slices
 
 ### Measure shipped journeys

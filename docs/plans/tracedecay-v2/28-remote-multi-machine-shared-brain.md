@@ -137,6 +137,25 @@ finding and remediation identities.
   authority. Content-addressed structures may support immutable spool
   integrity, deduplication, or gap evidence only.
 
+## PR16 implementation defaults
+
+- Build the first delivery on existing HTTP/SSE, rustls, and libSQL paths.
+  They replace no semantics: TraceDecay still owns authentication, revocation,
+  authority fencing, single-writer admission, replay identity, coverage,
+  backup/restore verification, and failover.
+- At the concrete integration that needs them, consider `reqwest` plus
+  `eventsource-stream` for remote streaming, `tokio-util` for cancellation,
+  `zstd`/`tar` for backup payloads, `object_store` for an admitted object
+  backend, and Hickory for discovery. Admit one only when it deletes named
+  transport, stream, cancellation, archive, backend, or discovery code and
+  passes compile-time, binary-size, memory, connection, cancellation, and
+  recovery budgets.
+- If admission fails or no shipped journey yet needs the integration, retain
+  the existing path or report the capability unavailable. Do not add
+  speculative transport layers, HMAC/attestation machinery, or another
+  authority protocol; remote authentication and every durable fence remain
+  mandatory.
+
 ## Implementation slices
 
 1. **Connect enrollment to offline capture.** Extend the shipped node-local

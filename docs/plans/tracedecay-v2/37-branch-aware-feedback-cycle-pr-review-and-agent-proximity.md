@@ -86,7 +86,8 @@ applies an edit, or performs a refactor.
 1. An authorized operation requests existing reviews, threads, comments, and
    replies for an exact repository and pull request.
 2. Plan 27's adapter performs structurally read-only acquisition. REST permits
-   only `GET`; GraphQL permits only allowlisted parsed `query` documents.
+   only `GET`; GraphQL permits only the shipped static allowlisted `query`
+   documents.
    Mutation operations, write-capable client methods, and write-capable or
    indeterminate credential scopes fail before network access.
 3. Canonical capture preserves provider repository/PR/base/head/merge-base,
@@ -190,6 +191,24 @@ deferral, override, task completion, or comment resolution remains interaction
 evidence only and never becomes a correctness label.
 
 ## PR13 implementation slices
+
+### Concrete GitHub and CI defaults
+
+- Use existing `ureq` transport and one shared set of typed Serde DTOs for
+  GitHub review and CI responses. Keep GraphQL documents as static audited
+  query text with fixed response DTOs. This replaces provider-local HTTP/JSON
+  wrappers and dynamic GraphQL parsing without changing exact
+  repository/PR/run identity, overlap pagination, cursor publication,
+  freshness, coverage, rate-limit, lifecycle, or read-only semantics.
+- Keep `gh api` as a documented manual acquisition/troubleshooting fallback,
+  not a daemon dependency or alternate product path. If a checked-in provider
+  fixture exposes schema drift or a required field cannot be decoded, retain
+  the last complete generation and return typed partial/stale/unavailable
+  evidence until the DTO/query is updated.
+- Do not add Octocrab, `backon`, or `graphql-parser`. Existing bounded retry
+  remains explicit in the refresh owner; admit a replacement only if it
+  deletes that owned mechanism without obscuring `Retry-After`, cancellation,
+  quarantine, or publication rules.
 
 ### Complete the four-pillar cycle
 

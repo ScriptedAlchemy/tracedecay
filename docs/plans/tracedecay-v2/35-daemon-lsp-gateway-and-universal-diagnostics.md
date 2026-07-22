@@ -80,6 +80,17 @@ Git, readiness, conflict, and proximity state before projection.
 
 ## Retained PR12 gateway capabilities
 
+- Retain the current gateway, protocol, capability, correlation, and
+  cancellation structs as the PR12 implementation default. This avoids a
+  parallel protocol model or conversion layer and preserves the negotiated
+  TraceDecay extension, field-level projection, stale-result suppression,
+  broker ownership, and host conformance already required below. Add no
+  otherwise-unused `lsp-types` dependency.
+- `async-lsp` remains a future candidate only if a measured conversion deletes
+  gateway code, unifies rather than duplicates `lsp-types` versions, and
+  passes the existing lifecycle, cancellation, reconnect, diagnostics, and
+  resource fixtures. Otherwise keep the gateway; a weaker host remains typed
+  unavailable instead of lowering the protocol contract.
 - LSP 3.17 initialize, initialized, shutdown, exit, document
   open/change/save/close, cancellation, progress, push diagnostics, document
   pull diagnostics, and diagnostic refresh.

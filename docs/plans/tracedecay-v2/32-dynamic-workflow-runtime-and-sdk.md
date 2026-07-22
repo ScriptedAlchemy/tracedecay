@@ -22,6 +22,26 @@ PR17 adds no JavaScript/TypeScript workflow runtime, generated workflow source,
 Markdown parser, shell command tape, developer-plan executor, or recursive
 generic execution.
 
+## PR17 implementation defaults
+
+- Use `petgraph` for task/workflow DAG traversal, topological order, and SCC
+  rejection; `tokio-util` for cancellation; Serde plus `schemars` and
+  `jsonschema` for immutable definition validation; rusqlite transactions for
+  atomic claims, effects, and publication; `process-wrap` for admitted
+  provider process-tree containment; and `d3-dag` for dashboard layout. These
+  replace bespoke graph algorithms, cancellation tokens, schema walkers,
+  transaction choreography, child-process cleanup, and DAG layout.
+- Use existing Tokio timers and `DelayQueue` only for mechanical waiting.
+  TraceDecay owns retry eligibility, attempt creation, caps, jitter, exact
+  retry directives, cumulative deadline/budget, cancellation, attempt
+  identity, and receipts. Add no retry library or library-owned retry policy.
+- These libraries do not own Plan 24 task meaning, admission, readiness,
+  scheduling, runtime clocks, authority, lease fences, provider selection,
+  effect reconciliation, evidence, or replanning. Reject an integration that
+  requires a second scheduler, state machine, journal, or authority model.
+  Add no workflow platform, PTY layer, `statig`, or outbox framework; retain
+  the existing atomic outbox publication semantics in the owner transaction.
+
 ## PR17 user outcome
 
 After reviewing an evidence-backed Plan 24 proposal, a user can explicitly

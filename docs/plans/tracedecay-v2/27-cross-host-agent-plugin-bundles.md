@@ -76,7 +76,7 @@ interruption.
    surfaces. Full bodies expand only through authorized evidence reads.
 
 There is no GitHub mutation client. REST is limited to `GET`; GraphQL transport
-may use HTTP `POST` only for allowlisted parsed `query` operations. Mutation
+may use HTTP `POST` only for shipped static allowlisted `query` operations. Mutation
 documents, write-capable methods, and write-capable or indeterminate
 credential scopes fail before network access.
 
@@ -130,6 +130,17 @@ credential scopes fail before network access.
 
 ### Ship lifecycle operations
 
+- Edit Hermes YAML with `yaml-edit`; use each supported host's official
+  SDK/plugin/registration API where it exists; and route every resulting
+  change through the existing atomic-write, backup, compare-and-swap,
+  lifecycle receipt, and rollback kernel. This replaces bespoke YAML/string
+  patching and host-local write choreography while retaining ownership,
+  unrelated configuration, exact prior state, dry run, confirmation,
+  interrupted repair, and uninstall semantics.
+- If a host has no proven official mutation API, or `yaml-edit` cannot
+  round-trip the exact supported Hermes document without collateral change,
+  keep the component unavailable/read-only and emit the typed remediation.
+  Do not silently fall back to raw replacement or a second lifecycle engine.
 - Provide callable install, update, repair, backup/restore, and uninstall
   operations with dry run, explicit confirmation, idempotency, receipts, and
   rollback.
@@ -151,6 +162,14 @@ credential scopes fail before network access.
 
 ### Ship GitHub review ingestion
 
+- Use existing `ureq`, shared typed Serde DTOs, and static GraphQL query text
+  for the concrete GitHub path. This replaces a new provider client, dynamic
+  GraphQL parser, and source-local response models while retaining the
+  acquisition and publication contract below. `gh api` remains a manual
+  troubleshooting fallback; schema/fixture drift returns typed partial,
+  stale, or unavailable and preserves the last complete generation.
+- Do not add Octocrab, `backon`, or `graphql-parser`; the refresh owner keeps
+  its explicit bounded retry and `Retry-After` behavior.
 - Implement the one concrete read-only GitHub review refresh needed by PR13.
   Do not introduce provider-neutral source connector catalogs, generic query
   capability projections, signed connector-selection schemas, or planner

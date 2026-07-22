@@ -58,6 +58,20 @@ or projection repair is admitted only after corruption is localized to
 deterministically rebuildable derived state; whole-store or authoritative
 family corruption remains preserve-and-escalate.
 
+## PR19 implementation defaults
+
+- Use the existing SQLite `VACUUM INTO`/backup path, migration and
+  fault-injection seams, and proptest coverage. These replace a new backup
+  copier, migration orchestration framework, and separate crash/property
+  harness while retaining maintenance fencing, isolated staging, bounded
+  transactions, durable checkpoints, semantic verification, atomic cutover,
+  and forward-only recovery.
+- If a source store or supported platform cannot create and verify the required
+  snapshot through those seams, block cutover and use the existing explicit
+  verified-backup fallback. Unknown, partial, or unverifiable backup state
+  remains a typed failure; do not add a migration framework or treat
+  schema-only equality as success.
+
 ## Implementation slices
 
 ### Complete staged migration

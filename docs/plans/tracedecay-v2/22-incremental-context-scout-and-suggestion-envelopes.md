@@ -64,6 +64,16 @@ and treats historical narrative as quoted evidence, never active instruction.
 
 ### Configured model assistance
 
+- Prefer the existing provider adapters and their typed capability,
+  cancellation, usage, cost, and schema receipts. This avoids another model
+  transport while retaining exact configured route, provider availability,
+  deterministic fallback, scope, evidence, and budget semantics.
+- `genai` is only an admitted replacement candidate when one integration
+  deletes multiple provider transports, introduces neither an AWS-LC nor a
+  duplicate Reqwest stack, and passes the existing cancellation, structured
+  schema, cost, timeout, malformed-output, and fallback fixtures. Otherwise
+  keep the existing adapters; provider absence remains typed unavailable and
+  deterministic Scout remains usable.
 - Select a model only from typed configuration and discovered capabilities;
   no provider, executable, or model is a source-code default.
 - Constrain model output to the same structured candidate and evidence

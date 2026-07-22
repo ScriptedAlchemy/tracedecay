@@ -95,6 +95,25 @@ deferred by this framing.
   after license, bundle, capability, offline, accessibility, fallback, and
   performance review.
 
+## PR14 implementation defaults
+
+- Use React Router for route and deep-link mechanics, TanStack Query for
+  canonical HTTP/SSE-backed server state, Zustand only for bounded
+  presentation and linked-selection state, and Zod at generated wire
+  boundaries. These replace custom routing, request/cache lifecycles, ad hoc
+  global stores, and handwritten runtime decoders while retaining exhaustive
+  domain states, revision-monotone updates, exact scope, stable IDs, and
+  server-owned product semantics.
+- Use selected Radix primitives for accessible interaction and TanStack
+  Virtual for large lists. Retain native elements or focused local code when a
+  primitive would weaken keyboard, screen-reader, offline, or bundle behavior;
+  the accessible table/text projection remains required.
+- Keep existing `d3-force` as the default connected-graph renderer.
+  Observable Plot is admitted only for a concrete chart journey that the
+  existing renderer does not serve and only when lazy loading passes the
+  route's bundle and interaction budget. No renderer becomes graph, query,
+  health, readiness, ranking, or action authority.
+
 ## Binding implementation map
 
 PR14 keeps `dashboard/` as the single npm package and adds these exact shared
