@@ -220,9 +220,19 @@ enum FeedbackCycleFinishPath {
 }
 
 enum FeedbackCycleStep {
-    Continue(FeedbackCycleStage),
-    Terminal(FeedbackCycleTerminal),
+    Continue(Box<FeedbackCycleStage>),
+    Terminal(Box<FeedbackCycleTerminal>),
     Complete(Box<FeedbackCycleExecutionResult>),
+}
+
+impl FeedbackCycleStep {
+    fn continue_with(stage: FeedbackCycleStage) -> Self {
+        Self::Continue(Box::new(stage))
+    }
+
+    fn terminal(terminal: FeedbackCycleTerminal) -> Self {
+        Self::Terminal(Box::new(terminal))
+    }
 }
 
 /// One terminal application result. It contains references to authoritative
@@ -316,8 +326,9 @@ where
                 )
                 .await?
             {
-                FeedbackCycleStep::Continue(next) => stage = next,
+                FeedbackCycleStep::Continue(next) => stage = *next,
                 FeedbackCycleStep::Terminal(terminal) => {
+                    let terminal = *terminal;
                     let Some(progress) = progress else {
                         return self
                             .finish_terminal(context, &request, None, terminal)
@@ -389,7 +400,7 @@ where
         request: &FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
         if !scope_matches(context, &request.input) {
-            return Ok(FeedbackCycleStep::Terminal(FeedbackCycleTerminal {
+            return Ok(FeedbackCycleStep::terminal(FeedbackCycleTerminal {
                 termination: FeedbackCycleTerminationV1::Blocked,
                 provider_states: Vec::new(),
                 baseline_states: Vec::new(),
@@ -400,7 +411,7 @@ where
                 finish_path: FeedbackCycleFinishPath::Immediate,
             }));
         }
-        Ok(FeedbackCycleStep::Continue(FeedbackCycleStage::Admit))
+        Ok(FeedbackCycleStep::continue_with(FeedbackCycleStage::Admit))
     }
 
     fn handle_admit(
@@ -427,13 +438,13 @@ where
                     findings: Vec::new(),
                     dedupe_key: None,
                 });
-                Ok(FeedbackCycleStep::Continue(
+                Ok(FeedbackCycleStep::continue_with(
                     FeedbackCycleStage::CheckInterruption,
                 ))
             }
             Err(problem) => {
                 let (termination, states) = terminal_for_problem(&problem);
-                Ok(FeedbackCycleStep::Terminal(FeedbackCycleTerminal {
+                Ok(FeedbackCycleStep::terminal(FeedbackCycleTerminal {
                     termination,
                     provider_states: states,
                     baseline_states: Vec::new(),
@@ -453,7 +464,7 @@ where
         request: &FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
         if let Some((termination, states)) = request_interruption(context, request) {
-            return Ok(FeedbackCycleStep::Terminal(FeedbackCycleTerminal {
+            return Ok(FeedbackCycleStep::terminal(FeedbackCycleTerminal {
                 termination,
                 provider_states: states,
                 baseline_states: Vec::new(),
@@ -467,7 +478,7 @@ where
                 },
             }));
         }
-        Ok(FeedbackCycleStep::Continue(
+        Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::ResolveRuntime,
         ))
     }
@@ -481,7 +492,7 @@ where
         let initial_runtime = match self.runtime.resolve(context, &request.input).await {
             Some(runtime) => runtime,
             None => {
-                return Ok(FeedbackCycleStep::Terminal(FeedbackCycleTerminal {
+                return Ok(FeedbackCycleStep::terminal(FeedbackCycleTerminal {
                     termination: FeedbackCycleTerminationV1::DaemonUnavailable,
                     provider_states: vec![ProviderEvaluationStateV1::Unavailable],
                     baseline_states: Vec::new(),
@@ -497,7 +508,7 @@ where
             }
         };
         progress.as_mut().expect("admitted").runtime = Some(initial_runtime);
-        Ok(FeedbackCycleStep::Continue(
+        Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::ValidateRuntime,
         ))
     }
@@ -513,7 +524,7 @@ where
             .as_ref()
             .expect("runtime resolved before validation");
         if runtime.validate_for(&request.input).is_err() {
-            return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::DaemonUnavailable,
                 vec![ProviderEvaluationStateV1::Unavailable],
                 progress.runtime.clone(),
@@ -521,7 +532,7 @@ where
             )));
         }
         if !runtime.has_same_root(&request.input) {
-            return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::Blocked,
                 Vec::new(),
                 progress.runtime.clone(),
@@ -529,14 +540,14 @@ where
             )));
         }
         if !runtime.is_current_for(&request.input) {
-            return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::StaleReplanRequired,
                 vec![ProviderEvaluationStateV1::Stale],
                 progress.runtime.clone(),
                 FeedbackCycleStageEmission::FromProgress,
             )));
         }
-        Ok(FeedbackCycleStep::Continue(
+        Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::CheckUserStop,
         ))
     }
@@ -548,14 +559,14 @@ where
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
         if request.control == FeedbackCycleControl::UserStop {
             let runtime = progress.as_ref().expect("admitted").runtime.clone();
-            return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::UserStop,
                 Vec::new(),
                 runtime,
                 FeedbackCycleStageEmission::FromProgress,
             )));
         }
-        Ok(FeedbackCycleStep::Continue(
+        Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::CheckBudgetAndProviders,
         ))
     }
@@ -568,7 +579,7 @@ where
         let progress = progress.as_mut().expect("runtime resolved");
         progress.completed_stages = vec![FeedbackEvaluationStageV1::Admission];
         if request.usage.exceeds(&request.input) {
-            return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::BudgetExceeded,
                 vec![ProviderEvaluationStateV1::TimedOut],
                 progress.runtime.clone(),
@@ -576,7 +587,7 @@ where
             )));
         }
         if request.providers.is_empty() {
-            return Ok(FeedbackCycleStep::Terminal(after_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::Blocked,
                 Vec::new(),
                 progress.runtime.clone(),
@@ -586,7 +597,7 @@ where
         progress
             .completed_stages
             .push(FeedbackEvaluationStageV1::Diagnostics);
-        Ok(FeedbackCycleStep::Continue(
+        Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::LoadBaselines,
         ))
     }
@@ -620,7 +631,7 @@ where
                 .runtime_override(context, request, progress.runtime.as_ref())
                 .await
             {
-                return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+                return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
                     termination,
                     states,
                     Vec::new(),
@@ -632,7 +643,7 @@ where
         } else {
             Vec::new()
         };
-        Ok(FeedbackCycleStep::Continue(
+        Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::LoadDiagnostics,
         ))
     }
@@ -656,7 +667,7 @@ where
             .runtime_override(context, request, progress.runtime.as_ref())
             .await
         {
-            return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
                 termination,
                 states,
                 Vec::new(),
@@ -664,7 +675,7 @@ where
                 FeedbackCycleStageEmission::Suppressed,
             )));
         }
-        Ok(FeedbackCycleStep::Continue(
+        Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::ClassifyDiagnostics,
         ))
     }
@@ -703,7 +714,7 @@ where
         if let Some(termination) =
             terminal_before_impact(&provider_states, &progress.baseline_states)
         {
-            return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
                 termination,
                 provider_states,
                 progress.baseline_states.clone(),
@@ -717,7 +728,7 @@ where
         progress
             .completed_stages
             .push(FeedbackEvaluationStageV1::Impact);
-        Ok(FeedbackCycleStep::Continue(
+        Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::ResolveImpact,
         ))
     }
@@ -735,7 +746,7 @@ where
                 progress.impact_state = Some(state);
             }
             FeedbackImpactResolution::Cancelled => {
-                return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+                return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
                     FeedbackCycleTerminationV1::Cancelled,
                     vec![ProviderEvaluationStateV1::Cancelled],
                     Vec::new(),
@@ -744,7 +755,7 @@ where
                 )));
             }
             FeedbackImpactResolution::TimedOut => {
-                return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+                return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
                     FeedbackCycleTerminationV1::BudgetExceeded,
                     vec![ProviderEvaluationStateV1::TimedOut],
                     Vec::new(),
@@ -757,7 +768,7 @@ where
             .runtime_override(context, request, progress.runtime.as_ref())
             .await
         {
-            return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
                 termination,
                 states,
                 Vec::new(),
@@ -771,7 +782,7 @@ where
         progress
             .completed_stages
             .push(FeedbackEvaluationStageV1::ResultAssembly);
-        Ok(FeedbackCycleStep::Continue(
+        Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::LookupDedupe,
         ))
     }
@@ -809,7 +820,7 @@ where
                 .runtime_override(context, request, progress.runtime.as_ref())
                 .await
             {
-                return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+                return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
                     termination,
                     states,
                     Vec::new(),
@@ -819,7 +830,7 @@ where
             }
             match dedupe_state {
                 FeedbackCycleDedupeState::Duplicate => {
-                    return Ok(FeedbackCycleStep::Terminal(
+                    return Ok(FeedbackCycleStep::terminal(
                         after_checked_runtime_terminal_with_dedupe(
                             FeedbackCycleTerminationV1::DuplicateNoop,
                             Vec::new(),
@@ -830,7 +841,7 @@ where
                     ));
                 }
                 FeedbackCycleDedupeState::Unavailable => {
-                    return Ok(FeedbackCycleStep::Terminal(
+                    return Ok(FeedbackCycleStep::terminal(
                         after_checked_runtime_terminal_with_dedupe(
                             FeedbackCycleTerminationV1::DaemonUnavailable,
                             vec![ProviderEvaluationStateV1::Unavailable],
@@ -841,7 +852,7 @@ where
                     ));
                 }
                 FeedbackCycleDedupeState::Cancelled => {
-                    return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+                    return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
                         FeedbackCycleTerminationV1::Cancelled,
                         vec![ProviderEvaluationStateV1::Cancelled],
                         Vec::new(),
@@ -850,7 +861,7 @@ where
                     )));
                 }
                 FeedbackCycleDedupeState::TimedOut => {
-                    return Ok(FeedbackCycleStep::Terminal(after_checked_runtime_terminal(
+                    return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
                         FeedbackCycleTerminationV1::BudgetExceeded,
                         vec![ProviderEvaluationStateV1::TimedOut],
                         Vec::new(),
@@ -863,7 +874,7 @@ where
         } else {
             None
         };
-        Ok(FeedbackCycleStep::Continue(
+        Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::AssembleResult,
         ))
     }

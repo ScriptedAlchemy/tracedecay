@@ -284,9 +284,12 @@ fn invalid_test_primitive_problem() -> ApplicationProblem {
     }
 }
 
+/// Page projection: (returned, total, cursor) extracted from a payload.
+type TestPageProjectionFn<T> = fn(&T) -> (u64, Option<u64>, Option<OpaqueCursor>);
+
 fn test_evidence<T>(
     outcome: TestPrimitivePortOutcome<T>,
-    page: fn(&T) -> (u64, Option<u64>, Option<OpaqueCursor>),
+    page: TestPageProjectionFn<T>,
 ) -> RetrievalPortOutcome<T> {
     match outcome {
         TestPrimitivePortOutcome::Completed {
@@ -333,7 +336,7 @@ fn retrieval_evidence<T>(
     budget: OperationBudgetUsage,
     completeness: CoverageCompleteness,
     omission: Option<OmissionReason>,
-    page: fn(&T) -> (u64, Option<u64>, Option<OpaqueCursor>),
+    page: TestPageProjectionFn<T>,
 ) -> RetrievalEvidence<T> {
     let (returned, total, cursor) = payload.as_ref().map_or((0, None, None), page);
     RetrievalEvidence {

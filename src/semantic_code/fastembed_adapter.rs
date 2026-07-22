@@ -261,7 +261,7 @@ impl VerifiedEmbeddingArtifactV1 {
 /// admitted domain projection. Construction exhaustively checks every pin the
 /// signed manifest and projection share before compatibility or session open.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct AdmittedProjectionArtifactV1 {
+pub(crate) struct AdmittedProjectionArtifactV1 {
     runtime_artifact: VerifiedEmbeddingArtifactV1,
 }
 
