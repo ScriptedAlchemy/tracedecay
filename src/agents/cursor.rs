@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 
+use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
     backup_and_write_json, load_json_file, load_jsonc_file_strict, safe_write_text_file,
@@ -145,6 +146,61 @@ impl AgentIntegration for CursorIntegration {
         doctor_check_session_ingest(dc, &ctx.project_path, daemon_status);
     }
 
+    fn host_component_registration(
+        &self,
+        component: HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> HostBundleRegistrationStateV1 {
+        if component == HostBundleComponentV1::Agent {
+            return cursor_native_extension_registration(&ctx.home);
+        }
+        let plugin_dir = cursor_plugin_install_dir(&ctx.home);
+        let manifest_path = cursor_plugin_manifest_path(&ctx.home);
+        let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
+            return HostBundleRegistrationStateV1::Missing;
+        };
+        let Ok(manifest) = serde_json::from_slice::<Value>(&manifest_bytes) else {
+            return HostBundleRegistrationStateV1::Corrupt;
+        };
+        if manifest.get("name").and_then(Value::as_str) != Some("tracedecay") {
+            return HostBundleRegistrationStateV1::Corrupt;
+        }
+        let mcp = load_json_file(&plugin_dir.join("mcp.json"));
+        let mcp_current = mcp
+            .pointer("/mcpServers/tracedecay")
+            .is_some_and(Value::is_object);
+        if matches!(
+            component,
+            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
+        ) {
+            return if mcp_current {
+                HostBundleRegistrationStateV1::Current
+            } else {
+                HostBundleRegistrationStateV1::Repairable
+            };
+        }
+        let hooks = load_json_file(&plugin_dir.join("hooks/hooks.json"));
+        let native_hooks_current =
+            cursor_plugin_hook_expectations()
+                .iter()
+                .all(|(event, command)| {
+                    hooks["hooks"][event.as_str()]
+                        .as_array()
+                        .is_some_and(|entries| {
+                            entries.iter().any(|entry| {
+                                entry["command"]
+                                    .as_str()
+                                    .is_some_and(|value| value.contains(command))
+                            })
+                        })
+                });
+        if native_hooks_current && plugin_dir.join("rules/tracedecay.mdc").is_file() {
+            HostBundleRegistrationStateV1::Current
+        } else {
+            HostBundleRegistrationStateV1::Repairable
+        }
+    }
+
     fn is_detected(&self, home: &Path) -> bool {
         home.join(".cursor").is_dir()
     }
@@ -264,6 +320,35 @@ fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
 
 fn cursor_plugin_manifest_path(home: &Path) -> PathBuf {
     cursor_plugin_install_dir(home).join(".cursor-plugin/plugin.json")
+}
+
+const CURSOR_NATIVE_EXTENSION_DIR: &str = "tracedecay.cursor-native-0.0.0";
+
+fn cursor_native_extension_install_dir(home: &Path) -> PathBuf {
+    home.join(".cursor/extensions")
+        .join(CURSOR_NATIVE_EXTENSION_DIR)
+}
+
+fn cursor_native_extension_registration(home: &Path) -> HostBundleRegistrationStateV1 {
+    let install_dir = cursor_native_extension_install_dir(home);
+    let manifest_path = install_dir.join("package.json");
+    let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
+        return HostBundleRegistrationStateV1::Missing;
+    };
+    let Ok(manifest) = serde_json::from_slice::<Value>(&manifest_bytes) else {
+        return HostBundleRegistrationStateV1::Corrupt;
+    };
+    let expected_manifest = manifest.get("name").and_then(Value::as_str) == Some("cursor-native")
+        && manifest.get("publisher").and_then(Value::as_str) == Some("tracedecay")
+        && manifest.get("main").and_then(Value::as_str) == Some("./dist/extension.js");
+    if !expected_manifest {
+        return HostBundleRegistrationStateV1::Corrupt;
+    }
+    if install_dir.join("dist/extension.js").is_file() {
+        HostBundleRegistrationStateV1::Current
+    } else {
+        HostBundleRegistrationStateV1::Repairable
+    }
 }
 
 /// Path of the materialized always-applied memory rule rendered from the
@@ -1094,6 +1179,41 @@ mod tests {
                 "{relative} should be a managed path"
             );
         }
+    }
+
+    #[test]
+    fn native_extension_registration_is_receipt_doctor_ready() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(
+            cursor_native_extension_registration(tmp.path()),
+            HostBundleRegistrationStateV1::Missing
+        );
+
+        let install_dir = cursor_native_extension_install_dir(tmp.path());
+        std::fs::create_dir_all(install_dir.join("dist")).unwrap();
+        std::fs::write(
+            install_dir.join("package.json"),
+            r#"{
+                "name": "cursor-native",
+                "publisher": "tracedecay",
+                "main": "./dist/extension.js"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cursor_native_extension_registration(tmp.path()),
+            HostBundleRegistrationStateV1::Repairable
+        );
+
+        std::fs::write(
+            install_dir.join("dist/extension.js"),
+            "module.exports = {};",
+        )
+        .unwrap();
+        assert_eq!(
+            cursor_native_extension_registration(tmp.path()),
+            HostBundleRegistrationStateV1::Current
+        );
     }
 
     /// The Cursor deploy set (composed from the shared `plugin/` tree) must

@@ -194,9 +194,10 @@ impl ProjectHostAdmissionReplayWorker {
                     }
                     ReplayPassDecision::Stop => {
                         consecutive_retryable = 0;
-                        eprintln!(
-                            "[tracedecay] project host admission disposition: {}",
-                            outcome.reason_code.unwrap_or("host_admission_unavailable")
+                        tracing::warn!(
+                            reason_code =
+                                outcome.reason_code.unwrap_or("host_admission_unavailable"),
+                            "project host admission replay stopped"
                         );
                         break;
                     }

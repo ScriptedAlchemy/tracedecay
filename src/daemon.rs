@@ -58,6 +58,8 @@ const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
 mod authority;
 mod branch_add;
 mod branch_admin;
+#[cfg(unix)]
+mod code_index_scheduler;
 mod core_admission;
 mod core_client;
 mod core_doctor;
@@ -89,9 +91,14 @@ mod service;
 pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod transport;
 pub(crate) use service::invocation::{
-    DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
-    DaemonInvocationResponse, DaemonInvocationService, DaemonLspSessionAccess,
-    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, parse_daemon_invocation_request,
+    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonAdvisoryRuntimeRegistrar,
+    DaemonAdvisoryRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrar,
+    DaemonFeedbackRuntimeRegistrationError, DaemonInvocationOutcome, DaemonInvocationProblem,
+    DaemonInvocationRequest, DaemonInvocationResponse, DaemonInvocationService,
+    DaemonLspInvocationOwner, DaemonLspOwnerRegistrar, DaemonLspSessionAccess,
+    DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
+    DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
+    daemon_operation_event_authority, parse_daemon_invocation_request,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
@@ -134,6 +141,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let lifecycle = DaemonLifecycle::default();
     let store_administration = StoreAdministration::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
+    let invocation = DaemonInvocationState::default();
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
@@ -160,15 +168,17 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         let client_lifecycle = lifecycle.clone();
         let store_administration = store_administration.clone();
         let project_open_gates = Arc::clone(&project_open_gates);
+        let invocation = invocation.clone();
         let per_client_admission = per_client_admission.clone();
         clients.spawn(async move {
             let _permit = permit;
-            Box::pin(serve_windows_broker_client_with_class(
+            Box::pin(serve_windows_broker_client_with_class_and_invocation(
                 stream,
                 &auth_token,
                 &client_lifecycle,
                 store_administration,
                 project_open_gates,
+                invocation,
                 per_client_admission,
                 admission_class,
                 #[cfg(test)]
@@ -179,6 +189,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     }
     lifecycle.begin_draining();
     shutdown_portable_project_open_tasks(project_open_gates.as_ref()).await;
+    invocation.shutdown().await;
     let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
         .await
         .is_ok();
@@ -465,19 +476,52 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
     }
 }
 
+/// Daemon-generation-local state for the closed invocation protocol.
+///
+/// The Unix and portable brokers share this state so an authenticated LSP
+/// session remains daemon-owned across client connections until it is detached
+/// or expires.
+#[derive(Clone, Default)]
+struct DaemonInvocationState {
+    lsp_session_registry: Arc<tokio::sync::Mutex<lsp_gateway::LspSessionRegistry>>,
+    service: DaemonInvocationService,
+}
+
+impl DaemonInvocationState {
+    fn advisory_runtime_registrar(&self) -> DaemonAdvisoryRuntimeRegistrar {
+        DaemonAdvisoryRuntimeRegistrar::new(&self.service)
+    }
+
+    fn feedback_runtime_registrar(&self) -> DaemonFeedbackRuntimeRegistrar {
+        DaemonFeedbackRuntimeRegistrar::new(&self.service)
+    }
+
+    fn primitive_runtime_registrar(&self) -> DaemonPrimitiveRuntimeRegistrar {
+        DaemonPrimitiveRuntimeRegistrar::new(&self.service)
+    }
+
+    fn semantic_runtime_registrar(&self) -> DaemonSemanticRuntimeRegistrar {
+        DaemonSemanticRuntimeRegistrar::new(&self.service)
+    }
+
+    fn lsp_owner_registrar(&self) -> DaemonLspOwnerRegistrar {
+        DaemonLspOwnerRegistrar::new(&self.service)
+    }
+
+    async fn shutdown(&self) {
+        self.lsp_session_registry.lock().await.expire_at(u64::MAX);
+        self.service.expire_all().await;
+    }
+}
+
 #[cfg(unix)]
 #[derive(Clone, Default)]
 struct DaemonEngine {
     lifecycle: DaemonLifecycle,
-    /// Daemon-generation-local registry for authenticated, single-root LSP
-    /// sessions. It is intentionally ephemeral: protocol actors own overlays,
-    /// and daemon shutdown expires every registry entry instead of preserving
-    /// client document state or creating a bridge-local fallback.
-    lsp_session_registry: Arc<tokio::sync::Mutex<lsp_gateway::LspSessionRegistry>>,
     /// Closed post-handshake operations backed by daemon-owned session actors.
     /// Git and feedback remain unavailable until their authoritative request
     /// owners register daemon-minted handles; no client-side fallback exists.
-    invocation_service: DaemonInvocationService,
+    invocation: DaemonInvocationState,
     /// Lightweight per-proxy leases keep one reconnecting client from
     /// consuming every bulk slot while preserving reserved control capacity.
     per_client_admission: DaemonPerClientAdmission,
@@ -561,6 +605,28 @@ async fn ensure_git_index_transactions_before_advertising(
         .map_err(|error| TraceDecayError::Config {
             message: format!("git index transaction startup did not complete: {error}"),
         })
+}
+
+fn ensure_context_scout_owner_before_advertising(
+    project: &crate::tracedecay::TraceDecay,
+) -> Result<()> {
+    if project.store_layout().identity.project_id.is_none() {
+        return Ok(());
+    }
+    let owner = project
+        .context_scout_owner()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project Context Scout owner did not start".to_owned(),
+        })?;
+    if matches!(
+        owner.startup_outcome(),
+        crate::agents::context_scout_v2::ContextScoutDurableStartupOutcomeV1::Unavailable
+    ) {
+        return Err(TraceDecayError::Config {
+            message: "project Context Scout durable owner is unavailable".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1456,8 +1522,23 @@ impl DaemonEngine {
             handshake,
         ))
         .await?;
+        ensure_context_scout_owner_before_advertising(&cg)?;
         cg.register_project_store_in_global_registry().await;
         let key = ProjectServerKey::from_open_project(&cg, handshake)?;
+        let semantic_resources = cg
+            .configuration_runtime()
+            .configuration()
+            .config
+            .semantic
+            .resources;
+        let semantic_runtime = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(
+            semantic_resources.max_concurrent_sessions as usize,
+            semantic_resources.max_batch_size as usize,
+            semantic_resources.max_resident_bytes,
+        )
+        .map_err(|_| TraceDecayError::Config {
+            message: "semantic runtime resource ceilings are invalid".to_owned(),
+        })?;
 
         let existing = {
             let mut servers = self.store_administration.project_servers().lock().await;
@@ -1569,6 +1650,14 @@ impl DaemonEngine {
         if !inserted {
             route_registered.store(false, Ordering::Release);
         } else {
+            match self
+                .invocation
+                .semantic_runtime_registrar()
+                .register(canonical_project_path.clone(), semantic_runtime)
+                .await
+            {
+                Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
+            }
             self.spawn_project_maintenance_activation(
                 key.clone(),
                 canonical_project_path.clone(),
@@ -1808,8 +1897,7 @@ impl DaemonEngine {
 
     async fn shutdown_background_tasks(&self) {
         self.shutdown_project_open_tasks().await;
-        self.lsp_session_registry.lock().await.expire_at(u64::MAX);
-        self.invocation_service.expire_all().await;
+        self.invocation.shutdown().await;
         self.store_administration
             .session_temporal_refresh_schedulers()
             .shutdown()
@@ -2141,6 +2229,7 @@ async fn begin_portable_project_open(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    invocation: DaemonInvocationState,
     handshake: DaemonHandshake,
     canonical_project_path: PathBuf,
     route: ProjectRouteKey,
@@ -2162,6 +2251,7 @@ async fn begin_portable_project_open(
                     portable_project_server(
                         &store_administration,
                         open_gates.as_ref(),
+                        &invocation,
                         &open_project_path,
                         &handshake,
                         #[cfg(test)]
@@ -2179,6 +2269,7 @@ async fn schedule_portable_project_server_warmup(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    invocation: DaemonInvocationState,
     handshake: DaemonHandshake,
     initialize_request: JsonRpcRequest,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
@@ -2194,6 +2285,7 @@ async fn schedule_portable_project_server_warmup(
         lifecycle,
         store_administration,
         project_open_gates,
+        invocation,
         handshake,
         canonical_project_path,
         route,
@@ -2214,6 +2306,7 @@ async fn portable_project_server_for_request(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    invocation: DaemonInvocationState,
     handshake: &DaemonHandshake,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<Arc<crate::mcp::McpServer>> {
@@ -2228,6 +2321,7 @@ async fn portable_project_server_for_request(
         lifecycle,
         store_administration.clone(),
         project_open_gates,
+        invocation,
         handshake.clone(),
         canonical_project_path.clone(),
         route,
@@ -2286,6 +2380,7 @@ async fn shutdown_portable_project_open_tasks(
 async fn portable_project_server(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
+    invocation: &DaemonInvocationState,
     canonical_project_path: &Path,
     handshake: &DaemonHandshake,
     #[cfg(test)] project_open_attempts: Option<&Arc<AtomicUsize>>,
@@ -2320,8 +2415,23 @@ async fn portable_project_server(
         handshake,
     ))
     .await?;
+    ensure_context_scout_owner_before_advertising(&cg)?;
     cg.register_project_store_in_global_registry().await;
     let key = ProjectServerKey::from_open_project(&cg, handshake)?;
+    let semantic_resources = cg
+        .configuration_runtime()
+        .configuration()
+        .config
+        .semantic
+        .resources;
+    let semantic_runtime = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(
+        semantic_resources.max_concurrent_sessions as usize,
+        semantic_resources.max_batch_size as usize,
+        semantic_resources.max_resident_bytes,
+    )
+    .map_err(|_| TraceDecayError::Config {
+        message: "semantic runtime resource ceilings are invalid".to_owned(),
+    })?;
     let existing = {
         let mut servers = store_administration.project_servers().lock().await;
         let existing = servers.get(&key).cloned();
@@ -2416,6 +2526,14 @@ async fn portable_project_server(
     };
     if !inserted {
         route_registered.store(false, Ordering::Release);
+    } else {
+        match invocation
+            .semantic_runtime_registrar()
+            .register(canonical_project_path.to_path_buf(), semantic_runtime)
+            .await
+        {
+            Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
+        }
     }
     Ok(resolved)
 }
@@ -2549,13 +2667,25 @@ async fn serve_broker_socket_client(
         return Ok(());
     }
     if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
-        let response = match invocation {
-            Ok(request) => execute_daemon_invocation(&engine, &handshake, request).await,
-            Err(response) => response,
-        };
-        drop(setup_activity);
-        write_daemon_invocation_response(&mut transport, &response).await?;
-        return Ok(());
+        let mut invocation = invocation;
+        loop {
+            let response = match invocation {
+                Ok(request) => execute_daemon_invocation(&engine, &handshake, request).await,
+                Err(response) => response,
+            };
+            write_daemon_invocation_response(&mut transport, &response).await?;
+            let next_line = tokio::select! {
+                result = read_line_handling_wire_oversized(&mut transport) => result?,
+                () = engine.lifecycle.wait_for_draining() => return Ok(()),
+            };
+            let Some(next_line) = next_line else {
+                return Ok(());
+            };
+            let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
+                return Ok(());
+            };
+            invocation = next_invocation;
+        }
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let project_node_count =
@@ -2683,7 +2813,7 @@ async fn serve_broker_socket_client(
     Ok(())
 }
 
-#[cfg(any(not(unix), test))]
+#[cfg(test)]
 async fn serve_windows_broker_client(
     stream: BrokerStream,
     auth_token: &str,
@@ -2706,7 +2836,7 @@ async fn serve_windows_broker_client(
     .await
 }
 
-#[cfg(any(not(unix), test))]
+#[cfg(test)]
 // Cohesive per-connection serving context; bundling into a params struct would churn every caller.
 #[allow(clippy::too_many_arguments)]
 async fn serve_windows_broker_client_with_class(
@@ -2715,6 +2845,35 @@ async fn serve_windows_broker_client_with_class(
     lifecycle: &DaemonLifecycle,
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    per_client_admission: DaemonPerClientAdmission,
+    admission_class: DaemonClientAdmissionClass,
+    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+) -> Result<()> {
+    Box::pin(serve_windows_broker_client_with_class_and_invocation(
+        stream,
+        auth_token,
+        lifecycle,
+        store_administration,
+        project_open_gates,
+        DaemonInvocationState::default(),
+        per_client_admission,
+        admission_class,
+        #[cfg(test)]
+        project_open_attempts,
+    ))
+    .await
+}
+
+#[cfg(any(not(unix), test))]
+// The foreground portable broker supplies one daemon-generation invocation state.
+#[allow(clippy::too_many_arguments)]
+async fn serve_windows_broker_client_with_class_and_invocation(
+    stream: BrokerStream,
+    auth_token: &str,
+    lifecycle: &DaemonLifecycle,
+    store_administration: StoreAdministration,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    invocation: DaemonInvocationState,
     per_client_admission: DaemonPerClientAdmission,
     admission_class: DaemonClientAdmissionClass,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
@@ -2797,6 +2956,39 @@ async fn serve_windows_broker_client_with_class(
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
     }
+    if let Some(invocation_request) = parse_daemon_invocation_request(&first_request_line) {
+        let mut invocation_request = invocation_request;
+        loop {
+            let response = match invocation_request {
+                Ok(request) => {
+                    execute_portable_daemon_invocation(
+                        lifecycle.clone(),
+                        store_administration.clone(),
+                        Arc::clone(&project_open_gates),
+                        &handshake,
+                        &invocation,
+                        request,
+                        #[cfg(test)]
+                        project_open_attempts.clone(),
+                    )
+                    .await
+                }
+                Err(response) => response,
+            };
+            write_daemon_invocation_response(&mut transport, &response).await?;
+            let next_line = tokio::select! {
+                result = read_line_handling_wire_oversized(&mut transport) => result?,
+                () = lifecycle.wait_for_draining() => return Ok(()),
+            };
+            let Some(next_line) = next_line else {
+                return Ok(());
+            };
+            let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
+                return Ok(());
+            };
+            invocation_request = next_invocation;
+        }
+    }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let project_node_count =
             if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
@@ -2830,6 +3022,7 @@ async fn serve_windows_broker_client_with_class(
                             lifecycle.clone(),
                             store_administration.clone(),
                             Arc::clone(&project_open_gates),
+                            invocation.clone(),
                             handshake.clone(),
                             request.clone(),
                             #[cfg(test)]
@@ -2862,6 +3055,7 @@ async fn serve_windows_broker_client_with_class(
             lifecycle.clone(),
             store_administration.clone(),
             Arc::clone(&project_open_gates),
+            invocation.clone(),
             &handshake,
             #[cfg(test)]
             project_open_attempts.clone(),
@@ -2908,6 +3102,94 @@ async fn serve_windows_broker_client_with_class(
     Ok(())
 }
 
+#[cfg(any(not(unix), test))]
+async fn execute_portable_daemon_invocation(
+    lifecycle: DaemonLifecycle,
+    store_administration: StoreAdministration,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    handshake: &DaemonHandshake,
+    invocation: &DaemonInvocationState,
+    request: DaemonInvocationRequest,
+    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+) -> DaemonInvocationResponse {
+    let request_id = request.request_id.clone();
+    let git_operation = matches!(
+        request.operation(),
+        service::invocation::DaemonInvocationOperation::GitPreview
+            | service::invocation::DaemonInvocationOperation::GitApply
+    );
+    let mut project_path = None;
+    let root = if request.requires_project() {
+        if Box::pin(portable_project_server_for_request(
+            lifecycle,
+            store_administration.clone(),
+            project_open_gates,
+            invocation.clone(),
+            handshake,
+            #[cfg(test)]
+            project_open_attempts,
+        ))
+        .await
+        .is_err()
+        {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                if git_operation {
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized
+                } else {
+                    DaemonInvocationProblem::Unavailable
+                },
+            );
+        }
+        let Ok((resolved_project_path, _)) = project_route_for_handshake(handshake) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        };
+        let Some(root) = admitted_lsp_root_for_project_path(&resolved_project_path) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        };
+        project_path = Some(resolved_project_path);
+        Some(root)
+    } else {
+        None
+    };
+    let git_service = if git_operation {
+        git_service_for_project_path(&store_administration, project_path.as_deref()).await
+    } else {
+        None
+    };
+    invocation
+        .service
+        .invoke(
+            &invocation.lsp_session_registry,
+            project_path.as_deref(),
+            root,
+            git_service,
+            request,
+        )
+        .await
+}
+
+async fn git_service_for_project_path(
+    store_administration: &StoreAdministration,
+    project_path: Option<&Path>,
+) -> Option<git_transactions::DaemonGitInvocationOwner> {
+    let project_path = project_path?;
+    let repository_root = crate::worktree::git_worktree_root(project_path)
+        .unwrap_or_else(|| project_path.to_path_buf());
+    store_administration
+        .git_index_transaction_services()
+        .for_repository_root(&repository_root)
+        .await
+        .ok()
+        .flatten()
+}
+
 #[cfg(unix)]
 async fn write_tool_list_changed_notification(transport: &mut impl McpTransport) -> Result<()> {
     let notification = json!({
@@ -2936,11 +3218,18 @@ async fn open_project_for_handshake(
         Err(open_err) if handshake.allow_init && is_missing_index_error(&open_err) => {
             match crate::tracedecay::TraceDecay::init_and_index_with_options(
                 project_path,
-                open_options,
+                open_options.clone(),
             )
             .await
             {
-                Ok(cg) => Ok(cg),
+                Ok(cg) => {
+                    cg.close();
+                    Box::pin(open_existing_project_with_options(
+                        project_path,
+                        open_options,
+                    ))
+                    .await
+                }
                 Err(_) => Err(open_err),
             }
         }
@@ -3109,32 +3398,55 @@ async fn execute_daemon_invocation(
     request: DaemonInvocationRequest,
 ) -> DaemonInvocationResponse {
     let request_id = request.request_id.clone();
+    let git_operation = matches!(
+        request.operation(),
+        service::invocation::DaemonInvocationOperation::GitPreview
+            | service::invocation::DaemonInvocationOperation::GitApply
+    );
+    let mut project_path = None;
     let root = if request.requires_project() {
         if engine.project_server_for_request(handshake).await.is_err() {
             return DaemonInvocationResponse::problem(
                 request_id,
-                service::invocation::DaemonInvocationProblem::Unavailable,
+                if git_operation {
+                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized
+                } else {
+                    service::invocation::DaemonInvocationProblem::Unavailable
+                },
             );
         }
-        let Ok((project_path, _)) = DaemonEngine::project_route(handshake) else {
+        let Ok((resolved_project_path, _)) = DaemonEngine::project_route(handshake) else {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        let Some(root) = admitted_lsp_root_for_project_path(&project_path) else {
+        let Some(root) = admitted_lsp_root_for_project_path(&resolved_project_path) else {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::Unavailable,
             );
         };
+        project_path = Some(resolved_project_path);
         Some(root)
     } else {
         None
     };
+    let git_service = if git_operation {
+        git_service_for_project_path(&engine.store_administration, project_path.as_deref()).await
+    } else {
+        None
+    };
     engine
-        .invocation_service
-        .invoke(&engine.lsp_session_registry, root, request)
+        .invocation
+        .service
+        .invoke(
+            &engine.invocation.lsp_session_registry,
+            project_path.as_deref(),
+            root,
+            git_service,
+            request,
+        )
         .await
 }
 

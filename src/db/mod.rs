@@ -3,6 +3,7 @@ mod analytics;
 mod connection;
 mod coverage;
 mod edges;
+mod evidence_assembly;
 mod files;
 mod fingerprints;
 mod maintenance;
@@ -11,6 +12,7 @@ mod metadata;
 pub mod migrations;
 mod nodes;
 mod redundancy_pairs;
+mod retrieval_anchor_authority;
 pub(crate) mod retrieval_anchor_schema;
 mod rows;
 mod search;
@@ -41,4 +43,11 @@ pub(crate) use memory_v2::{
     MemoryV2FeedbackHistoryRepairProgress,
 };
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
+pub use retrieval_anchor_authority::{
+    AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionReasonClassV1,
+    AnchorDispositionStateV1, RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
+};
+pub(crate) use retrieval_anchor_authority::{
+    publish_anchor_derivative, publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,
+};
 pub use search::DependencyImportUse;

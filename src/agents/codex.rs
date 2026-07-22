@@ -69,6 +69,17 @@ impl AgentIntegration for CodexIntegration {
         Ok(())
     }
 
+    fn uninstall_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        let local = InstallContext {
+            home: ctx.home.clone(),
+            tracedecay_bin: ctx.tracedecay_bin.clone(),
+            tool_permissions: ctx.tool_permissions.clone(),
+            project_root: Some(project_path.to_path_buf()),
+            dashboard: ctx.dashboard,
+        };
+        uninstall_codex_repo_plugin_if_present(&local)
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let codex_dir = ctx.home.join(".codex");
         let config_path = codex_dir.join("config.toml");
@@ -240,6 +251,61 @@ impl AgentIntegration for CodexIntegration {
             doctor_check_plugin(dc, &ctx.home);
         }
         doctor_suggest_native_memories_off(dc, &ctx.home);
+    }
+
+    fn host_component_registration(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        use super::host_bundle_v2::{
+            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
+        };
+
+        let candidates = [
+            ctx.home.join(".codex/plugins/tracedecay"),
+            codex_plugin_install_dir(&ctx.home),
+        ];
+        let Some(plugin_dir) = candidates
+            .into_iter()
+            .find(|path| path.join(".codex-plugin/plugin.json").is_file())
+        else {
+            return State::Missing;
+        };
+        let manifest = load_json_file(&plugin_dir.join(".codex-plugin/plugin.json"));
+        if manifest.get("name").and_then(serde_json::Value::as_str) != Some("tracedecay") {
+            return State::Corrupt;
+        }
+        let marketplace_current = load_json_file(&codex_personal_marketplace_path(&ctx.home))
+            .get("plugins")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|plugins| {
+                plugins.iter().any(|entry| {
+                    entry.get("name").and_then(serde_json::Value::as_str) == Some("tracedecay")
+                })
+            });
+        let mcp_current = load_json_file(&plugin_dir.join(".mcp.json"))
+            .pointer("/mcpServers/graph")
+            .is_some();
+        if matches!(
+            component,
+            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
+        ) {
+            return if marketplace_current && mcp_current {
+                State::Current
+            } else {
+                State::Repairable
+            };
+        }
+        let hooks = load_json_file(&plugin_dir.join("hooks/hooks.json"));
+        let hooks_current = CODEX_MANAGED_HOOKS
+            .iter()
+            .all(|hook| codex_hook_present(&hooks, hook.event, hook.subcommand));
+        if marketplace_current && hooks_current {
+            State::Current
+        } else {
+            State::Repairable
+        }
     }
 
     fn is_detected(&self, home: &Path) -> bool {

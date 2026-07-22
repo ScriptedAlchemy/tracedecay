@@ -17,9 +17,9 @@ pub use config::{
     HOOK_CONFIGURATION_SCHEMA_VERSION, HookConfigurationFileReaderV1,
     HookConfigurationFileWriterV1, HookConfigurationPublicationError,
     HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationStoreV1,
-    HookConfigurationPublicationV1, HookConfigurationPublisherV1, HookConfigurationReadOutcomeV1,
-    HookConfigurationReadStoreV1, HookConfigurationSnapshotV1, HookConfigurationSubscriberV1,
-    MAX_HOOK_CONFIGURATION_BYTES,
+    HookConfigurationPublisherV1, HookConfigurationReadOutcomeV1, HookConfigurationReadStoreV1,
+    HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, MAX_HOOK_CONFIGURATION_BYTES,
+    hook_configuration_path,
 };
 pub use native::{
     DecodedNativeHookEventV1, NativeEnvelopeMaterialV1, NativeHookDecodeError, NativeHookSignalV1,
@@ -75,6 +75,24 @@ pub enum HookHostV1 {
     Cline,
     RooCode,
     Kilo,
+}
+
+impl HookHostV1 {
+    pub const fn as_key(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude",
+            Self::Codex => "codex",
+            Self::CursorDesktop => "cursor-desktop",
+            Self::CursorCloud => "cursor-cloud",
+            Self::Hermes => "hermes",
+            Self::Kiro => "kiro",
+            Self::KimiCode => "kimi",
+            Self::OpenCode => "opencode",
+            Self::Cline => "cline",
+            Self::RooCode => "roo-code",
+            Self::Kilo => "kilo",
+        }
+    }
 }
 
 /// Event families that a host hook itself may emit in PR13.
@@ -178,7 +196,6 @@ pub enum HookEventV2 {
     },
     SavedEdit {
         file_id: [u8; 16],
-        content_digest: [u8; 32],
         changed_range_count: u8,
     },
     TestLifecycle {
@@ -227,13 +244,10 @@ pub struct HookEventEnvelopeV2 {
     pub repository_id: [u8; 16],
     pub worktree_id: [u8; 16],
     pub worktree_epoch: u64,
-    pub authorization_epoch: u64,
-    pub capability_revision: u32,
     pub binding_token: [u8; 32],
     pub ordering: HookOrderingV1,
     pub observed_at: UtcMicros,
     pub event: HookEventV2,
-    pub payload_digest: [u8; 32],
 }
 
 impl HookEventEnvelopeV2 {
@@ -247,7 +261,6 @@ impl HookEventEnvelopeV2 {
             || self.repository_id == [0; 16]
             || self.worktree_id == [0; 16]
             || self.binding_token == [0; 32]
-            || self.payload_digest == [0; 32]
         {
             return Err(HookContractError::InvalidIdentity);
         }
@@ -256,8 +269,6 @@ impl HookEventEnvelopeV2 {
             || self.repository_id != binding.repository_id
             || self.worktree_id != binding.worktree_id
             || self.worktree_epoch != binding.worktree_epoch
-            || self.authorization_epoch != binding.authorization_epoch
-            || self.capability_revision != binding.capability_revision
             || self.binding_token != binding.binding_token
         {
             return Err(HookContractError::BindingMismatch);
@@ -289,8 +300,6 @@ pub struct HookScopeBindingV1 {
     pub repository_id: [u8; 16],
     pub worktree_id: [u8; 16],
     pub worktree_epoch: u64,
-    pub authorization_epoch: u64,
-    pub capability_revision: u32,
     pub binding_token: [u8; 32],
     pub capabilities: Vec<HookCapabilityV1>,
 }
@@ -511,8 +520,6 @@ mod tests {
             repository_id: [2; 16],
             worktree_id: [3; 16],
             worktree_epoch: 4,
-            authorization_epoch: 5,
-            capability_revision: 6,
             binding_token: [7; 32],
             capabilities: vec![HookCapabilityV1 {
                 family: HookEventFamily::SessionBoundary,
@@ -531,15 +538,12 @@ mod tests {
             repository_id: [2; 16],
             worktree_id: [3; 16],
             worktree_epoch: 4,
-            authorization_epoch: 5,
-            capability_revision: 6,
             binding_token: [7; 32],
             ordering: HookOrderingV1::Unknown,
             observed_at: UtcMicros(10),
             event: HookEventV2::SessionBoundary {
                 boundary: HookBoundaryV1::Start,
             },
-            payload_digest: [13; 32],
         }
     }
 

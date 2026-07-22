@@ -237,7 +237,7 @@ pub(crate) async fn run(
         if let Err(err) =
             run_user_job_with_backend(&dashboard_root, &config, &backend, &job, options).await
         {
-            eprintln!("[tracedecay] dashboard user job '{}' failed: {err}", job.id);
+            tracing::warn!(job_id = %job.id, error = %err, "dashboard user job failed");
         }
     });
     Ok((StatusCode::ACCEPTED, Json(payload)))

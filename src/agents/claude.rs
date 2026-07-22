@@ -90,13 +90,6 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        // Claude Code plugins are global (they live under `~/.claude/plugins`
-        // and are enabled per-user). There is no robust project-scoped plugin
-        // install that mirrors the codex repo bundle, so a `--local` install
-        // ensures the global plugin is present and adds the project-scoped
-        // CLAUDE.md steering rules, which are the genuinely project-local part.
-        self.install(ctx)?;
-
         let claude_dir = project_path.join(".claude");
         let claude_md_path = claude_dir.join("CLAUDE.md");
         // The only genuinely project-local write is `.claude/CLAUDE.md`; refuse
@@ -109,6 +102,17 @@ impl AgentIntegration for ClaudeIntegration {
             &claude_md_path,
             crate::automation::skill_targets::SkillInstallTarget::Claude,
         )
+    }
+
+    fn uninstall_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        let claude_md_path = project_path.join(".claude/CLAUDE.md");
+        super::remove_managed_skill_prompt_index(
+            &ctx.home,
+            &claude_md_path,
+            crate::automation::skill_targets::SkillInstallTarget::Claude,
+        )?;
+        uninstall_claude_md_rules(&claude_md_path);
+        Ok(())
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -179,6 +183,71 @@ impl AgentIntegration for ClaudeIntegration {
         doctor_check_claude_md(dc, &ctx.home);
         doctor_check_config_managed_leftovers(dc, &ctx.home);
         doctor_check_local_config(dc, &ctx.project_path);
+    }
+
+    fn host_component_registration(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        use super::host_bundle_v2::{
+            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
+        };
+
+        let deploy_dir = plugin_deploy_dir(&ctx.home);
+        let manifest_path = plugin_marketplace_manifest_path(&ctx.home);
+        let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
+            return State::Missing;
+        };
+        let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) else {
+            return State::Corrupt;
+        };
+        if manifest.get("name").and_then(serde_json::Value::as_str) != Some("tracedecay") {
+            return State::Corrupt;
+        }
+        let mcp_current = load_json_file(&deploy_dir.join(".mcp.json"))
+            .get("mcpServers")
+            .and_then(|servers| servers.get("graph"))
+            .is_some();
+        let settings = load_json_file(&ctx.home.join(".claude/settings.json"));
+        let enabled = settings
+            .pointer("/enabledPlugins/tracedecay@tracedecay")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        let marketplace_registered = load_json_file(&known_marketplaces_path(&ctx.home))
+            .pointer("/tracedecay/source/source")
+            .and_then(serde_json::Value::as_str)
+            == Some("directory");
+        let permissions = settings
+            .pointer("/permissions/allow")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|installed| {
+                plugin_tool_perms().iter().all(|expected| {
+                    installed
+                        .iter()
+                        .any(|value| value.as_str() == Some(expected.as_str()))
+                })
+            });
+        if matches!(
+            component,
+            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
+        ) {
+            return if marketplace_registered && enabled && permissions && mcp_current {
+                State::Current
+            } else {
+                State::Repairable
+            };
+        }
+        let core_current = marketplace_registered
+            && enabled
+            && permissions
+            && deploy_dir.join("hooks/hooks.json").is_file()
+            && deploy_dir.join(".lsp.json").is_file();
+        if core_current {
+            State::Current
+        } else {
+            State::Repairable
+        }
     }
 
     fn export_managed_skills(
@@ -280,12 +349,13 @@ const PLUGIN_IDENTIFIER: &str = "tracedecay@tracedecay";
 /// tracedecay binary path at deploy time.
 const TRACEDECAY_BIN_PLACEHOLDER: &str = "__TRACEDECAY_BIN__";
 
-/// The Claude plugin's composed deploy set, sourced from the shared `plugin/`
-/// tree via [`crate::agents::plugin_bundle::claude_files`]. Each entry is
-/// `(deploy_relative_path, file_contents)`. Coverage of the shared tree is
-/// enforced by `claude_embedded_file_list_covers_the_whole_source_bundle`.
+/// The compatibility installer composes the MCP-free core and optional MCP
+/// companion. Signed lifecycle callers can consume either inventory
+/// independently through `plugin_bundle`.
 fn claude_embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
-    crate::agents::plugin_bundle::claude_files()
+    let mut files = crate::agents::plugin_bundle::claude_core_files();
+    files.extend(crate::agents::plugin_bundle::claude_mcp_companion_files());
+    files
 }
 
 /// The stable marketplace/deploy root. It contains
@@ -364,15 +434,29 @@ fn clean_replace_owned_deploy_dir(deploy_dir: &Path) -> Result<()> {
 
 /// Apply per-file deploy-time substitutions:
 /// - `plugin.json`: stamp `version` from the crate version.
+/// - `.lsp.json`: set the configured-language bridge command.
 /// - `.mcp.json`: set the server `command` to the absolute binary path.
 /// - `hooks/hooks.json`: replace the `__TRACEDECAY_BIN__` placeholder.
 fn render_plugin_file(relative: &str, contents: &str, tracedecay_bin: &str) -> Result<String> {
     match relative {
         ".claude-plugin/plugin.json" => stamp_plugin_version(contents),
+        ".lsp.json" => set_lsp_command(contents, tracedecay_bin),
         ".mcp.json" => set_mcp_command(contents, tracedecay_bin),
         "hooks/hooks.json" => set_hook_commands(contents, tracedecay_bin),
         _ => Ok(contents.to_string()),
     }
+}
+
+fn set_lsp_command(raw: &str, tracedecay_bin: &str) -> Result<String> {
+    let mut config: serde_json::Value = serde_json::from_str(raw)?;
+    let server = config
+        .get_mut("tracedecay")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "Claude LSP bundle is missing the tracedecay server".to_string(),
+        })?;
+    server.insert("command".to_string(), json!(tracedecay_bin));
+    Ok(format!("{}\n", serde_json::to_string_pretty(&config)?))
 }
 
 /// Replace the `__TRACEDECAY_BIN__` placeholder in every hook `command` field

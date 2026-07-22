@@ -10,11 +10,15 @@ pub mod antigravity;
 pub mod claude;
 pub mod cline;
 pub mod codex;
+pub mod context_scout_model;
+pub mod context_scout_owner;
+pub mod context_scout_v2;
 pub mod copilot;
 pub mod cursor;
 pub(crate) mod cursor_diagnostics;
 pub mod gemini;
 pub mod hermes;
+pub mod host_bundle_registry;
 pub mod host_bundle_v2;
 pub mod kilo;
 pub mod kimi;
@@ -203,6 +207,14 @@ pub trait AgentIntegration {
         })
     }
 
+    /// Remove only the project-local registration and generated assets owned
+    /// by [`AgentIntegration::install_local`].
+    fn uninstall_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
+        Err(TraceDecayError::Config {
+            message: format!("{} does not support project-local uninstall", self.name()),
+        })
+    }
+
     /// Optional hook run after a successful [`AgentIntegration::install`] or
     /// [`AgentIntegration::install_local`]. The default is a no-op.
     ///
@@ -278,6 +290,17 @@ pub trait AgentIntegration {
         self.healthcheck(dc, ctx);
     }
 
+    /// Read-only native registration state for one receipt-backed component.
+    /// Doctor calls this only for components enumerated from lifecycle
+    /// receipts; implementations must not infer uninstalled catalog pairs.
+    fn host_component_registration(
+        &self,
+        _component: host_bundle_v2::HostBundleComponentV1,
+        _ctx: &HealthcheckContext,
+    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
+        host_bundle_v2::HostBundleRegistrationStateV1::Missing
+    }
+
     /// Returns true if this agent appears to be installed on the system
     /// (its config directory exists).
     fn is_detected(&self, _home: &Path) -> bool {
@@ -300,6 +323,19 @@ pub trait AgentIntegration {
     /// primary config" (e.g. an append-only TOML file with no rewrite path).
     fn primary_config_path(&self, _home: &Path) -> Option<PathBuf> {
         None
+    }
+
+    /// Every mutable host registration/configuration path participating in an
+    /// aggregate component-set lifecycle. The transaction stages backups for
+    /// all returned paths before invoking the host registration adapter.
+    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+        self.primary_config_path(home).into_iter().collect()
+    }
+
+    /// Re-activate host-native registration for already-deployed component
+    /// assets without rendering or copying those assets again.
+    fn activate_deployed_host_registration(&self, _ctx: &InstallContext) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -422,6 +458,67 @@ pub fn available_integrations() -> Vec<&'static str> {
         "kimi",
         "vibe",
     ]
+}
+
+pub fn integration_id_for_host(host: host_bundle_v2::HostKindV1) -> &'static str {
+    match host {
+        host_bundle_v2::HostKindV1::ClaudeCode => "claude",
+        host_bundle_v2::HostKindV1::CursorDesktop | host_bundle_v2::HostKindV1::CursorCloud => {
+            "cursor"
+        }
+        host_bundle_v2::HostKindV1::Codex => "codex",
+        host_bundle_v2::HostKindV1::Hermes => "hermes",
+        host_bundle_v2::HostKindV1::Kiro => "kiro",
+        host_bundle_v2::HostKindV1::ClineFamily => "cline",
+        host_bundle_v2::HostKindV1::Cline => "cline",
+        host_bundle_v2::HostKindV1::RooCode => "roo-code",
+        host_bundle_v2::HostKindV1::Kilo => "kilo",
+        host_bundle_v2::HostKindV1::KimiCode => "kimi",
+        host_bundle_v2::HostKindV1::OpenCode => "opencode",
+    }
+}
+
+struct AgentRegistrationInspector<'a> {
+    context: &'a HealthcheckContext,
+}
+
+impl host_bundle_v2::HostBundleRegistrationInspectorV1 for AgentRegistrationInspector<'_> {
+    fn inspect_registration(
+        &self,
+        host: host_bundle_v2::HostKindV1,
+        component: host_bundle_v2::HostBundleComponentV1,
+    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
+        get_integration(integration_id_for_host(host)).map_or(
+            host_bundle_v2::HostBundleRegistrationStateV1::Missing,
+            |integration| integration.host_component_registration(component, self.context),
+        )
+    }
+}
+
+pub fn inspect_receipt_backed_host_components(
+    context: &HealthcheckContext,
+    lifecycle_root: &Path,
+) -> std::result::Result<host_bundle_v2::HostBundleDoctorReportV1, host_bundle_v2::HostBundleError>
+{
+    host_bundle_v2::inspect_installed_host_bundle_components_at(
+        &context.home,
+        lifecycle_root,
+        &AgentRegistrationInspector { context },
+    )
+}
+
+pub fn inspect_installed_host_components(
+    context: &HealthcheckContext,
+) -> Result<host_bundle_v2::HostBundleDoctorReportV1> {
+    let lifecycle_root = host_bundle_v2::resolved_host_bundle_lifecycle_root()?;
+    inspect_receipt_backed_host_components(context, &lifecycle_root).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!(
+                "could not inspect receipt-backed host components in {}: {error}",
+                lifecycle_root.display()
+            ),
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1300,7 +1397,7 @@ pub fn migrate_installed_agents(home: &Path, config: &mut crate::user_config::Us
     }
     config.installed_agents.extend(additions);
     if let Err(err) = config.save() {
-        eprintln!("warning: could not save tracedecay config: {err}");
+        tracing::warn!(%err, "could not save tracedecay config");
     }
 }
 

@@ -231,12 +231,29 @@ pub const CLAUDE_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!("hooks/hooks.json", "hooks/hooks-claude.json"),
 ];
 
+/// Claude's one configured-language LSP bridge. It is part of the MCP-free
+/// core bundle and is deployed separately from the compatibility manifest
+/// inventory so existing aggregate installers keep their stable file set.
+pub const CLAUDE_LSP_FILES: &[PluginFile] = &[plugin_file!(".lsp.json", ".lsp.json")];
+
 /// Cursor manifest + Cursor MCP + Cursor hooks + README.
 pub const CURSOR_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!(".cursor-plugin/plugin.json", ".cursor-plugin/plugin.json"),
     plugin_file!("README.md", "README-cursor.md"),
     plugin_file!("mcp.json", "mcp-cursor.json"),
     plugin_file!("hooks/hooks.json", "hooks/hooks-cursor.json"),
+];
+
+/// Cursor's unpacked desktop extension. The host-component lifecycle deploys
+/// these assets to Cursor's extension root rather than the plugin root.
+const CURSOR_NATIVE_EXTENSION_FILES: &[PluginFile] = &[
+    plugin_file!("package.json", "cursor-native-extension/package.json"),
+    plugin_file!(
+        "dist/extension.js",
+        "cursor-native-extension/dist/extension.js"
+    ),
+    plugin_file!("README.md", "cursor-native-extension/README.md"),
+    plugin_file!("LICENSE", "cursor-native-extension/LICENSE"),
 ];
 
 /// Codex manifest + shared MCP + Codex hooks + README.
@@ -280,6 +297,29 @@ pub fn claude_files() -> Vec<(&'static str, &'static str)> {
     )
 }
 
+/// MCP-free Claude core: plugin metadata, hooks, skills, agents, commands, and
+/// the single configured-language TraceDecay LSP bridge.
+pub fn claude_core_files() -> Vec<(&'static str, &'static str)> {
+    claude_files()
+        .into_iter()
+        .filter(|(relative, _)| *relative != ".mcp.json")
+        .chain(
+            CLAUDE_LSP_FILES
+                .iter()
+                .map(|file| (file.relative, file.contents)),
+        )
+        .collect()
+}
+
+/// Independently installable Claude MCP companion inventory.
+pub fn claude_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
+    CLAUDE_MANIFEST_FILES
+        .iter()
+        .filter(|file| file.relative == ".mcp.json")
+        .map(|file| (file.relative, file.contents))
+        .collect()
+}
+
 /// Files Cursor deploys: manifest + Cursor rules + Cursor agents + Cursor
 /// native commands + the shared skill files *without* the `tracedecay-*`
 /// dispatcher skills (those slugs are native commands on Cursor).
@@ -295,10 +335,55 @@ pub fn cursor_files() -> Vec<(&'static str, &'static str)> {
     )
 }
 
+/// MCP-free Cursor core. The separately packaged native-diagnostics extension
+/// is an `Agent` host component so the plugin deployment root remains limited
+/// to Cursor plugin assets.
+pub fn cursor_core_files() -> Vec<(&'static str, &'static str)> {
+    cursor_files()
+        .into_iter()
+        .filter(|(relative, _)| *relative != "mcp.json")
+        .collect()
+}
+
+/// Unpacked VS Code/Cursor extension files for the native-diagnostics host
+/// component. Its bundle includes `vscode-languageclient` and leaves only the
+/// host-provided `vscode` module external.
+pub fn cursor_native_extension_files() -> Vec<(&'static str, &'static str)> {
+    CURSOR_NATIVE_EXTENSION_FILES
+        .iter()
+        .map(|file| (file.relative, file.contents))
+        .collect()
+}
+
+/// Independently installable Cursor MCP companion inventory.
+pub fn cursor_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
+    CURSOR_MANIFEST_FILES
+        .iter()
+        .filter(|file| file.relative == "mcp.json")
+        .map(|file| (file.relative, file.contents))
+        .collect()
+}
+
 /// Files Codex deploys: manifest + every skill file (all 30 skills incl.
 /// dispatchers, plus any support files). Codex ships no agents/commands/rules.
 pub fn codex_files() -> Vec<(&'static str, &'static str)> {
     compose(&[CODEX_MANIFEST_FILES], all_skill_files())
+}
+
+/// MCP-free Codex core and independently installable MCP companion inventory.
+pub fn codex_core_files() -> Vec<(&'static str, &'static str)> {
+    codex_files()
+        .into_iter()
+        .filter(|(relative, _)| *relative != ".mcp.json")
+        .collect()
+}
+
+pub fn codex_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
+    CODEX_MANIFEST_FILES
+        .iter()
+        .filter(|file| file.relative == ".mcp.json")
+        .map(|file| (file.relative, file.contents))
+        .collect()
 }
 
 /// Files Kimi deploys: manifest + README + the shared Claude command Markdown
@@ -310,6 +395,32 @@ pub fn kimi_files() -> Vec<(&'static str, &'static str)> {
         &[KIMI_MANIFEST_FILES, CLAUDE_COMMAND_FILES],
         all_skill_files(),
     )
+}
+
+/// Kimi's independently addressable MCP companion is declared by its plugin
+/// manifest; the official plugin manager owns registration of that manifest.
+pub fn kimi_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
+    KIMI_MANIFEST_FILES
+        .iter()
+        .filter(|file| file.relative == ".kimi-plugin/plugin.json")
+        .map(|file| (file.relative, file.contents))
+        .collect()
+}
+
+/// OpenCode Agent component: host-loadable skills, agent definitions, and
+/// command prompt templates. `AGENTS.md` remains Core instruction content.
+pub fn opencode_agent_files() -> Vec<(&'static str, &'static str)> {
+    compose(
+        &[GENERATED_CLAUDE_AGENT_FILES, CLAUDE_COMMAND_FILES],
+        all_skill_files(),
+    )
+}
+
+pub fn opencode_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
+    vec![(
+        "tracedecay-mcp.ts",
+        include_str!("../../plugin/opencode/tracedecay-mcp.ts"),
+    )]
 }
 
 #[cfg(test)]

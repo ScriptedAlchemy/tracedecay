@@ -1,6 +1,0 @@
-{
-  "packages": ["tracedecay-application"],
-  "command": "cargo test -p tracedecay-application --test four_pillar_milestone",
-  "recorded_at": "2026-07-21T09:20:19Z",
-  "notes": "PR13 canonical four-pillar advisory contract fixture; transport and hook verification are recorded by their owning packages."
-}

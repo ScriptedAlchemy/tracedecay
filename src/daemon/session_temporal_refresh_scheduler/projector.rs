@@ -189,6 +189,11 @@ fn canonical_noop_complete_effect(
         next_batch.saturating_add(1),
         committed_records,
         refresh_clock_micros(),
+    )
+    .with_source_coverage(
+        recovery
+            .source_coverage(committed)
+            .map_err(|_| SessionTemporalRefreshProjectorError::terminal("projector_failed"))?,
     );
     let batch = SessionTemporalProjectionBatchV1::new(
         recovery.session_id().clone(),

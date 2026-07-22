@@ -45,13 +45,14 @@ Measured phases:
   steps (4 at workload authoring, when the chain ended at v22; 5 at capture
   time, after the additive v23 PR7 migration landed in the same chain).
 
-## Provisional, unattested evidence
+## Acceptance status: pending parent run
 
-Unlike the PR5 baseline, this evidence is **provisional**. The PR5 runner
-requires a clean commit, expands it with `git archive`, and attests every
-compiler input; that workflow is impossible while the PR7 tree is dirty, so
-commit-attested naming (`result-<date>-<commithash>.json`) and the
-`acceptance` evidence status cannot be used here. Instead:
+The checked-in result is **provisional, unattested evidence**, not accepted
+benchmark evidence. The PR5 runner requires a clean commit, expands it with
+`git archive`, and attests every compiler input. The PR7 harness does not
+currently provide that acceptance path, so commit-attested naming
+(`result-<date>-<commithash>.json`) and the `acceptance` evidence status cannot
+be used here.
 
 - The measurement runs as a normal test,
   `store::memory_benchmark::pr7_memory_baseline`, and rewrites
@@ -67,15 +68,54 @@ commit-attested naming (`result-<date>-<commithash>.json`) and the
   acceptance artifact from a dirty tree, unindexed or duplicate artifacts, and
   artifacts whose embedded workload or harness identity differs from the
   compiled sources.
-- When PR7 lands on a clean commit, regenerate this baseline through an
-  attested run and promote the index to a commit-attested acceptance artifact
-  before PR20 compares against it.
+- `current_acceptance` must remain null until a parent run completes every gate
+  below and produces a clean-commit, compiler-input-attested artifact. Merely
+  rerunning the current measurement test does not promote provisional evidence.
 
-The checked-in artifact was captured with:
+### Unmeasured behavioral acceptance coverage
 
-```console
-cargo test --release --lib store::memory_benchmark::pr7_memory_baseline -- --exact --nocapture --test-threads=1
-```
+The retained PR6/PR7 behavior gates are intentionally separate from the
+performance samples in `result-provisional.json`:
+
+- checked-in native provider fixtures exercise definition/binding separation,
+  complete and partial source frontiers, snapshot completion, and partial
+  non-deletion through the production host-ingestion path;
+- the production database authority exercises generic active, unavailable,
+  superseded, and deleted anchor dispositions, append-only history, reverse
+  lineage, terminal tombstones, and direct-evidence derivative suppression;
+- V3 Git-topology domain fixtures exercise immutable repository/worktree/ref/
+  object, PR/check, preview/apply, and integration-receipt targets; authorized
+  drilldown preserves exact ordered sources and reports retargeting, stale
+  generations, and source dispositions;
+- evidence assembly exercises occurrence-set normalization, ordered spans,
+  contribution publication/replay, and paged contribution-to-span-to-exact-
+  source drilldown through production APIs.
+
+These regressions are acceptance prerequisites, not benchmark measurements.
+Their presence does not change the provisional artifact or the null acceptance
+index.
+
+### Required parent-run gates
+
+Run these gates from the exact clean product/harness/workload commit that the
+artifact will attest:
+
+1. `cargo test --test host_event_fixture_test native_host_event_fixtures_execute_provider_admission_paths -- --exact`
+2. `cargo test -p tracedecay-domain --test git_topology_anchor_contract`
+3. `cargo test --lib db::retrieval_anchor_authority::tests -- --test-threads=1`
+4. `cargo test --lib application::anchor_resolution::tests::topology_drilldown_preserves_sources_and_reports_stale_or_retargeted -- --exact`
+5. `cargo test --lib application::evidence_assembly::tests::authorized_drilldown_expands_contribution_span_set_and_exact_members -- --exact`
+6. `cargo test --all-features`
+7. `cargo test --release --lib store::memory_benchmark::pr7_memory_baseline -- --exact --nocapture --test-threads=1`
+8. `cargo test --lib store::memory_benchmark::workload_manifest_matches_code_contract -- --exact`
+9. `cargo test --lib store::memory_benchmark::evidence_directory_matches_index_contract -- --exact`
+
+The parent must additionally use a clean-archive attestation path equivalent to
+the PR5 runner, verify the artifact's commit equals the clean source commit,
+verify `git.dirty == false` and `platform.debug_assertions == false`, and verify
+the embedded workload and harness digests against the compiler inputs. No such
+PR7 acceptance artifact has been generated yet. Until all of those conditions
+hold, the index remains pending with `current_acceptance: null`.
 
 Any `cargo test --lib store::memory_benchmark` invocation re-executes the
 measurement and re-emits the provisional artifact; the manifest and evidence
@@ -83,38 +123,13 @@ directory validators run in the same module and hold an inter-process file
 lock plus atomic rename so concurrent test processes never read a partial
 artifact.
 
-## Measured summary
+## Provisional measurement snapshot
 
-Captured from the dirty PR7 worktree at commit
-`63f21295226b1ab86cc0bd61d179c0310d99c078` (dirty, so no commit attestation),
-release test profile (`debug_assertions: false`), on an AMD EPYC 7742 under
-Linux 6.8.0-134-generic, rustc/cargo 1.95.0, 3 warmups and 30 measured
-repetitions of 8 records per record phase (30 x 8 = 240 records) and 30
-migration runs of 5 applied steps each (v19 through v23; the chain gained the
-additive v23 PR7 migration while this baseline was recorded). The raw artifact
-records the Linux kernel, CPU, memory, Rust/Cargo toolchains, every
-repetition, and the nearest-rank/sample-standard-deviation method.
-
-- Fact write (8 facts/repetition): p50 16,789,952 ns; p95 40,764,387 ns; p99
-  41,118,912 ns; 339.0 facts/s. Timed CPU: 510 ms; process write I/O:
-  85,409,792 bytes; database growth: 2,703,960 bytes; peak RSS: 24,972 KiB.
-- Anchor create (8 anchored observations/repetition): p50 23,876,623 ns; p95
-  28,616,012 ns; p99 29,025,918 ns; 323.4 records/s. Timed CPU: 440 ms;
-  process write I/O: 25,460,736 bytes; database growth: 3,337,400 bytes; peak
-  RSS: 29,472 KiB.
-- Anchor resolution (8 resolutions/repetition): p50 11,517,756 ns; p95
-  11,583,457 ns; p99 11,598,948 ns; 694.5 resolutions/s. Timed CPU: 340 ms;
-  zero process write bytes and database growth; peak RSS: 29,492 KiB.
-- Anchor replay (8 exact repeat persists/repetition): p50 11,343,964 ns; p95
-  11,412,954 ns; p99 11,420,574 ns; 706.2 replays/s; every sample returned the
-  originally created anchor as an exact duplicate and durable observation
-  cardinality stayed at 264. Timed CPU: 350 ms; zero process write bytes and
-  database growth; peak RSS: 29,492 KiB.
-- Migration v19-to-v23 (one production `migrate()` run per repetition, 5
-  applied steps): p50 23,913,874 ns; p95 25,032,110 ns; p99 87,941,944 ns;
-  191.8 migration steps/s. Timed CPU: 670 ms; process write I/O: 12,922,880
-  bytes; database growth: 12,854,400 bytes across the 30 independent fixture
-  databases; peak RSS: 29,060 KiB.
+[result-provisional.json](result-provisional.json) is the sole authority for
+the latest local measurement values. It records its dirty commit snapshot,
+build profile, toolchain, raw samples, and derived distributions. Those values
+are diagnostic only: they may be regenerated by an ordinary test run and must
+not be quoted as accepted PR7 performance evidence.
 
 ## Developer build feedback
 

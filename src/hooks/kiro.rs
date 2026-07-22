@@ -138,6 +138,15 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
     let root = codex_project_root_from_event(&event);
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
+    if let Some(root) = root.as_deref()
+        && let super::v2::HookV2Dispatch::Handled { guidance, .. } =
+            super::v2::dispatch(tracedecay_hooks::HookHostV1::Kiro, &event, root).await
+    {
+        if let Some(guidance) = guidance {
+            println!("{guidance}");
+        }
+        return 0;
+    }
     reset_counter_for_kiro_event(&event, Some(&hook_telemetry)).await;
     let ingest = ingest_kiro_transcript_for_event(
         &event,

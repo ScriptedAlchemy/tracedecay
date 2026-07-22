@@ -17,10 +17,18 @@ Announce: "Using tracedecay:fixing-build-and-type-errors."
 | Situation | Call | Cost |
 |---|---|---|
 | Compiler output already on hand (pasted or captured) | `tracedecay_diagnose` (`cargo_output`, `include_callers?`) — parses text, maps each error to the smallest containing node with up to 5 callers. Rust/cargo only. | Free — no toolchain run |
-| Need fresh diagnostics | `tracedecay_diagnostics` (`scope`: `workspace` \| `package`+`name` \| `file`+`path`) — multi-language (cargo/tsc/pyright), structured, node-mapped. | Heavy — first run on a fresh tree can take minutes (target dir `/tmp/tracedecay-target/<project_id>/diagnostics`); later runs sub-second |
+| Need fresh diagnostics | `tracedecay_diagnostics` / `tracedecay_diagnostics_read` (`scope`: `workspace` \| `package`+`name` \| `file`+`path`) — multi-language (cargo/tsc/pyright), structured, node-mapped. | Heavy — first run on a fresh tree can take minutes (target dir `/tmp/tracedecay-target/<project_id>/diagnostics`); later runs sub-second |
 
 Always prefer the free row. Respect the host's approval/run-mode before
 running fresh toolchain checks.
+
+## PR12 LSP discovery
+
+When an editor-language-server availability question is material to the
+diagnosis, run `tracedecay lsp servers --json`. This is a CLI-only,
+informational inventory of detected servers and install hints; it neither
+starts nor installs a server. It is not an MCP tool and must not be added to a
+host MCP allowlist.
 
 ## Fix loop
 

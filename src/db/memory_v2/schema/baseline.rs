@@ -461,6 +461,91 @@ pub(in crate::db) async fn create_schema(conn: &Connection, operation: &str) -> 
     )
     .await
     .map_err(|error| db_error(operation, error))?;
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
+             source_anchor_id, owner_json, derivative_kind, derivative_id, direct_evidence
+         )
+         SELECT anchor_id, owner_json, 'contribution', evidence_id,
+                CASE json_extract(evidence_json, '$.relation')
+                    WHEN 'supports' THEN 1
+                    WHEN 'contradicts' THEN 1
+                    WHEN 'corrects' THEN 1
+                    ELSE 0
+                END
+         FROM memory_v2_evidence;",
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
+             source_anchor_id, owner_json, derivative_kind, derivative_id, direct_evidence
+         )
+         SELECT lineage.source_anchor_id, lineage.owner_json,
+                'finding', event.event_id, 1
+         FROM retrieval_anchor_reverse_lineage AS lineage
+         JOIN memory_v2_evidence AS evidence
+           ON evidence.anchor_id = lineage.source_anchor_id
+          AND evidence.owner_json = lineage.owner_json
+          AND evidence.evidence_id = lineage.derivative_id
+         JOIN memory_v2_lineage_events AS event
+           ON event.fact_id = evidence.fact_id
+          AND event.owner_kind = evidence.owner_kind
+          AND event.project_id = evidence.project_id
+         WHERE lineage.derivative_kind = 'contribution'
+           AND lineage.direct_evidence = 1
+           AND json_extract(event.event_json, '$.kind') = 'trust_changed'
+           AND COALESCE((
+               SELECT disposition.state
+               FROM retrieval_anchor_dispositions AS disposition
+               WHERE disposition.anchor_id = lineage.source_anchor_id
+                 AND disposition.owner_json = lineage.owner_json
+               ORDER BY disposition.sequence DESC LIMIT 1
+           ), 'active') = 'active';",
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO retrieval_anchor_derivative_tombstones (
+             source_anchor_id, owner_json, derivative_kind, derivative_id,
+             disposition_id, effective_at
+         )
+         SELECT lineage.source_anchor_id, lineage.owner_json,
+                lineage.derivative_kind, lineage.derivative_id,
+                current.last_event_id, current.updated_at
+         FROM retrieval_anchor_reverse_lineage AS lineage
+         JOIN memory_v2_evidence AS evidence
+           ON evidence.anchor_id = lineage.source_anchor_id
+          AND evidence.owner_json = lineage.owner_json
+          AND evidence.evidence_id = lineage.derivative_id
+         JOIN memory_v2_current_facts AS current
+           ON current.fact_id = evidence.fact_id
+          AND current.owner_kind = evidence.owner_kind
+          AND current.project_id = evidence.project_id
+         WHERE lineage.derivative_kind = 'contribution'
+           AND current.payload_access = 'deleted';",
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO retrieval_anchor_derivative_tombstones (
+             source_anchor_id, owner_json, derivative_kind, derivative_id,
+             disposition_id, effective_at
+         )
+         SELECT lineage.source_anchor_id, lineage.owner_json,
+                lineage.derivative_kind, lineage.derivative_id,
+                current.last_event_id, current.updated_at
+         FROM retrieval_anchor_reverse_lineage AS lineage
+         JOIN memory_v2_lineage_events AS event
+           ON event.event_id = lineage.derivative_id
+         JOIN memory_v2_current_facts AS current
+           ON current.fact_id = event.fact_id
+          AND current.owner_kind = event.owner_kind
+          AND current.project_id = event.project_id
+         WHERE lineage.derivative_kind = 'finding'
+           AND current.payload_access = 'deleted';",
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
     install_v20_integrity_triggers(conn, operation).await?;
     install_v21_current_projection_indexes(conn, operation).await?;
     Ok(())

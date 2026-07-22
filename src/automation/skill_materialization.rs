@@ -1773,7 +1773,7 @@ pub fn reconcile_after_activation(profile_root: &Path, project_root: &Path) {
     };
     let (_results, errors) = reconcile_detected_scopes(profile_root, &home, project_root);
     for error in errors {
-        eprintln!("warning: managed skill materialization failed for {error}");
+        tracing::warn!(%error, "managed skill materialization failed");
     }
 }
 

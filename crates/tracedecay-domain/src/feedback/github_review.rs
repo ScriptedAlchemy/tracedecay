@@ -62,6 +62,8 @@ github_review_id!(GitHubPullRequestIdV1, "github pull request id");
 github_review_id!(GitHubReviewIdV1, "github review id");
 github_review_id!(GitHubReviewThreadIdV1, "github review thread id");
 github_review_id!(GitHubReviewCommentIdV1, "github review comment id");
+github_review_id!(GitHubReviewEtagV1, "github review etag");
+github_review_id!(GitHubReviewCursorV1, "github review cursor");
 
 /// Closed allowlist for the review-ingress connector. REST variants denote
 /// exactly one HTTP `GET`; the GraphQL variant denotes a normalized `query`
@@ -80,6 +82,19 @@ impl GitHubReviewReadOperationV1 {
     /// This is structurally true for every representable operation.
     pub const fn is_read_only(self) -> bool {
         true
+    }
+
+    pub const fn is_rest(self) -> bool {
+        matches!(
+            self,
+            Self::RestGetPullRequest
+                | Self::RestListPullRequestReviews
+                | Self::RestListPullRequestReviewComments
+        )
+    }
+
+    pub const fn is_graphql_query(self) -> bool {
+        matches!(self, Self::GraphQlQueryPullRequestReviewThreads)
     }
 }
 
@@ -140,6 +155,67 @@ pub enum GitHubReviewCoverageV1 {
     Stale,
 }
 
+/// Opaque checkpoint from a completed or partial read. It captures only cache,
+/// pagination, and rate-limit state; it cannot express a write precondition or
+/// an outbound operation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewReadCheckpointV1 {
+    pub etag: Option<GitHubReviewEtagV1>,
+    pub next_cursor: Option<GitHubReviewCursorV1>,
+    pub rate_limit: Option<GitHubReviewRateLimitCheckpointV1>,
+}
+
+impl GitHubReviewReadCheckpointV1 {
+    pub fn validate_for(
+        &self,
+        outcome: GitHubReviewIngressProviderOutcomeV1,
+    ) -> Result<(), DomainError> {
+        self.etag
+            .as_ref()
+            .map_or(Ok(()), GitHubReviewEtagV1::validate)?;
+        self.next_cursor
+            .as_ref()
+            .map_or(Ok(()), GitHubReviewCursorV1::validate)?;
+        self.rate_limit
+            .as_ref()
+            .map_or(Ok(()), GitHubReviewRateLimitCheckpointV1::validate)?;
+        if outcome == GitHubReviewIngressProviderOutcomeV1::Complete && self.next_cursor.is_some() {
+            return Err(DomainError::NonCanonical {
+                field: "complete github review cursor",
+            });
+        }
+        if outcome == GitHubReviewIngressProviderOutcomeV1::RateLimited && self.rate_limit.is_none()
+        {
+            return Err(DomainError::NonCanonical {
+                field: "github review rate-limit checkpoint",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Provider-observed rate-limit checkpoint. `remaining` may be zero, but it
+/// can never exceed the provider's observed limit.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewRateLimitCheckpointV1 {
+    pub limit: u32,
+    pub remaining: u32,
+    pub reset_at: UtcMicros,
+}
+
+impl GitHubReviewRateLimitCheckpointV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self.limit == 0 || self.remaining > self.limit {
+            return Err(DomainError::NonCanonical {
+                field: "github review rate-limit checkpoint",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Whether an original review anchor has a provable exact representation on
 /// the current branch. Similar paths or lines alone never produce
 /// [`Self::ExactCurrent`].
@@ -192,6 +268,22 @@ pub struct GitHubReviewCurrentBranchRemapV1 {
 }
 
 impl GitHubReviewCurrentBranchRemapV1 {
+    /// Preserve an immutable original anchor when no exact current-branch
+    /// projection exists. This deliberately never guesses a similar line.
+    pub fn unmapped(
+        original: GitHubReviewImmutableAnchorV1,
+        current_scope: FeedbackScopeV1,
+    ) -> Result<Self, DomainError> {
+        let remap = Self {
+            original,
+            current_scope,
+            current: None,
+            state: GitHubReviewRemapStateV1::Unmapped,
+        };
+        remap.validate()?;
+        Ok(remap)
+    }
+
     pub fn validate(&self) -> Result<(), DomainError> {
         self.original.validate()?;
         self.current_scope.validate()?;
@@ -316,7 +408,9 @@ impl GitHubReviewIngressResultV1 {
         self.provider_base_commit_id.validate()?;
         self.provider_head_commit_id.validate()?;
         self.merge_base_commit_id.validate()?;
-        if self.scope.head_commit_id != self.provider_head_commit_id {
+        if self.scope.head_commit_id != self.provider_head_commit_id
+            && self.outcome != GitHubReviewIngressProviderOutcomeV1::Stale
+        {
             return Err(DomainError::NonCanonical {
                 field: "github review provider head commit",
             });
@@ -365,5 +459,44 @@ impl GitHubReviewIngressResultV1 {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limited_checkpoint_requires_observed_limit_state() {
+        let missing = GitHubReviewReadCheckpointV1 {
+            etag: None,
+            next_cursor: None,
+            rate_limit: None,
+        };
+        assert!(
+            missing
+                .validate_for(GitHubReviewIngressProviderOutcomeV1::RateLimited)
+                .is_err()
+        );
+
+        let checkpoint = GitHubReviewReadCheckpointV1 {
+            etag: Some(GitHubReviewEtagV1::new("W/\"fixture\"").unwrap()),
+            next_cursor: Some(GitHubReviewCursorV1::new("cursor.fixture").unwrap()),
+            rate_limit: Some(GitHubReviewRateLimitCheckpointV1 {
+                limit: 5_000,
+                remaining: 0,
+                reset_at: UtcMicros(1),
+            }),
+        };
+        checkpoint
+            .validate_for(GitHubReviewIngressProviderOutcomeV1::RateLimited)
+            .unwrap();
+
+        assert!(
+            checkpoint
+                .validate_for(GitHubReviewIngressProviderOutcomeV1::Complete)
+                .is_err(),
+            "complete coverage cannot retain a next-page cursor"
+        );
     }
 }

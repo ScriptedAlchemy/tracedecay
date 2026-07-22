@@ -68,8 +68,11 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+use crate::application_surface::http_application_router;
 use crate::automation::backend;
 use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
+use crate::daemon::{DaemonHandshake, daemon_operation_event_authority};
+use crate::daemon_client::DaemonInvocationClient;
 use crate::db::Database;
 use crate::diagnostics::lsp;
 use crate::errors::{Result, TraceDecayError};
@@ -465,9 +468,12 @@ fn spawn_session_catch_up_ingest(
         let mut stats = project_outcome.stats;
         if !project_outcome.is_success() {
             for failure in &project_outcome.failures {
-                eprintln!(
-                    "Session catch-up incomplete: provider={} source={} reason_code={} retryable={}",
-                    failure.provider, failure.source, failure.reason_code, failure.retryable
+                tracing::warn!(
+                    provider = failure.provider,
+                    source = failure.source,
+                    reason_code = failure.reason_code,
+                    retryable = failure.retryable,
+                    "dashboard project session catch-up incomplete"
                 );
             }
         }
@@ -483,23 +489,27 @@ fn spawn_session_catch_up_ingest(
                 )
                 .await;
                 for failure in &outcome.failures {
-                    eprintln!(
-                        "Session catch-up incomplete: provider={} source={} reason_code={} retryable={}",
-                        failure.provider, failure.source, failure.reason_code, failure.retryable
+                    tracing::warn!(
+                        provider = failure.provider,
+                        source = failure.source,
+                        reason_code = failure.reason_code,
+                        retryable = failure.retryable,
+                        "dashboard user session catch-up incomplete"
                     );
                 }
                 stats = stats.merge(outcome.stats);
             } else {
-                eprintln!(
-                    "User session catch-up skipped: retained authority is unavailable for {}.",
-                    user_db_path.display()
+                tracing::warn!(
+                    user_db = %user_db_path.display(),
+                    "dashboard user session catch-up skipped because retained authority is unavailable"
                 );
             }
         }
         if stats.sessions_upserted > 0 || stats.messages_upserted > 0 {
-            eprintln!(
-                "Session catch-up ingest: {} session(s), {} message(s) updated.",
-                stats.sessions_upserted, stats.messages_upserted
+            tracing::info!(
+                sessions = stats.sessions_upserted,
+                messages = stats.messages_upserted,
+                "dashboard session catch-up completed"
             );
         }
     });
@@ -592,28 +602,6 @@ where
         direct_dashboard_automation_writer(),
     )
     .await?;
-    // Converge derived memory projections (missing vectors, HRR banks) before
-    // serving. Fact writes defer bank rebuilds to the repair pass, and a
-    // standalone dashboard has no daemon scheduler to drive that convergence,
-    // so without this call the overview reports stale or empty banks.
-    //
-    // The dashboard is a one-shot caller of the single application-layer
-    // convergence policy (`MemoryApplication::converge_derived_memory`);
-    // that policy owns the retry-until-saturated-or-bounded loop, not this
-    // route.
-    match memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
-        Ok(application) => {
-            if let Err(error) = application
-                .converge_derived_memory("dashboard-startup-repair")
-                .await
-            {
-                tracing::warn!("Derived memory startup repair skipped: {error}");
-            }
-        }
-        Err(error) => {
-            tracing::warn!("Derived memory startup repair skipped: {error}");
-        }
-    }
     if options.start_session_catch_up {
         if let Some(db) = state.lcm_db.as_ref() {
             spawn_session_catch_up_ingest(
@@ -623,13 +611,13 @@ where
                 state.project_id.clone(),
             );
         } else {
-            eprintln!(
-                "Session catch-up ingest skipped: authoritative project session storage is unavailable for {}.",
-                state.project_root.display()
+            tracing::warn!(
+                project_root = %state.project_root.display(),
+                "dashboard session catch-up skipped because authoritative project session storage is unavailable"
             );
         }
     }
-    let app = router(state);
+    let app = router(cg, state).await?;
     let (listener, addr) = bind_dashboard(host, port).await?;
 
     let url = format!("http://{addr}/");
@@ -665,6 +653,7 @@ pub(crate) async fn bind_dashboard(
     host: &str,
     port: u16,
 ) -> Result<(tokio::net::TcpListener, std::net::SocketAddr)> {
+    let host = validate_dashboard_host(host)?;
     let listener = tokio::net::TcpListener::bind((host, port))
         .await
         .map_err(|e| config_error(format!("failed to bind {host}:{port}: {e}")))?;
@@ -674,7 +663,81 @@ pub(crate) async fn bind_dashboard(
     Ok((listener, addr))
 }
 
-pub(crate) fn router(state: DashboardState) -> Router {
+pub(crate) fn validate_dashboard_host(host: &str) -> Result<&str> {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1") {
+        return Ok(host);
+    }
+
+    Err(config_error(format!(
+        "dashboard host is loopback-only; use 127.0.0.1, localhost, or ::1 (got {host:?})"
+    )))
+}
+
+/// PR12 application routes are intentionally bound to the active project
+/// daemon. They are not part of the selected-project dashboard gateway; PR14
+/// must add explicit selected-project and Hermes adapters before that scope
+/// can change.
+struct ActiveProjectApplicationRoutes(Router);
+
+impl ActiveProjectApplicationRoutes {
+    fn for_active_project(cg: &TraceDecay) -> Result<Self> {
+        let handshake = DaemonHandshake::for_current_client(
+            Some(cg.project_root().to_path_buf()),
+            None,
+            false,
+            false,
+        )?;
+        let client = DaemonInvocationClient::for_current(handshake)?;
+        let active_project_id = match project_memory_owner(cg)? {
+            FactOwnerV1::Project { project_id } => project_id,
+            FactOwnerV1::Profile => {
+                return Err(config_error(
+                    "active-project application routes require project authority",
+                ));
+            }
+        };
+        let router = http_application_router(
+            client,
+            daemon_operation_event_authority(),
+            active_project_id,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("could not mount application HTTP routes: {error}"),
+        })?;
+        Ok(Self(router))
+    }
+}
+
+/// Builds the complete dashboard router shared by direct and daemon-managed
+/// startup. The supplied state is the active writable project authority.
+pub(crate) async fn router(cg: &TraceDecay, state: DashboardState) -> Result<Router> {
+    // Fact writes defer derived memory rebuilds. Invoke the canonical bounded
+    // convergence policy exactly once for the active writable project before
+    // serving either startup path. Selected-project states are opened later
+    // through the read-only gateway and never pass through this function.
+    match memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
+        Ok(application) => {
+            if let Err(error) = application
+                .converge_derived_memory("dashboard-startup-repair")
+                .await
+            {
+                tracing::warn!("Derived memory startup repair skipped: {error}");
+            }
+        }
+        Err(error) => {
+            tracing::warn!("Derived memory startup repair skipped: {error}");
+        }
+    }
+
+    let application = ActiveProjectApplicationRoutes::for_active_project(cg)?;
+    Ok(router_with_active_application(state, application))
+}
+
+fn router_with_active_application(
+    state: DashboardState,
+    application: ActiveProjectApplicationRoutes,
+) -> Router {
     let runtime = projects::DashboardRuntime::new(state, project_api_router());
     Router::new()
         .route("/", get(assets::index_html))
@@ -696,6 +759,7 @@ pub(crate) fn router(state: DashboardState) -> Router {
         .route("/api/settings", any(active_api_gateway))
         .route("/api/settings/{*tail}", any(active_api_gateway))
         .with_state(runtime)
+        .nest("/api/application", application.0)
 }
 
 fn project_api_router() -> Router<DashboardState> {
@@ -1224,5 +1288,62 @@ mod authority_tests {
         assert!(selected.conn.is_some());
         assert!(selected.lcm_db.is_none());
         assert_ne!(selected.scope, "unavailable");
+    }
+
+    #[test]
+    fn dashboard_bindings_are_loopback_only() {
+        assert_eq!(
+            validate_dashboard_host("127.0.0.1").expect("IPv4 loopback"),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            validate_dashboard_host("localhost").expect("localhost"),
+            "localhost"
+        );
+        assert_eq!(
+            validate_dashboard_host("::1").expect("IPv6 loopback"),
+            "::1"
+        );
+        assert!(validate_dashboard_host("0.0.0.0").is_err());
+    }
+
+    #[tokio::test]
+    async fn application_routes_are_active_project_only() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
+        let state = build_state(&cg).await.expect("dashboard state");
+        let project_id = state.project_id.clone().expect("active project id");
+        let application = ActiveProjectApplicationRoutes(
+            Router::new().route("/probe", get(|| async { StatusCode::NO_CONTENT })),
+        );
+        let app = router_with_active_application(state, application);
+
+        let active = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/application/probe")
+                    .body(Body::empty())
+                    .expect("active application request"),
+            )
+            .await
+            .expect("active application response");
+        assert_eq!(active.status(), StatusCode::NO_CONTENT);
+
+        let selected = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/application/probe"))
+                    .body(Body::empty())
+                    .expect("selected-project application request"),
+            )
+            .await
+            .expect("selected-project application response");
+        assert_eq!(selected.status(), StatusCode::NOT_FOUND);
     }
 }

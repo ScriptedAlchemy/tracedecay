@@ -485,7 +485,7 @@ pub(super) async fn run_session_reflector_for_store<A: FactCompatibilityStore>(
     )
     .await
     {
-        eprintln!("[tracedecay] warning: failed to refresh fact outcomes: {err}");
+        tracing::warn!(error = %err, "failed to refresh fact outcomes");
     }
 
     let request = AgentTaskRequest::new(

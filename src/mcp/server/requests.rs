@@ -23,6 +23,30 @@ struct ToolTokenAccounting {
     net_saved_tokens: u64,
 }
 
+struct ApplicationCancellationRegistration<'a> {
+    registry: &'a std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
+    request_id: Option<String>,
+}
+
+impl Drop for ApplicationCancellationRegistration<'_> {
+    fn drop(&mut self) {
+        if let Some(request_id) = self.request_id.as_deref()
+            && let Ok(mut cancellations) = self.registry.lock()
+        {
+            cancellations.remove(request_id);
+        }
+    }
+}
+
+fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
+    tracedecay_domain::UtcMicros(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
+            .unwrap_or(i64::MAX),
+    )
+}
+
 /// Hand-maintained schema documentation for the `tracedecay://schema` resource.
 /// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
 const SCHEMA_MARKDOWN: &str = r"# tracedecay SQLite schema
@@ -155,6 +179,21 @@ LIMIT 20;
 ";
 
 impl McpServer {
+    pub(crate) fn cancel_application_surface_request(
+        &self,
+        id: &Value,
+        connection_scope: &str,
+    ) -> bool {
+        let Some(cancelled_id) = application_surface_request_id(id, connection_scope) else {
+            return false;
+        };
+        self.application_surface_cancellations
+            .lock()
+            .ok()
+            .and_then(|cancellations| cancellations.get(&cancelled_id).cloned())
+            .is_some_and(|cancellation| cancellation.cancel(mcp_now_micros()))
+    }
+
     /// Dispatches a parsed JSON-RPC request to the appropriate handler.
     ///
     /// Returns `None` for notifications (requests without an `id`).
@@ -212,6 +251,19 @@ impl McpServer {
             .await;
             return None;
         }
+        if matches!(classify_mcp_method(&request.method), McpMethod::Cancelled) {
+            if let Some(cancelled_id) = request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("requestId"))
+            {
+                let _ = self.cancel_application_surface_request(
+                    cancelled_id,
+                    connection.memory_request_scope(),
+                );
+            }
+            return None;
+        }
         self.hook_project_routes
             .refresh_into(&mut connection.route_cache);
         let id = request.id.clone()?;
@@ -222,7 +274,7 @@ impl McpServer {
             // via the alternate method name); both stay compatibility no-ops.
             // Hook events were consumed by the early notification dispatch
             // above and can never reach this match with a response due.
-            McpMethod::InitializedAck | McpMethod::HookEvent => None,
+            McpMethod::InitializedAck | McpMethod::HookEvent | McpMethod::Cancelled => None,
             McpMethod::ToolsList => Some(self.handle_tools_list(id).await),
             McpMethod::ToolsCall => Some(
                 Box::pin(self.handle_tools_call(
@@ -646,6 +698,15 @@ impl McpServer {
             memory_request_scope,
             &mut handler_arguments,
         );
+        if crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name)
+            .is_some()
+            && let Some(map) = handler_arguments.as_object_mut()
+        {
+            map.remove("__mcp_request_id");
+            if let Some(request_id) = application_surface_request_id(id, memory_request_scope) {
+                map.insert("__mcp_request_id".to_owned(), json!(request_id));
+            }
+        }
         handler_arguments
     }
 
@@ -656,6 +717,10 @@ impl McpServer {
         handler_arguments: Value,
         server_stats: Option<Value>,
         implicit_project_path: Option<&Path>,
+        application_invocation_client: Option<&crate::daemon_client::DaemonInvocationClient>,
+        application_request_id: Option<tracedecay_application::RequestId>,
+        application_deadline: Option<tracedecay_application::Deadline>,
+        application_cancellation: Option<tracedecay_application::CancellationSignal>,
     ) -> Result<ToolResult> {
         let engine_identity = cg.db_path();
         let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
@@ -681,6 +746,10 @@ impl McpServer {
                 automation_writer: self.dashboard_automation_writer.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
                 diagnostics_lsp: Some(&self.diagnostics_lsp),
+                application_invocation_client,
+                application_request_id,
+                application_deadline,
+                application_cancellation,
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
                     self.session_db.as_ref(),
                     self.user_session_db.as_ref(),
@@ -746,7 +815,7 @@ impl McpServer {
         }
 
         self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
-        eprintln!("[tracedecay] tool call: {tool_name}");
+        tracing::trace!(tool_name, "dispatching MCP tool call");
         if let Ok(mut counts) = self.tool_call_counts.lock() {
             *counts.entry(tool_name.to_string()).or_insert(0) += 1;
         }
@@ -768,6 +837,53 @@ impl McpServer {
         };
         let handler_arguments =
             self.route_tool_arguments(id, tool_name, arguments, route_cache, memory_request_scope);
+        let application_surface =
+            crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
+        let application_request_id = application_surface
+            .and_then(|_| application_surface_request_id(id, memory_request_scope))
+            .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
+        let application_cancellation = application_request_id.as_ref().and_then(|request_id| {
+            tracedecay_application::CancellationSignal::active(format!(
+                "cancellation.{}",
+                request_id.as_str()
+            ))
+            .ok()
+        });
+        if let (Some(request_id), Some(cancellation)) =
+            (&application_request_id, &application_cancellation)
+            && let Ok(mut cancellations) = self.application_surface_cancellations.lock()
+        {
+            cancellations.insert(request_id.as_str().to_owned(), cancellation.clone());
+        }
+        let _cancellation_registration = ApplicationCancellationRegistration {
+            registry: &self.application_surface_cancellations,
+            request_id: application_request_id
+                .as_ref()
+                .map(|request_id| request_id.as_str().to_owned()),
+        };
+        let application_deadline = application_surface.and_then(|_| {
+            let now = mcp_now_micros().0;
+            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                now.saturating_add(10_000_000),
+            ))
+            .ok()
+        });
+        let application_invocation_client = if application_surface.is_some() {
+            self.application_surface_client
+                .get_or_try_init(|| async {
+                    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+                        Some(cg.project_root().to_path_buf()),
+                        self.scope_prefix.clone(),
+                        false,
+                        false,
+                    )?;
+                    crate::daemon_client::DaemonInvocationClient::for_current(handshake)
+                })
+                .await
+                .ok()
+        } else {
+            None
+        };
         let outcome = self
             .execute_tool_dispatch(
                 &cg,
@@ -775,9 +891,12 @@ impl McpServer {
                 handler_arguments,
                 server_stats,
                 implicit_project_path,
+                application_invocation_client,
+                application_request_id.clone(),
+                application_deadline,
+                application_cancellation,
             )
             .await;
-
         DispatchedToolCall {
             cg,
             outcome,
@@ -917,7 +1036,7 @@ impl McpServer {
                 )
                 .await;
                 if let Err(e) = gdb.append_analytics_event(&analytics_event).await {
-                    eprintln!("[tracedecay] analytics_events insert failed: {e}");
+                    tracing::warn!(error = %e, "MCP analytics event insert failed");
                 }
             });
         }

@@ -18,6 +18,10 @@ pub const HOOK_CONFIGURATION_SCHEMA_VERSION: u16 = 1;
 pub const MAX_HOOK_CONFIGURATION_BYTES: usize = 64 * 1024;
 const DIRECTORY_SYNC_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;
 
+pub fn hook_configuration_path(data_root: &Path, host: HookHostV1) -> PathBuf {
+    data_root.join(format!("hook-config-{}.json", host.as_key()))
+}
+
 /// Daemon-issued configuration that a hook process can consume. All identity
 /// fields reside in the opaque binding; this value has no path, credential,
 /// endpoint, prompt, tool payload, or host-local storage selector.
@@ -46,20 +50,6 @@ impl HookConfigurationSnapshotV1 {
     }
 }
 
-/// Transparent publication wrapper. Its JSON representation is the snapshot
-/// itself, with no secondary envelope or alternate policy authority.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct HookConfigurationPublicationV1 {
-    pub snapshot: HookConfigurationSnapshotV1,
-}
-
-impl HookConfigurationPublicationV1 {
-    pub fn validate_structure(&self) -> Result<(), HookConfigurationPublicationError> {
-        self.snapshot.validate()
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookConfigurationPublicationOutcomeV1 {
     Published,
@@ -71,7 +61,7 @@ pub enum HookConfigurationPublicationOutcomeV1 {
 /// and do not disclose a different host's binding or configuration existence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HookConfigurationReadOutcomeV1 {
-    Bound(HookScopeBindingV1),
+    Bound(HookConfigurationSnapshotV1),
     Missing,
     Stale,
     Corrupted,
@@ -92,7 +82,7 @@ pub enum HookConfigurationPublicationError {
 pub trait HookConfigurationPublicationStoreV1 {
     fn publish(
         &self,
-        publication: HookConfigurationPublicationV1,
+        snapshot: HookConfigurationSnapshotV1,
     ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError>;
 }
 
@@ -101,7 +91,7 @@ pub trait HookConfigurationReadStoreV1 {
     fn load(
         &self,
         host: HookHostV1,
-    ) -> Result<Option<HookConfigurationPublicationV1>, HookConfigurationPublicationError>;
+    ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError>;
 }
 
 /// Daemon-side publisher. Structure and monotonic revision are checked before
@@ -122,10 +112,10 @@ where
 {
     pub fn publish(
         &self,
-        publication: HookConfigurationPublicationV1,
+        snapshot: HookConfigurationSnapshotV1,
     ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError> {
-        publication.validate_structure()?;
-        self.store.publish(publication)
+        snapshot.validate()?;
+        self.store.publish(snapshot)
     }
 }
 
@@ -146,8 +136,8 @@ where
     S: HookConfigurationReadStoreV1,
 {
     pub fn load_current(&self, host: HookHostV1, now: UtcMicros) -> HookConfigurationReadOutcomeV1 {
-        let publication = match self.store.load(host) {
-            Ok(Some(publication)) => publication,
+        let snapshot = match self.store.load(host) {
+            Ok(Some(snapshot)) => snapshot,
             Ok(None) => return HookConfigurationReadOutcomeV1::Missing,
             Err(HookConfigurationPublicationError::Corrupted)
             | Err(HookConfigurationPublicationError::InvalidSnapshot) => {
@@ -157,13 +147,13 @@ where
                 return HookConfigurationReadOutcomeV1::Unavailable;
             }
         };
-        if publication.validate_structure().is_err() || publication.snapshot.binding.host != host {
+        if snapshot.validate().is_err() || snapshot.binding.host != host {
             return HookConfigurationReadOutcomeV1::Corrupted;
         }
-        if now.0 >= publication.snapshot.expires_at.0 {
+        if now.0 >= snapshot.expires_at.0 {
             return HookConfigurationReadOutcomeV1::Stale;
         }
-        HookConfigurationReadOutcomeV1::Bound(publication.snapshot.binding)
+        HookConfigurationReadOutcomeV1::Bound(snapshot)
     }
 }
 
@@ -186,18 +176,18 @@ impl HookConfigurationFileWriterV1 {
 impl HookConfigurationPublicationStoreV1 for HookConfigurationFileWriterV1 {
     fn publish(
         &self,
-        publication: HookConfigurationPublicationV1,
+        snapshot: HookConfigurationSnapshotV1,
     ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError> {
-        publication.validate_structure()?;
-        if let Some(current) = read_publication(&self.path)? {
-            if current == publication {
+        snapshot.validate()?;
+        if let Some(current) = read_snapshot(&self.path)? {
+            if current == snapshot {
                 return Ok(HookConfigurationPublicationOutcomeV1::Duplicate);
             }
-            if current.snapshot.revision >= publication.snapshot.revision {
+            if current.revision >= snapshot.revision {
                 return Ok(HookConfigurationPublicationOutcomeV1::StaleRejected);
             }
         }
-        let bytes = serde_json::to_vec(&publication)
+        let bytes = serde_json::to_vec(&snapshot)
             .map_err(|_| HookConfigurationPublicationError::InvalidSnapshot)?;
         if bytes.is_empty() || bytes.len() > MAX_HOOK_CONFIGURATION_BYTES {
             return Err(HookConfigurationPublicationError::InvalidSnapshot);
@@ -224,14 +214,14 @@ impl HookConfigurationReadStoreV1 for HookConfigurationFileReaderV1 {
     fn load(
         &self,
         _host: HookHostV1,
-    ) -> Result<Option<HookConfigurationPublicationV1>, HookConfigurationPublicationError> {
-        read_publication(&self.path)
+    ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError> {
+        read_snapshot(&self.path)
     }
 }
 
-fn read_publication(
+fn read_snapshot(
     path: &Path,
-) -> Result<Option<HookConfigurationPublicationV1>, HookConfigurationPublicationError> {
+) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError> {
     let bytes = match read_bounded(path, MAX_HOOK_CONFIGURATION_BYTES) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::InvalidData => {
@@ -242,12 +232,12 @@ fn read_publication(
     let Some(bytes) = bytes else {
         return Ok(None);
     };
-    let publication = serde_json::from_slice::<HookConfigurationPublicationV1>(&bytes)
+    let snapshot = serde_json::from_slice::<HookConfigurationSnapshotV1>(&bytes)
         .map_err(|_| HookConfigurationPublicationError::Corrupted)?;
-    publication
-        .validate_structure()
+    snapshot
+        .validate()
         .map_err(|_| HookConfigurationPublicationError::Corrupted)?;
-    Ok(Some(publication))
+    Ok(Some(snapshot))
 }
 
 #[cfg(test)]
@@ -262,27 +252,27 @@ mod tests {
     use crate::{HookCapabilityV1, HookEventFamily, HookEventSupportV1};
 
     #[derive(Clone, Default)]
-    struct Store(Arc<Mutex<Option<HookConfigurationPublicationV1>>>);
+    struct Store(Arc<Mutex<Option<HookConfigurationSnapshotV1>>>);
 
     impl HookConfigurationPublicationStoreV1 for Store {
         fn publish(
             &self,
-            publication: HookConfigurationPublicationV1,
+            snapshot: HookConfigurationSnapshotV1,
         ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError>
         {
             let mut current = self.0.lock().unwrap();
             match current.as_ref() {
-                Some(existing) if existing.snapshot.revision > publication.snapshot.revision => {
+                Some(existing) if existing.revision > snapshot.revision => {
                     Ok(HookConfigurationPublicationOutcomeV1::StaleRejected)
                 }
-                Some(existing) if existing == &publication => {
+                Some(existing) if existing == &snapshot => {
                     Ok(HookConfigurationPublicationOutcomeV1::Duplicate)
                 }
-                Some(existing) if existing.snapshot.revision == publication.snapshot.revision => {
+                Some(existing) if existing.revision == snapshot.revision => {
                     Ok(HookConfigurationPublicationOutcomeV1::StaleRejected)
                 }
                 _ => {
-                    *current = Some(publication);
+                    *current = Some(snapshot);
                     Ok(HookConfigurationPublicationOutcomeV1::Published)
                 }
             }
@@ -293,7 +283,7 @@ mod tests {
         fn load(
             &self,
             _host: HookHostV1,
-        ) -> Result<Option<HookConfigurationPublicationV1>, HookConfigurationPublicationError>
+        ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError>
         {
             Ok(self.0.lock().unwrap().clone())
         }
@@ -322,27 +312,23 @@ mod tests {
         }
     }
 
-    fn publication(revision: u64, expires_at: i64) -> HookConfigurationPublicationV1 {
-        HookConfigurationPublicationV1 {
-            snapshot: HookConfigurationSnapshotV1 {
-                schema_version: HOOK_CONFIGURATION_SCHEMA_VERSION,
-                revision,
-                published_at: UtcMicros(1),
-                expires_at: UtcMicros(expires_at),
-                binding: HookScopeBindingV1 {
-                    host: HookHostV1::ClaudeCode,
-                    project_id: [1; 16],
-                    repository_id: [2; 16],
-                    worktree_id: [3; 16],
-                    worktree_epoch: 1,
-                    authorization_epoch: 1,
-                    capability_revision: 1,
-                    binding_token: [4; 32],
-                    capabilities: vec![HookCapabilityV1 {
-                        family: HookEventFamily::SessionBoundary,
-                        support: HookEventSupportV1::Native,
-                    }],
-                },
+    fn snapshot(revision: u64, expires_at: i64) -> HookConfigurationSnapshotV1 {
+        HookConfigurationSnapshotV1 {
+            schema_version: HOOK_CONFIGURATION_SCHEMA_VERSION,
+            revision,
+            published_at: UtcMicros(1),
+            expires_at: UtcMicros(expires_at),
+            binding: HookScopeBindingV1 {
+                host: HookHostV1::ClaudeCode,
+                project_id: [1; 16],
+                repository_id: [2; 16],
+                worktree_id: [3; 16],
+                worktree_epoch: 1,
+                binding_token: [4; 32],
+                capabilities: vec![HookCapabilityV1 {
+                    family: HookEventFamily::SessionBoundary,
+                    support: HookEventSupportV1::Native,
+                }],
             },
         }
     }
@@ -351,7 +337,7 @@ mod tests {
     fn publication_replay_rejects_stale_revision_and_preserves_exact_scope() {
         let store = Store::default();
         let publisher = HookConfigurationPublisherV1::new(store.clone());
-        let published = publication(2, 100);
+        let published = snapshot(2, 100);
         assert_eq!(
             publisher.publish(published.clone()).unwrap(),
             HookConfigurationPublicationOutcomeV1::Published
@@ -361,17 +347,17 @@ mod tests {
             HookConfigurationPublicationOutcomeV1::Duplicate
         );
         assert_eq!(
-            publisher.publish(publication(1, 100)).unwrap(),
+            publisher.publish(snapshot(1, 100)).unwrap(),
             HookConfigurationPublicationOutcomeV1::StaleRejected
         );
         assert_eq!(
-            publisher.publish(publication(2, 101)).unwrap(),
+            publisher.publish(snapshot(2, 101)).unwrap(),
             HookConfigurationPublicationOutcomeV1::StaleRejected
         );
         let restarted_subscriber = HookConfigurationSubscriberV1::new(store);
         assert_eq!(
             restarted_subscriber.load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
-            HookConfigurationReadOutcomeV1::Bound(published.snapshot.binding)
+            HookConfigurationReadOutcomeV1::Bound(published)
         );
     }
 
@@ -379,8 +365,8 @@ mod tests {
     fn schema_revision_expiry_and_scope_validation_fail_closed() {
         let store = Store::default();
         let publisher = HookConfigurationPublisherV1::new(store.clone());
-        let mut invalid_schema = publication(1, 100);
-        invalid_schema.snapshot.schema_version += 1;
+        let mut invalid_schema = snapshot(1, 100);
+        invalid_schema.schema_version += 1;
         assert_eq!(
             publisher.publish(invalid_schema),
             Err(HookConfigurationPublicationError::InvalidSnapshot)
@@ -388,17 +374,17 @@ mod tests {
         assert!(store.0.lock().unwrap().is_none());
 
         assert_eq!(
-            publisher.publish(publication(0, 100)),
+            publisher.publish(snapshot(0, 100)),
             Err(HookConfigurationPublicationError::InvalidSnapshot)
         );
         let subscriber = HookConfigurationSubscriberV1::new(store.clone());
-        *store.0.lock().unwrap() = Some(publication(1, 2));
+        *store.0.lock().unwrap() = Some(snapshot(1, 2));
         assert_eq!(
             subscriber.load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Stale
         );
 
-        *store.0.lock().unwrap() = Some(publication(1, 100));
+        *store.0.lock().unwrap() = Some(snapshot(1, 100));
         assert_eq!(
             subscriber.load_current(HookHostV1::Codex, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Corrupted
@@ -411,7 +397,7 @@ mod tests {
         let path = directory.path.join("hook-config.json");
         let writer = HookConfigurationFileWriterV1::new(&path);
         let reader = writer.reader();
-        let published = publication(2, 100);
+        let published = snapshot(2, 100);
         assert_eq!(
             HookConfigurationPublisherV1::new(writer.clone())
                 .publish(published.clone())
@@ -420,15 +406,14 @@ mod tests {
         );
         let value = serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["revision"], 2);
-        assert!(value.get("snapshot").is_none());
         assert_eq!(
             HookConfigurationSubscriberV1::new(reader.clone())
                 .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
-            HookConfigurationReadOutcomeV1::Bound(published.snapshot.binding)
+            HookConfigurationReadOutcomeV1::Bound(published)
         );
         assert_eq!(
             HookConfigurationPublisherV1::new(writer)
-                .publish(publication(1, 100))
+                .publish(snapshot(1, 100))
                 .unwrap(),
             HookConfigurationPublicationOutcomeV1::StaleRejected
         );

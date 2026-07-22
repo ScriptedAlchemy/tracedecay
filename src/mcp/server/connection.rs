@@ -4,6 +4,52 @@
 use super::*;
 
 impl McpServer {
+    async fn handle_cancellable_application_request(
+        &self,
+        request: &JsonRpcRequest,
+        timings_enabled: bool,
+        connection: &mut ConnectionRouteState,
+        transport: &mut impl crate::mcp::transport::McpTransport,
+        pending_line: &mut Option<String>,
+    ) -> Result<(Option<JsonRpcResponse>, bool)> {
+        let connection_scope = connection.memory_request_scope().to_owned();
+        let handling =
+            Box::pin(self.handle_request_for_connection(request, timings_enabled, connection));
+        tokio::pin!(handling);
+        loop {
+            tokio::select! {
+                response = &mut handling => return Ok((response, false)),
+                incoming = transport.read_line() => {
+                    let Some(line) = incoming? else {
+                        if let Some(id) = request.id.as_ref() {
+                            let _ = self.cancel_application_surface_request(id, &connection_scope);
+                        }
+                        return Ok((None, true));
+                    };
+                    let parsed = serde_json::from_str::<JsonRpcRequest>(line.trim());
+                    if let Ok(notification) = &parsed
+                        && matches!(
+                            classify_mcp_method(&notification.method),
+                            McpMethod::Cancelled
+                        )
+                    {
+                        if let Some(id) = notification
+                            .params
+                            .as_ref()
+                            .and_then(|params| params.get("requestId"))
+                        {
+                            let _ =
+                                self.cancel_application_surface_request(id, &connection_scope);
+                        }
+                        continue;
+                    }
+                    *pending_line = Some(line);
+                    return Ok((handling.await, false));
+                }
+            }
+        }
+    }
+
     /// Process a single raw JSON-RPC line and write the response.
     /// Used to replay a peeked `initialize` message that was consumed before
     /// the server's main loop started.
@@ -100,9 +146,12 @@ impl McpServer {
         });
 
         let mut connection_route = self.new_connection_route_state();
+        let mut pending_line = None;
 
         loop {
-            let line: String = {
+            let line: String = if let Some(line) = pending_line.take() {
+                line
+            } else {
                 #[cfg(unix)]
                 {
                     if let Some(sigterm) = sigterm.as_mut() {
@@ -204,6 +253,7 @@ impl McpServer {
             let request_activity =
                 request_lifecycle.and_then(crate::daemon::DaemonLifecycle::try_enter);
             let rejecting_for_drain = request_lifecycle.is_some() && request_activity.is_none();
+            let mut peer_closed = false;
 
             let response = if rejecting_for_drain {
                 parsed.as_ref().ok().and_then(|request| {
@@ -229,12 +279,36 @@ impl McpServer {
                                 )
                                 .await;
                         }
-                        Box::pin(self.handle_request_for_connection(
-                            &request,
-                            timings_override.unwrap_or_else(|| self.timings_enabled()),
-                            &mut connection_route,
-                        ))
-                        .await
+                        let application_surface_call = request.method == "tools/call"
+                            && request
+                                .params
+                                .as_ref()
+                                .and_then(|params| params.get("name"))
+                                .and_then(Value::as_str)
+                                .and_then(
+                                    crate::application_surface::ApplicationSurfaceOperation::from_tool_name,
+                                )
+                                .is_some();
+                        if application_surface_call {
+                            let (response, closed) = self
+                                .handle_cancellable_application_request(
+                                    &request,
+                                    timings_override.unwrap_or_else(|| self.timings_enabled()),
+                                    &mut connection_route,
+                                    transport,
+                                    &mut pending_line,
+                                )
+                                .await?;
+                            peer_closed = closed;
+                            response
+                        } else {
+                            Box::pin(self.handle_request_for_connection(
+                                &request,
+                                timings_override.unwrap_or_else(|| self.timings_enabled()),
+                                &mut connection_route,
+                            ))
+                            .await
+                        }
                     }
                     Err(e) => Some(JsonRpcResponse::error(
                         Value::Null,
@@ -243,6 +317,11 @@ impl McpServer {
                     )),
                 }
             };
+
+            if peer_closed {
+                drop(request_activity);
+                break;
+            }
 
             // Drain and write any pending notifications (e.g., version warnings).
             {
@@ -270,12 +349,12 @@ impl McpServer {
                 let json_line = serialize_response_line(&resp);
                 let output = format!("{json_line}\n");
                 if let Err(e) = transport.write_line(&output).await {
-                    eprintln!("failed to write response: {e}");
+                    tracing::error!(error = %e, "failed to write MCP response");
                     self.shutdown_if(shutdown_on_exit).await;
                     return Err(e.into());
                 }
                 if let Err(e) = transport.flush().await {
-                    eprintln!("failed to flush stdout: {e}");
+                    tracing::error!(error = %e, "failed to flush MCP transport");
                     self.shutdown_if(shutdown_on_exit).await;
                     return Err(e.into());
                 }
@@ -321,7 +400,7 @@ impl McpServer {
         let cg = self.cg_snapshot().await;
         // Persist final tokens-saved value
         if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
-            eprintln!("[tracedecay] warning: failed to persist tokens_saved on shutdown: {e}");
+            tracing::warn!(error = %e, "failed to persist tokens saved during shutdown");
         }
 
         // Update global DB with final count and checkpoint it
@@ -347,20 +426,20 @@ impl McpServer {
                 config.last_upload_at = now;
             }
             if let Err(err) = config.save() {
-                eprintln!("[tracedecay] warning: could not save config: {err}");
+                tracing::warn!(error = %err, "could not save upload config during shutdown");
             }
         }
 
         // Checkpoint WAL to merge it into the main database file
         if let Err(e) = cg.checkpoint().await {
-            eprintln!("[tracedecay] warning: failed to checkpoint WAL on shutdown: {e}");
+            tracing::warn!(error = %e, "failed to checkpoint WAL during shutdown");
         }
 
-        eprintln!(
-            "[tracedecay] shutdown: {} tool calls, ~{} tokens saved, uptime {}s",
+        tracing::info!(
             tool_calls,
             tokens_saved,
-            uptime.as_secs()
+            uptime_secs = uptime.as_secs(),
+            "MCP server shutdown complete"
         );
     }
 
@@ -507,9 +586,9 @@ impl McpServer {
         if outcome.status.is_replay_progress() {
             return;
         }
-        eprintln!(
-            "[tracedecay] host admission disposition: {}",
-            outcome.reason_code.unwrap_or("host_admission_unavailable")
+        tracing::warn!(
+            reason_code = outcome.reason_code.unwrap_or("host_admission_unavailable"),
+            "host admission did not make replay progress"
         );
     }
 

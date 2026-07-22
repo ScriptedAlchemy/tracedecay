@@ -1,0 +1,554 @@
+//! PR13 packet schemas, structural contracts, and authentic host decoders.
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
+
+use serde_json::{Value, json};
+use tracedecay::agents::host_bundle_registry::{
+    default_components, verified_embedded_default_host_component_set, verified_embedded_host_bundle,
+};
+use tracedecay::agents::host_bundle_v2::{
+    HostBundleComponentDoctorStateV1, HostBundleComponentV1, HostBundleInstallReceiptV1,
+    HostBundleLifecycleOpV1, HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1,
+    HostBundleRegistrationStateV1, HostBundleRollbackBoundaryV1, HostBundleWriterV1,
+    HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
+    HostComponentSetRegistrationV1, HostComponentSetTransactionV1, HostKindV1,
+    inspect_installed_host_bundle_components_at, stock_host_kinds,
+};
+use tracedecay::agents::{
+    AgentIntegration, HealthcheckContext, KimiIntegration, OpenCodeIntegration,
+    inspect_receipt_backed_host_components,
+};
+use tracedecay_hooks::{
+    HookHostV1, OpenCodePluginSurfaceV1, decode_native_hook_event, decode_opencode_plugin_event,
+};
+
+#[path = "../src/privacy/detector_kernel.rs"]
+mod detector_kernel;
+#[path = "agent_suite/plugin_validation_support.rs"]
+mod plugin_validation_support;
+
+use detector_kernel::{CredentialPatternProfile, compile_credential_patterns};
+use plugin_validation_support::{assert_schema_valid, compile_schema};
+
+const HOST_PACKET: &str = include_str!("../benchmarks/pr13-host-conformance/workload-v1.json");
+const HOST_SCHEMA: &str = include_str!("../benchmarks/pr13-host-conformance/schema-v1.json");
+const ADVISORY_PACKET: &str =
+    include_str!("../benchmarks/pr13-advisory-milestone/workload-v1.json");
+const ADVISORY_SCHEMA: &str = include_str!("../benchmarks/pr13-advisory-milestone/schema-v1.json");
+const FOUR_PILLAR_SOURCE: &str =
+    include_str!("../crates/tracedecay-application/tests/four_pillar_milestone.rs");
+
+fn packet(value: &str) -> Value {
+    serde_json::from_str(value).expect("checked-in packet parses")
+}
+
+fn function_names(source: &str) -> BTreeSet<String> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(
+            &tracedecay::extraction::ts_provider::language("rust")
+                .expect("Rust grammar is available"),
+        )
+        .expect("Rust grammar loads");
+    let tree = parser.parse(source, None).expect("Rust source parses");
+    let mut names = BTreeSet::new();
+    collect_function_names(tree.root_node(), source.as_bytes(), &mut names);
+    names
+}
+
+fn collect_function_names(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    names: &mut BTreeSet<String>,
+) {
+    if node.kind() == "function_item"
+        && let Some(name) = node.child_by_field_name("name")
+        && let Ok(name) = name.utf8_text(source)
+    {
+        names.insert(name.to_owned());
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_function_names(child, source, names);
+    }
+}
+
+fn assert_agent_integration<T: AgentIntegration>() {}
+
+struct CurrentRegistration;
+
+impl HostBundleRegistrationInspectorV1 for CurrentRegistration {
+    fn inspect_registration(
+        &self,
+        _host: HostKindV1,
+        _component: HostBundleComponentV1,
+    ) -> HostBundleRegistrationStateV1 {
+        HostBundleRegistrationStateV1::Current
+    }
+}
+
+impl HostComponentSetRegistrationV1 for CurrentRegistration {}
+
+#[test]
+fn draft07_schemas_validate_contract_packets() {
+    let host_schema = compile_schema(&packet(HOST_SCHEMA));
+    let advisory_schema = compile_schema(&packet(ADVISORY_SCHEMA));
+    assert_schema_valid(&host_schema, &packet(HOST_PACKET), Path::new("host packet"));
+    assert_schema_valid(
+        &advisory_schema,
+        &packet(ADVISORY_PACKET),
+        Path::new("advisory packet"),
+    );
+}
+
+#[test]
+fn schemas_reject_unknown_fields_wrong_types_and_unknown_gates() {
+    let validator = compile_schema(&packet(HOST_SCHEMA));
+    let mut unknown_field = packet(HOST_PACKET);
+    unknown_field["unexpected"] = json!(true);
+    assert!(!validator.is_valid(&unknown_field));
+
+    let mut wrong_type = packet(HOST_PACKET);
+    wrong_type["schema_version"] = json!("1");
+    assert!(!validator.is_valid(&wrong_type));
+
+    let mut unknown_gate = packet(HOST_PACKET);
+    unknown_gate["static_gate_ids"] = json!(["unknown_gate"]);
+    assert!(!validator.is_valid(&unknown_gate));
+
+    let advisory_validator = compile_schema(&packet(ADVISORY_SCHEMA));
+    let mut advisory_unknown = packet(ADVISORY_PACKET);
+    advisory_unknown["unexpected"] = json!(true);
+    assert!(!advisory_validator.is_valid(&advisory_unknown));
+    let mut advisory_wrong_type = packet(ADVISORY_PACKET);
+    advisory_wrong_type["provider_gaps"] = json!("none");
+    assert!(!advisory_validator.is_valid(&advisory_wrong_type));
+}
+
+#[test]
+fn structural_checks_ignore_commented_out_symbols() {
+    let advisory_functions = function_names(FOUR_PILLAR_SOURCE);
+    assert!(
+        advisory_functions.contains("four_pillars_share_one_cycle_result_and_canonical_anchors")
+    );
+    assert!(!function_names("// fn commented_out_symbol() {}").contains("commented_out_symbol"));
+}
+
+#[test]
+fn public_host_contracts_are_compiler_referenced() {
+    assert_agent_integration::<KimiIntegration>();
+    assert_agent_integration::<OpenCodeIntegration>();
+    let _native_decoder = decode_native_hook_event;
+    let _opencode_decoder = decode_opencode_plugin_event;
+}
+
+#[test]
+fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
+    let artifact_root = tempfile::tempdir().unwrap();
+    let lifecycle_root = tempfile::tempdir().unwrap();
+
+    let bundle =
+        verified_embedded_host_bundle(HostKindV1::KimiCode, HostBundleComponentV1::Core, 0)
+            .unwrap();
+    for content in &bundle.contents {
+        let path = artifact_root.path().join(&content.relative_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, &content.bytes).unwrap();
+    }
+    let managed_dir = artifact_root
+        .path()
+        .join(".kimi-code/plugins/managed/tracedecay")
+        .canonicalize()
+        .unwrap();
+    let installed_path = artifact_root
+        .path()
+        .join(".kimi-code/plugins/installed.json");
+    fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+    fs::write(
+        installed_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "plugins": [{
+                "id": "tracedecay",
+                "enabled": true,
+                "source": "local-path",
+                "root": managed_dir,
+            }],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let receipt = HostBundleInstallReceiptV1 {
+        schema_version: 1,
+        operation_id: [7; 16],
+        host: HostKindV1::KimiCode,
+        component: HostBundleComponentV1::Core,
+        operation: HostBundleLifecycleOpV1::Install,
+        manifest_digest: bundle.manifest.canonical_digest().unwrap(),
+        artifacts: bundle
+            .manifest
+            .artifacts
+            .iter()
+            .map(|artifact| HostBundleReceiptArtifactV1 {
+                relative_path: artifact.relative_path.clone(),
+                artifact_digest: artifact.artifact_digest,
+                ownership_marker: artifact.ownership_marker.clone(),
+            })
+            .collect(),
+        rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
+        rollback_history: Vec::new(),
+    };
+    let control = lifecycle_root.path().join(".tracedecay-host-bundle-v1");
+    fs::create_dir_all(&control).unwrap();
+    fs::write(
+        control.join("receipt.kimi-code.core.v1.json"),
+        serde_json::to_vec_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+
+    let direct = inspect_installed_host_bundle_components_at(
+        artifact_root.path(),
+        lifecycle_root.path(),
+        &CurrentRegistration,
+    )
+    .unwrap();
+    assert_eq!(direct.components.len(), 1);
+    let component = &direct.components[0];
+    assert_eq!(component.state, HostBundleComponentDoctorStateV1::Current);
+    assert_eq!(
+        component.registration,
+        Some(HostBundleRegistrationStateV1::Current)
+    );
+    assert!(
+        component
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.observed_digest == Some(artifact.expected_digest))
+    );
+    assert_eq!(component.repair_action, "none");
+
+    let owner = inspect_receipt_backed_host_components(
+        &HealthcheckContext {
+            home: artifact_root.path().to_path_buf(),
+            project_path: artifact_root.path().to_path_buf(),
+        },
+        lifecycle_root.path(),
+    )
+    .unwrap();
+    assert_eq!(owner.components.len(), 1);
+    assert_eq!(
+        owner.components[0].registration,
+        Some(HostBundleRegistrationStateV1::Current)
+    );
+
+    let modified = artifact_root
+        .path()
+        .join(&receipt.artifacts[0].relative_path);
+    fs::write(modified, b"modified").unwrap();
+    let repair = inspect_installed_host_bundle_components_at(
+        artifact_root.path(),
+        lifecycle_root.path(),
+        &CurrentRegistration,
+    )
+    .unwrap();
+    assert_eq!(
+        repair.components[0].state,
+        HostBundleComponentDoctorStateV1::OwnershipConflict
+    );
+    assert!(!repair.components[0].repair_action.is_empty());
+}
+
+#[test]
+fn cursor_native_extension_receipt_matches_embedded_assets() {
+    let artifact_root = tempfile::tempdir().unwrap();
+    let lifecycle_root = tempfile::tempdir().unwrap();
+    let bundle =
+        verified_embedded_host_bundle(HostKindV1::CursorDesktop, HostBundleComponentV1::Agent, 0)
+            .unwrap();
+    for content in &bundle.contents {
+        let path = artifact_root.path().join(&content.relative_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, &content.bytes).unwrap();
+    }
+    let receipt = HostBundleInstallReceiptV1 {
+        schema_version: 1,
+        operation_id: [8; 16],
+        host: HostKindV1::CursorDesktop,
+        component: HostBundleComponentV1::Agent,
+        operation: HostBundleLifecycleOpV1::Install,
+        manifest_digest: bundle.manifest.canonical_digest().unwrap(),
+        artifacts: bundle
+            .manifest
+            .artifacts
+            .iter()
+            .map(|artifact| HostBundleReceiptArtifactV1 {
+                relative_path: artifact.relative_path.clone(),
+                artifact_digest: artifact.artifact_digest,
+                ownership_marker: artifact.ownership_marker.clone(),
+            })
+            .collect(),
+        rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
+        rollback_history: Vec::new(),
+    };
+    assert!(receipt.artifacts.iter().all(|artifact| {
+        artifact
+            .relative_path
+            .starts_with(".cursor/extensions/tracedecay.cursor-native-0.0.0/")
+    }));
+    let control = lifecycle_root.path().join(".tracedecay-host-bundle-v1");
+    fs::create_dir_all(&control).unwrap();
+    fs::write(
+        control.join("receipt.cursor-desktop.agent.v1.json"),
+        serde_json::to_vec_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+    let report = inspect_installed_host_bundle_components_at(
+        artifact_root.path(),
+        lifecycle_root.path(),
+        &CurrentRegistration,
+    )
+    .unwrap();
+    assert_eq!(report.components.len(), 1);
+    assert_eq!(
+        report.components[0].state,
+        HostBundleComponentDoctorStateV1::Current
+    );
+    assert!(
+        report.components[0]
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.observed_digest == Some(artifact.expected_digest))
+    );
+}
+
+#[test]
+fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
+    let mut covered_hosts = 0;
+    for host in stock_host_kinds() {
+        let mut expected_components = default_components(host);
+        if expected_components.is_empty() {
+            continue;
+        }
+        expected_components.sort_unstable();
+        covered_hosts += 1;
+        let artifacts = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let component_set = verified_embedded_default_host_component_set(host, 0).unwrap();
+        assert_eq!(
+            component_set
+                .component_set
+                .components
+                .iter()
+                .map(|component| component.manifest.component)
+                .collect::<Vec<_>>(),
+            expected_components
+        );
+        let request = |operation, operation_id| HostComponentSetExecutionRequestV1 {
+            lifecycle: HostComponentSetLifecycleRequestV1 {
+                operation,
+                expected_host: host,
+                expected_components: expected_components.clone(),
+                explicit_confirmation: true,
+                hermes_profile_bindings: 0,
+            },
+            operation_id: [operation_id; 16],
+        };
+        let mut writer =
+            HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path())
+                .unwrap();
+        let mut registration = CurrentRegistration;
+
+        let install = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &component_set.component_set,
+                &request(HostBundleLifecycleOpV1::Install, 41),
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+        assert_eq!(install.component_receipts.len(), expected_components.len());
+        assert!(
+            inspect_installed_host_bundle_components_at(
+                artifacts.path(),
+                lifecycle.path(),
+                &CurrentRegistration,
+            )
+            .unwrap()
+            .components
+            .iter()
+            .all(|component| component.state == HostBundleComponentDoctorStateV1::Current)
+        );
+
+        let update = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &component_set.component_set,
+                &request(HostBundleLifecycleOpV1::Update, 42),
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+        assert!(
+            update
+                .component_receipts
+                .iter()
+                .all(|receipt| receipt.operation == HostBundleLifecycleOpV1::Update)
+        );
+
+        let repair_target = component_set.component_set.components[0].manifest.artifacts[0]
+            .relative_path
+            .clone();
+        fs::write(artifacts.path().join(repair_target), b"corrupted").unwrap();
+        let repair = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &component_set.component_set,
+                &request(HostBundleLifecycleOpV1::Repair, 43),
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+        assert!(
+            repair
+                .component_receipts
+                .iter()
+                .all(|receipt| receipt.operation == HostBundleLifecycleOpV1::Repair)
+        );
+        assert!(
+            inspect_installed_host_bundle_components_at(
+                artifacts.path(),
+                lifecycle.path(),
+                &CurrentRegistration,
+            )
+            .unwrap()
+            .components
+            .iter()
+            .all(|component| component.state == HostBundleComponentDoctorStateV1::Current)
+        );
+
+        let uninstall = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &component_set.component_set,
+                &request(HostBundleLifecycleOpV1::Uninstall, 44),
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+        assert!(uninstall.component_receipts.iter().all(|receipt| {
+            receipt.operation == HostBundleLifecycleOpV1::Uninstall && receipt.artifacts.is_empty()
+        }));
+        assert!(
+            inspect_installed_host_bundle_components_at(
+                artifacts.path(),
+                lifecycle.path(),
+                &CurrentRegistration,
+            )
+            .unwrap()
+            .components
+            .is_empty()
+        );
+    }
+    assert!(covered_hosts > 0);
+}
+
+#[test]
+fn authentic_host_fixtures_use_production_typed_decoders() {
+    let fixtures: &[(HookHostV1, &str)] = &[
+        (
+            HookHostV1::ClaudeCode,
+            include_str!(
+                "../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
+            ),
+        ),
+        (
+            HookHostV1::ClaudeCode,
+            include_str!("../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"),
+        ),
+        (
+            HookHostV1::Codex,
+            include_str!("../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"),
+        ),
+        (
+            HookHostV1::CursorDesktop,
+            include_str!(
+                "../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
+            ),
+        ),
+        (
+            HookHostV1::Hermes,
+            include_str!("../crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"),
+        ),
+        (
+            HookHostV1::Hermes,
+            include_str!("../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json"),
+        ),
+        (
+            HookHostV1::KimiCode,
+            include_str!(
+                "../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
+            ),
+        ),
+        (
+            HookHostV1::KimiCode,
+            include_str!("../crates/tracedecay-hooks/fixtures/host_events/kimi/stop.json"),
+        ),
+    ];
+    for (host, fixture) in fixtures {
+        decode_native_hook_event(*host, fixture.as_bytes())
+            .unwrap_or_else(|error| panic!("{host:?} fixture rejected: {error}"));
+    }
+
+    let opencode = packet(include_str!(
+        "../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
+    ));
+    let events = opencode["events"].as_array().expect("OpenCode events");
+    for identity in ["saved_edit", "stop"] {
+        let event = events
+            .iter()
+            .find(|event| event["identity"] == identity)
+            .expect("OpenCode fixture identity");
+        decode_opencode_plugin_event(
+            OpenCodePluginSurfaceV1::Event,
+            serde_json::to_vec(&event["request"]).unwrap().as_slice(),
+        )
+        .unwrap_or_else(|error| panic!("OpenCode {identity} rejected: {error}"));
+    }
+    let tool_after = events
+        .iter()
+        .find(|event| event["identity"] == "post_tool_use")
+        .expect("OpenCode tool.execute.after");
+    decode_opencode_plugin_event(
+        OpenCodePluginSurfaceV1::ToolExecuteAfter,
+        serde_json::to_vec(&tool_after["request"])
+            .unwrap()
+            .as_slice(),
+    )
+    .expect("OpenCode tool.execute.after decodes");
+}
+
+#[test]
+fn corrupted_host_identity_fails_typed_decoder() {
+    let mut fixture = packet(include_str!(
+        "../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
+    ));
+    fixture["hook_event_name"] = json!("NotARealEvent");
+    assert!(
+        decode_native_hook_event(
+            HookHostV1::ClaudeCode,
+            serde_json::to_vec(&fixture).unwrap().as_slice(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn packets_pass_shared_minimal_no_secret_kernel() {
+    let patterns =
+        compile_credential_patterns(CredentialPatternProfile::Observation).expect("patterns");
+    for packet in [HOST_PACKET, ADVISORY_PACKET] {
+        assert!(
+            patterns.iter().all(|pattern| !pattern.is_match(packet)),
+            "contract packet contains credential-like material"
+        );
+    }
+}

@@ -1,3 +1,4 @@
+use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::application::host_admission::{
     HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
     HostAdmissionStatus, SharedHostAdmissionBroker, TerminalReason,
@@ -14,9 +15,12 @@ use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
-use tracedecay_domain::{ObservationScopeV1, ProjectId};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracedecay_domain::{ObservationScopeV1, ProjectId, UtcMicros};
 
 use super::{SessionAuthorities, rendered_tool_json};
+
+const CONTEXT_SCOUT_MODEL_DEADLINE: Duration = Duration::from_secs(5);
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
@@ -38,6 +42,12 @@ pub async fn handle_hook_runtime(
             json!({ "action": action, "reset": true })
         }
         "accounting_receipt" => accounting_receipt(cg, global_db).await?,
+        "hook_v2_admit" | "hook_v2_guidance_lookup" => hook_v2_admit(cg, &args, action).await?,
+        "hook_v2_scout_prepare" => hook_v2_scout_prepare(cg, &args).await?,
+        "hook_v2_delivery_receipt" => hook_v2_delivery_receipt(cg, &args).await?,
+        "hook_v2_feedback" => hook_v2_feedback(cg, &args).await?,
+        "hook_v2_cancel" => hook_v2_cancel(cg, &args).await?,
+        "hook_v2_status" => hook_v2_status(cg, &args).await?,
         "ingest_transcript" => {
             if args.get("user_scope").and_then(Value::as_bool) == Some(true) {
                 return Err(config_error(
@@ -111,6 +121,250 @@ fn projectless_action_allowed(action: &str, args: &Value) -> bool {
     matches!(action, "user_review" | "hermes_receipt")
         || (action == "ingest_transcript"
             && args.get("user_scope").and_then(Value::as_bool) == Some(true))
+}
+
+fn hook_now() -> UtcMicros {
+    UtcMicros(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(1, |duration| {
+                duration.as_micros().min(i64::MAX as u128) as i64
+            }),
+    )
+}
+
+fn hook_v2_envelope(args: &Value, action: &str) -> Result<tracedecay_hooks::HookEventEnvelopeV2> {
+    let envelope = args
+        .get("envelope")
+        .cloned()
+        .ok_or_else(|| config_error(format!("{action} requires envelope")))
+        .and_then(|value| {
+            serde_json::from_value::<tracedecay_hooks::HookEventEnvelopeV2>(value)
+                .map_err(|error| config_error(format!("invalid Hook V2 envelope: {error}")))
+        })?;
+    Ok(envelope)
+}
+
+fn hook_v2_binding_snapshot(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    now: UtcMicros,
+) -> Result<Option<tracedecay_hooks::HookConfigurationSnapshotV1>> {
+    let layout = cg.hook_store_layout();
+    let subscriber = tracedecay_hooks::HookConfigurationSubscriberV1::new(
+        tracedecay_hooks::HookConfigurationFileReaderV1::new(
+            tracedecay_hooks::hook_configuration_path(&layout.data_root, envelope.producer),
+        ),
+    );
+    let snapshot = match subscriber.load_current(envelope.producer, now) {
+        tracedecay_hooks::HookConfigurationReadOutcomeV1::Bound(snapshot) => snapshot,
+        _ => return Ok(None),
+    };
+    envelope
+        .validate(&snapshot.binding)
+        .map_err(|error| config_error(format!("Hook V2 scope rejected: {error}")))?;
+    Ok(Some(snapshot))
+}
+
+async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Value> {
+    let envelope = hook_v2_envelope(args, action)?;
+    let now = hook_now();
+    let Some(snapshot) = hook_v2_binding_snapshot(cg, &envelope, now)? else {
+        return Ok(json!({
+            "action": action,
+            "status": "unavailable",
+        }));
+    };
+    let Some(owner) = cg.context_scout_owner() else {
+        return Ok(json!({
+            "action": action,
+            "status": "unavailable",
+            "ready_guidance": Value::Null,
+        }));
+    };
+    let ready = owner
+        .claim_ready_guidance(&envelope, snapshot.revision, now)
+        .await;
+    let ready_guidance = match ready {
+        Some((guidance, claim)) => {
+            let _ = owner.requeue(claim).await;
+            serde_json::to_value(guidance).unwrap_or(Value::Null)
+        }
+        None => Value::Null,
+    };
+    Ok(json!({
+        "action": action,
+        "status": "accepted",
+        "ready_guidance": ready_guidance,
+    }))
+}
+
+async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Result<Value> {
+    let envelope = hook_v2_envelope(args, "hook_v2_scout_prepare")?;
+    let input = serde_json::from_value::<
+        crate::agents::context_scout_v2::ContextScoutSelectionInputV1,
+    >(required_value(args, "input")?)
+    .map_err(|error| config_error(format!("invalid Context Scout input: {error}")))?;
+    let control = serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutControlV1>(
+        required_value(args, "control")?,
+    )
+    .map_err(|error| config_error(format!("invalid Context Scout control: {error}")))?;
+    let now = hook_now();
+    if hook_v2_binding_snapshot(cg, &envelope, now)?.is_none() {
+        return Ok(json!({
+            "action": "hook_v2_scout_prepare",
+            "status": "unavailable",
+        }));
+    }
+    validate_scout_prepare_scope(&input, envelope.project_id, envelope.protected_session_id)?;
+    let Some(owner) = cg.context_scout_owner() else {
+        return Ok(json!({
+            "action": "hook_v2_scout_prepare",
+            "status": "unavailable",
+        }));
+    };
+    let execution = crate::agents::context_scout_v2::ContextScoutModelExecutionV1::new(
+        MonotonicDeadline::at(Instant::now() + CONTEXT_SCOUT_MODEL_DEADLINE),
+        CancellationToken::new(),
+        control.limits,
+    )
+    .map_err(|error| config_error(format!("invalid Context Scout execution: {error}")))?;
+    let outcome = owner
+        .runtime()
+        .await
+        .prepare_controlled(&input, control, execution)
+        .await
+        .map_err(|error| config_error(format!("Context Scout preparation failed: {error}")))?;
+    Ok(scout_prepare_response(outcome))
+}
+
+fn validate_scout_prepare_scope(
+    input: &crate::agents::context_scout_v2::ContextScoutSelectionInputV1,
+    project_id: [u8; 16],
+    protected_session_id: [u8; 32],
+) -> Result<()> {
+    if input.address.project_id != project_id
+        || input.address.protected_session_id != protected_session_id
+    {
+        return Err(config_error(
+            "Context Scout input scope does not match the Hook V2 envelope",
+        ));
+    }
+    Ok(())
+}
+
+fn scout_prepare_response(
+    outcome: crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1,
+) -> Value {
+    match outcome {
+        crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Enqueued {
+            entry,
+            store_outcome,
+        } => json!({
+            "action": "hook_v2_scout_prepare",
+            "status": scout_store_outcome(store_outcome),
+            "route": entry.route,
+        }),
+        crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Suppressed { reason } => {
+            json!({
+                "action": "hook_v2_scout_prepare",
+                "status": "suppressed",
+                "reason": reason,
+            })
+        }
+        crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Unavailable => json!({
+            "action": "hook_v2_scout_prepare",
+            "status": "unavailable",
+        }),
+    }
+}
+
+async fn hook_v2_delivery_receipt(cg: &TraceDecay, args: &Value) -> Result<Value> {
+    let claim = required_value(args, "claim")?;
+    let receipt = required_value(args, "receipt")?;
+    let claim =
+        serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutDurableClaimV1>(
+            claim,
+        )
+        .map_err(|error| config_error(format!("invalid Context Scout claim: {error}")))?;
+    let receipt = serde_json::from_value::<
+        crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+    >(receipt)
+    .map_err(|error| config_error(format!("invalid Context Scout receipt: {error}")))?;
+    let Some(owner) = cg.context_scout_owner() else {
+        return Ok(json!({ "status": "unavailable" }));
+    };
+    Ok(json!({
+        "status": scout_store_outcome(owner.record_delivery(&claim, &receipt).await),
+    }))
+}
+
+async fn hook_v2_feedback(cg: &TraceDecay, args: &Value) -> Result<Value> {
+    let receipt = serde_json::from_value::<
+        crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+    >(required_value(args, "receipt")?)
+    .map_err(|error| config_error(format!("invalid Context Scout receipt: {error}")))?;
+    let feedback =
+        serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutFeedbackV1>(
+            required_value(args, "feedback")?,
+        )
+        .map_err(|error| config_error(format!("invalid Context Scout feedback: {error}")))?;
+    let Some(owner) = cg.context_scout_owner() else {
+        return Ok(json!({ "status": "unavailable" }));
+    };
+    Ok(json!({
+        "status": scout_store_outcome(owner.record_feedback(&receipt, feedback).await),
+    }))
+}
+
+async fn hook_v2_cancel(cg: &TraceDecay, args: &Value) -> Result<Value> {
+    let work = serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutWorkV1>(
+        required_value(args, "work")?,
+    )
+    .map_err(|error| config_error(format!("invalid Context Scout work: {error}")))?;
+    let Some(owner) = cg.context_scout_owner() else {
+        return Ok(json!({ "status": "unavailable" }));
+    };
+    let status = owner
+        .cancel(work)
+        .await
+        .map(scout_store_outcome)
+        .unwrap_or("unavailable");
+    Ok(json!({ "status": status }))
+}
+
+async fn hook_v2_status(cg: &TraceDecay, args: &Value) -> Result<Value> {
+    let control = serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutControlV1>(
+        required_value(args, "control")?,
+    )
+    .map_err(|error| config_error(format!("invalid Context Scout control: {error}")))?;
+    let Some(owner) = cg.context_scout_owner() else {
+        return Ok(json!({ "status": "unavailable" }));
+    };
+    let status = owner
+        .status(control)
+        .await
+        .map_err(|error| config_error(format!("Context Scout status unavailable: {error}")))?;
+    serde_json::to_value(status)
+        .map_err(|error| config_error(format!("Context Scout status encoding failed: {error}")))
+}
+
+fn required_value(args: &Value, key: &str) -> Result<Value> {
+    args.get(key)
+        .cloned()
+        .ok_or_else(|| config_error(format!("missing required field `{key}`")))
+}
+
+fn scout_store_outcome(
+    outcome: crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1,
+) -> &'static str {
+    use crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1;
+    match outcome {
+        ContextScoutDurableStoreOutcomeV1::Stored => "stored",
+        ContextScoutDurableStoreOutcomeV1::Duplicate => "duplicate",
+        ContextScoutDurableStoreOutcomeV1::Superseded => "superseded",
+        ContextScoutDurableStoreOutcomeV1::Unavailable => "unavailable",
+    }
 }
 
 fn host_admission_facade<'a>(
@@ -1097,6 +1351,47 @@ mod tests {
         let none = SessionAuthorities::default();
         assert!(required_project_db(none).is_err());
         assert!(required_user_db(none).is_err());
+    }
+
+    #[test]
+    fn hook_v2_scout_prepare_is_scope_bound_and_content_free() {
+        let mut input = crate::agents::context_scout_v2::ContextScoutSelectionInputV1 {
+            address: crate::agents::context_scout_v2::ContextScoutAddressV1 {
+                profile_id: [1; 16],
+                provider_id: [2; 16],
+                protected_session_id: [3; 32],
+                thread_id: [4; 16],
+                turn_id: [5; 16],
+                agent_id: [6; 16],
+                logical_message_id: [7; 16],
+                project_id: [8; 16],
+            },
+            input_watermark: [9; 32],
+            configuration_revision: [10; 32],
+            envelope_id: [11; 16],
+            now: tracedecay_domain::UtcMicros(1),
+            delivery_window:
+                crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::Immediate,
+            delivered_dedupe_keys: std::collections::BTreeSet::new(),
+            candidates: Vec::new(),
+        };
+        assert!(validate_scout_prepare_scope(&input, [8; 16], [3; 32]).is_ok());
+
+        input.address.project_id = [12; 16];
+        assert!(validate_scout_prepare_scope(&input, [8; 16], [3; 32]).is_err());
+        input.address.project_id = [8; 16];
+        input.address.protected_session_id = [13; 32];
+        assert!(validate_scout_prepare_scope(&input, [8; 16], [3; 32]).is_err());
+
+        let response = scout_prepare_response(
+            crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Suppressed {
+                reason: crate::agents::context_scout_v2::ContextScoutSuppressionV1::DirtyOverlay,
+            },
+        );
+        assert_eq!(response["action"], "hook_v2_scout_prepare");
+        assert_eq!(response["status"], "suppressed");
+        assert_eq!(response["reason"], "dirty_overlay");
+        assert!(!response.to_string().contains("suggestion_text"));
     }
 
     #[tokio::test]

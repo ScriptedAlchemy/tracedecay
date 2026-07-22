@@ -6,6 +6,10 @@ Claude Code.
 
 ## What it ships
 
+- **Configured-language LSP bridge** (`.lsp.json`): one TraceDecay server maps
+  the supported file extensions to `tracedecay lsp bridge --stdio --project .`.
+  It is one plugin, not one plugin per language, and forwards to the
+  daemon-owned gateway rather than embedding analyzer logic.
 - **MCP server** (`.mcp.json`): the `tracedecay` stdio server exposing the code
   graph, search, call-graph, impact, memory, and session-recall tools.
 - **Skills** (`skills/`): one skill per common workflow — searching for code,
@@ -31,6 +35,10 @@ tracedecay install --agent claude
 The installer resolves the absolute path of the `tracedecay` binary and writes
 it into the managed hooks, so the plugin works even when tracedecay lives on a
 path with spaces.
+
+The LSP bridge, hooks, skills, and CLI bindings form the MCP-free core. The MCP
+registration is an independently installable companion in the signed host
+bundle lifecycle; the compatibility installer composes both.
 
 ## CLI fallback
 

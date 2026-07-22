@@ -109,9 +109,10 @@ impl McpServer {
         let started = self.ledger_writes_started.load(Ordering::SeqCst);
         let finished = self.ledger_writes_finished.load(Ordering::SeqCst);
         let pending = started.saturating_sub(finished);
-        eprintln!(
-            "[tracedecay] ledger_writes_settled timed out after {timeout:?} with \
-             {pending} savings-ledger write(s) still pending"
+        tracing::warn!(
+            ?timeout,
+            pending,
+            "timed out waiting for savings-ledger writes"
         );
         false
     }
@@ -185,12 +186,12 @@ impl McpServer {
                     .unwrap_or_default()
                     .as_secs() as i64;
                 if let Err(err) = config.save() {
-                    eprintln!("[tracedecay] warning: could not save config: {err}");
+                    tracing::warn!(error = %err, "could not save upload config");
                 }
                 return true;
             }
             if let Err(err) = config.save() {
-                eprintln!("[tracedecay] warning: could not save config: {err}");
+                tracing::warn!(error = %err, "could not save upload config");
             }
             false
         })
@@ -243,7 +244,7 @@ impl McpServer {
         });
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {
-                eprintln!("[tracedecay] analytics_events insert failed: {e}");
+                tracing::warn!(error = %e, "MCP error analytics event insert failed");
             }
         });
     }
@@ -277,7 +278,7 @@ impl McpServer {
             if let Err(e) = gdb.append_analytics_event(&event).await {
                 // Deliberate fail-open: admission already committed; telemetry
                 // loss is preferred over blocking or rewriting host outcomes.
-                eprintln!("[tracedecay] hook route analytics insert failed: {e}");
+                tracing::warn!(error = %e, "hook route analytics insert failed");
             }
         });
     }
@@ -381,7 +382,7 @@ impl McpServer {
                 .git_record_span_observation(&observation, DEFAULT_SPAN_MERGE_GAP_SECS)
                 .await
             {
-                eprintln!("[tracedecay] hook route span record failed: {e}");
+                tracing::warn!(error = %e, "hook route span record failed");
             }
         });
     }

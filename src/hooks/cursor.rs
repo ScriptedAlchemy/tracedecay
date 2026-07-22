@@ -209,6 +209,18 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Cursor, hook_name, &event);
+    if hook_name == "stop"
+        && let Some(root) = root.as_deref()
+        && let super::v2::HookV2Dispatch::Handled { guidance, .. } =
+            super::v2::dispatch(tracedecay_hooks::HookHostV1::CursorDesktop, &event, root).await
+    {
+        if let Some(guidance) = guidance {
+            println!("{}", serde_json::json!({ "additional_context": guidance }));
+        } else {
+            println!("{}", serde_json::json!({}));
+        }
+        return 0;
+    }
     let outcome = ingest_cursor_transcript_for_event_inner(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
@@ -284,6 +296,15 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "afterFileEdit", &event);
+    if let Some(root) = root.as_deref()
+        && let super::v2::HookV2Dispatch::Handled { guidance, .. } =
+            super::v2::dispatch(tracedecay_hooks::HookHostV1::CursorDesktop, &event, root).await
+    {
+        if let Some(guidance) = guidance {
+            println!("{}", serde_json::json!({ "additional_context": guidance }));
+        }
+        return 0;
+    }
     notify_cursor_after_file_edit(&event, &hook_telemetry).await;
     if let Some(decision) = cursor_after_file_edit_decision_for_hook(&event).await {
         println!("{decision}");

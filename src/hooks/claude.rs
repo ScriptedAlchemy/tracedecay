@@ -302,6 +302,18 @@ pub async fn hook_claude_post_tool_use() -> i32 {
     let root = claude_project_root_from_event_with_identity(&event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Claude, hook_event_name, &event);
+    if let Some(root) = root.as_deref()
+        && let super::v2::HookV2Dispatch::Handled { guidance, .. } =
+            super::v2::dispatch(tracedecay_hooks::HookHostV1::ClaudeCode, &event, root).await
+    {
+        if let Some(guidance) = guidance {
+            println!(
+                "{}",
+                codex_additional_context_json(hook_event_name, &guidance)
+            );
+        }
+        return 0;
+    }
     if let Some(context) = claude_post_tool_use_hint_context(&event) {
         println!(
             "{}",
@@ -454,6 +466,15 @@ pub async fn hook_stop() {
     };
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = claude_session_project_root(&parsed).await;
+    if let Some(root) = root.as_deref()
+        && let super::v2::HookV2Dispatch::Handled { guidance, .. } =
+            super::v2::dispatch(tracedecay_hooks::HookHostV1::ClaudeCode, &event, root).await
+    {
+        if let Some(guidance) = guidance {
+            println!("{}", codex_additional_context_json("Stop", &guidance));
+        }
+        return;
+    }
     let session_id = event_session_id(&parsed);
     let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Claude, "Stop", &event);
     if root.is_none()
@@ -461,41 +482,6 @@ pub async fn hook_stop() {
             .await
     {
         super::schedule_user_session_review("claude", session_id.as_deref());
-    }
-
-    let project_path = root.unwrap_or_else(|| crate::config::resolve_path(None));
-    match super::daemon_hook_action(
-        Some(&project_path),
-        serde_json::json!({ "action": "accounting_receipt" }),
-        Some(&hook_telemetry),
-    )
-    .await
-    {
-        Ok(receipt) => {
-            let turns = receipt
-                .get("turns_inserted")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let cost = receipt
-                .get("cost_usd")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0);
-            if turns > 0 && cost >= 0.001 {
-                let saved = receipt
-                    .get("tokens_saved")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                let efficiency = receipt
-                    .get("efficiency")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0);
-                let saved_str = crate::display::format_token_count(saved);
-                eprintln!(
-                    "\x1b[36mSession: ${cost:.2} spent | {saved_str} saved | {efficiency:.0}% efficiency\x1b[0m"
-                );
-            }
-        }
-        Err(error) => eprintln!("[tracedecay] session receipt daemon call failed: {error}"),
     }
 }
 

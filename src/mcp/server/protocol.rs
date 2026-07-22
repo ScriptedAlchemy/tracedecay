@@ -15,6 +15,7 @@ pub(crate) enum McpMethod {
     TrivialAck,
     /// The daemon's internal hook-event notification.
     HookEvent,
+    Cancelled,
     Unknown,
 }
 
@@ -29,6 +30,7 @@ pub(crate) fn classify_mcp_method(method: &str) -> McpMethod {
         "tools/call" => McpMethod::ToolsCall,
         "resources/list" => McpMethod::ResourcesList,
         "resources/read" => McpMethod::ResourcesRead,
+        "notifications/cancelled" => McpMethod::Cancelled,
         "ping" | "logging/setLevel" => McpMethod::TrivialAck,
         _ => McpMethod::Unknown,
     }

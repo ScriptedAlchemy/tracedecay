@@ -96,6 +96,501 @@ async fn socket_client_rejects_tool_calls_without_project() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn socket_client_routes_multiple_closed_invocations_without_falling_back_to_mcp() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(super::super::serve_socket_client(
+        server,
+        super::super::DaemonEngine::default(),
+    ));
+
+    let (reader, mut writer) = client.into_split();
+    let handshake = DaemonHandshake {
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    writer
+        .write_all(handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("newline");
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    for (request_id, request_handle) in [("request.1", "handle.1"), ("request.2", "handle.2")] {
+        writer
+            .write_all(
+                serde_json::to_string(&json!({
+                    "protocol": "tracedecay.daemon.invocation",
+                    "revision": 1,
+                    "request_id": request_id,
+                    "operation": "feedback_list",
+                    "request_handle": request_handle,
+                }))
+                .expect("invocation json")
+                .as_bytes(),
+            )
+            .await
+            .expect("write invocation");
+        writer.write_all(b"\n").await.expect("newline");
+
+        let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+            .await
+            .expect("invocation response should not time out")
+            .expect("read invocation response")
+            .expect("invocation response");
+        let response: Value = serde_json::from_str(&line).expect("response json");
+        assert_eq!(response["protocol"], "tracedecay.daemon.invocation");
+        assert_eq!(response["request_id"], request_id);
+        assert_eq!(response["status"], "problem");
+        assert_eq!(response["problem"], "unavailable");
+        assert!(response.get("jsonrpc").is_none());
+    }
+
+    writer.shutdown().await.expect("shutdown writer");
+
+    server_task
+        .await
+        .expect("server task should complete")
+        .expect("invocation should complete cleanly");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonical() {
+    use std::process::Command;
+
+    use tracedecay_application::{CancellationContext, Deadline, IdempotencyKey};
+    use tracedecay_domain::{
+        GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexSigningPolicyV1,
+        GitIndexTransactionOperationV1, RepositoryId, UtcMicros, WorktreeId,
+    };
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .status()
+            .expect("run Git fixture command");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let repository = TempDir::new().expect("repository");
+    git(repository.path(), &["init", "--quiet"]);
+    git(
+        repository.path(),
+        &["config", "user.name", "TraceDecay Test"],
+    );
+    git(
+        repository.path(),
+        &["config", "user.email", "tracedecay@example.com"],
+    );
+    std::fs::write(repository.path().join("packet.txt"), "base\n").expect("base file");
+    git(repository.path(), &["add", "packet.txt"]);
+    git(repository.path(), &["commit", "--quiet", "-m", "base"]);
+    std::fs::write(repository.path().join("packet.txt"), "base\nnext\n").expect("changed file");
+    git(repository.path(), &["add", "packet.txt"]);
+
+    let handshake = DaemonHandshake {
+        project_path: Some(repository.path().to_path_buf()),
+        allow_init: true,
+        client_identity: test_client_identity_for(home.join("client")),
+        ..test_handshake_defaults()
+    };
+    let engine = super::super::DaemonEngine::default();
+    let (key, _, _, _) = engine
+        .open_project_server(&handshake)
+        .await
+        .expect("mount project owner");
+    let project_id =
+        tracedecay_domain::ProjectId::new(key.owner.project_id.expect("durable test project id"))
+            .expect("typed project id");
+    let observed_at = UtcMicros(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_micros(),
+        )
+        .unwrap_or(i64::MAX),
+    );
+    let snapshot = super::super::git_transactions::capture_exact_snapshot_for_test(
+        repository.path(),
+        project_id.clone(),
+        RepositoryId::new("repository.socket-git").expect("repository id"),
+        WorktreeId::new("worktree.socket-git").expect("worktree id"),
+        observed_at,
+    );
+    let identity = GitCommitIdentityV1 {
+        name: "TraceDecay Test".to_owned(),
+        email: "tracedecay@example.com".to_owned(),
+        at: observed_at,
+    };
+    let request = crate::application_surface::GitPreviewSurfaceRequest {
+        operation: GitIndexTransactionOperationV1::CommitIndex,
+        preview_id: GitIndexPreviewId::new("preview.socket-git").expect("preview id"),
+        repository_snapshot: snapshot,
+        selected_hunks: Vec::new(),
+        commit_intent: Some(
+            GitIndexCommitIntentV1::new(
+                "socket Git transaction\n".to_owned(),
+                identity.clone(),
+                identity,
+                GitIndexSigningPolicyV1::UnsignedPermitted,
+            )
+            .expect("commit intent"),
+        ),
+    };
+    let deadline =
+        Deadline::new(UtcMicros(observed_at.0.saturating_add(60_000_000))).expect("deadline");
+    let cancellation = CancellationContext::active("cancel.socket-git").expect("cancellation");
+
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let engine_for_test = engine.clone();
+    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
+    let (reader, mut writer) = client.into_split();
+    writer
+        .write_all(handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+
+    let unauthorized_snapshot = super::super::git_transactions::capture_exact_snapshot_for_test(
+        repository.path(),
+        tracedecay_domain::ProjectId::new("project.unauthorized").unwrap(),
+        RepositoryId::new("repository.socket-git").unwrap(),
+        WorktreeId::new("worktree.socket-git").unwrap(),
+        observed_at,
+    );
+    let unauthorized = super::super::DaemonInvocationRequest::git_preview(
+        "request.socket.unauthorized",
+        crate::application_surface::GitPreviewSurfaceRequest {
+            operation: GitIndexTransactionOperationV1::CommitIndex,
+            preview_id: GitIndexPreviewId::new("preview.socket-unauthorized").unwrap(),
+            repository_snapshot: unauthorized_snapshot,
+            selected_hunks: Vec::new(),
+            commit_intent: request.commit_intent.clone(),
+        },
+        observed_at,
+        deadline.clone(),
+        cancellation.clone(),
+    );
+    writer
+        .write_all(serde_json::to_string(&unauthorized).unwrap().as_bytes())
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    let response: Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("authorization response"),
+    )
+    .unwrap();
+    assert_eq!(response["status"], "application_problem");
+    assert_eq!(response["problem"]["kind"], "not_found_or_not_authorized");
+
+    let preview_request = super::super::DaemonInvocationRequest::git_preview(
+        "request.socket.preview",
+        request,
+        observed_at,
+        deadline.clone(),
+        cancellation.clone(),
+    );
+    writer
+        .write_all(serde_json::to_string(&preview_request).unwrap().as_bytes())
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    let preview_line = lines.next_line().await.unwrap().expect("preview response");
+    let preview_response: Value = serde_json::from_str(&preview_line).expect("preview JSON");
+    assert_eq!(preview_response["status"], "git_preview");
+    let preview: tracedecay_domain::GitIndexPreviewV1 =
+        serde_json::from_value(preview_response["preview"]["payload"].clone())
+            .expect("typed immutable preview");
+
+    let apply = crate::application_surface::GitApplySurfaceRequest {
+        preview,
+        idempotency_key: IdempotencyKey::new("idempotency.socket-git").expect("idempotency"),
+    };
+    let apply_request = super::super::DaemonInvocationRequest::git_apply(
+        "request.socket.apply",
+        apply.clone(),
+        observed_at,
+        deadline.clone(),
+        cancellation,
+    );
+    let apply_request_json = serde_json::to_string(&apply_request).unwrap();
+    for _ in 0..2 {
+        let expected_request_id = "request.socket.apply";
+        writer
+            .write_all(apply_request_json.as_bytes())
+            .await
+            .unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().expect("apply response");
+        let response: Value = serde_json::from_str(&line).expect("apply JSON");
+        assert_eq!(response["request_id"], expected_request_id);
+        assert_eq!(response["status"], "git_apply", "{response:#}");
+        assert_eq!(response["effect"]["receipt"]["outcome"], "completed");
+    }
+
+    let stale = super::super::DaemonInvocationRequest::git_apply(
+        "request.socket.stale",
+        crate::application_surface::GitApplySurfaceRequest {
+            preview: apply.preview.clone(),
+            idempotency_key: IdempotencyKey::new("idempotency.socket-stale").unwrap(),
+        },
+        observed_at,
+        deadline.clone(),
+        CancellationContext::active("cancel.socket-stale").unwrap(),
+    );
+    writer
+        .write_all(serde_json::to_string(&stale).unwrap().as_bytes())
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    let response: Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().expect("stale response")).unwrap();
+    assert_eq!(response["status"], "git_apply", "{response:#}");
+    assert_eq!(
+        response["effect"]["payload"]["outcome"],
+        "aborted_no_change"
+    );
+
+    std::fs::write(
+        repository.path().join("packet.txt"),
+        "base\nnext\nrecovery\n",
+    )
+    .expect("recovery fixture change");
+    git(repository.path(), &["add", "packet.txt"]);
+    let recovery_repository_id = RepositoryId::new("repository.socket-git").unwrap();
+    let recovery_preview_request = super::super::DaemonInvocationRequest::git_preview(
+        "request.socket.recovery-preview",
+        crate::application_surface::GitPreviewSurfaceRequest {
+            operation: GitIndexTransactionOperationV1::CommitIndex,
+            preview_id: GitIndexPreviewId::new("preview.socket-recovery").unwrap(),
+            repository_snapshot: super::super::git_transactions::capture_exact_snapshot_for_test(
+                repository.path(),
+                project_id.clone(),
+                recovery_repository_id.clone(),
+                WorktreeId::new("worktree.socket-git").unwrap(),
+                observed_at,
+            ),
+            selected_hunks: Vec::new(),
+            commit_intent: Some(
+                GitIndexCommitIntentV1::new(
+                    "socket recovery fence\n".to_owned(),
+                    GitCommitIdentityV1 {
+                        name: "TraceDecay Test".to_owned(),
+                        email: "tracedecay@example.com".to_owned(),
+                        at: observed_at,
+                    },
+                    GitCommitIdentityV1 {
+                        name: "TraceDecay Test".to_owned(),
+                        email: "tracedecay@example.com".to_owned(),
+                        at: observed_at,
+                    },
+                    GitIndexSigningPolicyV1::UnsignedPermitted,
+                )
+                .unwrap(),
+            ),
+        },
+        observed_at,
+        deadline.clone(),
+        CancellationContext::active("cancel.socket-recovery-preview").unwrap(),
+    );
+    writer
+        .write_all(
+            serde_json::to_string(&recovery_preview_request)
+                .unwrap()
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    let response: Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("recovery preview response"),
+    )
+    .unwrap();
+    assert_eq!(response["status"], "git_preview", "{response:#}");
+    let recovery_preview: tracedecay_domain::GitIndexPreviewV1 =
+        serde_json::from_value(response["preview"]["payload"].clone()).unwrap();
+
+    engine_for_test
+        .store_administration
+        .git_index_transaction_services()
+        .quarantine_preview_for_test(repository.path(), &recovery_preview, observed_at)
+        .await
+        .unwrap();
+    let recovery_blocked = super::super::DaemonInvocationRequest::git_apply(
+        "request.socket.recovery-blocked",
+        crate::application_surface::GitApplySurfaceRequest {
+            preview: recovery_preview,
+            idempotency_key: IdempotencyKey::new("idempotency.socket-recovery").unwrap(),
+        },
+        observed_at,
+        deadline.clone(),
+        CancellationContext::active("cancel.socket-recovery").unwrap(),
+    );
+    writer
+        .write_all(serde_json::to_string(&recovery_blocked).unwrap().as_bytes())
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    let response: Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("recovery-blocked response"),
+    )
+    .unwrap();
+    assert_eq!(response["status"], "application_problem", "{response:#}");
+    assert_eq!(response["problem"]["kind"], "unavailable");
+    assert_eq!(
+        response["problem"]["diagnostic"]["code"],
+        "git_index.recovery_required"
+    );
+
+    let cancelled = super::super::DaemonInvocationRequest::git_apply(
+        "request.socket.cancelled",
+        apply.clone(),
+        observed_at,
+        deadline,
+        CancellationContext::cancelled("cancel.socket-cancelled", observed_at).unwrap(),
+    );
+    writer
+        .write_all(serde_json::to_string(&cancelled).unwrap().as_bytes())
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    let response: Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("cancelled response"),
+    )
+    .unwrap();
+    assert_eq!(response["status"], "application_problem");
+    assert_eq!(response["problem"]["kind"], "cancelled");
+
+    let timed_out = super::super::DaemonInvocationRequest::git_apply(
+        "request.socket.timed-out",
+        apply,
+        observed_at,
+        Deadline::new(UtcMicros(observed_at.0)).unwrap(),
+        CancellationContext::active("cancel.socket-timeout").unwrap(),
+    );
+    writer
+        .write_all(serde_json::to_string(&timed_out).unwrap().as_bytes())
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    let response: Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().expect("timeout response")).unwrap();
+    assert_eq!(response["status"], "application_problem");
+    assert_eq!(response["problem"]["kind"], "timed_out");
+
+    writer.shutdown().await.expect("shutdown writer");
+    server_task.await.unwrap().expect("socket server");
+}
+
+#[tokio::test]
+async fn portable_broker_routes_multiple_closed_invocations_without_falling_back_to_mcp() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept client");
+        let lifecycle = DaemonLifecycle::default();
+        super::super::serve_windows_broker_client(
+            stream,
+            TOKEN,
+            &lifecycle,
+            StoreAdministration::default(),
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::ProjectOpenGates::default(),
+            )),
+            None,
+        )
+        .await
+    });
+
+    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+        .await
+        .expect("connect client");
+    let (reader, mut writer) = stream.into_split();
+    let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+        .to_line()
+        .expect("auth preface");
+    let handshake = DaemonHandshake {
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    writer.write_all(preface.as_bytes()).await.expect("preface");
+    writer.write_all(b"\n").await.expect("preface newline");
+    writer
+        .write_all(handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    for (request_id, request_handle) in [("request.1", "handle.1"), ("request.2", "handle.2")] {
+        writer
+            .write_all(
+                serde_json::to_string(&json!({
+                    "protocol": "tracedecay.daemon.invocation",
+                    "revision": 1,
+                    "request_id": request_id,
+                    "operation": "feedback_list",
+                    "request_handle": request_handle,
+                }))
+                .expect("invocation json")
+                .as_bytes(),
+            )
+            .await
+            .expect("write invocation");
+        writer.write_all(b"\n").await.expect("invocation newline");
+
+        let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+            .await
+            .expect("invocation response should not time out")
+            .expect("read invocation response")
+            .expect("invocation response");
+        let response: Value = serde_json::from_str(&line).expect("response json");
+        assert_eq!(response["protocol"], "tracedecay.daemon.invocation");
+        assert_eq!(response["request_id"], request_id);
+        assert_eq!(response["status"], "problem");
+        assert_eq!(response["problem"], "unavailable");
+        assert!(response.get("jsonrpc").is_none());
+    }
+    writer.shutdown().await.expect("shutdown writer");
+
+    server
+        .await
+        .expect("server task should complete")
+        .expect("invocation should complete cleanly");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias() {
     let dir = TempDir::new().expect("temp dir");
     let root = dir.path().canonicalize().expect("canonical temp dir");

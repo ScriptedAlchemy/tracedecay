@@ -54,7 +54,8 @@ with `tracedecay_project_search`/`tracedecay_project_context`, then pass
    watermarks, and explanations. Partial, hidden, or redacted coverage is not
    evidence that content never existed; retain anchors when citing or drilling
    further.
-6. **Git-scoped session lookup → `tracedecay_sessions_for`:** use `git_ref`
+6. **Git-scoped session lookup → `tracedecay_sessions_for` /
+   `tracedecay_session_lookup`:** use `git_ref`
    (`branch`|`worktree`|`commit`) and `value`, optionally `since`/`until`.
    Commit queries default to `relation=produced` and `limit=20`; feed returned
    session ids back into rungs 2–4.

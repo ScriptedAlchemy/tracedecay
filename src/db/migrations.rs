@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 23;
+const LATEST_VERSION: u32 = 24;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -294,6 +294,7 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
     super::memory_v2::create_schema(conn, "create_schema").await?;
     super::memory_v2::install_v22_fresh_schema(conn, "create_schema").await?;
     super::memory_v2::install_v23_fresh_schema(conn, "create_schema").await?;
+    super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     set_version(conn, LATEST_VERSION).await?;
     Ok(())
 }
@@ -406,6 +407,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         21 => migrate_v21(conn).await,
         22 => migrate_v22(conn).await,
         23 => migrate_v23(conn).await,
+        24 => migrate_v24(conn).await,
         _ => Err(TraceDecayError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -445,6 +447,13 @@ async fn migrate_v22(conn: &Connection) -> Result<()> {
 /// compatibility-bank projections without reopening V20/V21 schema scope.
 async fn migrate_v23(conn: &Connection) -> Result<()> {
     super::memory_v2::upgrade_v23_schema(conn, "migrate_v23").await
+}
+
+/// v24: adds the payload-free Plan 13 evidence assembly ledger. The tables
+/// retain immutable source membership, producer order, publication receipts,
+/// and replay keys in the existing project database.
+async fn migrate_v24(conn: &Connection) -> Result<()> {
+    super::evidence_assembly::install_evidence_assembly_schema(conn, "migrate_v24").await
 }
 
 /// Compatibility marker after v12 was exposed on the PR stack.

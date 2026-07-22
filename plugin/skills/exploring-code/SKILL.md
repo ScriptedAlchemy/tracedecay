@@ -29,17 +29,20 @@ row below, run it, and stop when the question is answered.
 
 ## Read cheaply — stop at the first rung that answers
 
-1. Orient in a file → `tracedecay_outline` (symbols + line numbers, no bodies).
+1. Orient in a file → `tracedecay_outline` or application-surface
+   `tracedecay_source_outline` (symbols + line numbers, no bodies).
 2. API surface → `tracedecay_signature`; per-file bulk → `tracedecay_read` `mode:"signatures"`.
-3. One symbol's source → `tracedecay_body` — never open a whole file for one function.
-4. A line range → `tracedecay_read` `mode:"lines"`; whole file (last resort) →
-   `tracedecay_read` `mode:"full"` (cross-session cached; prefer it over Read).
+3. One symbol's source → `tracedecay_body` or `tracedecay_source_body` — never
+   open a whole file for one function.
+4. A line range → `tracedecay_read` / `tracedecay_source_lines`; whole file
+   (last resort) → `tracedecay_read` `mode:"full"` (cross-session cached;
+   prefer it over Read). File role/metadata only → `tracedecay_file_metadata`.
 5. Module surface → `tracedecay_module_api`.
 
 For types and traits — `tracedecay_implementations` / `tracedecay_impls` /
 `tracedecay_type_hierarchy` / `tracedecay_derives` / `tracedecay_constructors`
-/ `tracedecay_field_sites`, plus `tracedecay_by_qualified_name` and
-`tracedecay_node` for stable identity — read
+/ `tracedecay_field_sites`, plus `tracedecay_by_qualified_name` /
+`tracedecay_qualified_name` and `tracedecay_node` for stable identity — read
 [references/types-and-traits.md](references/types-and-traits.md).
 For other git branches without switching checkout — `tracedecay_branch_list` /
 `tracedecay_branch_search` / `tracedecay_branch_diff` — read

@@ -203,9 +203,9 @@ pub(crate) async fn patch_user_settings(
     }
     match config.save_with_recovery() {
         Ok(Some(backup)) => {
-            eprintln!(
-                "[tracedecay] note: corrupt config.toml backed up to {} before regenerating",
-                backup.display()
+            tracing::warn!(
+                backup = %backup.display(),
+                "corrupt user config backed up before regeneration"
             );
         }
         Ok(None) => {}

@@ -8,6 +8,7 @@
 //! (read-side graph queries), [`diagnostics`] (branch state), [`facts`]
 //! (session memory), and [`locking`] (dirty sentinel + sync lock).
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::config::TraceDecayConfig;
 use crate::db::Database;
@@ -39,6 +40,7 @@ pub use locking::{SyncLockGuard, try_acquire_sync_lock, try_acquire_sync_lock_at
 pub struct TraceDecay {
     db: Database,
     config: TraceDecayConfig,
+    configuration_runtime: Arc<crate::application::configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
     store_layout: StoreLayout,
     active_graph_layout: ActiveGraphLayout,
@@ -51,6 +53,35 @@ pub struct TraceDecay {
     /// Set when serving from a fallback (ancestor) DB instead of the exact branch.
     fallback_warning: Option<String>,
     read_only: bool,
+    context_scout_owner:
+        Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
+}
+
+impl TraceDecay {
+    pub(crate) fn configuration_runtime(
+        &self,
+    ) -> &Arc<crate::application::configuration::ProjectConfigurationRuntime> {
+        &self.configuration_runtime
+    }
+
+    pub(crate) fn hook_store_layout(&self) -> &StoreLayout {
+        &self.store_layout
+    }
+
+    pub(crate) fn context_scout_owner(
+        &self,
+    ) -> Option<&Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>> {
+        self.context_scout_owner.as_ref()
+    }
+
+    pub(crate) async fn configure_context_scout_model(
+        &self,
+        config: &crate::automation::config::AutomationConfig,
+    ) {
+        if let Some(owner) = &self.context_scout_owner {
+            owner.configure_model(config).await;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

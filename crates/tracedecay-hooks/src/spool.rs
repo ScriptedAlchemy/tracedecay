@@ -665,8 +665,13 @@ impl HookSpoolV1 {
             bytes.extend_from_slice(&frame);
             rebuilt.push(rebuilt_record);
         }
-        shared_atomic_write(&records_path(&self.root), "records", &bytes, DIRECTORY_POLICY)
-            .map_err(|_| HookSpoolError::Io)?;
+        shared_atomic_write(
+            &records_path(&self.root),
+            "records",
+            &bytes,
+            DIRECTORY_POLICY,
+        )
+        .map_err(|_| HookSpoolError::Io)?;
         self.pending = rebuilt;
         self.physical_len = offset;
         Ok(())
@@ -742,7 +747,9 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, HookSpoo
     match shared_read_bounded(path, maximum) {
         Ok(bytes) => Ok(bytes),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(HookSpoolError::UnsafePath),
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+            Err(HookSpoolError::UnsafePath)
+        }
         Err(_) => Err(HookSpoolError::MetadataCorrupted),
     }
 }
@@ -1333,8 +1340,6 @@ mod tests {
             repository_id: [2; 16],
             worktree_id: [3; 16],
             worktree_epoch: 4,
-            authorization_epoch: 5,
-            capability_revision: 6,
             binding_token: [7; 32],
             capabilities: vec![HookCapabilityV1 {
                 family: HookEventFamily::SessionBoundary,
@@ -1353,15 +1358,12 @@ mod tests {
             repository_id: [2; 16],
             worktree_id: [3; 16],
             worktree_epoch: 4,
-            authorization_epoch: 5,
-            capability_revision: 6,
             binding_token: [7; 32],
             ordering: HookOrderingV1::ProviderSequence(event as u64),
             observed_at: UtcMicros(10),
             event: HookEventV2::SessionBoundary {
                 boundary: crate::HookBoundaryV1::Start,
             },
-            payload_digest: [13; 32],
         }
     }
 

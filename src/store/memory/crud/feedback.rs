@@ -28,7 +28,7 @@ use super::{
     compatibility_mirror_insert_tx, compatibility_payload_metadata, compatibility_sanitize_payload,
     compatibility_update_feedback_projection_tx, load_current_fact_tx, query_fact_lineage_tx,
 };
-use crate::db::Database;
+use crate::db::{Database, publish_fact_feedback_finding_tx};
 use crate::privacy::sanitize_provider_metadata_text;
 use libsql::{Transaction, params};
 use serde_json::{Value, json};
@@ -361,6 +361,14 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
     )?;
     let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
     let event_id = canonical_receipt.last_event_id().clone();
+    publish_fact_feedback_finding_tx(
+        transaction,
+        request.target().owner(),
+        fact_id.as_str(),
+        event_id.as_str(),
+    )
+    .await
+    .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
     let mapping =
         compatibility_required_mapping_tx(transaction, request.target().owner(), &fact_id).await?;
     let (mirror_source, history_source, history_note, availability) =
@@ -572,6 +580,21 @@ pub(in crate::store::memory) async fn inspect_compatibility_fact_tx(
                AND evidence.owner_kind = ?2
                AND evidence.project_id = ?3
                AND evidence.owner_json = ?4
+               AND COALESCE((
+                   SELECT disposition.state
+                   FROM retrieval_anchor_dispositions AS disposition
+                   WHERE disposition.anchor_id = anchors.anchor_id
+                     AND disposition.owner_json = anchors.owner_json
+                   ORDER BY disposition.sequence DESC LIMIT 1
+               ), 'active') = 'active'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM retrieval_anchor_derivative_tombstones AS tombstone
+                   WHERE tombstone.source_anchor_id = evidence.anchor_id
+                     AND tombstone.owner_json = evidence.owner_json
+                     AND tombstone.derivative_kind = 'contribution'
+                     AND tombstone.derivative_id = evidence.evidence_id
+               )
              ORDER BY anchors.anchor_id ASC
              LIMIT 1000",
             params![

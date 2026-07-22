@@ -2,12 +2,15 @@
 //! registration helpers they rely on.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{
-    bootstrap_runtime_configuration, db_filename, ensure_runtime_configuration_for_layout,
+    db_filename, install_configuration_daemon_client_for_project,
+    open_runtime_configuration_for_layout, open_runtime_configuration_for_layout_read_only,
 };
 use crate::db::{Database, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
@@ -23,9 +26,8 @@ use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 impl TraceDecay {
     /// Initializes a new `TraceDecay` project at the given root.
     ///
-    /// Pins registry defaults for the pre-store bootstrap and initializes a
-    /// fresh `SQLite` database. It never creates or rewrites legacy
-    /// `config.json`.
+    /// Initializes the graph and its durable configuration revision. It never
+    /// creates or rewrites legacy `config.json`.
     pub async fn init(project_root: &Path) -> Result<Self> {
         Self::init_with_options(project_root, TraceDecayOpenOptions::default()).await
     }
@@ -37,9 +39,16 @@ impl TraceDecay {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let authority = DatabaseAuthority::for_runtime(&store_layout.graph_db_path, "init")?;
-        let config = bootstrap_runtime_configuration(project_root, &store_layout)?.config;
 
         let (db, _migrated) = Database::initialize(&store_layout.graph_db_path, &authority).await?;
+        let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
+            open_runtime_configuration_for_layout(project_root, &store_layout).await?,
+        )?);
+        let config = configuration_runtime.configuration().config.clone();
+        install_configuration_daemon_client_for_project(
+            &configuration_runtime.configuration().target,
+            configuration_runtime.client(),
+        );
         let active_graph_layout = active_graph_layout(&store_layout.graph_db_path);
         if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
             storage::write_store_manifest(&store_layout)?;
@@ -58,6 +67,7 @@ impl TraceDecay {
         let ts = Self {
             db,
             config,
+            configuration_runtime,
             project_root: project_root.to_path_buf(),
             store_layout,
             active_graph_layout,
@@ -67,6 +77,7 @@ impl TraceDecay {
             serving_branch: None,
             fallback_warning: None,
             read_only: false,
+            context_scout_owner: None,
         };
         ts.register_project_store_in_global_registry().await;
         Ok(ts)
@@ -344,7 +355,6 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
-        let config = ensure_runtime_configuration_for_layout(project_root, &store_layout)?.config;
         let active_branch = branch::current_branch(project_root);
         Self::auto_track_active_branch(
             project_root,
@@ -526,9 +536,18 @@ impl TraceDecay {
             }
         }
 
-        let ts = Self {
+        let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
+            open_runtime_configuration_for_layout(project_root, &store_layout).await?,
+        )?);
+        let config = configuration_runtime.configuration().config.clone();
+        install_configuration_daemon_client_for_project(
+            &configuration_runtime.configuration().target,
+            configuration_runtime.client(),
+        );
+        let mut ts = Self {
             db,
             config,
+            configuration_runtime,
             project_root: project_root.to_path_buf(),
             store_layout,
             active_graph_layout,
@@ -538,7 +557,26 @@ impl TraceDecay {
             serving_branch,
             fallback_warning,
             read_only: false,
+            context_scout_owner: None,
         };
+
+        crate::hooks::publish_hook_v2_bindings(&ts.store_layout)?;
+        if let Some(project_id) = crate::hooks::hook_v2_project_id_for_layout(&ts.store_layout) {
+            ts.context_scout_owner =
+                crate::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                    ts.db.clone(),
+                    project_id,
+                    tracedecay_domain::UtcMicros(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(1, |duration| {
+                                duration.as_micros().min(i64::MAX as u128) as i64
+                            }),
+                    ),
+                    None,
+                )
+                .await;
+        }
 
         if migrated {
             eprintln!("[tracedecay] schema changed — performing full re-index…");
@@ -569,7 +607,6 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project_read_only(project_root, &open_options).await?;
-        let config = ensure_runtime_configuration_for_layout(project_root, &store_layout)?.config;
         let active_branch = branch::current_branch(project_root);
 
         let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
@@ -590,9 +627,18 @@ impl TraceDecay {
 
         let authority = DatabaseAuthority::for_runtime(&db_path, "open project store read-only")?;
         let (db, _) = Database::open_read_only(&db_path, &authority).await?;
+        let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
+            open_runtime_configuration_for_layout_read_only(project_root, &store_layout).await?,
+        )?);
+        let config = configuration_runtime.configuration().config.clone();
+        install_configuration_daemon_client_for_project(
+            &configuration_runtime.configuration().target,
+            configuration_runtime.client(),
+        );
         Ok(Self {
             db,
             config,
+            configuration_runtime,
             project_root: project_root.to_path_buf(),
             store_layout,
             active_graph_layout,
@@ -602,6 +648,7 @@ impl TraceDecay {
             serving_branch,
             fallback_warning,
             read_only: true,
+            context_scout_owner: None,
         })
     }
 
@@ -808,7 +855,6 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
-        let config = ensure_runtime_configuration_for_layout(project_root, &store_layout)?.config;
 
         let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
             TraceDecayError::Config {
@@ -834,9 +880,18 @@ impl TraceDecay {
 
         let authority = DatabaseAuthority::for_runtime(&db_path, "open branch store")?;
         let (db, _) = Database::open(&db_path, &authority).await?;
+        let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
+            open_runtime_configuration_for_layout(project_root, &store_layout).await?,
+        )?);
+        let config = configuration_runtime.configuration().config.clone();
+        install_configuration_daemon_client_for_project(
+            &configuration_runtime.configuration().target,
+            configuration_runtime.client(),
+        );
         Ok(Self {
             db,
             config,
+            configuration_runtime,
             project_root: project_root.to_path_buf(),
             store_layout,
             active_graph_layout,
@@ -846,6 +901,7 @@ impl TraceDecay {
             serving_branch: Some(branch_name.to_string()),
             fallback_warning: None,
             read_only: false,
+            context_scout_owner: None,
         })
     }
 

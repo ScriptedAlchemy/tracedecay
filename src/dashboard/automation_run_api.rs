@@ -334,13 +334,24 @@ async fn run_dashboard_job<F, Fut>(
     Fut: Future<Output = Result<Value, String>>,
 {
     if let Err(err) = append_running_record(&state, &run_id, task).await {
-        eprintln!("[tracedecay] failed to mark automation run running: {err}");
+        tracing::warn!(
+            run_id,
+            task = ?task,
+            error = %err,
+            "failed to mark dashboard automation run as running"
+        );
     }
 
     match dashboard_job_skip_reason(&state, task).await {
         Ok(Some(reason)) => {
             if let Err(err) = append_skipped_record(&state, &run_id, task, reason).await {
-                eprintln!("[tracedecay] failed to record automation run skip: {err}");
+                tracing::warn!(
+                    run_id,
+                    task = ?task,
+                    %reason,
+                    error = %err,
+                    "failed to record dashboard automation run skip"
+                );
             }
             push_dashboard_task_skip_activity(&state, task, reason).await;
             return;
@@ -463,7 +474,12 @@ async fn append_failed_if_missing(
         append_dashboard_job_record(state, run_id, task, AutomationRunStatus::Failed, Some(err))
             .await
     {
-        eprintln!("[tracedecay] failed to record automation run failure: {err}");
+        tracing::warn!(
+            run_id,
+            task = ?task,
+            error = %err,
+            "failed to record dashboard automation run failure"
+        );
     }
 }
 

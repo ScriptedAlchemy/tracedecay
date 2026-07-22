@@ -9,11 +9,13 @@ use serde::{Deserialize, Serialize};
 use crate::code_intelligence::identity::{
     CodeGenerationId, FileOccurrenceId, SourceSpan, SymbolOccurrenceId,
 };
-use crate::research::{
-    CommitId, DomainError, ManifestDigest, ProviderId, RetrievalAnchorId, UtcMicros,
-};
+use crate::research::{CommitId, DomainError, ProviderId, RetrievalAnchorId, UtcMicros};
 
 use super::FeedbackScopeV1;
+
+pub const MAX_CI_FAILURE_CALLER_EVIDENCE_V1: usize = 64;
+pub const MAX_CI_FAILURE_TEST_EVIDENCE_V1: usize = 64;
+pub const MAX_CI_FAILURE_RERUN_HINTS_V1: usize = 8;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -219,7 +221,6 @@ pub struct CiFailureLocalizationResultV1 {
     pub coverage: CiFailureCoverageV1,
     pub failure_kind: CiFailureKindV1,
     pub failure_anchor: RetrievalAnchorId,
-    pub failure_excerpt_digest: ManifestDigest,
     pub branch: CiFailureBranchEvidenceV1,
     pub generation: Option<CiFailureGenerationEvidenceV1>,
     pub symbol: Option<CiFailureSymbolEvidenceV1>,
@@ -235,7 +236,6 @@ impl CiFailureLocalizationResultV1 {
         self.run.validate()?;
         self.parser.validate()?;
         self.failure_anchor.validate()?;
-        self.failure_excerpt_digest.validate()?;
         self.branch.validate()?;
         self.generation
             .as_ref()
@@ -251,6 +251,14 @@ impl CiFailureLocalizationResultV1 {
         }
         for hint in &self.rerun_hints {
             hint.validate()?;
+        }
+        if self.callers.len() > MAX_CI_FAILURE_CALLER_EVIDENCE_V1
+            || self.tests.len() > MAX_CI_FAILURE_TEST_EVIDENCE_V1
+            || self.rerun_hints.len() > MAX_CI_FAILURE_RERUN_HINTS_V1
+        {
+            return Err(DomainError::NonCanonical {
+                field: "bounded ci failure localization evidence",
+            });
         }
         let coverage_matches = matches!(
             (self.state, self.coverage),
@@ -304,6 +312,28 @@ impl CiFailureLocalizationResultV1 {
                 field: "complete ci failure test evidence",
             });
         }
+        if matches!(
+            self.state,
+            CiFailureLocalizationStateV1::Denied | CiFailureLocalizationStateV1::Unavailable
+        ) && (self.generation.is_some()
+            || self.symbol.is_some()
+            || !self.callers.is_empty()
+            || !self.tests.is_empty()
+            || !self.rerun_hints.is_empty())
+        {
+            return Err(DomainError::NonCanonical {
+                field: "unavailable ci localization evidence",
+            });
+        }
+        if !matches!(
+            self.state,
+            CiFailureLocalizationStateV1::Complete | CiFailureLocalizationStateV1::Partial
+        ) && !self.rerun_hints.is_empty()
+        {
+            return Err(DomainError::NonCanonical {
+                field: "degraded ci rerun hint",
+            });
+        }
         Ok(())
     }
 }
@@ -312,8 +342,6 @@ impl CiFailureLocalizationResultV1 {
 mod tests {
     use super::*;
     use crate::research::{CommitId, ProjectId, RepositoryId, WorktreeId};
-
-    const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn result() -> CiFailureLocalizationResultV1 {
         let scope = FeedbackScopeV1 {
@@ -341,7 +369,6 @@ mod tests {
             coverage: CiFailureCoverageV1::Complete,
             failure_kind: CiFailureKindV1::InfrastructureFailure,
             failure_anchor: RetrievalAnchorId::new("anchor.ci").unwrap(),
-            failure_excerpt_digest: ManifestDigest::new(SHA).unwrap(),
             branch: CiFailureBranchEvidenceV1 {
                 provider_head_commit_id: scope.head_commit_id.clone(),
                 scope,
@@ -365,5 +392,31 @@ mod tests {
         let mut mismatched = result();
         mismatched.state = CiFailureLocalizationStateV1::Partial;
         assert!(mismatched.validate().is_err());
+    }
+
+    #[test]
+    fn denied_and_unavailable_ci_results_cannot_carry_localized_evidence() {
+        let mut denied = result();
+        denied.state = CiFailureLocalizationStateV1::Denied;
+        denied.coverage = CiFailureCoverageV1::Denied;
+        denied.generation = Some(CiFailureGenerationEvidenceV1 {
+            generation_id: CodeGenerationId::new("generation.denied").unwrap(),
+            retrieval_anchor_id: RetrievalAnchorId::new("anchor.denied").unwrap(),
+        });
+        assert!(denied.validate().is_err());
+
+        denied.generation = None;
+        assert!(denied.validate().is_ok());
+
+        let mut unavailable = result();
+        unavailable.state = CiFailureLocalizationStateV1::Unavailable;
+        unavailable.coverage = CiFailureCoverageV1::Unavailable;
+        unavailable.rerun_hints.push(CiInertRerunHintV1 {
+            target: CiInertRerunTargetV1::Workflow,
+            retrieval_anchor_id: None,
+        });
+        assert!(unavailable.validate().is_err());
+        unavailable.rerun_hints.clear();
+        assert!(unavailable.validate().is_ok());
     }
 }

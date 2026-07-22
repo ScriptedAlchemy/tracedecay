@@ -92,6 +92,39 @@ pub(crate) fn read_config_pinned_project_root(config_path: &Path) -> Option<Stri
     string_value(&tracedecay, "project_root")
 }
 
+pub(super) fn registration_state(
+    config_path: &Path,
+) -> crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 {
+    use crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+    let Ok(contents) = std::fs::read_to_string(config_path) else {
+        return State::Missing;
+    };
+    let Ok(config) = ProfileConfigDocument::parse(&contents) else {
+        return State::Corrupt;
+    };
+    let root = config.root();
+    let enabled = root
+        .get_mapping("plugins")
+        .and_then(|plugins| plugins.get_sequence("enabled"))
+        .is_some_and(|plugins| sequence_contains(&plugins, "tracedecay"));
+    let memory = root
+        .get_mapping("memory")
+        .and_then(|memory| string_value(&memory, "provider"))
+        .as_deref()
+        == Some("tracedecay");
+    let context = root
+        .get_mapping("context")
+        .and_then(|context| string_value(&context, "engine"))
+        .as_deref()
+        == Some("tracedecay");
+    if enabled && memory && context {
+        State::Current
+    } else {
+        State::Repairable
+    }
+}
+
 pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {
     let existing = std::fs::read_to_string(config_path).unwrap_or_default();
     let updated = enable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {

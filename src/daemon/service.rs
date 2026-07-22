@@ -7,10 +7,10 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::SOCKET_ENV;
 
+pub(crate) mod invocation;
 mod probe;
 mod runner;
 mod unit_file;
-pub(crate) mod invocation;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

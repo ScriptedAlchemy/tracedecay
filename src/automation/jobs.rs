@@ -181,9 +181,11 @@ pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
             for (index, entry) in file.jobs.into_iter().enumerate() {
                 match serde_json::from_value::<AutomationJob>(entry) {
                     Ok(job) => loaded.push(job),
-                    Err(e) => eprintln!(
-                        "[tracedecay] skipped corrupt automation job entry {index} in '{}': {e}",
-                        path.display()
+                    Err(error) => tracing::warn!(
+                        index,
+                        path = %path.display(),
+                        %error,
+                        "skipped corrupt automation job entry"
                     ),
                 }
             }

@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use tracedecay_store::{
     SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
-    SessionRefreshStore, SessionStoreError,
+    SessionRefreshProgressV1, SessionRefreshStore, SessionStoreError,
 };
 
 use super::projector::{
@@ -201,7 +201,14 @@ async fn complete_ready_refresh(
         progress.frontier(),
         *progress.coverage(),
     ) {
-        Ok(request) => request,
+        Ok(request) => match progress.source_coverage().cloned().or_else(|| {
+            recovery
+                .source_coverage(progress.frontier().committed_through())
+                .ok()
+        }) {
+            Some(source_coverage) => request.with_source_coverage(source_coverage),
+            None => request,
+        },
         Err(_) => {
             attempt.retain();
             report.terminal_errors += 1;
@@ -364,7 +371,15 @@ async fn project_running_refresh(
                 coverage,
                 failure_code,
             ) {
-                Ok(request) => request,
+                Ok(request) => match recovery
+                    .progress()
+                    .and_then(SessionRefreshProgressV1::source_coverage)
+                    .cloned()
+                    .or_else(|| recovery.source_coverage(frontier.committed_through()).ok())
+                {
+                    Some(source_coverage) => request.with_source_coverage(source_coverage),
+                    None => request,
+                },
                 Err(_) => {
                     report.terminal_errors += 1;
                     return;

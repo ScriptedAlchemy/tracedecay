@@ -5,6 +5,7 @@
 //! tool arguments, output, and provider identifiers; opaque IDs are supplied
 //! later by the daemon-issued binding/material contract.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -95,9 +96,6 @@ impl DecodedNativeHookEventV1 {
                 file_id: material
                     .file_id
                     .ok_or(NativeHookDecodeError::MissingOpaqueMaterial)?,
-                content_digest: material
-                    .content_digest
-                    .ok_or(NativeHookDecodeError::MissingOpaqueMaterial)?,
                 changed_range_count: material.changed_range_count,
             },
         };
@@ -110,13 +108,10 @@ impl DecodedNativeHookEventV1 {
             repository_id: binding.repository_id,
             worktree_id: binding.worktree_id,
             worktree_epoch: binding.worktree_epoch,
-            authorization_epoch: binding.authorization_epoch,
-            capability_revision: binding.capability_revision,
             binding_token: binding.binding_token,
             ordering: self.ordering,
             observed_at: material.observed_at,
             event,
-            payload_digest: material.payload_digest,
         };
         envelope
             .validate(binding)
@@ -131,12 +126,10 @@ impl DecodedNativeHookEventV1 {
 pub struct NativeEnvelopeMaterialV1 {
     pub event_id: [u8; 16],
     pub protected_session_id: [u8; 32],
-    pub payload_digest: [u8; 32],
     pub observed_at: UtcMicros,
     pub tool_id: Option<[u8; 16]>,
     pub effect_receipt_id: Option<[u8; 16]>,
     pub file_id: Option<[u8; 16]>,
-    pub content_digest: Option<[u8; 32]>,
     pub changed_range_count: u8,
 }
 
@@ -234,24 +227,214 @@ pub fn decode_bound_native_hook_event(
     decode_native_hook_event(host, payload)?.into_envelope(binding, material)
 }
 
+// Provider schemas intentionally allow unknown fields: documented hosts add
+// forward-compatible metadata. Every field consumed for identity or routing is
+// strongly typed below, so wrong types fail without retaining raw payloads.
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct ClaudeWriteEvent {
+    session_id: String,
+    transcript_path: String,
+    cwd: String,
+    prompt_id: String,
+    permission_mode: String,
+    tool_name: String,
+    tool_input: ClaudeWriteInput,
+    tool_response: serde_json::Map<String, Value>,
+    tool_use_id: String,
+    duration_ms: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct ClaudeWriteInput {
+    file_path: String,
+    content: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct ClaudeStopEvent {
+    session_id: String,
+    transcript_path: String,
+    cwd: String,
+    prompt_id: String,
+    permission_mode: String,
+    stop_hook_active: bool,
+    last_assistant_message: String,
+    background_tasks: Vec<Value>,
+    session_crons: Vec<Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct CodexStopEvent {
+    session_id: String,
+    turn_id: String,
+    transcript_path: Option<String>,
+    cwd: String,
+    model: String,
+    permission_mode: String,
+    stop_hook_active: bool,
+    last_assistant_message: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct CursorAfterFileEditEvent {
+    conversation_id: String,
+    generation_id: String,
+    model: String,
+    file_path: String,
+    edits: Vec<CursorEdit>,
+    session_id: String,
+    cursor_version: String,
+    workspace_roots: Vec<String>,
+    user_email: Option<String>,
+    transcript_path: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct CursorEdit {
+    old_string: String,
+    new_string: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct CursorStopEvent {
+    conversation_id: String,
+    generation_id: String,
+    model: String,
+    status: String,
+    loop_count: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HermesWriteEvent {
+    cwd: String,
+    extra: serde_json::Map<String, Value>,
+    session_id: String,
+    tool_input: HermesWriteInput,
+    tool_name: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HermesWriteInput {
+    content: String,
+    path: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HermesSessionEndEvent {
+    cwd: String,
+    extra: HermesSessionEndExtra,
+    session_id: String,
+    tool_input: Option<Value>,
+    tool_name: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HermesSessionEndExtra {
+    completed: bool,
+    interrupted: bool,
+    model: String,
+    platform: String,
+    task_id: String,
+    telemetry_schema_version: String,
+    turn_id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct KimiPostToolUseEvent {
+    session_id: String,
+    cwd: String,
+    tool_name: String,
+    tool_input: serde_json::Map<String, Value>,
+    tool_call_id: String,
+    tool_output: Value,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct KimiStopEvent {
+    session_id: String,
+    cwd: String,
+    stop_hook_active: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct OpenCodeEventProperties {
+    file: Option<String>,
+    #[serde(rename = "sessionID")]
+    session_id: Option<String>,
+    status: Option<OpenCodeSessionStatus>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct OpenCodeSessionStatus {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct OpenCodeBusEvent {
+    id: String,
+    properties: OpenCodeEventProperties,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct OpenCodeToolAfterEvent {
+    input: OpenCodeToolAfterInput,
+    output: OpenCodeToolAfterOutput,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct OpenCodeToolAfterInput {
+    tool: String,
+    #[serde(rename = "sessionID")]
+    session_id: String,
+    #[serde(rename = "callID")]
+    call_id: String,
+    args: Value,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct OpenCodeToolAfterOutput {
+    title: String,
+    output: String,
+    metadata: Value,
+}
+
+fn decode_shape<T: DeserializeOwned>(raw: &Value) -> Result<T, NativeHookDecodeError> {
+    serde_json::from_value(raw.clone()).map_err(|_| NativeHookDecodeError::MalformedPayload)
+}
+
 fn decode_claude(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
     match event_name(raw, "hook_event_name")? {
         "SessionStart" => Ok(NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start)),
-        "PostToolUse" if required_string(raw, "tool_name")? == "Write" => {
-            required_common_session(raw)?;
-            required_string(raw, "prompt_id")?;
-            required_object(raw, "tool_input")?;
-            required_object(raw, "tool_response")?;
-            required_string(raw, "tool_use_id")?;
-            Ok(NativeHookSignalV1::SavedEdit)
+        "PostToolUse" => {
+            let event = decode_shape::<ClaudeWriteEvent>(raw)?;
+            if event.tool_name == "Write" {
+                Ok(NativeHookSignalV1::SavedEdit)
+            } else {
+                Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            }
         }
         "Stop" => {
-            required_common_session(raw)?;
-            required_string(raw, "prompt_id")?;
-            required_bool(raw, "stop_hook_active")?;
-            required_string(raw, "last_assistant_message")?;
-            required_array(raw, "background_tasks")?;
-            required_array(raw, "session_crons")?;
+            decode_shape::<ClaudeStopEvent>(raw)?;
             Ok(NativeHookSignalV1::SessionBoundary(
                 HookBoundaryV1::TurnComplete,
             ))
@@ -264,14 +447,7 @@ fn decode_codex(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError
     match event_name(raw, "hook_event_name")? {
         "SessionStart" => Ok(NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start)),
         "Stop" => {
-            required_string(raw, "session_id")?;
-            required_string(raw, "turn_id")?;
-            optional_string_or_null(raw, "transcript_path")?;
-            required_string(raw, "cwd")?;
-            required_string(raw, "model")?;
-            required_string(raw, "permission_mode")?;
-            required_bool(raw, "stop_hook_active")?;
-            required_string(raw, "last_assistant_message")?;
+            decode_shape::<CodexStopEvent>(raw)?;
             Ok(NativeHookSignalV1::SessionBoundary(
                 HookBoundaryV1::TurnComplete,
             ))
@@ -284,21 +460,20 @@ fn decode_cursor(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
     match event_name(raw, "hook_event_name")? {
         "sessionStart" => Ok(NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start)),
         "afterFileEdit" => {
-            for key in [
-                "conversation_id",
-                "generation_id",
-                "model",
-                "file_path",
-                "session_id",
-                "cursor_version",
-                "transcript_path",
-            ] {
-                required_string(raw, key)?;
+            let event = decode_shape::<CursorAfterFileEditEvent>(raw)?;
+            if event.edits.is_empty() || event.workspace_roots.is_empty() {
+                return Err(NativeHookDecodeError::MalformedPayload);
             }
-            required_nonempty_array(raw, "edits")?;
-            required_nonempty_array(raw, "workspace_roots")?;
-            optional_string_or_null(raw, "user_email")?;
             Ok(NativeHookSignalV1::SavedEdit)
+        }
+        "stop" => {
+            let event = decode_shape::<CursorStopEvent>(raw)?;
+            if !matches!(event.status.as_str(), "completed" | "aborted" | "error") {
+                return Err(NativeHookDecodeError::MalformedPayload);
+            }
+            Ok(NativeHookSignalV1::SessionBoundary(
+                HookBoundaryV1::TurnComplete,
+            ))
         }
         _ => Err(NativeHookDecodeError::UnsupportedNativeEvent),
     }
@@ -315,21 +490,19 @@ fn decode_hermes(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
         "turnIngested" => Ok(NativeHookSignalV1::SessionBoundary(
             HookBoundaryV1::TurnComplete,
         )),
-        "post_tool_call" if required_string(raw, "tool_name")? == "write_file" => {
-            required_string(raw, "cwd")?;
-            required_string(raw, "session_id")?;
-            required_object(raw, "tool_input")?;
-            required_object(raw, "extra")?;
-            Ok(NativeHookSignalV1::SavedEdit)
+        "post_tool_call" => {
+            let event = decode_shape::<HermesWriteEvent>(raw)?;
+            if event.tool_name == "write_file" {
+                Ok(NativeHookSignalV1::SavedEdit)
+            } else {
+                Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            }
         }
         "on_session_end" => {
-            required_string(raw, "cwd")?;
-            required_string(raw, "session_id")?;
-            required_null(raw, "tool_name")?;
-            required_null(raw, "tool_input")?;
-            let extra = required_object(raw, "extra")?;
-            required_bool(extra, "completed")?;
-            required_bool(extra, "interrupted")?;
+            let event = decode_shape::<HermesSessionEndEvent>(raw)?;
+            if event.tool_name.is_some() || event.tool_input.is_some() {
+                return Err(NativeHookDecodeError::MalformedPayload);
+            }
             Ok(NativeHookSignalV1::SessionBoundary(
                 HookBoundaryV1::TurnComplete,
             ))
@@ -348,22 +521,15 @@ fn decode_kiro(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError>
 fn decode_kimi(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
     match event_name(raw, "hook_event_name")? {
         "PostToolUse" => {
-            required_string(raw, "session_id")?;
-            required_string(raw, "cwd")?;
-            let tool_name = required_string(raw, "tool_name")?;
-            required_object(raw, "tool_input")?;
-            required_string(raw, "tool_call_id")?;
-            required_field(raw, "tool_output")?;
-            Ok(if tool_name == "Edit" {
+            let event = decode_shape::<KimiPostToolUseEvent>(raw)?;
+            Ok(if event.tool_name == "Edit" {
                 NativeHookSignalV1::SavedEdit
             } else {
                 NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed)
             })
         }
         "Stop" => {
-            required_string(raw, "session_id")?;
-            required_string(raw, "cwd")?;
-            required_bool(raw, "stop_hook_active")?;
+            decode_shape::<KimiStopEvent>(raw)?;
             Ok(NativeHookSignalV1::SessionBoundary(
                 HookBoundaryV1::TurnComplete,
             ))
@@ -373,23 +539,33 @@ fn decode_kimi(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError>
 }
 
 fn decode_opencode_event(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
-    required_string(raw, "id")?;
-    let properties = required_object(raw, "properties")?;
+    let event = decode_shape::<OpenCodeBusEvent>(raw)?;
     match event_name(raw, "type")? {
         "file.edited" => {
-            required_string(properties, "file")?;
+            event
+                .properties
+                .file
+                .filter(|file| !file.is_empty())
+                .ok_or(NativeHookDecodeError::MalformedPayload)?;
             Ok(NativeHookSignalV1::SavedEdit)
         }
         "session.idle" => {
-            required_string(properties, "sessionID")?;
+            event
+                .properties
+                .session_id
+                .filter(|session| !session.is_empty())
+                .ok_or(NativeHookDecodeError::MalformedPayload)?;
             Ok(NativeHookSignalV1::SessionBoundary(
                 HookBoundaryV1::TurnComplete,
             ))
         }
         "session.status" => {
-            required_string(properties, "sessionID")?;
-            let status = required_object(properties, "status")?;
-            if required_string(status, "type")? != "idle" {
+            event
+                .properties
+                .session_id
+                .filter(|session| !session.is_empty())
+                .ok_or(NativeHookDecodeError::MalformedPayload)?;
+            if event.properties.status.map(|status| status.kind).as_deref() != Some("idle") {
                 return Err(NativeHookDecodeError::UnsupportedNativeEvent);
             }
             Ok(NativeHookSignalV1::SessionBoundary(
@@ -401,20 +577,14 @@ fn decode_opencode_event(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDe
 }
 
 fn decode_opencode_tool_after(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
-    let input = required_object(raw, "input")?;
-    let output = required_object(raw, "output")?;
-    let tool = required_string(input, "tool")?;
-    required_string(input, "sessionID")?;
-    required_string(input, "callID")?;
-    required_field(input, "args")?;
-    required_string(output, "title")?;
-    required_string(output, "output")?;
-    required_field(output, "metadata")?;
-    Ok(if matches!(tool, "apply_patch" | "edit" | "write") {
-        NativeHookSignalV1::SavedEdit
-    } else {
-        NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed)
-    })
+    let event = decode_shape::<OpenCodeToolAfterEvent>(raw)?;
+    Ok(
+        if matches!(event.input.tool.as_str(), "apply_patch" | "edit" | "write") {
+            NativeHookSignalV1::SavedEdit
+        } else {
+            NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed)
+        },
+    )
 }
 
 fn event_name<'a>(raw: &'a Value, key: &str) -> Result<&'a str, NativeHookDecodeError> {
@@ -422,66 +592,6 @@ fn event_name<'a>(raw: &'a Value, key: &str) -> Result<&'a str, NativeHookDecode
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or(NativeHookDecodeError::MalformedPayload)
-}
-
-fn required_common_session(raw: &Value) -> Result<(), NativeHookDecodeError> {
-    for key in ["session_id", "transcript_path", "cwd", "permission_mode"] {
-        required_string(raw, key)?;
-    }
-    Ok(())
-}
-
-fn required_string<'a>(raw: &'a Value, key: &str) -> Result<&'a str, NativeHookDecodeError> {
-    raw.get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or(NativeHookDecodeError::MalformedPayload)
-}
-
-fn optional_string_or_null(raw: &Value, key: &str) -> Result<(), NativeHookDecodeError> {
-    match raw.get(key) {
-        Some(Value::Null | Value::String(_)) => Ok(()),
-        _ => Err(NativeHookDecodeError::MalformedPayload),
-    }
-}
-
-fn required_bool(raw: &Value, key: &str) -> Result<bool, NativeHookDecodeError> {
-    raw.get(key)
-        .and_then(Value::as_bool)
-        .ok_or(NativeHookDecodeError::MalformedPayload)
-}
-
-fn required_object<'a>(raw: &'a Value, key: &str) -> Result<&'a Value, NativeHookDecodeError> {
-    raw.get(key)
-        .filter(|value| value.is_object())
-        .ok_or(NativeHookDecodeError::MalformedPayload)
-}
-
-fn required_array<'a>(raw: &'a Value, key: &str) -> Result<&'a Vec<Value>, NativeHookDecodeError> {
-    raw.get(key)
-        .and_then(Value::as_array)
-        .ok_or(NativeHookDecodeError::MalformedPayload)
-}
-
-fn required_nonempty_array<'a>(
-    raw: &'a Value,
-    key: &str,
-) -> Result<&'a Vec<Value>, NativeHookDecodeError> {
-    required_array(raw, key).and_then(|values| {
-        (!values.is_empty())
-            .then_some(values)
-            .ok_or(NativeHookDecodeError::MalformedPayload)
-    })
-}
-
-fn required_null(raw: &Value, key: &str) -> Result<(), NativeHookDecodeError> {
-    matches!(raw.get(key), Some(Value::Null))
-        .then_some(())
-        .ok_or(NativeHookDecodeError::MalformedPayload)
-}
-
-fn required_field<'a>(raw: &'a Value, key: &str) -> Result<&'a Value, NativeHookDecodeError> {
-    raw.get(key).ok_or(NativeHookDecodeError::MalformedPayload)
 }
 
 fn native_ordering(raw: &Value) -> Result<HookOrderingV1, NativeHookDecodeError> {
@@ -500,102 +610,162 @@ fn native_ordering(raw: &Value) -> Result<HookOrderingV1, NativeHookDecodeError>
 mod tests {
     use super::*;
 
-    #[derive(Deserialize)]
-    struct Fixture {
-        schema_version: u16,
-        provider: String,
-        cases: Vec<FixtureCase>,
+    fn fixture_request(document: &str, identity: &str) -> Vec<u8> {
+        let document: serde_json::Value = serde_json::from_str(document).unwrap();
+        let event = document["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["identity"].as_str() == Some(identity))
+            .unwrap();
+        serde_json::to_vec(&event["request"]).unwrap()
     }
-
-    #[derive(Deserialize)]
-    struct FixtureCase {
-        state: String,
-        request: Value,
-    }
-
-    const FIXTURES: &[(HookHostV1, HookEventFamily, &str, &str)] = &[
-        (
-            HookHostV1::ClaudeCode,
-            HookEventFamily::SessionBoundary,
-            "claude",
-            include_str!("../../../tests/fixtures/host_events/claude/baseline.json"),
-        ),
-        (
-            HookHostV1::Codex,
-            HookEventFamily::SessionBoundary,
-            "codex",
-            include_str!("../../../tests/fixtures/host_events/codex/baseline.json"),
-        ),
-        (
-            HookHostV1::CursorDesktop,
-            HookEventFamily::SessionBoundary,
-            "cursor",
-            include_str!("../../../tests/fixtures/host_events/cursor/baseline.json"),
-        ),
-        (
-            HookHostV1::Hermes,
-            HookEventFamily::SessionBoundary,
-            "hermes",
-            include_str!("../../../tests/fixtures/host_events/hermes/baseline.json"),
-        ),
-        (
-            HookHostV1::Kiro,
-            HookEventFamily::PromptBoundary,
-            "kiro",
-            include_str!("../../../tests/fixtures/host_events/kiro/baseline.json"),
-        ),
-    ];
 
     #[test]
-    fn checked_in_native_fixtures_have_family_shadow_parity_without_payload_leakage() {
-        for (host, expected_family, expected_provider, bytes) in FIXTURES {
-            let fixture: Fixture = serde_json::from_str(bytes).unwrap();
-            assert_eq!(fixture.schema_version, 1);
-            assert_eq!(&fixture.provider, expected_provider);
-            let mut request = fixture
-                .cases
-                .into_iter()
-                .find(|case| case.state == "supported")
-                .expect("authoritative fixture has a supported native case")
-                .request;
-            request["privacy_canary"] =
-                Value::String("TOP_SECRET /private/workspace raw-tool-argument".to_owned());
-            let decoded = decode_native_hook_event(*host, request.to_string().as_bytes()).unwrap();
-            assert_eq!(decoded.family(), *expected_family);
+    fn decoded_event_serialization_is_structurally_content_free() {
+        let value = serde_json::to_value(DecodedNativeHookEventV1 {
+            host: HookHostV1::CursorDesktop,
+            signal: NativeHookSignalV1::SavedEdit,
+            ordering: HookOrderingV1::Unknown,
+        })
+        .unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 3);
+        assert!(object.contains_key("host"));
+        assert!(object.contains_key("signal"));
+        assert!(object.contains_key("ordering"));
+    }
+
+    #[test]
+    fn checked_in_native_captures_decode_supported_host_families() {
+        let captures: Vec<(HookHostV1, &[u8], NativeHookSignalV1)> = vec![
+            (
+                HookHostV1::ClaudeCode,
+                include_bytes!("../fixtures/host_events/claude/post_tool_use_write.json"),
+                NativeHookSignalV1::SavedEdit,
+            ),
+            (
+                HookHostV1::ClaudeCode,
+                include_bytes!("../fixtures/host_events/claude/stop.json"),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+            (
+                HookHostV1::Codex,
+                include_bytes!("../fixtures/host_events/codex/stop.json"),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+            (
+                HookHostV1::CursorDesktop,
+                include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
+                NativeHookSignalV1::SavedEdit,
+            ),
+            (
+                HookHostV1::Hermes,
+                include_bytes!("../fixtures/host_events/hermes/saved-edit.json"),
+                NativeHookSignalV1::SavedEdit,
+            ),
+            (
+                HookHostV1::Hermes,
+                include_bytes!("../fixtures/host_events/hermes/stop.json"),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+            (
+                HookHostV1::KimiCode,
+                include_bytes!("../fixtures/host_events/kimi/post-tool-use-edit.json"),
+                NativeHookSignalV1::SavedEdit,
+            ),
+            (
+                HookHostV1::KimiCode,
+                include_bytes!("../fixtures/host_events/kimi/stop.json"),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+        ];
+
+        for (host, payload, signal) in captures {
             assert_eq!(
-                stock_event_support(*host, decoded.family()),
-                HookEventSupportV1::Native
+                decode_native_hook_event(host, payload).unwrap().signal,
+                signal
             );
-            assert_eq!(decoded.ordering, HookOrderingV1::Unknown);
-            let rendered = serde_json::to_string(&decoded).unwrap();
-            for private in ["TOP_SECRET", "/private/workspace", "raw-tool-argument"] {
-                assert!(
-                    !rendered.contains(private),
-                    "fixture leaked {private}: {rendered}"
-                );
-            }
         }
-    }
 
-    #[test]
-    fn kiro_tool_events_are_rejected_instead_of_emulated() {
-        let raw = br#"{"hook_event_name":"preToolUse","tool_name":"fsWrite"}"#;
+        let opencode = include_str!("../fixtures/host_events/opencode/baseline.json");
+        for (identity, signal) in [
+            ("saved_edit", NativeHookSignalV1::SavedEdit),
+            (
+                "idle_status",
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+            (
+                "stop",
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+        ] {
+            assert_eq!(
+                decode_native_hook_event(
+                    HookHostV1::OpenCode,
+                    fixture_request(opencode, identity).as_slice()
+                )
+                .unwrap()
+                .signal,
+                signal
+            );
+        }
         assert_eq!(
-            decode_native_hook_event(HookHostV1::Kiro, raw),
-            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            decode_opencode_plugin_event(
+                OpenCodePluginSurfaceV1::ToolExecuteAfter,
+                fixture_request(opencode, "post_tool_use").as_slice(),
+            )
+            .unwrap()
+            .signal,
+            NativeHookSignalV1::SavedEdit
         );
     }
 
     #[test]
-    fn bound_decoder_requires_daemon_identity_and_drops_native_payload_fields() {
+    fn kiro_documented_unverified_events_are_rejected_instead_of_emulated() {
+        let kiro = include_str!("../fixtures/host_events/kiro.json");
+        assert_eq!(
+            decode_native_hook_event(
+                HookHostV1::Kiro,
+                fixture_request(kiro, "prompt_boundary").as_slice()
+            )
+            .unwrap()
+            .signal,
+            NativeHookSignalV1::PromptBoundary
+        );
+        for identity in ["saved_edit", "stop"] {
+            assert_eq!(
+                decode_native_hook_event(
+                    HookHostV1::Kiro,
+                    fixture_request(kiro, identity).as_slice()
+                ),
+                Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            );
+        }
+    }
+
+    #[test]
+    fn authentic_cursor_saved_edit_capture_is_typed() {
+        assert!(matches!(
+            decode_native_hook_event(
+                HookHostV1::CursorDesktop,
+                include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
+            ),
+            Ok(DecodedNativeHookEventV1 {
+                signal: NativeHookSignalV1::SavedEdit,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bound_decoder_requires_exact_daemon_scope() {
         let binding = HookScopeBindingV1 {
             host: HookHostV1::ClaudeCode,
             project_id: [1; 16],
             repository_id: [2; 16],
             worktree_id: [3; 16],
             worktree_epoch: 1,
-            authorization_epoch: 1,
-            capability_revision: 1,
             binding_token: [4; 32],
             capabilities: vec![crate::HookCapabilityV1 {
                 family: HookEventFamily::SessionBoundary,
@@ -604,24 +774,22 @@ mod tests {
         };
         let envelope = decode_bound_native_hook_event(
             HookHostV1::ClaudeCode,
-            br#"{"hook_event_name":"SessionStart","cwd":"/private/path","secret":"do-not-retain"}"#,
+            include_bytes!("../fixtures/host_events/claude/stop.json"),
             &binding,
             NativeEnvelopeMaterialV1 {
                 event_id: [5; 16],
                 protected_session_id: [6; 32],
-                payload_digest: [7; 32],
                 observed_at: UtcMicros(1),
                 tool_id: None,
                 effect_receipt_id: None,
                 file_id: None,
-                content_digest: None,
                 changed_range_count: 0,
             },
         )
         .unwrap();
-        let rendered = serde_json::to_string(&envelope).unwrap();
-        assert!(!rendered.contains("/private/path"));
-        assert!(!rendered.contains("do-not-retain"));
         assert_eq!(envelope.producer, HookHostV1::ClaudeCode);
+        assert_eq!(envelope.project_id, binding.project_id);
+        assert_eq!(envelope.worktree_id, binding.worktree_id);
+        assert_eq!(envelope.binding_token, binding.binding_token);
     }
 }

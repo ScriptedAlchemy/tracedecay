@@ -52,6 +52,11 @@ impl AgentIntegration for RooCodeIntegration {
         install_mcp_server(&mcp_path, &ctx.tracedecay_bin)
     }
 
+    fn uninstall_local(&self, _ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        uninstall_mcp_server(&project_path.join(".roo/mcp.json"));
+        Ok(())
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let settings_path = roo_ext_dir(&ctx.home).join("settings/cline_mcp_settings.json");
         uninstall_mcp_server(&settings_path);
@@ -65,6 +70,35 @@ impl AgentIntegration for RooCodeIntegration {
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mRoo Code integration\x1b[0m");
         doctor_check_settings(dc, &ctx.home);
+    }
+
+    fn host_component_registration(
+        &self,
+        _component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+        let path = roo_ext_dir(&ctx.home).join("settings/cline_mcp_settings.json");
+        let Ok(bytes) = std::fs::read(path) else {
+            return State::Missing;
+        };
+        let Ok(settings) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return State::Corrupt;
+        };
+        if settings
+            .pointer("/mcpServers/tracedecay/disabled")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+            && settings
+                .pointer("/mcpServers/tracedecay/args")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+        {
+            State::Current
+        } else {
+            State::Missing
+        }
     }
 
     fn is_detected(&self, home: &Path) -> bool {

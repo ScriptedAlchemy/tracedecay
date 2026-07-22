@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -17,10 +18,16 @@ use tracedecay::sessions::{
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
-    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProjectId, ProviderId, RetentionClass, SessionId,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
+    LocatorDigest, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
+    ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass, SessionId,
+    SourceAggregateFrontierV1, SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1,
+    SourceContentStateV1, SourceCoverageV1, SourceCursorV1, SourceDefinitionV1,
+    SourceDeletionSemanticsV1, SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1,
+    SourceObjectRevisionV1, SourcePartitionFrontierV1, SourcePartitionIdV1,
+    SourceRefetchStrategyV1, SourceSnapshotCompletionV1, SourceSnapshotIdV1, UserProfileId,
+    canonical_sha256,
 };
 use tracedecay_store::{ObservationReplayRequest, ObservationStore};
 
@@ -74,7 +81,6 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
         home.join(".tracedecay"),
     );
     let boundary_project = initialize_boundary_project(&home);
-    let _daemon = spawn_tracedecay_daemon(&home);
     let init = tracedecay_command_with_home(&home)
         .arg("init")
         .current_dir(&boundary_project)
@@ -86,6 +92,7 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
+    let _daemon = spawn_tracedecay_daemon(&home);
     let transcript_path = write_claude_boundary_transcript(&home, &boundary_project);
     let unavailable = HostAdmissionFacade::new(HostAdmissionAuthorities::default());
 
@@ -408,6 +415,148 @@ fn execute_host_boundary(provider: &str, home: &Path, project: &Path, request: &
     child.wait_with_output().expect("host boundary output")
 }
 
+fn assert_external_source_contract(
+    provider: &str,
+    scope: &HostAdmissionScope,
+    project_id: &ProjectId,
+    observation: &DurableObservationV1,
+) {
+    let envelope: CanonicalObservationEnvelopeV1 =
+        serde_json::from_value(observation.payload().clone()).unwrap();
+    assert_eq!(envelope.provider().as_str(), provider);
+
+    let definition = SourceDefinitionV1::new(
+        SourceInstanceId::new(format!("source.host-event.{provider}")).unwrap(),
+        envelope.provider().clone(),
+        1,
+        SourceCaptureModeV1::Poll,
+        SourceRefetchStrategyV1::WholeRoot,
+        SourceDeletionSemanticsV1::CompleteSnapshotAbsence,
+        1,
+    )
+    .unwrap();
+    let owner = match scope {
+        HostAdmissionScope::Project => SourceBindingOwnerV1::Project(project_id.clone()),
+        HostAdmissionScope::Profile => SourceBindingOwnerV1::Profile(
+            UserProfileId::new(format!("profile.host-event.{provider}")).unwrap(),
+        ),
+    };
+    let privacy_domain =
+        tracedecay_domain::PrivacyDomainId::new(format!("privacy.host-event.{provider}")).unwrap();
+    let scope_tag = match scope {
+        HostAdmissionScope::Project => "project",
+        HostAdmissionScope::Profile => "profile",
+    };
+    let native_root_digest = canonical_sha256(&("native-root", provider, scope_tag))
+        .expect("canonical native root digest");
+    let native_root = LocatorDigest::new(native_root_digest.as_str()).unwrap();
+    let binding = SourceBindingV1::new(
+        &definition,
+        owner.clone(),
+        privacy_domain.clone(),
+        native_root.clone(),
+        1,
+    )
+    .unwrap();
+    binding.validate_against(&definition).unwrap();
+    assert_ne!(definition.definition_digest, binding.binding_digest);
+
+    let alternate_owner = match owner {
+        SourceBindingOwnerV1::Project(_) => SourceBindingOwnerV1::Profile(
+            UserProfileId::new(format!("profile.host-event.alternate.{provider}")).unwrap(),
+        ),
+        SourceBindingOwnerV1::Profile(_) => SourceBindingOwnerV1::Project(project_id.clone()),
+    };
+    let alternate_binding =
+        SourceBindingV1::new(&definition, alternate_owner, privacy_domain, native_root, 1).unwrap();
+    assert_ne!(binding.binding_id, alternate_binding.binding_id);
+
+    let partition = SourcePartitionIdV1::new(canonical_sha256(&("partition", provider)).unwrap());
+    let complete_snapshot =
+        SourceSnapshotIdV1::new(canonical_sha256(&("snapshot", provider, 1_u64)).unwrap());
+    let object = SourceNativeObjectIdV1::new(
+        canonical_sha256(&("native-object", observation.observation_id())).unwrap(),
+    );
+    let object_revision =
+        SourceObjectRevisionV1::new(canonical_sha256(&("revision", provider, 1_u64)).unwrap());
+    let retained = SourceObjectObservationV1::new(
+        object.clone(),
+        object_revision,
+        canonical_sha256(observation).unwrap(),
+        SourceContentStateV1::Live,
+    )
+    .unwrap();
+    let completion = SourceSnapshotCompletionV1::new(
+        partition.clone(),
+        complete_snapshot.clone(),
+        BTreeSet::from([object.clone()]),
+    )
+    .unwrap();
+    assert!(completion.present_objects().contains(&object));
+
+    let binding_identity = binding.immutable_identity().unwrap();
+    let complete = SourcePartitionFrontierV1::new(
+        binding_identity.clone(),
+        partition.clone(),
+        Some(SourceCursorV1::new(
+            canonical_sha256(&("cursor", provider, 1_u64)).unwrap(),
+        )),
+        Some(complete_snapshot.clone()),
+        None,
+        SourceCoverageV1::Complete,
+        1,
+        None,
+        canonical_sha256(&("input", provider, 1_u64)).unwrap(),
+    )
+    .unwrap();
+    let complete_aggregate =
+        SourceAggregateFrontierV1::with_updated_partition(binding_identity.clone(), None, complete)
+            .unwrap();
+    assert_eq!(complete_aggregate.coverage(), SourceCoverageV1::Complete);
+
+    let partial = SourcePartitionFrontierV1::new(
+        binding_identity.clone(),
+        partition.clone(),
+        Some(SourceCursorV1::new(
+            canonical_sha256(&("cursor", provider, 2_u64)).unwrap(),
+        )),
+        Some(SourceSnapshotIdV1::new(
+            canonical_sha256(&("snapshot", provider, 2_u64)).unwrap(),
+        )),
+        Some(SourceCursorV1::new(
+            canonical_sha256(&("continuation", provider, 2_u64)).unwrap(),
+        )),
+        SourceCoverageV1::Partial,
+        2,
+        Some(complete_snapshot.clone()),
+        canonical_sha256(&("input", provider, 2_u64)).unwrap(),
+    )
+    .unwrap();
+    let partial_aggregate = SourceAggregateFrontierV1::with_updated_partition(
+        binding_identity,
+        Some(&complete_aggregate),
+        partial,
+    )
+    .unwrap();
+
+    assert_eq!(partial_aggregate.coverage(), SourceCoverageV1::Partial);
+    assert_ne!(partial_aggregate.digest(), complete_aggregate.digest());
+    assert_eq!(
+        partial_aggregate
+            .partition(&partition)
+            .unwrap()
+            .last_complete_snapshot(),
+        Some(complete_snapshot)
+    );
+    assert_eq!(retained.content_state(), SourceContentStateV1::Live);
+    assert!(
+        completion
+            .present_objects()
+            .contains(retained.native_object()),
+        "partial coverage must preserve the last complete object evidence"
+    );
+}
+
 async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmissionOutcome {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path().join("project");
@@ -513,14 +662,15 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     };
 
     let store = GlobalDbObservationStore::new(&db);
+    let observations = store
+        .replay_observations(ObservationReplayRequest::new(0, 32).unwrap())
+        .await
+        .unwrap();
     assert!(
-        !store
-            .replay_observations(ObservationReplayRequest::new(0, 32).unwrap())
-            .await
-            .unwrap()
-            .is_empty(),
+        !observations.is_empty(),
         "{provider} native parser must reach observation authority"
     );
+    assert_external_source_contract(provider, &scope, &project_id, observations[0].observation());
     let authorities = match scope {
         HostAdmissionScope::Project => HostAdmissionAuthorities::for_project(&db, project_id),
         HostAdmissionScope::Profile => HostAdmissionAuthorities::for_profile(&db),

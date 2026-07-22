@@ -80,6 +80,9 @@ pub(crate) fn hook_input(command: &Commands) -> Option<HookInput> {
         | Commands::HookCodexPostCompact
         | Commands::HookCodexStop
         | Commands::HookHermesTerminalReceipt
+        | Commands::HookKimiEvent
+        | Commands::HookOpenCodeEvent
+        | Commands::HookOpenCodeToolAfter
         | Commands::HookUserSessionReview => Some(HookInput::Stdin),
         _ => None,
     }
@@ -168,6 +171,15 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         Commands::HookHermesTerminalReceipt => {
             exit_if_nonzero(tracedecay::hooks::hook_hermes_terminal_receipt().await);
         }
+        Commands::HookKimiEvent => {
+            exit_if_nonzero(tracedecay::hooks::hook_kimi_event().await);
+        }
+        Commands::HookOpenCodeEvent => {
+            exit_if_nonzero(tracedecay::hooks::hook_opencode_event().await);
+        }
+        Commands::HookOpenCodeToolAfter => {
+            exit_if_nonzero(tracedecay::hooks::hook_opencode_tool_after().await);
+        }
         Commands::HookUserSessionReview => {
             exit_if_nonzero(tracedecay::hooks::hook_user_session_review().await);
         }
@@ -222,6 +234,9 @@ mod tests {
             (Commands::HookCodexPostCompact, HookInput::Stdin),
             (Commands::HookCodexStop, HookInput::Stdin),
             (Commands::HookHermesTerminalReceipt, HookInput::Stdin),
+            (Commands::HookKimiEvent, HookInput::Stdin),
+            (Commands::HookOpenCodeEvent, HookInput::Stdin),
+            (Commands::HookOpenCodeToolAfter, HookInput::Stdin),
             (Commands::HookUserSessionReview, HookInput::Stdin),
         ]
     }
@@ -229,7 +244,7 @@ mod tests {
     #[test]
     fn all_hook_commands_have_explicit_input_semantics() {
         let hooks = hook_commands();
-        assert_eq!(hooks.len(), 27);
+        assert_eq!(hooks.len(), 30);
         assert_eq!(
             hooks
                 .iter()

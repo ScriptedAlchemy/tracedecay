@@ -12,6 +12,8 @@ use crate::research::{DomainError, ManifestDigest, RetrievalAnchorId, UtcMicros}
 
 use super::FeedbackScopeV1;
 
+pub const PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1: &str = "feedback.proximity.risk_threshold";
+
 macro_rules! proximity_id {
     ($name:ident, $field:literal) => {
         #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -215,6 +217,27 @@ pub struct ProximityContributionV1 {
 }
 
 impl ProximityContributionV1 {
+    /// Expired contributions are never valid presentation or dedupe input for
+    /// a later request. The source authority decides whether a fresh value can
+    /// be produced; this contract merely makes stale reuse unrepresentable.
+    pub const fn is_expired_at(&self, observed_at: UtcMicros) -> bool {
+        observed_at.0 >= self.expires_at.0
+    }
+
+    /// Records presentation suppression without discarding the evidence,
+    /// threshold provenance, or expiry that produced the duplicate warning.
+    pub fn suppressed_duplicate(mut self) -> Result<Self, DomainError> {
+        self.validate()?;
+        if self.inclusion != ProximityInclusionV1::Included {
+            return Err(DomainError::NonCanonical {
+                field: "proximity duplicate suppression input",
+            });
+        }
+        self.inclusion = ProximityInclusionV1::SuppressedDuplicate;
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn validate(&self) -> Result<(), DomainError> {
         self.contribution_id.validate()?;
         self.warning_id.validate()?;
@@ -264,6 +287,22 @@ impl ProximityContributionV1 {
                 field: "proximity raw risk basis points",
             });
         }
+        let coverage_matches = matches!(
+            (self.inclusion, self.coverage),
+            (
+                ProximityInclusionV1::Included
+                    | ProximityInclusionV1::BelowThreshold
+                    | ProximityInclusionV1::SuppressedDuplicate,
+                ProximityCoverageV1::Complete | ProximityCoverageV1::Partial
+            ) | (ProximityInclusionV1::Stale, ProximityCoverageV1::Stale)
+                | (ProximityInclusionV1::Denied, ProximityCoverageV1::Denied)
+                | (ProximityInclusionV1::Private, ProximityCoverageV1::Private)
+        );
+        if !coverage_matches {
+            return Err(DomainError::NonCanonical {
+                field: "proximity inclusion coverage",
+            });
+        }
 
         if concealed {
             if self.threshold_value_basis_points.is_some() || self.threshold_revision.is_some() {
@@ -307,13 +346,7 @@ impl ProximityContributionV1 {
             });
         }
         if concealed {
-            let matching_coverage = matches!(
-                (self.inclusion, self.coverage),
-                (ProximityInclusionV1::Denied, ProximityCoverageV1::Denied)
-                    | (ProximityInclusionV1::Private, ProximityCoverageV1::Private)
-            );
-            if !matching_coverage
-                || !self.source_observation_ids.is_empty()
+            if !self.source_observation_ids.is_empty()
                 || !self.retrieval_anchor_ids.is_empty()
                 || self.address.is_some()
                 || !self.relation_paths.is_empty()
@@ -325,6 +358,7 @@ impl ProximityContributionV1 {
                 });
             }
         } else if self.source_observation_ids.is_empty()
+            || self.retrieval_anchor_ids.is_empty()
             || self.address.is_none()
             || self.risk_inputs.is_none()
             || self.raw_risk_basis_points.is_none()
@@ -430,9 +464,20 @@ mod tests {
     fn private_proximity_exposes_no_evidence_or_threshold_inputs() {
         let contribution = concealed_private_contribution();
         contribution.validate().unwrap();
+        assert!(!contribution.is_expired_at(UtcMicros(1)));
+        assert!(contribution.is_expired_at(UtcMicros(2)));
 
         let mut leaking = contribution;
         leaking.raw_risk_basis_points = Some(9_000);
         assert!(leaking.validate().is_err());
+    }
+
+    #[test]
+    fn concealed_proximity_requires_matching_coverage() {
+        let mut contribution = concealed_private_contribution();
+        contribution.inclusion = ProximityInclusionV1::Denied;
+        assert!(contribution.validate().is_err());
+        contribution.coverage = ProximityCoverageV1::Denied;
+        assert!(contribution.validate().is_ok());
     }
 }

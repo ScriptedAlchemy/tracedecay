@@ -21,7 +21,7 @@ use super::{
     compatibility_mirror_insert_tx, compatibility_mirror_update_tx, compatibility_payload_metadata,
     compatibility_sanitize_payload, load_current_fact_tx, load_current_projection,
 };
-use crate::db::Database;
+use crate::db::{Database, tombstone_fact_derivatives_tx};
 use libsql::{Transaction, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{
@@ -760,6 +760,15 @@ pub(in crate::store::memory) async fn remove_compatibility_fact_tx(
             now,
         )?;
         let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
+        tombstone_fact_derivatives_tx(
+            transaction,
+            request.target().owner(),
+            fact_id.as_str(),
+            canonical_receipt.last_event_id().as_str(),
+            now,
+        )
+        .await
+        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
         compatibility_mirror_delete_tx(
             db,
             transaction,

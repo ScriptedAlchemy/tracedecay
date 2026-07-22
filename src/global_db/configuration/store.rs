@@ -6,9 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::sync::Arc;
 
 use hmac::{Hmac, KeyInit, Mac};
-#[cfg(test)]
 use libsql::{Connection, TransactionBehavior};
 use libsql::{Row, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -51,7 +51,15 @@ use crate::application::configuration::{
 };
 use crate::config::registry::ConfigurationRegistry;
 use crate::config::resolver::{ConfigurationResolutionV1, registry_default_candidate};
-use crate::global_db::GlobalDb;
+use crate::global_db::{GlobalDb, GlobalDbReadSnapshot, GlobalDbWriteTransaction};
+
+mod audit;
+mod read;
+mod write;
+
+use audit::*;
+use read::*;
+use write::*;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationStorageError {
@@ -542,6 +550,34 @@ fn unavailable_store(_error: libsql::Error) -> ConfigurationStoreError {
     ConfigurationStoreError::Unavailable
 }
 
+trait ConfigurationQueryExecutor {
+    fn query_connection(&self) -> &Connection;
+}
+
+impl ConfigurationQueryExecutor for Connection {
+    fn query_connection(&self) -> &Connection {
+        self
+    }
+}
+
+impl ConfigurationQueryExecutor for Transaction {
+    fn query_connection(&self) -> &Connection {
+        self
+    }
+}
+
+impl ConfigurationQueryExecutor for GlobalDbWriteTransaction<'_> {
+    fn query_connection(&self) -> &Connection {
+        self
+    }
+}
+
+impl ConfigurationQueryExecutor for GlobalDbReadSnapshot {
+    fn query_connection(&self) -> &Connection {
+        self
+    }
+}
+
 fn decode_id<T>(value: String, field: &'static str) -> ConfigurationStoreResult<T>
 where
     T: TryFrom<String>,
@@ -550,376 +586,6 @@ where
     T::try_from(value).map_err(|error| {
         invalid_store_data(format!("invalid stored configuration {field}: {error}"))
     })
-}
-
-fn encode_snapshot_entry(
-    value: Option<ConfigurationValueV1>,
-    provenance: Vec<ConfigurationCandidateV1>,
-) -> ConfigurationStoreResult<String> {
-    serde_json::to_string(&StoredConfigurationSnapshotEntryV1 {
-        schema_version: CONFIGURATION_SNAPSHOT_ENTRY_PAYLOAD_SCHEMA_VERSION,
-        value,
-        provenance,
-    })
-    .map_err(|error| invalid_store_data(format!("encode configuration snapshot entry: {error}")))
-}
-
-fn decode_snapshot_entry(
-    value: &str,
-) -> ConfigurationStoreResult<StoredConfigurationSnapshotEntryV1> {
-    let entry =
-        serde_json::from_str::<StoredConfigurationSnapshotEntryV1>(value).map_err(|error| {
-            invalid_store_data(format!("decode configuration snapshot entry: {error}"))
-        })?;
-    if entry.schema_version != CONFIGURATION_SNAPSHOT_ENTRY_PAYLOAD_SCHEMA_VERSION {
-        return Err(invalid_store_data(
-            "unsupported configuration snapshot entry payload schema version",
-        ));
-    }
-    Ok(entry)
-}
-
-fn snapshot_from_entries(
-    entries: Vec<(String, i64, String)>,
-    expected_snapshot_id: &str,
-    expected_behavior_digest: &str,
-    expected_provenance_digest: &str,
-) -> ConfigurationStoreResult<ConfigurationSnapshotV1> {
-    let mut effective_values = BTreeMap::new();
-    let mut provenance = BTreeMap::new();
-
-    for (stored_key, schema_revision, encoded_entry) in entries {
-        if schema_revision != i64::from(CONFIGURATION_SNAPSHOT_ENTRY_PAYLOAD_SCHEMA_VERSION) {
-            return Err(invalid_store_data(
-                "unsupported configuration entry schema revision",
-            ));
-        }
-        let key = SettingKey::new(stored_key).map_err(|error| {
-            invalid_store_data(format!("invalid stored configuration key: {error}"))
-        })?;
-        let entry = decode_snapshot_entry(&encoded_entry)?;
-        if entry.value.is_none() && entry.provenance.is_empty() {
-            return Err(invalid_store_data(
-                "configuration snapshot entry has neither value nor provenance",
-            ));
-        }
-        if effective_values.contains_key(&key) || provenance.contains_key(&key) {
-            return Err(invalid_store_data(
-                "configuration snapshot contains duplicate setting entries",
-            ));
-        }
-        if let Some(value) = entry.value {
-            effective_values.insert(key.clone(), value);
-        }
-        if !entry.provenance.is_empty() {
-            provenance.insert(key, entry.provenance);
-        }
-    }
-
-    let snapshot = ConfigurationSnapshotV1::new(effective_values, provenance)
-        .map_err(ConfigurationStoreError::from)?;
-    if snapshot.snapshot_id.as_str() != expected_snapshot_id
-        || snapshot.effective_behavior_digest.as_str() != expected_behavior_digest
-        || snapshot.resolution_provenance_digest.as_str() != expected_provenance_digest
-    {
-        return Err(invalid_store_data(
-            "stored configuration snapshot payload does not match revision metadata",
-        ));
-    }
-    Ok(snapshot)
-}
-
-fn validate_snapshot_registry_completeness(
-    snapshot: &ConfigurationSnapshotV1,
-) -> ConfigurationStoreResult<()> {
-    let registry = ConfigurationRegistry::core()
-        .map_err(|error| invalid_store_data(format!("load configuration registry: {error}")))?;
-    let expected = registry
-        .definitions()
-        .map(|definition| definition.key.clone())
-        .collect::<BTreeSet<_>>();
-    let actual = snapshot
-        .effective_values
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if actual != expected {
-        return Err(invalid_store_data(
-            "configuration snapshot does not contain the complete registry",
-        ));
-    }
-    for (key, value) in &snapshot.effective_values {
-        registry.validate_value(key, value).map_err(|error| {
-            invalid_store_data(format!("validate configuration value: {error}"))
-        })?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-async fn snapshot_from_connection(
-    connection: &Connection,
-    revision_id: &ConfigurationRevisionId,
-    expected_snapshot_id: &str,
-    expected_behavior_digest: &str,
-    expected_provenance_digest: &str,
-) -> ConfigurationStoreResult<ConfigurationSnapshotV1> {
-    let mut rows = connection
-        .query(
-            "SELECT key, schema_revision, typed_value
-             FROM configuration_entries
-             WHERE revision_id = ?1
-             ORDER BY key ASC",
-            params![revision_id.as_str()],
-        )
-        .await
-        .map_err(unavailable_store)?;
-    let mut entries = Vec::new();
-    while let Some(row) = rows.next().await.map_err(unavailable_store)? {
-        entries.push((
-            row.get::<String>(0).map_err(|error| {
-                invalid_store_data(format!("read configuration entry key: {error}"))
-            })?,
-            row.get::<i64>(1).map_err(|error| {
-                invalid_store_data(format!("read configuration entry schema revision: {error}"))
-            })?,
-            row.get::<String>(2).map_err(|error| {
-                invalid_store_data(format!("read configuration entry payload: {error}"))
-            })?,
-        ));
-    }
-    drop(rows);
-    snapshot_from_entries(
-        entries,
-        expected_snapshot_id,
-        expected_behavior_digest,
-        expected_provenance_digest,
-    )
-}
-
-async fn snapshot_from_transaction(
-    transaction: &Transaction,
-    revision_id: &ConfigurationRevisionId,
-    expected_snapshot_id: &str,
-    expected_behavior_digest: &str,
-    expected_provenance_digest: &str,
-) -> ConfigurationStoreResult<ConfigurationSnapshotV1> {
-    let mut rows = transaction
-        .query(
-            "SELECT key, schema_revision, typed_value
-             FROM configuration_entries
-             WHERE revision_id = ?1
-             ORDER BY key ASC",
-            params![revision_id.as_str()],
-        )
-        .await
-        .map_err(unavailable_store)?;
-    let mut entries = Vec::new();
-    while let Some(row) = rows.next().await.map_err(unavailable_store)? {
-        entries.push((
-            row.get::<String>(0).map_err(|error| {
-                invalid_store_data(format!("read configuration entry key: {error}"))
-            })?,
-            row.get::<i64>(1).map_err(|error| {
-                invalid_store_data(format!("read configuration entry schema revision: {error}"))
-            })?,
-            row.get::<String>(2).map_err(|error| {
-                invalid_store_data(format!("read configuration entry payload: {error}"))
-            })?,
-        ));
-    }
-    drop(rows);
-    snapshot_from_entries(
-        entries,
-        expected_snapshot_id,
-        expected_behavior_digest,
-        expected_provenance_digest,
-    )
-}
-
-fn decode_revision_metadata(row: &Row) -> ConfigurationStoreResult<StoredRevisionMetadata> {
-    Ok(StoredRevisionMetadata {
-        revision_id: row.get::<String>(0).map_err(|error| {
-            invalid_store_data(format!("read configuration revision id: {error}"))
-        })?,
-        parent_revision_id: row.get::<Option<String>>(1).map_err(|error| {
-            invalid_store_data(format!("read configuration parent revision id: {error}"))
-        })?,
-        snapshot_id: row.get::<String>(2).map_err(|error| {
-            invalid_store_data(format!("read configuration snapshot id: {error}"))
-        })?,
-        effective_behavior_digest: row.get::<String>(3).map_err(|error| {
-            invalid_store_data(format!("read configuration behavior digest: {error}"))
-        })?,
-        resolution_provenance_digest: row.get::<String>(4).map_err(|error| {
-            invalid_store_data(format!("read configuration provenance digest: {error}"))
-        })?,
-        actor_id: row
-            .get::<String>(5)
-            .map_err(|error| invalid_store_data(format!("read configuration actor id: {error}")))?,
-        operation_kind: row.get::<String>(6).map_err(|error| {
-            invalid_store_data(format!("read configuration operation kind: {error}"))
-        })?,
-        created_at: row.get::<i64>(7).map_err(|error| {
-            invalid_store_data(format!("read configuration creation time: {error}"))
-        })?,
-    })
-}
-
-fn revision_from_metadata(
-    metadata: StoredRevisionMetadata,
-    snapshot: ConfigurationSnapshotV1,
-) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
-    let revision_id: ConfigurationRevisionId = decode_id(metadata.revision_id, "revision id")?;
-    let parent_revision_id: Option<ConfigurationRevisionId> = metadata
-        .parent_revision_id
-        .map(|value| decode_id(value, "parent revision id"))
-        .transpose()?;
-    let actor_id: ActorId = decode_id(metadata.actor_id, "actor id")?;
-    let record = ConfigurationRevisionRecordV1 {
-        revision_id,
-        parent_revision_id,
-        snapshot,
-        actor_id,
-        operation_kind: metadata.operation_kind,
-        created_at: UtcMicros(metadata.created_at),
-    };
-    record.validate().map_err(ConfigurationStoreError::from)?;
-    Ok(record)
-}
-
-#[cfg(test)]
-async fn read_revision_from_connection(
-    connection: &Connection,
-    revision_id: &ConfigurationRevisionId,
-) -> ConfigurationStoreResult<Option<ConfigurationRevisionRecordV1>> {
-    let mut rows = connection
-        .query(
-            "SELECT revision_id, parent_revision_id, snapshot_id,
-                    effective_behavior_digest, resolution_provenance_digest,
-                    actor_id, operation_kind, created_at
-             FROM configuration_revisions
-             WHERE revision_id = ?1",
-            params![revision_id.as_str()],
-        )
-        .await
-        .map_err(unavailable_store)?;
-    let Some(row) = rows.next().await.map_err(unavailable_store)? else {
-        return Ok(None);
-    };
-    let metadata = decode_revision_metadata(&row)?;
-    if rows.next().await.map_err(unavailable_store)?.is_some() {
-        return Err(invalid_store_data(
-            "configuration revision id resolved to multiple rows",
-        ));
-    }
-    drop(rows);
-    let snapshot = snapshot_from_connection(
-        connection,
-        revision_id,
-        &metadata.snapshot_id,
-        &metadata.effective_behavior_digest,
-        &metadata.resolution_provenance_digest,
-    )
-    .await?;
-    Ok(Some(revision_from_metadata(metadata, snapshot)?))
-}
-
-async fn read_revision_from_transaction(
-    transaction: &Transaction,
-    revision_id: &ConfigurationRevisionId,
-) -> ConfigurationStoreResult<Option<ConfigurationRevisionRecordV1>> {
-    let mut rows = transaction
-        .query(
-            "SELECT revision_id, parent_revision_id, snapshot_id,
-                    effective_behavior_digest, resolution_provenance_digest,
-                    actor_id, operation_kind, created_at
-             FROM configuration_revisions
-             WHERE revision_id = ?1",
-            params![revision_id.as_str()],
-        )
-        .await
-        .map_err(unavailable_store)?;
-    let Some(row) = rows.next().await.map_err(unavailable_store)? else {
-        return Ok(None);
-    };
-    let metadata = decode_revision_metadata(&row)?;
-    if rows.next().await.map_err(unavailable_store)?.is_some() {
-        return Err(invalid_store_data(
-            "configuration revision id resolved to multiple rows",
-        ));
-    }
-    drop(rows);
-    let snapshot = snapshot_from_transaction(
-        transaction,
-        revision_id,
-        &metadata.snapshot_id,
-        &metadata.effective_behavior_digest,
-        &metadata.resolution_provenance_digest,
-    )
-    .await?;
-    Ok(Some(revision_from_metadata(metadata, snapshot)?))
-}
-
-fn snapshot_entry_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, Option<String>) {
-    let layer = provenance
-        .iter()
-        .find(|candidate| {
-            matches!(
-                candidate.disposition,
-                CandidateDispositionV1::Winning | CandidateDispositionV1::Defaulted
-            )
-        })
-        .or_else(|| provenance.first())
-        .map(|candidate| &candidate.layer);
-    match layer {
-        Some(ConfigurationLayerIdV1::Default) | None => ("default", None),
-        Some(ConfigurationLayerIdV1::UserProfile { profile_id }) => {
-            ("user_profile", Some(profile_id.as_str().to_owned()))
-        }
-        Some(ConfigurationLayerIdV1::Project { project_id }) => {
-            ("project", Some(project_id.as_str().to_owned()))
-        }
-        Some(ConfigurationLayerIdV1::Collection { collection_id }) => {
-            ("collection", Some(collection_id.as_str().to_owned()))
-        }
-    }
-}
-
-async fn insert_snapshot_entries(
-    transaction: &Transaction,
-    revision_id: &ConfigurationRevisionId,
-    snapshot: &ConfigurationSnapshotV1,
-) -> ConfigurationStoreResult<()> {
-    let keys: BTreeSet<SettingKey> = snapshot
-        .effective_values
-        .keys()
-        .chain(snapshot.provenance.keys())
-        .cloned()
-        .collect();
-    for key in keys {
-        let value = snapshot.effective_values.get(&key).cloned();
-        let provenance = snapshot.provenance.get(&key).cloned().unwrap_or_default();
-        let (layer_kind, layer_id) = snapshot_entry_layer(&provenance);
-        let encoded_entry = encode_snapshot_entry(value, provenance)?;
-        transaction
-            .execute(
-                "INSERT INTO configuration_entries (
-                    revision_id, key, layer_kind, layer_id, schema_revision, typed_value
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    revision_id.as_str(),
-                    key.as_str(),
-                    layer_kind,
-                    layer_id,
-                    i64::from(CONFIGURATION_SNAPSHOT_ENTRY_PAYLOAD_SCHEMA_VERSION),
-                    encoded_entry,
-                ],
-            )
-            .await
-            .map_err(unavailable_store)?;
-    }
-    Ok(())
 }
 
 fn projection_encoding<T: Serialize>(value: &T) -> ConfigurationStoreResult<String> {
@@ -1235,18 +901,6 @@ async fn insert_revision(
     insert_configuration_projections(transaction, &revision.revision_id, &revision.snapshot).await
 }
 
-fn encode_plan_payload(
-    plan: &ConfigurationProtectedPlanRecordV1,
-) -> ConfigurationStoreResult<Vec<u8>> {
-    plan.validate().map_err(ConfigurationStoreError::from)?;
-    serde_json::to_vec(&StoredConfigurationPlanPayloadV2 {
-        schema_version: CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION,
-        plan: plan.plan.clone(),
-        operation: (&plan.operation).into(),
-    })
-    .map_err(|error| invalid_store_data(format!("encode configuration plan payload: {error}")))
-}
-
 fn decode_plan_row(row: &Row) -> ConfigurationStoreResult<ConfigurationProtectedPlanRecordV1> {
     let stored_plan_id = row
         .get::<String>(0)
@@ -1351,132 +1005,6 @@ fn decode_plan_row(row: &Row) -> ConfigurationStoreResult<ConfigurationProtected
     Ok(record)
 }
 
-#[cfg(test)]
-async fn read_change_plan_from_connection(
-    connection: &Connection,
-    plan_id: &ChangePlanId,
-) -> ConfigurationStoreResult<Option<ConfigurationProtectedPlanRecordV1>> {
-    let mut rows = connection
-        .query(
-            "SELECT p.plan_id, p.actor_id, p.base_revision_id, p.operation_digest,
-                    p.resolved_scope_digest, p.membership_digest,
-                    p.authorization_policy_digest, p.policy_epoch, p.expires_at, p.created_at,
-                    o.sequence, o.payload_schema_revision, o.sealed_typed_operation,
-                    o.operation_digest
-             FROM configuration_change_plans p
-             LEFT JOIN configuration_change_plan_operations o ON o.plan_id = p.plan_id
-             WHERE p.plan_id = ?1
-             ORDER BY o.sequence ASC",
-            params![plan_id.as_str()],
-        )
-        .await
-        .map_err(unavailable_store)?;
-    let mut plans = Vec::new();
-    while let Some(row) = rows.next().await.map_err(unavailable_store)? {
-        plans.push(decode_plan_row(&row)?);
-    }
-    if plans.len() > 1 {
-        return Err(invalid_store_data(
-            "configuration plan has multiple operation payloads unsupported by this contract",
-        ));
-    }
-    Ok(plans.pop())
-}
-
-async fn read_change_plan_from_transaction(
-    transaction: &Transaction,
-    plan_id: &ChangePlanId,
-) -> ConfigurationStoreResult<Option<ConfigurationProtectedPlanRecordV1>> {
-    let mut rows = transaction
-        .query(
-            "SELECT p.plan_id, p.actor_id, p.base_revision_id, p.operation_digest,
-                    p.resolved_scope_digest, p.membership_digest,
-                    p.authorization_policy_digest, p.policy_epoch, p.expires_at, p.created_at,
-                    o.sequence, o.payload_schema_revision, o.sealed_typed_operation,
-                    o.operation_digest
-             FROM configuration_change_plans p
-             LEFT JOIN configuration_change_plan_operations o ON o.plan_id = p.plan_id
-             WHERE p.plan_id = ?1
-             ORDER BY o.sequence ASC",
-            params![plan_id.as_str()],
-        )
-        .await
-        .map_err(unavailable_store)?;
-    let mut plans = Vec::new();
-    while let Some(row) = rows.next().await.map_err(unavailable_store)? {
-        plans.push(decode_plan_row(&row)?);
-    }
-    if plans.len() > 1 {
-        return Err(invalid_store_data(
-            "configuration plan has multiple operation payloads unsupported by this contract",
-        ));
-    }
-    Ok(plans.pop())
-}
-
-async fn insert_change_plan(
-    transaction: &Transaction,
-    plan: &ConfigurationProtectedPlanRecordV1,
-) -> ConfigurationStoreResult<()> {
-    plan.validate().map_err(ConfigurationStoreError::from)?;
-    let payload = encode_plan_payload(plan)?;
-    let membership_digest = plan
-        .plan
-        .membership_digest
-        .as_ref()
-        .map(|value| value.as_str().to_owned());
-    transaction
-        .execute(
-            "INSERT INTO configuration_change_plans (
-                plan_id, actor_id, base_revision_id, operation_digest,
-                resolved_scope_digest, membership_digest, authorization_policy_digest,
-                policy_epoch, expires_at, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                plan.plan.plan_id.as_str(),
-                plan.plan.actor_id.as_str(),
-                plan.plan.base_revision_id.as_str(),
-                plan.plan.operation_digest.as_str(),
-                plan.plan.resolved_scope_digest.as_str(),
-                membership_digest,
-                plan.plan.authorization_policy_digest.as_str(),
-                i64::try_from(plan.plan.policy_epoch).map_err(|_| {
-                    invalid_store_data(
-                        "configuration plan policy epoch exceeds SQLite integer range",
-                    )
-                })?,
-                plan.plan.expires_at.0,
-                plan.plan.created_at.0,
-            ],
-        )
-        .await
-        .map_err(unavailable_store)?;
-    transaction
-        .execute(
-            "INSERT INTO configuration_change_plan_operations (
-                plan_id, sequence, payload_schema_revision, sealed_typed_operation, operation_digest
-             ) VALUES (?1, 0, ?2, ?3, ?4)",
-            params![
-                plan.plan.plan_id.as_str(),
-                i64::from(CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION),
-                payload,
-                plan.plan.operation_digest.as_str(),
-            ],
-        )
-        .await
-        .map_err(unavailable_store)?;
-    transaction
-        .execute(
-            "INSERT INTO configuration_change_plan_events (
-                plan_id, sequence, event_kind, safe_reason_code, occurred_at
-             ) VALUES (?1, 0, 'dry_run_created', NULL, ?2)",
-            params![plan.plan.plan_id.as_str(), plan.plan.created_at.0],
-        )
-        .await
-        .map_err(unavailable_store)?;
-    Ok(())
-}
-
 async fn insert_dry_run_audit_event(
     transaction: &Transaction,
     record: &ConfigurationProtectedPlanRecordV1,
@@ -1527,120 +1055,6 @@ async fn insert_dry_run_audit_event(
         Some(&sealed_target_reference),
     )
     .await
-}
-
-fn encode_audit_payload(event: &ConfigurationAuditEvent) -> ConfigurationStoreResult<String> {
-    serde_json::to_string(&StoredConfigurationAuditPayloadV1 {
-        schema_version: CONFIGURATION_AUDIT_PAYLOAD_SCHEMA_VERSION,
-        event: event.clone(),
-    })
-    .map_err(|error| invalid_store_data(format!("encode configuration audit payload: {error}")))
-}
-
-const CONFIGURATION_AUDIT_REDACTION_KEY_BYTES: usize = 32;
-
-async fn read_audit_redaction_key(
-    transaction: &Transaction,
-) -> ConfigurationStoreResult<Option<Zeroizing<Vec<u8>>>> {
-    let mut rows = transaction
-        .query(
-            "SELECT key_material FROM configuration_audit_redaction_keys WHERE singleton = 1",
-            (),
-        )
-        .await
-        .map_err(unavailable_store)?;
-    let Some(row) = rows.next().await.map_err(unavailable_store)? else {
-        return Ok(None);
-    };
-    let material = Zeroizing::new(row.get::<Vec<u8>>(0).map_err(|error| {
-        invalid_store_data(format!("read configuration audit redaction key: {error}"))
-    })?);
-    if material.len() != CONFIGURATION_AUDIT_REDACTION_KEY_BYTES
-        || rows.next().await.map_err(unavailable_store)?.is_some()
-    {
-        return Err(invalid_store_data(
-            "configuration audit redaction key is not canonical",
-        ));
-    }
-    Ok(Some(material))
-}
-
-async fn ensure_audit_redaction_key(
-    transaction: &Transaction,
-    created_at: UtcMicros,
-) -> ConfigurationStoreResult<Zeroizing<Vec<u8>>> {
-    if let Some(material) = read_audit_redaction_key(transaction).await? {
-        return Ok(material);
-    }
-    let mut material = Zeroizing::new(vec![0_u8; CONFIGURATION_AUDIT_REDACTION_KEY_BYTES]);
-    getrandom::getrandom(material.as_mut_slice())
-        .map_err(|_| ConfigurationStoreError::Unavailable)?;
-    transaction
-        .execute(
-            "INSERT INTO configuration_audit_redaction_keys (singleton, key_material, created_at)
-             VALUES (1, ?1, ?2)",
-            params![material.as_slice(), created_at.0],
-        )
-        .await
-        .map_err(unavailable_store)?;
-    Ok(material)
-}
-
-fn audit_target_commitment(
-    key: &[u8],
-    event_id: &ConfigurationAuditEventId,
-    sealed_target_reference: &[u8],
-) -> ConfigurationStoreResult<ManifestDigest> {
-    let authenticated = serde_json::to_vec(&(
-        "tracedecay.configuration.audit-target-commitment.v1",
-        event_id,
-        sealed_target_reference,
-    ))
-    .map_err(|error| invalid_store_data(format!("encode audit target commitment: {error}")))?;
-    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key)
-        .map_err(|_| invalid_store_data("configuration audit redaction key is invalid"))?;
-    mac.update(&authenticated);
-    ManifestDigest::new(format!(
-        "sha256:{}",
-        hex::encode(mac.finalize().into_bytes())
-    ))
-    .map_err(ConfigurationStoreError::from)
-}
-
-async fn seal_audit_target<T: Serialize>(
-    transaction: &Transaction,
-    event_id: &ConfigurationAuditEventId,
-    target: &T,
-    created_at: UtcMicros,
-) -> ConfigurationStoreResult<(Vec<u8>, ManifestDigest)> {
-    let sealed = serde_json::to_vec(&SealedAuditTargetReferenceV1 {
-        schema_version: CONFIGURATION_SEALED_AUDIT_TARGET_SCHEMA_VERSION,
-        target,
-    })
-    .map_err(|error| invalid_store_data(format!("seal configuration audit target: {error}")))?;
-    let key = ensure_audit_redaction_key(transaction, created_at).await?;
-    let commitment = audit_target_commitment(&key, event_id, &sealed)?;
-    Ok((sealed, commitment))
-}
-
-async fn validate_sealed_audit_target(
-    transaction: &Transaction,
-    event: &ConfigurationAuditEvent,
-    sealed_target_reference: Option<&[u8]>,
-) -> ConfigurationStoreResult<()> {
-    let Some(sealed_target_reference) = sealed_target_reference else {
-        return Ok(());
-    };
-    let key = read_audit_redaction_key(transaction)
-        .await?
-        .ok_or_else(|| invalid_store_data("configuration audit redaction key is missing"))?;
-    let expected = audit_target_commitment(&key, &event.event_id, sealed_target_reference)?;
-    if event.target_commitment != expected {
-        return Err(invalid_store_data(
-            "configuration audit target commitment does not bind its sealed reference",
-        ));
-    }
-    Ok(())
 }
 
 fn decode_audit_row(
@@ -2282,79 +1696,6 @@ async fn advance_component_desired_state(
     Ok(())
 }
 
-#[cfg(test)]
-async fn current_revision_id_from_connection(
-    connection: &Connection,
-) -> ConfigurationStoreResult<ConfigurationRevisionId> {
-    let mut rows = connection
-        .query(
-            "SELECT revision_id
-             FROM configuration_revisions AS candidate
-             WHERE NOT EXISTS (
-                 SELECT 1
-                 FROM configuration_revisions AS child
-                 WHERE child.parent_revision_id = candidate.revision_id
-             )
-             ORDER BY created_at ASC, revision_id ASC",
-            (),
-        )
-        .await
-        .map_err(unavailable_store)?;
-    let Some(row) = rows.next().await.map_err(unavailable_store)? else {
-        return Err(invalid_store_data(
-            "configuration store has no current revision",
-        ));
-    };
-    let revision_id: ConfigurationRevisionId = decode_id(
-        row.get::<String>(0).map_err(|error| {
-            invalid_store_data(format!("read current configuration revision: {error}"))
-        })?,
-        "current revision id",
-    )?;
-    if rows.next().await.map_err(unavailable_store)?.is_some() {
-        return Err(invalid_store_data(
-            "configuration revision history has multiple current leaves",
-        ));
-    }
-    Ok(revision_id)
-}
-
-async fn current_revision_id_from_transaction(
-    transaction: &Transaction,
-) -> ConfigurationStoreResult<ConfigurationRevisionId> {
-    let mut rows = transaction
-        .query(
-            "SELECT revision_id
-             FROM configuration_revisions AS candidate
-             WHERE NOT EXISTS (
-                 SELECT 1
-                 FROM configuration_revisions AS child
-                 WHERE child.parent_revision_id = candidate.revision_id
-             )
-             ORDER BY created_at ASC, revision_id ASC",
-            (),
-        )
-        .await
-        .map_err(unavailable_store)?;
-    let Some(row) = rows.next().await.map_err(unavailable_store)? else {
-        return Err(invalid_store_data(
-            "configuration store has no current revision",
-        ));
-    };
-    let revision_id: ConfigurationRevisionId = decode_id(
-        row.get::<String>(0).map_err(|error| {
-            invalid_store_data(format!("read current configuration revision: {error}"))
-        })?,
-        "current revision id",
-    )?;
-    if rows.next().await.map_err(unavailable_store)?.is_some() {
-        return Err(invalid_store_data(
-            "configuration revision history has multiple current leaves",
-        ));
-    }
-    Ok(revision_id)
-}
-
 fn validate_commit_bindings(commit: &ConfigurationCommitV1) -> ConfigurationStoreResult<()> {
     commit.validate().map_err(ConfigurationStoreError::from)?;
     if commit.next_revision.parent_revision_id.as_ref() != Some(&commit.expected_base_revision_id) {
@@ -2408,7 +1749,7 @@ async fn replay_matches_commit(
         return Ok(false);
     }
     let stored_revision =
-        read_revision_from_transaction(transaction, &commit.next_revision.revision_id).await?;
+        read_revision_from_executor(transaction, &commit.next_revision.revision_id).await?;
     if stored_revision.as_ref() != Some(&commit.next_revision) {
         return Ok(false);
     }
@@ -2418,7 +1759,7 @@ async fn replay_matches_commit(
         return Ok(false);
     }
     if let Some(plan) = &commit.change_plan {
-        let stored_plan = read_change_plan_from_transaction(transaction, &plan.plan_id).await?;
+        let stored_plan = read_change_plan_from_executor(transaction, &plan.plan_id).await?;
         if stored_plan.as_ref().map(|record| &record.plan) != Some(plan)
             || !has_matching_terminal_plan_event(transaction, plan, &commit.audit_event).await?
         {
@@ -2448,12 +1789,12 @@ async fn commit_configuration_transaction(
         };
     }
 
-    let current_revision_id = current_revision_id_from_transaction(transaction).await?;
+    let current_revision_id = current_revision_id_from_executor(transaction).await?;
     if current_revision_id != commit.expected_base_revision_id {
         return Err(ConfigurationStoreError::RevisionConflict);
     }
     if let Some(plan) = &commit.change_plan {
-        let stored_plan = read_change_plan_from_transaction(transaction, &plan.plan_id).await?;
+        let stored_plan = read_change_plan_from_executor(transaction, &plan.plan_id).await?;
         if stored_plan.as_ref().map(|record| &record.plan) != Some(plan) {
             return Err(ConfigurationStoreError::PlanStale);
         }
@@ -2490,8 +1831,8 @@ impl ConfigurationSqlStore<'_> {
     pub async fn current_revision(
         &self,
     ) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
-        let revision_id = current_revision_id_from_connection(self.connection).await?;
-        read_revision_from_connection(self.connection, &revision_id)
+        let revision_id = current_revision_id_from_executor(self.connection).await?;
+        read_revision_from_executor(self.connection, &revision_id)
             .await?
             .ok_or_else(|| invalid_store_data("current configuration revision disappeared"))
     }
@@ -2503,7 +1844,7 @@ impl ConfigurationSqlStore<'_> {
         revision_id
             .validate()
             .map_err(ConfigurationStoreError::from)?;
-        read_revision_from_connection(self.connection, revision_id).await
+        read_revision_from_executor(self.connection, revision_id).await
     }
 
     pub async fn save_change_plan(
@@ -2516,15 +1857,14 @@ impl ConfigurationSqlStore<'_> {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(unavailable_store)?;
-        let outcome =
-            match read_change_plan_from_transaction(&transaction, &plan.plan.plan_id).await {
-                Ok(Some(existing)) if existing == *plan => Ok(()),
-                Ok(Some(_)) => Err(invalid_store_data(
-                    "configuration change plan id conflicts with immutable prior input",
-                )),
-                Ok(None) => insert_change_plan(&transaction, plan).await,
-                Err(error) => Err(error),
-            };
+        let outcome = match read_change_plan_from_executor(&transaction, &plan.plan.plan_id).await {
+            Ok(Some(existing)) if existing == *plan => Ok(()),
+            Ok(Some(_)) => Err(invalid_store_data(
+                "configuration change plan id conflicts with immutable prior input",
+            )),
+            Ok(None) => insert_change_plan(&transaction, plan).await,
+            Err(error) => Err(error),
+        };
         match outcome {
             Ok(()) => transaction.commit().await.map_err(unavailable_store),
             Err(error) => {
@@ -2539,7 +1879,7 @@ impl ConfigurationSqlStore<'_> {
         plan_id: &ChangePlanId,
     ) -> ConfigurationStoreResult<Option<ConfigurationProtectedPlanRecordV1>> {
         plan_id.validate().map_err(ConfigurationStoreError::from)?;
-        read_change_plan_from_connection(self.connection, plan_id).await
+        read_change_plan_from_executor(self.connection, plan_id).await
     }
 
     pub async fn commit(
@@ -3173,10 +2513,10 @@ fn rollback_redacted_changes(
 async fn current_state_from_transaction(
     transaction: &Transaction,
 ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
-    let revision_id = current_revision_id_from_transaction(transaction)
+    let revision_id = current_revision_id_from_executor(transaction)
         .await
         .map_err(map_store_error)?;
-    let revision = read_revision_from_transaction(transaction, &revision_id)
+    let revision = read_revision_from_executor(transaction, &revision_id)
         .await
         .map_err(map_store_error)?
         .ok_or_else(|| {
@@ -3209,7 +2549,7 @@ async fn replay_control_receipt(
     {
         return Err(ConfigurationError::IdempotencyConflict);
     }
-    let revision = read_revision_from_transaction(transaction, &stored.receipt.result_revision_id)
+    let revision = read_revision_from_executor(transaction, &stored.receipt.result_revision_id)
         .await
         .map_err(map_store_error)?
         .ok_or_else(|| {
@@ -3300,6 +2640,60 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         Self { db }
     }
 
+    /// Reports whether this persisted control-plane store has no revision yet.
+    ///
+    /// The caller may seed registry defaults only in this state. Any
+    /// non-empty store with an unreadable current revision remains an error;
+    /// falling back to defaults would replace durable authority.
+    pub fn is_uninitialized(&self) -> ConfigurationOperationFuture<'_, bool> {
+        Box::pin(async move {
+            let read = self
+                .db
+                .read_snapshot()
+                .await
+                .map_err(|_| ConfigurationError::Unavailable)?;
+            let mut rows = read
+                .query(
+                    "SELECT
+                        (SELECT COUNT(*) FROM configuration_revisions),
+                        (SELECT COUNT(*) FROM configuration_migration_receipts)",
+                    (),
+                )
+                .await
+                .map_err(|_| ConfigurationError::Unavailable)?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|_| ConfigurationError::Unavailable)?
+                .ok_or_else(|| {
+                    ConfigurationError::validation_message(
+                        "configuration initialization query returned no row",
+                    )
+                })?;
+            let revision_count = row.get::<i64>(0).map_err(|_| {
+                ConfigurationError::validation_message(
+                    "configuration revision count is not an integer",
+                )
+            })?;
+            let migration_receipt_count = row.get::<i64>(1).map_err(|_| {
+                ConfigurationError::validation_message(
+                    "configuration migration receipt count is not an integer",
+                )
+            })?;
+            if rows
+                .next()
+                .await
+                .map_err(|_| ConfigurationError::Unavailable)?
+                .is_some()
+            {
+                return Err(ConfigurationError::validation_message(
+                    "configuration initialization query returned multiple rows",
+                ));
+            }
+            Ok(revision_count == 0 && migration_receipt_count == 0)
+        })
+    }
+
     /// Records a daemon/component activation result. Failed activation keeps
     /// the prior last-working observed revision while advancing desired state.
     pub fn record_component_activation(
@@ -3321,7 +2715,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             let outcome = async {
                 let current = current_state_from_transaction(&transaction).await?;
                 if let Some(observed_revision_id) = &observed_revision_id
-                    && read_revision_from_transaction(&transaction, observed_revision_id)
+                    && read_revision_from_executor(&transaction, observed_revision_id)
                         .await
                         .map_err(map_store_error)?
                         .is_none()
@@ -3381,6 +2775,179 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
     }
 }
 
+/// Cloneable configuration authority for daemon-owned runtimes.
+///
+/// The adapter retains the daemon's already-open project runtime database and
+/// creates a scoped borrowed adapter for each operation. It therefore reuses
+/// the canonical transaction, revision, and compare-and-swap implementation
+/// without opening another database or resolving configuration independently.
+#[derive(Clone)]
+pub struct OwnedGlobalDbConfigurationControlStore {
+    db: Arc<GlobalDb>,
+}
+
+impl OwnedGlobalDbConfigurationControlStore {
+    /// Retains an existing daemon project-runtime database handle.
+    pub fn from_project_runtime_db(db: Arc<GlobalDb>) -> Self {
+        Self { db }
+    }
+}
+
+impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
+    fn current(&self) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
+        let db = Arc::clone(&self.db);
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            store.current().await
+        })
+    }
+
+    fn save_plan(
+        &self,
+        plan: &ProtectedChangePlan,
+        operation: &ProtectedChange,
+    ) -> ConfigurationOperationFuture<'_, ()> {
+        let db = Arc::clone(&self.db);
+        let plan = plan.clone();
+        let operation = operation.clone();
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            store.save_plan(&plan, &operation).await
+        })
+    }
+
+    fn load_plan(
+        &self,
+        plan_id: &ChangePlanId,
+    ) -> ConfigurationOperationFuture<'_, Option<ProtectedChangePlan>> {
+        let db = Arc::clone(&self.db);
+        let plan_id = plan_id.clone();
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            store.load_plan(&plan_id).await
+        })
+    }
+
+    fn commit_direct(
+        &self,
+        authority: &ConfigurationMutationAuthority,
+        mutation: &DirectConfigurationMutation,
+        expected_revision: &ConfigurationRevisionId,
+    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
+        let db = Arc::clone(&self.db);
+        let authority = authority.clone();
+        let mutation = mutation.clone();
+        let expected_revision = expected_revision.clone();
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            store
+                .commit_direct(&authority, &mutation, &expected_revision)
+                .await
+        })
+    }
+
+    fn commit_protected(
+        &self,
+        authority: &ConfigurationMutationAuthority,
+        request: &tracedecay_domain::configuration::ProtectedApplyRequest,
+        plan: &ProtectedChangePlan,
+        evidence: &ScopeRevalidationEvidenceV1,
+    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
+        let db = Arc::clone(&self.db);
+        let authority = authority.clone();
+        let request = request.clone();
+        let plan = plan.clone();
+        let evidence = evidence.clone();
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            store
+                .commit_protected(&authority, &request, &plan, &evidence)
+                .await
+        })
+    }
+
+    fn dry_run_rollback(
+        &self,
+        authority: &ConfigurationMutationAuthority,
+        rollback: &ConfigurationRollbackRequest,
+        now: UtcMicros,
+    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
+        let db = Arc::clone(&self.db);
+        let authority = authority.clone();
+        let rollback = rollback.clone();
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            store.dry_run_rollback(&authority, &rollback, now).await
+        })
+    }
+
+    fn apply_rollback(
+        &self,
+        authority: &ConfigurationMutationAuthority,
+        request: &tracedecay_domain::configuration::ProtectedApplyRequest,
+        plan: &ProtectedChangePlan,
+        evidence: &ScopeRevalidationEvidenceV1,
+    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
+        let db = Arc::clone(&self.db);
+        let authority = authority.clone();
+        let request = request.clone();
+        let plan = plan.clone();
+        let evidence = evidence.clone();
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            store
+                .apply_rollback(&authority, &request, &plan, &evidence)
+                .await
+        })
+    }
+
+    fn audit(
+        &self,
+        actor: &AuthorizedActor,
+        query: &ConfigurationAuditQuery,
+    ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
+        let db = Arc::clone(&self.db);
+        let actor = actor.clone();
+        let query = query.clone();
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            ConfigurationControlStore::audit(&store, &actor, &query).await
+        })
+    }
+
+    fn observed_state(
+        &self,
+        actor: &AuthorizedActor,
+    ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
+        let db = Arc::clone(&self.db);
+        let actor = actor.clone();
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            store.observed_state(&actor).await
+        })
+    }
+}
+
+impl CredentialWritePort for OwnedGlobalDbConfigurationControlStore {
+    fn write_reference(
+        &self,
+        authority: &ConfigurationMutationAuthority,
+        write: &WriteOnlyCredentialMutation,
+        expected_revision: &ConfigurationRevisionId,
+    ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
+        let db = Arc::clone(&self.db);
+        let authority = authority.clone();
+        let write = write.clone();
+        let expected_revision = expected_revision.clone();
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            store
+                .write_reference(&authority, &write, &expected_revision)
+                .await
+        })
+    }
+}
+
 impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
     fn current(&self) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
         Box::pin(async move {
@@ -3411,25 +2978,24 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 .begin_write_transaction()
                 .await
                 .map_err(|_| ConfigurationError::Unavailable)?;
-            let outcome =
-                match read_change_plan_from_transaction(&transaction, &record.plan.plan_id)
-                    .await
-                    .map_err(map_store_error)?
-                {
-                    Some(existing) if existing == record => Ok(()),
-                    Some(_) => Err(ConfigurationError::IdempotencyConflict),
-                    None => {
-                        async {
-                            insert_change_plan(&transaction, &record)
-                                .await
-                                .map_err(map_store_error)?;
-                            insert_dry_run_audit_event(&transaction, &record)
-                                .await
-                                .map_err(map_store_error)
-                        }
-                        .await
+            let outcome = match read_change_plan_from_executor(&transaction, &record.plan.plan_id)
+                .await
+                .map_err(map_store_error)?
+            {
+                Some(existing) if existing == record => Ok(()),
+                Some(_) => Err(ConfigurationError::IdempotencyConflict),
+                None => {
+                    async {
+                        insert_change_plan(&transaction, &record)
+                            .await
+                            .map_err(map_store_error)?;
+                        insert_dry_run_audit_event(&transaction, &record)
+                            .await
+                            .map_err(map_store_error)
                     }
-                };
+                    .await
+                }
+            };
             match outcome {
                 Ok(()) => transaction
                     .commit()
@@ -3452,7 +3018,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 .read_snapshot()
                 .await
                 .map_err(|_| ConfigurationError::Unavailable)?;
-            read_change_plan_from_transaction(&read, &plan_id)
+            read_change_plan_from_executor(&read, &plan_id)
                 .await
                 .map_err(map_store_error)
                 .map(|record| record.map(|record| record.plan))
@@ -3600,7 +3166,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 if current.revision_id != plan.base_revision_id {
                     return Err(ConfigurationError::PlanStale);
                 }
-                let record = read_change_plan_from_transaction(&transaction, &plan.plan_id)
+                let record = read_change_plan_from_executor(&transaction, &plan.plan_id)
                     .await
                     .map_err(map_store_error)?
                     .ok_or(ConfigurationError::PlanStale)?;
@@ -3703,7 +3269,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                     return Err(ConfigurationError::RevisionConflict);
                 }
                 let target =
-                    read_revision_from_transaction(&transaction, &rollback.target_revision_id)
+                    read_revision_from_executor(&transaction, &rollback.target_revision_id)
                         .await
                         .map_err(map_store_error)?
                         .ok_or(ConfigurationError::PlanStale)?;
@@ -3751,7 +3317,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                     operation,
                 };
                 record.validate().map_err(ConfigurationError::validation)?;
-                match read_change_plan_from_transaction(&transaction, &plan.plan_id)
+                match read_change_plan_from_executor(&transaction, &plan.plan_id)
                     .await
                     .map_err(map_store_error)?
                 {
@@ -3824,7 +3390,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 if current.revision_id != plan.base_revision_id {
                     return Err(ConfigurationError::PlanStale);
                 }
-                let record = read_change_plan_from_transaction(&transaction, &plan.plan_id)
+                let record = read_change_plan_from_executor(&transaction, &plan.plan_id)
                     .await
                     .map_err(map_store_error)?
                     .ok_or(ConfigurationError::PlanStale)?;
@@ -3849,7 +3415,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 {
                     return Err(ConfigurationError::PlanStale);
                 }
-                let target = read_revision_from_transaction(&transaction, target_revision_id)
+                let target = read_revision_from_executor(&transaction, target_revision_id)
                     .await
                     .map_err(map_store_error)?
                     .ok_or(ConfigurationError::PlanStale)?;
@@ -4161,8 +3727,8 @@ impl CredentialWritePort for GlobalDbConfigurationControlStore<'_> {
 impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
     async fn current_revision(&self) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
         let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
-        let revision_id = current_revision_id_from_transaction(&read).await?;
-        read_revision_from_transaction(&read, &revision_id)
+        let revision_id = current_revision_id_from_executor(&read).await?;
+        read_revision_from_executor(&read, &revision_id)
             .await?
             .ok_or_else(|| invalid_store_data("current configuration revision disappeared"))
     }
@@ -4178,7 +3744,7 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
                 .validate()
                 .map_err(ConfigurationStoreError::from)?;
             let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
-            read_revision_from_transaction(&read, &revision_id).await
+            read_revision_from_executor(&read, &revision_id).await
         }
     }
 
@@ -4195,7 +3761,7 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
                 .await
                 .map_err(unavailable_store)?;
             let outcome =
-                match read_change_plan_from_transaction(&transaction, &plan.plan.plan_id).await {
+                match read_change_plan_from_executor(&transaction, &plan.plan.plan_id).await {
                     Ok(Some(existing)) if existing == plan => Ok(()),
                     Ok(Some(_)) => Err(ConfigurationStoreError::IdempotencyConflict),
                     Ok(None) => insert_change_plan(&transaction, &plan).await,
@@ -4217,7 +3783,7 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
         async move {
             plan_id.validate().map_err(ConfigurationStoreError::from)?;
             let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
-            read_change_plan_from_transaction(&read, &plan_id).await
+            read_change_plan_from_executor(&read, &plan_id).await
         }
     }
 
@@ -4315,6 +3881,7 @@ impl ConfigurationMigrationStore for GlobalDbConfigurationControlStore<'_> {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use super::*;
     use crate::config::registry::ConfigurationRegistry;
@@ -4830,6 +4397,66 @@ mod tests {
         );
     }
 
+    fn assert_daemon_configuration_authority<T>()
+    where
+        T: ConfigurationControlStore + Clone + Send + Sync + 'static,
+    {
+    }
+
+    #[test]
+    fn owned_global_control_adapter_satisfies_daemon_registration_bounds() {
+        assert_daemon_configuration_authority::<OwnedGlobalDbConfigurationControlStore>();
+    }
+
+    #[tokio::test]
+    async fn owned_global_control_adapter_retains_runtime_db_and_preserves_cas() {
+        let (_directory, _path, db, root) = global_setup().await;
+        let runtime_db = Arc::new(db);
+        let store = OwnedGlobalDbConfigurationControlStore::from_project_runtime_db(Arc::clone(
+            &runtime_db,
+        ));
+        drop(runtime_db);
+
+        assert_eq!(store.current().await.unwrap().revision_id, root.revision_id);
+
+        let authority = control_authority(
+            ConfigurationMutationOperationV1::DirectMutation,
+            &root.revision_id,
+        );
+        let mutation = DirectConfigurationMutation::Set {
+            layer: direct_project_layer(),
+            key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
+            value: ConfigurationValueV1::Boolean(true),
+        };
+        let receipt = store
+            .commit_direct(&authority, &mutation, &root.revision_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .clone()
+                .commit_direct(&authority, &mutation, &root.revision_id)
+                .await
+                .unwrap(),
+            receipt
+        );
+        assert_eq!(
+            store
+                .commit_direct(
+                    &authority,
+                    &DirectConfigurationMutation::Set {
+                        layer: direct_project_layer(),
+                        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
+                        value: ConfigurationValueV1::Boolean(false),
+                    },
+                    &root.revision_id,
+                )
+                .await,
+            Err(ConfigurationError::RevisionConflict)
+        );
+    }
+
     #[tokio::test]
     async fn direct_audit_target_never_persists_sensitive_setting_values() {
         let (_directory, _path, db, root) = global_setup().await;
@@ -4933,7 +4560,7 @@ mod tests {
         );
 
         let read = db.read_snapshot().await.unwrap();
-        let record = read_change_plan_from_transaction(&read, &source_plan.plan_id)
+        let record = read_change_plan_from_executor(&read, &source_plan.plan_id)
             .await
             .unwrap()
             .unwrap();

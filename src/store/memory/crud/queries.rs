@@ -834,8 +834,16 @@ pub(in crate::store::memory) async fn get_retrieval_anchor_tx(
     let owner = OwnerKey::new(query.owner())?;
     let mut rows = snapshot
         .query(
-            "SELECT anchor_json FROM retrieval_anchors
-             WHERE anchor_id = ?1 AND owner_json = ?2",
+            "SELECT anchor.anchor_json
+             FROM retrieval_anchors AS anchor
+             WHERE anchor.anchor_id = ?1 AND anchor.owner_json = ?2
+               AND COALESCE((
+                   SELECT disposition.state
+                   FROM retrieval_anchor_dispositions AS disposition
+                   WHERE disposition.anchor_id = anchor.anchor_id
+                     AND disposition.owner_json = anchor.owner_json
+                   ORDER BY disposition.sequence DESC LIMIT 1
+               ), 'active') = 'active'",
             params![query.anchor_id().as_str(), owner.json.as_str()],
         )
         .await

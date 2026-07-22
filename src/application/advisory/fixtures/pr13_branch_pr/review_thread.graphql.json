@@ -1,0 +1,49 @@
+{
+  "capture": {
+    "captured_at": "2026-07-21T22:04:00Z",
+    "method": "POST",
+    "url": "https://api.github.com/graphql",
+    "operation_kind": "query",
+    "operation_name": "PR13ReviewFixture",
+    "documentation": "https://docs.github.com/en/graphql/reference/objects#pullrequestreviewthread"
+  },
+  "response": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "id": "PR_kwDOSzKG2s7v-wF-",
+          "number": 421,
+          "baseRefOid": "8339371d01311289e2b7cd7b0669ea3549308b8c",
+          "headRefOid": "e29900448db98ae58e90d08770a3bb8bfa710846",
+          "reviewThreads": {
+            "nodes": [
+              {
+                "id": "PRRT_kwDOSzKG2s6PyfyC",
+                "isResolved": false,
+                "isOutdated": true,
+                "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md",
+                "line": null,
+                "originalLine": 1949,
+                "startLine": null,
+                "originalStartLine": 1946,
+                "comments": {
+                  "nodes": [
+                    {
+                      "id": "PRRC_kwDOSzKG2s7T__a_",
+                      "databaseId": 3556767423,
+                      "url": "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767423",
+                      "createdAt": "2026-07-10T06:16:13Z",
+                      "updatedAt": "2026-07-10T06:16:13Z",
+                      "authorAssociation": "NONE",
+                      "replyTo": null
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

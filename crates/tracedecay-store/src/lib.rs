@@ -6,6 +6,7 @@
 
 pub mod configuration;
 pub mod diagnostics;
+pub mod external_source;
 pub mod git_index_transactions;
 pub mod memory;
 pub mod observation;
@@ -20,6 +21,11 @@ pub use configuration::{
 pub use diagnostics::{
     DiagnosticPublicationDispositionV1, DiagnosticPublicationReceiptV1, DiagnosticStore,
     DiagnosticStoreError, DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1,
+};
+pub use external_source::{
+    MAX_SOURCE_COMMIT_OBSERVATIONS_V1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
+    SourceCommitV1, SourceProjectionCommitV1, SourceProjectionEffectV1, SourceStoreErrorV1,
+    SourceStoreResult, SourceStoreStateV1, apply_source_commit,
 };
 pub use git_index_transactions::{
     GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,

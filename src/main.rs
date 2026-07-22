@@ -213,6 +213,11 @@ fn render_dynamic_command_help(args: &[String]) -> bool {
 }
 
 async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
+    let host_bundle = HostBundleCliOptions {
+        component: cli.component,
+        dry_run: cli.dry_run,
+        yes: cli.yes,
+    };
     let command = match cli.command {
         Some(cmd) => cmd,
         None => return commands::handle_no_command().await,
@@ -228,7 +233,7 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
         }
     };
     run_startup_preamble(&command).await;
-    dispatch_command(command).await
+    dispatch_command(command, host_bundle).await
 }
 
 fn maybe_run_extract_worker(command: &Commands) {
@@ -448,9 +453,10 @@ impl CommandFamily {
             | Commands::Serve { .. }
             | Commands::Daemon { .. } => Self::Runtime,
             Commands::Install { .. }
-            | Commands::Reinstall
-            | Commands::UpdatePlugin
-            | Commands::Uninstall { .. } => Self::Agent,
+            | Commands::Reinstall { .. }
+            | Commands::UpdatePlugin { .. }
+            | Commands::Uninstall { .. }
+            | Commands::FeedbackRollback { .. } => Self::Agent,
             Commands::HookPreToolUse
             | Commands::HookPromptSubmit
             | Commands::HookStop
@@ -477,6 +483,9 @@ impl CommandFamily {
             | Commands::HookCodexPostCompact
             | Commands::HookCodexStop
             | Commands::HookHermesTerminalReceipt
+            | Commands::HookKimiEvent
+            | Commands::HookOpenCodeEvent
+            | Commands::HookOpenCodeToolAfter
             | Commands::HookUserSessionReview => Self::Hook,
             Commands::Upgrade { .. }
             | Commands::Update { .. }
@@ -500,11 +509,22 @@ impl CommandFamily {
     }
 }
 
-async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
-    match CommandFamily::for_command(&command) {
+async fn dispatch_command(
+    command: Commands,
+    host_bundle: HostBundleCliOptions,
+) -> tracedecay::errors::Result<()> {
+    let family = CommandFamily::for_command(&command);
+    if host_bundle.component.is_some() && !matches!(family, CommandFamily::Agent) {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message:
+                "--component is only valid with install, update-plugin, reinstall, or uninstall"
+                    .to_string(),
+        });
+    }
+    match family {
         CommandFamily::Project => dispatch_project_command(command).await,
         CommandFamily::Runtime => dispatch_runtime_command(command).await,
-        CommandFamily::Agent => dispatch_agent_command(command).await,
+        CommandFamily::Agent => dispatch_agent_command(command, host_bundle).await,
         CommandFamily::Hook => dispatch_hook_command(command).await,
         CommandFamily::Update => dispatch_update_command(command).await,
         CommandFamily::Configuration => dispatch_configuration_command(command).await,
@@ -643,7 +663,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
             tool_command::run(project, name, args).await?;
         }
         Commands::Lsp { action } => {
-            lsp_cmd::handle_lsp_action(action)?;
+            lsp_cmd::handle_lsp_action(action).await?;
         }
         Commands::ExtractWorker => {
             // Handled by the early dispatch at the top of run(); this arm
@@ -746,7 +766,10 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
     Ok(())
 }
 
-async fn dispatch_agent_command(command: Commands) -> tracedecay::errors::Result<()> {
+async fn dispatch_agent_command(
+    command: Commands,
+    host_bundle: HostBundleCliOptions,
+) -> tracedecay::errors::Result<()> {
     match command {
         Commands::Install {
             agent,
@@ -755,22 +778,106 @@ async fn dispatch_agent_command(command: Commands) -> tracedecay::errors::Result
             automation,
             auto_apply,
         } => {
-            agent_cmd::handle_install_command(
-                agent,
-                local,
-                no_dashboard,
-                automation.then_some(agent_cmd::CodexAutomationInstall { auto_apply }),
-            )
-            .await?;
+            if host_bundle.component.is_some() {
+                if local || automation || no_dashboard {
+                    return Err(tracedecay::errors::TraceDecayError::Config {
+                        message: "--component cannot be combined with --local, --automation, or --no-dashboard"
+                            .to_string(),
+                    });
+                }
+                agent_cmd::handle_host_bundle_component_command(
+                    agent,
+                    agent_cmd::HostBundleCliOperation::Install,
+                    host_bundle,
+                )
+                .await?;
+            } else {
+                agent_cmd::handle_install_command(
+                    agent,
+                    local,
+                    no_dashboard,
+                    automation.then_some(agent_cmd::CodexAutomationInstall { auto_apply }),
+                )
+                .await?;
+            }
         }
-        Commands::Reinstall => {
-            agent_cmd::handle_reinstall_command().await?;
+        Commands::Reinstall { local, agent } => {
+            if host_bundle.component.is_some() {
+                if local {
+                    return Err(tracedecay::errors::TraceDecayError::Config {
+                        message: "--component cannot be combined with --local".to_string(),
+                    });
+                }
+                agent_cmd::handle_host_bundle_component_command(
+                    None,
+                    agent_cmd::HostBundleCliOperation::Repair,
+                    host_bundle,
+                )
+                .await?;
+            } else if local {
+                agent_cmd::handle_project_local_lifecycle_command(
+                    agent.expect("--local requires --agent"),
+                    agent_cmd::HostBundleCliOperation::Repair,
+                )
+                .await?;
+            } else {
+                agent_cmd::handle_reinstall_command().await?;
+            }
         }
-        Commands::UpdatePlugin => {
-            update_cmd::refresh_generated_plugins().await?;
+        Commands::UpdatePlugin { local, agent } => {
+            if host_bundle.component.is_some() {
+                if local {
+                    return Err(tracedecay::errors::TraceDecayError::Config {
+                        message: "--component cannot be combined with --local".to_string(),
+                    });
+                }
+                agent_cmd::handle_host_bundle_component_command(
+                    None,
+                    agent_cmd::HostBundleCliOperation::Update,
+                    host_bundle,
+                )
+                .await?;
+            } else if local {
+                agent_cmd::handle_project_local_lifecycle_command(
+                    agent.expect("--local requires --agent"),
+                    agent_cmd::HostBundleCliOperation::Update,
+                )
+                .await?;
+            } else {
+                agent_cmd::handle_update_plugin_command().await?;
+            }
         }
-        Commands::Uninstall { agent } => {
-            agent_cmd::handle_uninstall_command(agent).await?;
+        Commands::Uninstall { agent, local } => {
+            if host_bundle.component.is_some() {
+                if local {
+                    return Err(tracedecay::errors::TraceDecayError::Config {
+                        message: "--component cannot be combined with --local".to_string(),
+                    });
+                }
+                agent_cmd::handle_host_bundle_component_command(
+                    agent,
+                    agent_cmd::HostBundleCliOperation::Uninstall,
+                    host_bundle,
+                )
+                .await?;
+            } else if local {
+                agent_cmd::handle_project_local_lifecycle_command(
+                    agent.expect("--local requires --agent"),
+                    agent_cmd::HostBundleCliOperation::Uninstall,
+                )
+                .await?;
+            } else {
+                agent_cmd::handle_uninstall_command(agent).await?;
+            }
+        }
+        Commands::FeedbackRollback { action } => {
+            if host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.yes {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "feedback-rollback uses its action-specific --yes/--state flags"
+                        .to_string(),
+                });
+            }
+            agent_cmd::handle_feedback_rollback_command(action).await?;
         }
         _ => unreachable!("non-agent command passed to agent dispatcher"),
     }
@@ -805,6 +912,9 @@ async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<
         | Commands::HookCodexPostCompact
         | Commands::HookCodexStop
         | Commands::HookHermesTerminalReceipt
+        | Commands::HookKimiEvent
+        | Commands::HookOpenCodeEvent
+        | Commands::HookOpenCodeToolAfter
         | Commands::HookUserSessionReview) => {
             hook_cmd::handle_hook_command(hook_command).await?;
         }
@@ -993,8 +1103,9 @@ impl CommandStartupPolicy {
             // Serve is also latency-sensitive: clients impose a 30 s MCP
             // initialize timeout, so no implicit startup work belongs there.
             Commands::Install { .. }
-            | Commands::Reinstall
-            | Commands::UpdatePlugin
+            | Commands::Reinstall { .. }
+            | Commands::UpdatePlugin { .. }
+            | Commands::FeedbackRollback { .. }
             | Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::Dogfood

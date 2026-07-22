@@ -27,11 +27,6 @@ pub(super) fn install(ctx: &InstallContext) -> Result<InstallOutcome> {
         install_supported_plugin(&profile_plugin_dir, &ctx.tracedecay_bin, ctx.dashboard)?;
     }
 
-    eprintln!();
-    eprintln!("Setup complete. Next steps:");
-    eprintln!("  1. cd into your project and run: tracedecay init");
-    eprintln!("  2. Start Hermes — tracedecay plugin tools are now available");
-
     Ok(InstallOutcome { plugin_dir })
 }
 
@@ -43,9 +38,10 @@ fn install_supported_plugin(
     let existed = plugin_dir.join("plugin.yaml").is_file();
     if let Err(error) = super::install_plugin(plugin_dir, tracedecay_bin, deploy_dashboard) {
         if !existed && let Err(cleanup_error) = super::remove_generated_plugin_files(plugin_dir) {
-            eprintln!(
-                "  warning: failed to roll back incomplete Hermes plugin {}: {cleanup_error}",
-                plugin_dir.display()
+            tracing::warn!(
+                plugin_dir = %plugin_dir.display(),
+                %cleanup_error,
+                "failed to roll back incomplete Hermes plugin"
             );
         }
         return Err(error);
@@ -74,10 +70,6 @@ fn refresh_installed_plugins(home: &Path, tracedecay_bin: &str) -> Result<Vec<Pa
             tracedecay_bin,
             had_dashboard,
         )?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Refreshed Hermes tracedecay plugin at {}",
-            plugin_dir.display()
-        );
         refreshed.push(plugin_dir);
     }
     Ok(refreshed)
@@ -89,10 +81,6 @@ pub(super) fn uninstall(ctx: &InstallContext) -> Result<UninstallOutcome> {
     for profile_plugin_dir in super::profile_plugin_dirs(&ctx.home) {
         super::uninstall_plugin(&profile_plugin_dir)?;
     }
-
-    eprintln!();
-    eprintln!("Uninstall complete. Tracedecay has been removed from Hermes.");
-    eprintln!("Restart Hermes for changes to take effect.");
 
     Ok(UninstallOutcome { plugin_dir })
 }

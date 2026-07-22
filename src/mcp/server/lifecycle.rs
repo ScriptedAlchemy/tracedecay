@@ -19,16 +19,15 @@ fn log_startup_transcript_ingest_failure(
     scope: &str,
     failure: &crate::sessions::TranscriptCatchUpFailure,
 ) {
-    let locator = failure.source_locator.map_or_else(String::new, |range| {
-        format!(
-            " source_offset={} source_end_offset={}",
-            range.start(),
-            range.end()
-        )
-    });
-    eprintln!(
-        "[tracedecay] startup {scope} transcript ingest incomplete: provider={} source={} reason_code={} retryable={}{}",
-        failure.provider, failure.source, failure.reason_code, failure.retryable, locator,
+    tracing::warn!(
+        scope,
+        provider = failure.provider,
+        source = failure.source,
+        reason_code = failure.reason_code,
+        retryable = failure.retryable,
+        source_offset = ?failure.source_locator.map(|range| range.start()),
+        source_end_offset = ?failure.source_locator.map(|range| range.end()),
+        "startup transcript ingest incomplete"
     );
 }
 
@@ -40,9 +39,9 @@ pub(super) async fn run_startup_session_catch_up(
     project_id: Option<&str>,
 ) -> Option<Arc<GlobalDb>> {
     let Some(db) = session_db else {
-        eprintln!(
-            "[tracedecay] startup project transcript ingest skipped: authoritative project session storage is unavailable for {}",
-            project_root.display()
+        tracing::warn!(
+            project_root = %project_root.display(),
+            "startup project transcript ingest skipped because authoritative session storage is unavailable"
         );
         return None;
     };
@@ -70,13 +69,13 @@ pub(super) async fn run_startup_session_catch_up(
                 log_startup_transcript_ingest_failure("user", failure);
             }
         } else {
-            eprintln!(
-                "[tracedecay] startup user transcript ingest skipped: authoritative user session storage has no profile root"
+            tracing::warn!(
+                "startup user transcript ingest skipped because session storage has no profile root"
             );
         }
     } else {
-        eprintln!(
-            "[tracedecay] startup user transcript ingest skipped: authoritative user session or registry storage is unavailable"
+        tracing::warn!(
+            "startup user transcript ingest skipped because session or registry storage is unavailable"
         );
     }
     project_outcome.is_success().then_some(db)
@@ -107,9 +106,9 @@ impl McpServer {
             }
             match guard.reopen_for_current_branch().await {
                 Ok(fresh) => {
-                    eprintln!(
-                        "[tracedecay] branch changed to '{}' — reopened the index for it",
-                        fresh.active_branch().unwrap_or("<detached>")
+                    tracing::info!(
+                        branch = fresh.active_branch().unwrap_or("<detached>"),
+                        "reopened index after branch change"
                     );
                     *guard = Arc::new(fresh);
                     let fresh = guard.clone();
@@ -119,10 +118,10 @@ impl McpServer {
                     fresh
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[tracedecay] branch drift detected but reopen failed: {e}; \
-                         continuing to serve branch '{}'",
-                        guard.serving_branch().unwrap_or("<none>")
+                    tracing::warn!(
+                        error = %e,
+                        serving_branch = guard.serving_branch().unwrap_or("<none>"),
+                        "branch drift detected but index reopen failed"
                     );
                     return guard.clone();
                 }
@@ -138,9 +137,9 @@ impl McpServer {
             let mut guard = self.cg.write().await;
             match guard.reopen_for_current_branch().await {
                 Ok(fresh) => {
-                    eprintln!(
-                        "[tracedecay] branch tracking added for '{}' — reopened the index for it",
-                        fresh.active_branch().unwrap_or("<detached>")
+                    tracing::info!(
+                        branch = fresh.active_branch().unwrap_or("<detached>"),
+                        "reopened index after branch tracking was added"
                     );
                     *guard = Arc::new(fresh);
                     let fresh = guard.clone();
@@ -150,10 +149,10 @@ impl McpServer {
                     Some(fresh)
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[tracedecay] hook branch tracking added but reopen failed: {e}; \
-                         continuing to serve branch '{}'",
-                        guard.serving_branch().unwrap_or("<none>")
+                    tracing::warn!(
+                        error = %e,
+                        serving_branch = guard.serving_branch().unwrap_or("<none>"),
+                        "index reopen failed after branch tracking was added"
                     );
                     None
                 }
@@ -193,7 +192,7 @@ impl McpServer {
             }
             Ok(None) => {}
             Err(e) => {
-                eprintln!("[tracedecay] startup catch-up sync failed: {e}");
+                tracing::warn!(error = %e, "startup catch-up sync failed");
                 self.startup_catch_up_done.store(true, Ordering::Release);
                 self.transcript_ingest_done.store(true, Ordering::Release);
                 return;
@@ -368,7 +367,7 @@ impl McpServer {
         if !stale.is_empty()
             && let Err(e) = cg.sync_if_stale_silent(&stale).await
         {
-            eprintln!("[tracedecay] lazy sync failed: {e}");
+            tracing::warn!(error = %e, "lazy sync failed");
             return;
         }
         // Always refresh: a sibling MCP peer may have synced the DB
@@ -455,7 +454,10 @@ impl McpServer {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    eprintln!("[tracedecay] background read refresh could not reopen project: {e}");
+                    tracing::warn!(
+                        error = %e,
+                        "background read refresh could not reopen project"
+                    );
                 }
             }
             done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);

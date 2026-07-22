@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::application::host_admission::{
     HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
@@ -277,6 +278,11 @@ pub struct McpServer {
     /// connections a retained daemon server multiplexes, or across host
     /// restarts against the same persistent receipt store.
     connection_scope_seq: std::sync::atomic::AtomicU64,
+    /// One lazy authenticated application client retained for this server.
+    application_surface_client: tokio::sync::OnceCell<crate::daemon_client::DaemonInvocationClient>,
+    /// Live MCP cancellation tokens keyed by canonical application request id.
+    application_surface_cancellations:
+        std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
 }
 
 impl McpServer {
@@ -624,6 +630,8 @@ impl McpServer {
             // churn) even though the id now lives in `runtime_identity`.
             mcp_instance_id: crate::runtime_identity::process_run_id().to_string(),
             connection_scope_seq: std::sync::atomic::AtomicU64::new(0),
+            application_surface_client: tokio::sync::OnceCell::new(),
+            application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
         });
 
         tokio::task::spawn_blocking(move || {
@@ -842,6 +850,15 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
         Value::Number(id) => Some(id.to_string()),
         _ => None,
     }
+}
+
+fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
+    let id = json_rpc_request_id_string(id)?;
+    let digest = Sha256::digest(id.as_bytes());
+    Some(format!(
+        "request.mcp.{connection_scope}.{}",
+        hex::encode(&digest[..16])
+    ))
 }
 
 fn inject_trusted_memory_request_id(

@@ -42,6 +42,37 @@ parameters). The bundled `using-the-cli` skill and always-applied rule use
 that CLI fallback when MCP transport errors or times out, instead of querying
 `.tracedecay` databases.
 
+## PR13 desktop native diagnostics
+
+Cursor desktop installs the unpacked `tracedecay.cursor-native` VS Code
+extension through TraceDecay's receipt-backed host-component lifecycle. Reload
+Cursor after installation so the extension starts
+`tracedecay lsp bridge --stdio` with `vscode-languageclient`.
+
+The extension forwards bounded native diagnostics only for the single admitted
+workspace folder. It sends URI, document version, range, source, message, and
+safe diagnostic metadata—never document text or arbitrary diagnostic payloads.
+The gateway merges that native upstream lane internally but, in Cursor-native
+mode, publishes only TraceDecay findings back to avoid duplicating Cursor's own
+diagnostics. Multi-root workspaces remain disabled until PR15.
+
+The component is deployed at
+`~/.cursor/extensions/tracedecay.cursor-native-0.0.0/`; its receipt and
+installed manifest/bundle are checked by `tracedecay doctor --agent cursor`.
+TraceDecay does not install or claim ownership of `rust-analyzer`,
+`typescript-language-server`, Pyright, or another language analyzer.
+
+For compiler output Cursor already captured, call `tracedecay_diagnose` first:
+it maps the supplied `cargo`/`clippy` stderr to symbols and callers without
+starting a toolchain. Use `tracedecay_diagnostics` only when fresh structured
+diagnostics are needed; it runs the relevant type checker, so respect Cursor's
+approval/run mode even though the tool does not edit the workspace.
+
+`tracedecay lsp servers [--json]` is the separate PR12 CLI discovery command
+for supported local language servers and install hints. It is informational:
+it does not install or start a server. It is **not** an MCP tool, so do not add
+it (or a wildcard) to `mcpAllowlist`.
+
 For literal strings, regexes, and config keys inside indexed code, use
 `tracedecay_grep`; reserve `tracedecay_search` for symbol names and
 `tracedecay_context` for concept-level discovery.

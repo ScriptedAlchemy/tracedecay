@@ -575,7 +575,7 @@ async fn persist_redundancy_cache(
         .publish_redundancy_cache(&fingerprint_rows, &rows)
         .await
     {
-        eprintln!("[tracedecay] redundancy: atomic cache publication failed: {e}");
+        tracing::warn!(error = %e, "atomic redundancy cache publication failed");
     }
 }
 

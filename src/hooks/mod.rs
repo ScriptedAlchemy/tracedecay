@@ -23,6 +23,9 @@ pub(crate) mod memory_inject;
 mod post_tool_use;
 mod steering;
 pub mod tool_hints;
+mod v2;
+pub(crate) use v2::project_id_for_layout as hook_v2_project_id_for_layout;
+pub(crate) use v2::publish_daemon_bindings as publish_hook_v2_bindings;
 
 pub use claude::{
     claude_session_context_for_event, evaluate_hook_decision, hook_claude_post_tool_use,
@@ -81,6 +84,46 @@ pub(crate) fn aggregate_hook_completed_readiness(
 }
 use tool_hints::{HintAgent, ToolHint};
 
+pub async fn hook_kimi_v2(event_json: &str, project_root: &Path) -> Option<String> {
+    match v2::dispatch(
+        tracedecay_hooks::HookHostV1::KimiCode,
+        event_json,
+        project_root,
+    )
+    .await
+    {
+        v2::HookV2Dispatch::Handled { guidance, .. } => guidance,
+        v2::HookV2Dispatch::NotApplicable => None,
+    }
+}
+
+pub async fn hook_opencode_v2_event(event_json: &str, project_root: &Path) -> Option<String> {
+    match v2::dispatch(
+        tracedecay_hooks::HookHostV1::OpenCode,
+        event_json,
+        project_root,
+    )
+    .await
+    {
+        v2::HookV2Dispatch::Handled { guidance, .. } => guidance,
+        v2::HookV2Dispatch::NotApplicable => None,
+    }
+}
+
+pub async fn hook_opencode_v2_tool_after(event_json: &str, project_root: &Path) -> Option<String> {
+    match v2::dispatch_opencode_tool_after(event_json, project_root).await {
+        v2::HookV2Dispatch::Handled { guidance, .. } => guidance,
+        v2::HookV2Dispatch::NotApplicable => None,
+    }
+}
+
+pub async fn lookup_hook_v2_ready_guidance(
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    project_root: &Path,
+) -> Option<tracedecay_hooks::HookReadyGuidanceV1> {
+    v2::lookup_ready_guidance(envelope, project_root).await
+}
+
 macro_rules! read_hook_event {
     () => {{
         match $crate::hooks::read_stdin_bounded() {
@@ -100,6 +143,50 @@ macro_rules! read_hook_event {
     }};
 }
 pub(crate) use read_hook_event;
+
+pub async fn hook_kimi_event() -> i32 {
+    let event = read_hook_event!();
+    let Some(root) = native_event_project_root(&event).await else {
+        return 0;
+    };
+    if let Some(guidance) = hook_kimi_v2(&event, &root).await {
+        println!("{guidance}");
+    }
+    0
+}
+
+pub async fn hook_opencode_event() -> i32 {
+    let event = read_hook_event!();
+    let Some(root) = native_event_project_root(&event).await else {
+        return 0;
+    };
+    if let Some(guidance) = hook_opencode_v2_event(&event, &root).await {
+        println!("{guidance}");
+    }
+    0
+}
+
+pub async fn hook_opencode_tool_after() -> i32 {
+    let event = read_hook_event!();
+    let Some(root) = native_event_project_root(&event).await else {
+        return 0;
+    };
+    if let Some(guidance) = hook_opencode_v2_tool_after(&event, &root).await {
+        println!("{guidance}");
+    }
+    0
+}
+
+async fn native_event_project_root(event: &str) -> Option<PathBuf> {
+    let parsed = serde_json::from_str::<Value>(event).ok();
+    let start = parsed
+        .as_ref()
+        .and_then(|value| value.get("cwd"))
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())?;
+    crate::config::discover_project_root_with_identity(&start).await
+}
 
 pub(crate) async fn daemon_tool_json(
     project_root: Option<&Path>,
@@ -282,6 +369,18 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         &event_json,
     );
     if let Some(project_root) = project_root.as_ref() {
+        if let v2::HookV2Dispatch::Handled { guidance, .. } = v2::dispatch(
+            tracedecay_hooks::HookHostV1::Hermes,
+            &event_json,
+            project_root,
+        )
+        .await
+        {
+            if let Some(guidance) = guidance {
+                println!("{}", serde_json::json!({ "additional_context": guidance }));
+            }
+            return 0;
+        }
         notify_hook_event_with_telemetry(project_root, event, &hook_telemetry).await;
     } else if let Err(error) = daemon_hook_action(
         None,

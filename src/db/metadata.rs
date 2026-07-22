@@ -31,6 +31,37 @@ impl Database {
         }
     }
 
+    /// Reads a metadata value through an already-open canonical write
+    /// transaction. Compound durable operations use this to keep their
+    /// compare-and-set and metadata update on one writer lane.
+    pub(crate) async fn get_metadata_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        key: &str,
+    ) -> Result<Option<String>> {
+        let mut rows = transaction
+            .query("SELECT value FROM metadata WHERE key = ?1", params![key])
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query transactional metadata: {e}"),
+                operation: "get_metadata_unguarded".to_string(),
+            })?;
+
+        match rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read transactional metadata row: {e}"),
+            operation: "get_metadata_unguarded".to_string(),
+        })? {
+            Some(row) => {
+                let value: String = row.get(0).map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read transactional metadata value: {e}"),
+                    operation: "get_metadata_unguarded".to_string(),
+                })?;
+                Ok(Some(value))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Sets a metadata value, creating or replacing the entry.
     pub async fn set_metadata(&self, key: &str, value: &str) -> Result<()> {
         let transaction = self.begin_write_transaction("set_metadata").await?;

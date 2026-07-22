@@ -58,6 +58,11 @@ impl AgentIntegration for KiloIntegration {
         install_mcp_server(&mcp_path, &ctx.tracedecay_bin)
     }
 
+    fn uninstall_local(&self, _ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        uninstall_mcp_server(&project_path.join("kilo.json"));
+        Ok(())
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let config_path = kilo_config_path(&ctx.home);
         uninstall_mcp_server(&config_path);
@@ -71,6 +76,33 @@ impl AgentIntegration for KiloIntegration {
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKilo CLI integration\x1b[0m");
         doctor_check_settings(dc, &ctx.home);
+    }
+
+    fn host_component_registration(
+        &self,
+        _component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+        let path = kilo_config_path(&ctx.home);
+        let Ok(bytes) = std::fs::read_to_string(path) else {
+            return State::Missing;
+        };
+        let settings = super::parse_jsonc(&bytes);
+        if settings
+            .pointer("/mcp/tracedecay/enabled")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && settings
+                .pointer("/mcp/tracedecay/command")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+        {
+            State::Current
+        } else {
+            State::Missing
+        }
     }
 
     fn is_detected(&self, home: &Path) -> bool {

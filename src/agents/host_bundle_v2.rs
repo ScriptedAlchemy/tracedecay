@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
-use ed25519_dalek::{Signature, VerifyingKey};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,20 +22,30 @@ use tracedecay_domain::canonical_json_bytes;
 
 const HOST_BUNDLE_SCHEMA_VERSION: u16 = 1;
 const MAX_MANIFEST_ARTIFACTS: usize = 128;
+const MAX_HOST_COMPONENTS: usize = 4;
 const MAX_RELATIVE_PATH_BYTES: usize = 512;
 const MAX_IDENTIFIER_BYTES: usize = 128;
-const ED25519_SIGNATURE_BYTES: usize = 64;
 const MAX_ARTIFACT_CONTENT_BYTES: usize = 1024 * 1024;
 const HOST_BUNDLE_RECEIPT_SCHEMA_VERSION: u16 = 1;
 const HOST_BUNDLE_CONTROL_DIR: &str = ".tracedecay-host-bundle-v1";
 const HOST_BUNDLE_JOURNAL_FILE: &str = "journal.v1.json";
+const HOST_COMPONENT_SET_JOURNAL_FILE: &str = "component-set-journal.v1.json";
+const HOST_COMPONENT_SET_STAGE_DIR: &str = "component-set-staging";
 const HOST_BUNDLE_LOCK_FILE: &str = "writer.v1.lock";
 const MAX_CONTROL_FILE_BYTES: usize = 256 * 1024;
 static HOST_BUNDLE_TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
 
-/// Hosts and host surfaces covered by the five-host stock conformance set.
-/// Cursor desktop/cloud remain projections of one Cursor integration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Resolve the lifecycle authority from the active TraceDecay user profile.
+/// Host homes contain deployed artifacts only; receipts, journals, locks, and
+/// rollback backups are owned by this profile-scoped root.
+pub fn resolved_host_bundle_lifecycle_root() -> crate::errors::Result<PathBuf> {
+    Ok(crate::storage::default_profile_root()?.join("host-components"))
+}
+
+/// Hosts and host surfaces covered by the stock conformance set.
+/// Cursor desktop/cloud remain projections of one Cursor integration, while
+/// Cline-family means only versions with an evidenced Cline registration path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostKindV1 {
     ClaudeCode,
@@ -45,12 +54,38 @@ pub enum HostKindV1 {
     Codex,
     Hermes,
     Kiro,
+    ClineFamily,
+    Cline,
+    RooCode,
+    Kilo,
+    KimiCode,
+    OpenCode,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Canonical stock-host enumeration shared by packaging, delivery, and
+/// conformance consumers.
+pub const fn stock_host_kinds() -> [HostKindV1; 12] {
+    [
+        HostKindV1::ClaudeCode,
+        HostKindV1::CursorDesktop,
+        HostKindV1::CursorCloud,
+        HostKindV1::Codex,
+        HostKindV1::Hermes,
+        HostKindV1::Kiro,
+        HostKindV1::ClineFamily,
+        HostKindV1::Cline,
+        HostKindV1::RooCode,
+        HostKindV1::Kilo,
+        HostKindV1::KimiCode,
+        HostKindV1::OpenCode,
+    ]
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostBundleComponentV1 {
     Core,
+    Agent,
     ContextMcp,
     OperatorMcp,
 }
@@ -80,6 +115,8 @@ pub enum HostCapabilityUnavailableReasonV1 {
     HostApiAbsent,
     HostRegistrationUnsupported,
     NativeFixtureLimited,
+    CheckedInEvidenceMissing,
+    CompetingExtensionClaim,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,12 +133,34 @@ pub struct HostCapabilityRecordV1 {
     pub state: HostCapabilityStateV1,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostRegistrationRouteV1 {
+    ClaudeConfiguredLanguageLsp,
+    CursorNativeDiagnostics,
+    OpenCodeCustomLsp,
+    Hook,
+    Mcp,
+    Cli,
+}
+
+/// Evidence behind one stock-host registration route. `starts_analyzer` is
+/// explicit so a projection bridge cannot silently claim or spawn the
+/// language analyzer itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct HostRegistrationEvidenceV1 {
+    pub route: HostRegistrationRouteV1,
+    pub state: HostCapabilityStateV1,
+    pub evidence_ref: &'static str,
+    pub starts_analyzer: bool,
+}
+
 /// Static host-surface facts only. Runtime installation and availability are
 /// observed elsewhere and must not be inferred from this matrix.
 pub fn stock_host_capabilities(host: HostKindV1) -> [HostCapabilityRecordV1; 5] {
     use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
     use HostCapabilityUnavailableReasonV1::{
-        HostApiAbsent, HostRegistrationUnsupported, NativeFixtureLimited,
+        CheckedInEvidenceMissing, HostApiAbsent, HostRegistrationUnsupported, NativeFixtureLimited,
     };
     use HostCapabilityV1::{Cli, Hooks, Lsp, Mcp, NativeDiagnostics};
 
@@ -112,7 +171,12 @@ pub fn stock_host_capabilities(host: HostKindV1) -> [HostCapabilityRecordV1; 5] 
             Supported,
             Supported,
         ),
-        HostKindV1::CursorCloud | HostKindV1::Codex | HostKindV1::Hermes => (
+        HostKindV1::CursorCloud => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
+        ),
+        HostKindV1::Codex | HostKindV1::Hermes => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Supported,
@@ -122,6 +186,17 @@ pub fn stock_host_capabilities(host: HostKindV1) -> [HostCapabilityRecordV1; 5] 
             Unavailable(HostApiAbsent),
             Degraded(NativeFixtureLimited),
         ),
+        HostKindV1::ClineFamily | HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(HostApiAbsent),
+        ),
+        HostKindV1::KimiCode => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Supported,
+        ),
+        HostKindV1::OpenCode => (Supported, Supported, Supported),
     };
     [
         HostCapabilityRecordV1 {
@@ -147,8 +222,339 @@ pub fn stock_host_capabilities(host: HostKindV1) -> [HostCapabilityRecordV1; 5] 
     ]
 }
 
+/// Truthful host registration matrix used by packaging and conformance
+/// consumers. Evidence references are stable repository or host-contract
+/// identifiers, never inferred compatibility claims.
+pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistrationEvidenceV1> {
+    use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
+    use HostCapabilityUnavailableReasonV1::{
+        CheckedInEvidenceMissing, HostApiAbsent, NativeFixtureLimited,
+    };
+    use HostRegistrationRouteV1::{
+        ClaudeConfiguredLanguageLsp, Cli, CursorNativeDiagnostics, Hook, Mcp, OpenCodeCustomLsp,
+    };
+
+    let mut evidence = vec![HostRegistrationEvidenceV1 {
+        route: Cli,
+        state: Supported,
+        evidence_ref: "src/tool_command.rs",
+        starts_analyzer: false,
+    }];
+    match host {
+        HostKindV1::ClaudeCode => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: ClaudeConfiguredLanguageLsp,
+                state: Supported,
+                evidence_ref: "plugin/.lsp.json",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Supported,
+                evidence_ref: "plugin/hooks/hooks-claude.json",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "plugin/.mcp.json",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::CursorDesktop => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: CursorNativeDiagnostics,
+                state: Supported,
+                evidence_ref: "plugin/cursor-native-extension/package.json",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Supported,
+                evidence_ref: "plugin/hooks/hooks-cursor.json",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "plugin/mcp-cursor.json",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::CursorCloud => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Unavailable(CheckedInEvidenceMissing),
+                evidence_ref: "cursor_cloud_native_hook_fixture_absent_v1",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "plugin/mcp-cursor.json",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::Codex => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Supported,
+                evidence_ref: "plugin/hooks/hooks-codex.json",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "plugin/.mcp.json",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::Hermes => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Supported,
+                evidence_ref: "src/agents/hermes/templates.rs",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "src/agents/hermes/profile_config.rs",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::Kiro => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Degraded(NativeFixtureLimited),
+                evidence_ref: "tests/fixtures/host_events/kiro/baseline.json",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "src/agents/kiro.rs",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::ClineFamily => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Unavailable(HostApiAbsent),
+                evidence_ref: "cline_family_hook_evidence_absent_v1",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "cline_user_mcp_settings_v1",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => {
+            let evidence_ref = match host {
+                HostKindV1::Cline => "src/agents/cline.rs",
+                HostKindV1::RooCode => "src/agents/roo_code.rs",
+                HostKindV1::Kilo => "src/agents/kilo.rs",
+                _ => unreachable!(),
+            };
+            evidence.extend([
+                HostRegistrationEvidenceV1 {
+                    route: Hook,
+                    state: Unavailable(CheckedInEvidenceMissing),
+                    evidence_ref: "tests/fixtures/transcript_golden/cline_like/manifest.json",
+                    starts_analyzer: false,
+                },
+                HostRegistrationEvidenceV1 {
+                    route: Mcp,
+                    state: Supported,
+                    evidence_ref,
+                    starts_analyzer: false,
+                },
+            ]);
+        }
+        HostKindV1::KimiCode => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Supported,
+                evidence_ref: "plugin/.kimi-plugin/plugin.json",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "plugin/.kimi-plugin/plugin.json",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::OpenCode => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: OpenCodeCustomLsp,
+                state: Supported,
+                evidence_ref: "src/agents/opencode.rs",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Supported,
+                evidence_ref: "plugin/opencode/tracedecay.ts",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "src/agents/opencode.rs",
+                starts_analyzer: false,
+            },
+        ]),
+    }
+    evidence
+}
+
+/// Source-backed native hook fixture evidence. The fixture digest is computed
+/// from the checked-in bytes; no protocol field or event is synthesized.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HostNativeFixtureEvidenceV1 {
+    pub host: HostKindV1,
+    pub provider: &'static str,
+    pub source_path: &'static str,
+    pub fixture_digest: [u8; 32],
+    pub evidenced_event: &'static str,
+    pub edit: HostCapabilityStateV1,
+    pub stop: HostCapabilityStateV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClineFamilyProviderV1 {
+    Cline,
+    RooCode,
+    Kilo,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ClineFamilyEvidenceV1 {
+    pub provider: ClineFamilyProviderV1,
+    pub registration: HostRegistrationEvidenceV1,
+    pub transcript_manifest_path: &'static str,
+    pub transcript_manifest_digest: [u8; 32],
+    pub edit: HostCapabilityStateV1,
+    pub stop: HostCapabilityStateV1,
+}
+
+pub fn cline_family_evidence(provider: ClineFamilyProviderV1) -> Option<ClineFamilyEvidenceV1> {
+    use HostCapabilityStateV1::{Supported, Unavailable};
+    use HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing;
+
+    let evidence_ref = match provider {
+        ClineFamilyProviderV1::Cline => "src/agents/cline.rs",
+        ClineFamilyProviderV1::RooCode => "src/agents/roo_code.rs",
+        ClineFamilyProviderV1::Kilo => "src/agents/kilo.rs",
+    };
+    let transcript_manifest_path = "tests/fixtures/transcript_golden/cline_like/manifest.json";
+    let manifest =
+        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(transcript_manifest_path)).ok()?;
+    Some(ClineFamilyEvidenceV1 {
+        provider,
+        registration: HostRegistrationEvidenceV1 {
+            route: HostRegistrationRouteV1::Mcp,
+            state: Supported,
+            evidence_ref,
+            starts_analyzer: false,
+        },
+        transcript_manifest_path,
+        transcript_manifest_digest: Sha256::digest(&manifest).into(),
+        edit: Unavailable(CheckedInEvidenceMissing),
+        stop: Unavailable(CheckedInEvidenceMissing),
+    })
+}
+
+/// Consume authoritative checked-in Hook V2 fixtures or source declarations.
+/// A documented-but-not-captured declaration remains degraded rather than
+/// being promoted to native capture evidence.
+pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNativeFixtureEvidenceV1> {
+    use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
+    use HostCapabilityUnavailableReasonV1::{CheckedInEvidenceMissing, NativeFixtureLimited};
+
+    let unavailable = Unavailable(CheckedInEvidenceMissing);
+    let (provider, source_path, evidenced_event, edit, stop) = match host {
+        HostKindV1::ClaudeCode => (
+            "claude",
+            "tests/fixtures/host_events/claude/baseline.json",
+            "SessionStart",
+            unavailable,
+            unavailable,
+        ),
+        HostKindV1::Codex => (
+            "codex",
+            "tests/fixtures/host_events/codex/baseline.json",
+            "SessionStart",
+            unavailable,
+            unavailable,
+        ),
+        HostKindV1::CursorDesktop => (
+            "cursor",
+            "tests/fixtures/host_events/cursor/baseline.json",
+            "sessionStart",
+            unavailable,
+            unavailable,
+        ),
+        HostKindV1::Hermes => (
+            "hermes",
+            "crates/tracedecay-hooks/fixtures/host_events/hermes.json",
+            "post_tool_call,on_session_end",
+            Supported,
+            Supported,
+        ),
+        HostKindV1::Kiro => (
+            "kiro",
+            "tests/fixtures/host_events/kiro/baseline.json",
+            "userPromptSubmit",
+            unavailable,
+            unavailable,
+        ),
+        HostKindV1::OpenCode => (
+            "opencode",
+            "crates/tracedecay-hooks/fixtures/host_events/opencode.json",
+            "file.edited,session.idle",
+            Degraded(NativeFixtureLimited),
+            Degraded(NativeFixtureLimited),
+        ),
+        HostKindV1::CursorCloud
+        | HostKindV1::ClineFamily
+        | HostKindV1::Cline
+        | HostKindV1::RooCode
+        | HostKindV1::Kilo
+        | HostKindV1::KimiCode => return None,
+    };
+    let bytes = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(source_path)).ok()?;
+    Some(HostNativeFixtureEvidenceV1 {
+        host,
+        provider,
+        source_path,
+        fixture_digest: Sha256::digest(&bytes).into(),
+        evidenced_event,
+        edit,
+        stop,
+    })
+}
+
+pub fn native_host_edit_stop_conformance_evidence() -> Vec<HostNativeFixtureEvidenceV1> {
+    [
+        HostKindV1::ClaudeCode,
+        HostKindV1::Codex,
+        HostKindV1::CursorDesktop,
+        HostKindV1::Hermes,
+        HostKindV1::Kiro,
+        HostKindV1::OpenCode,
+    ]
+    .into_iter()
+    .filter_map(stock_host_native_fixture_evidence)
+    .collect()
+}
+
 /// One generated artifact. Contents and credentials never enter the manifest;
-/// the signed digest identifies bytes obtained from the verified bundle.
+/// the content digest identifies bytes compiled into the first-party catalog.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostBundleArtifactV1 {
@@ -157,7 +563,7 @@ pub struct HostBundleArtifactV1 {
     pub ownership_marker: String,
 }
 
-/// Generated signed projection for one host/component. It references the one
+/// Generated first-party projection for one host/component. It references the one
 /// integration/catalog authority and duplicates no workflow semantics.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -172,8 +578,6 @@ pub struct HostBundleManifestV1 {
     pub resolution_provenance_digest: [u8; 32],
     pub protocol_min: u16,
     pub protocol_max: u16,
-    pub signer_key_id: String,
-    pub signature: Vec<u8>,
     pub artifacts: Vec<HostBundleArtifactV1>,
 }
 
@@ -192,10 +596,6 @@ impl HostBundleManifestV1 {
             return Err(HostBundleError::InvalidManifest);
         }
         validate_identifier(&self.configuration_snapshot_id)?;
-        validate_identifier(&self.signer_key_id)?;
-        if self.signature.len() != ED25519_SIGNATURE_BYTES {
-            return Err(HostBundleError::InvalidManifest);
-        }
         if self.artifacts.is_empty() || self.artifacts.len() > MAX_MANIFEST_ARTIFACTS {
             return Err(HostBundleError::InvalidManifest);
         }
@@ -213,10 +613,9 @@ impl HostBundleManifestV1 {
         Ok(())
     }
 
-    /// RFC 8785-style canonical JSON bytes for the detached Ed25519 payload.
-    /// The signature itself is intentionally absent to avoid self-reference.
-    pub fn canonical_signed_bytes(&self) -> Result<Vec<u8>, HostBundleError> {
-        canonical_json_bytes(&HostBundleSignedPayloadV1 {
+    /// Canonical first-party catalog bytes used for content identity.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, HostBundleError> {
+        canonical_json_bytes(&HostBundleCatalogPayloadV1 {
             schema_version: self.schema_version,
             host: self.host,
             component: self.component,
@@ -227,19 +626,18 @@ impl HostBundleManifestV1 {
             resolution_provenance_digest: self.resolution_provenance_digest,
             protocol_min: self.protocol_min,
             protocol_max: self.protocol_max,
-            signer_key_id: &self.signer_key_id,
             artifacts: &self.artifacts,
         })
         .map_err(|_| HostBundleError::CanonicalizationFailed)
     }
 
-    pub fn canonical_signed_digest(&self) -> Result<[u8; 32], HostBundleError> {
-        Ok(Sha256::digest(self.canonical_signed_bytes()?).into())
+    pub fn canonical_digest(&self) -> Result<[u8; 32], HostBundleError> {
+        Ok(Sha256::digest(self.canonical_bytes()?).into())
     }
 }
 
 #[derive(Serialize)]
-struct HostBundleSignedPayloadV1<'a> {
+struct HostBundleCatalogPayloadV1<'a> {
     schema_version: u16,
     host: HostKindV1,
     component: HostBundleComponentV1,
@@ -250,57 +648,12 @@ struct HostBundleSignedPayloadV1<'a> {
     resolution_provenance_digest: [u8; 32],
     protocol_min: u16,
     protocol_max: u16,
-    signer_key_id: &'a str,
     artifacts: &'a [HostBundleArtifactV1],
 }
 
-/// Plan 20 supplies trusted/revocation-checked public keys. Host bundles never
-/// accept a trust root from the bundle being verified.
-pub trait HostBundleTrustResolverV1 {
-    fn resolve_ed25519_public_key(&self, signer_key_id: &str) -> Result<[u8; 32], HostBundleError>;
-}
-
-/// Narrow verifier adapter so a caller can use the real built-in Ed25519
-/// implementation or an approved test adapter without introducing a signing
-/// key into host installation code.
+/// First-party catalog identity verifier.
 pub trait HostBundleVerificationAdapterV1 {
     fn verify_manifest(&self, manifest: &HostBundleManifestV1) -> Result<(), HostBundleError>;
-}
-
-/// Actual JCS/Ed25519 verifier adapter used by production wiring.
-#[derive(Clone, Debug)]
-pub struct JcsEd25519HostBundleVerifierV1<R> {
-    trust_resolver: R,
-}
-
-impl<R> JcsEd25519HostBundleVerifierV1<R> {
-    pub const fn new(trust_resolver: R) -> Self {
-        Self { trust_resolver }
-    }
-}
-
-impl<R: HostBundleTrustResolverV1> HostBundleVerificationAdapterV1
-    for JcsEd25519HostBundleVerifierV1<R>
-{
-    fn verify_manifest(&self, manifest: &HostBundleManifestV1) -> Result<(), HostBundleError> {
-        manifest.validate_structure()?;
-        let public_key = self
-            .trust_resolver
-            .resolve_ed25519_public_key(&manifest.signer_key_id)
-            .map_err(|_| HostBundleError::VerificationFailed)?;
-        let signature: [u8; ED25519_SIGNATURE_BYTES] = manifest
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| HostBundleError::VerificationFailed)?;
-        VerifyingKey::from_bytes(&public_key)
-            .map_err(|_| HostBundleError::VerificationFailed)?
-            .verify_strict(
-                &manifest.canonical_signed_bytes()?,
-                &Signature::from_bytes(&signature),
-            )
-            .map_err(|_| HostBundleError::VerificationFailed)
-    }
 }
 
 /// Verify a signed bundle first, then produce its lifecycle plan. This keeps
@@ -460,8 +813,8 @@ pub enum HostBundleError {
     UnsupportedManifestVersion,
     #[error("bundle manifest is structurally invalid")]
     InvalidManifest,
-    #[error("bundle signature, trust record, or signed digests are invalid")]
-    VerificationFailed,
+    #[error("first-party component identity or content digest is invalid")]
+    CatalogMismatch,
     #[error("bundle signed payload cannot be canonicalized")]
     CanonicalizationFailed,
     #[error("bundle does not address the requested host/component")]
@@ -502,9 +855,7 @@ pub fn require_capability(
     }
 }
 
-/// Verify first, then produce a mutation-only plan. The verifier is the Plan
-/// 20 authority and must check canonical signed bytes, key trust/revocation,
-/// expiry, configuration/provenance digests, and protocol compatibility.
+/// Validate the compiled catalog entry before producing a mutation-only plan.
 pub fn plan_lifecycle_mutation(
     manifest: &HostBundleManifestV1,
     request: &HostBundleLifecycleRequestV1,
@@ -512,7 +863,7 @@ pub fn plan_lifecycle_mutation(
     verify: impl FnOnce(&HostBundleManifestV1) -> Result<(), HostBundleError>,
 ) -> Result<HostBundleMutationPlanV1, HostBundleError> {
     manifest.validate_structure()?;
-    verify(manifest).map_err(|_| HostBundleError::VerificationFailed)?;
+    verify(manifest).map_err(|_| HostBundleError::CatalogMismatch)?;
     if manifest.host != request.expected_host || manifest.component != request.expected_component {
         return Err(HostBundleError::WrongTarget);
     }
@@ -706,7 +1057,7 @@ fn plan_artifact_action(
 /// Bytes obtained from the verified host bundle. They are checked against the
 /// signed artifact digest before any host path is touched and are never copied
 /// into receipts or journals.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostBundleArtifactContentV1 {
     pub relative_path: String,
     pub bytes: Vec<u8>,
@@ -718,6 +1069,73 @@ pub struct HostBundleArtifactContentV1 {
 pub struct HostBundleExecutionRequestV1 {
     pub lifecycle: HostBundleLifecycleRequestV1,
     pub operation_id: [u8; 16],
+}
+
+/// One verified component in the canonical set for a host lifecycle operation.
+/// The content remains outside receipts and journals; it is staged and checked
+/// against the embedded manifest before any host path is changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostComponentSetEntryV1 {
+    pub manifest: HostBundleManifestV1,
+    pub contents: Vec<HostBundleArtifactContentV1>,
+}
+
+/// The complete, host-specific component set that must be committed or rolled
+/// back as one lifecycle boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostComponentSetV1 {
+    pub host: HostKindV1,
+    pub components: Vec<HostComponentSetEntryV1>,
+}
+
+/// Set-level lifecycle authority. Component selection is explicit so a
+/// default install and an explicit `--component` use the same transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostComponentSetLifecycleRequestV1 {
+    pub operation: HostBundleLifecycleOpV1,
+    pub expected_host: HostKindV1,
+    pub expected_components: Vec<HostBundleComponentV1>,
+    pub explicit_confirmation: bool,
+    pub hermes_profile_bindings: u8,
+}
+
+/// One operation id spans every component, registration mutation, receipt,
+/// backup, and recovery record in a component-set transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostComponentSetExecutionRequestV1 {
+    pub lifecycle: HostComponentSetLifecycleRequestV1,
+    pub operation_id: [u8; 16],
+}
+
+/// A third-party host extension claiming a surface TraceDecay would register.
+/// The digest points to bounded discovery evidence; raw host config is never
+/// retained in lifecycle requests or receipts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompetingHostExtensionClaimV1 {
+    pub extension_id: String,
+    pub capability: HostCapabilityV1,
+    pub evidence_digest: [u8; 32],
+}
+
+/// Explicit host-level rollback handoff returned by a dry run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostBundleRollbackSeamV1 {
+    pub operation_id: [u8; 16],
+    pub host: HostKindV1,
+    pub component: HostBundleComponentV1,
+    pub backup_relative_paths: Vec<String>,
+    pub interrupted_recovery_required: bool,
+}
+
+/// Read-only lifecycle result. Producing this value verifies the signed
+/// manifest and exact ownership observations but never opens a writer,
+/// creates a control directory, writes a receipt, or recovers a journal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostBundleLifecyclePreviewV1 {
+    pub plan: HostBundleMutationPlanV1,
+    pub confirmation_required: bool,
+    pub competing_extension_claims: Vec<CompetingHostExtensionClaimV1>,
+    pub rollback: HostBundleRollbackSeamV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -740,6 +1158,82 @@ pub struct HostBundleInstallReceiptV1 {
     pub operation: HostBundleLifecycleOpV1,
     pub manifest_digest: [u8; 32],
     pub artifacts: Vec<HostBundleReceiptArtifactV1>,
+    pub rollback_boundary: HostBundleRollbackBoundaryV1,
+    #[serde(default)]
+    pub rollback_history: Vec<[u8; 16]>,
+}
+
+/// Durable aggregate commit marker for a complete host component set. The
+/// individual component receipts remain the Doctor API; this receipt only
+/// binds them to their common atomic operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostComponentSetReceiptV1 {
+    pub schema_version: u16,
+    pub operation_id: [u8; 16],
+    pub host: HostKindV1,
+    pub operation: HostBundleLifecycleOpV1,
+    pub component_manifests: Vec<HostBundleManifestV1>,
+    pub component_receipts: Vec<HostBundleInstallReceiptV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBundleRollbackBoundaryV1 {
+    Pending,
+    Passed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBundleRegistrationStateV1 {
+    Current,
+    Repairable,
+    Missing,
+    Corrupt,
+}
+
+pub trait HostBundleRegistrationInspectorV1 {
+    fn inspect_registration(
+        &self,
+        host: HostKindV1,
+        component: HostBundleComponentV1,
+    ) -> HostBundleRegistrationStateV1;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBundleComponentDoctorStateV1 {
+    Current,
+    Repairable,
+    OwnershipConflict,
+    Missing,
+    Corrupt,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HostBundleArtifactDoctorResultV1 {
+    pub relative_path: String,
+    pub expected_digest: [u8; 32],
+    pub observed_digest: Option<[u8; 32]>,
+    pub ownership_marker: String,
+    pub state: HostBundleComponentDoctorStateV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HostBundleComponentDoctorResultV1 {
+    pub receipt_path: PathBuf,
+    pub host: Option<HostKindV1>,
+    pub component: Option<HostBundleComponentV1>,
+    pub state: HostBundleComponentDoctorStateV1,
+    pub registration: Option<HostBundleRegistrationStateV1>,
+    pub artifacts: Vec<HostBundleArtifactDoctorResultV1>,
+    pub repair_action: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct HostBundleDoctorReportV1 {
+    pub components: Vec<HostBundleComponentDoctorResultV1>,
 }
 
 /// Injected lifecycle storage boundary. The concrete no-follow writer below
@@ -757,9 +1251,96 @@ pub trait HostBundleLifecycleStorageV1 {
     ) -> Result<HostBundleInstallReceiptV1, HostBundleError>;
 }
 
+/// Host-native registration boundary coordinated with an artifact component
+/// set. Implementations persist their own bounded registration backups during
+/// `stage`; the aggregate writer records the state transition in its recovery
+/// journal and invokes these hooks in reverse on failure or restart.
+pub trait HostComponentSetRegistrationV1 {
+    fn preflight(
+        &mut self,
+        _component_set: &HostComponentSetV1,
+        _request: &HostComponentSetExecutionRequestV1,
+    ) -> Result<(), HostBundleError> {
+        Ok(())
+    }
+
+    fn stage(
+        &mut self,
+        _component_set: &HostComponentSetV1,
+        _request: &HostComponentSetExecutionRequestV1,
+    ) -> Result<(), HostBundleError> {
+        Ok(())
+    }
+
+    fn apply(
+        &mut self,
+        _component_set: &HostComponentSetV1,
+        _request: &HostComponentSetExecutionRequestV1,
+    ) -> Result<(), HostBundleError> {
+        Ok(())
+    }
+
+    fn verify(
+        &mut self,
+        _component_set: &HostComponentSetV1,
+        _request: &HostComponentSetExecutionRequestV1,
+    ) -> Result<(), HostBundleError> {
+        Ok(())
+    }
+
+    fn commit(
+        &mut self,
+        _component_set: &HostComponentSetV1,
+        _request: &HostComponentSetExecutionRequestV1,
+    ) -> Result<(), HostBundleError> {
+        Ok(())
+    }
+
+    fn rollback(
+        &mut self,
+        _component_set: &HostComponentSetV1,
+        _request: &HostComponentSetExecutionRequestV1,
+    ) -> Result<(), HostBundleError> {
+        Ok(())
+    }
+}
+
+/// Public component-set lifecycle façade over the capability-rooted writer.
+/// It keeps the existing per-component receipt API intact while ensuring the
+/// default host lifecycle has one aggregate recovery boundary.
+pub struct HostComponentSetTransactionV1<'a> {
+    writer: &'a mut HostBundleWriterV1,
+}
+
+impl<'a> HostComponentSetTransactionV1<'a> {
+    pub fn new(writer: &'a mut HostBundleWriterV1) -> Self {
+        Self { writer }
+    }
+
+    pub fn recover<R: HostComponentSetRegistrationV1>(
+        &mut self,
+        registration: &mut R,
+    ) -> Result<(), HostBundleError> {
+        self.writer.recover_component_set_operation(registration)?;
+        self.writer.recover_interrupted_operation()
+    }
+
+    pub fn execute<V: HostBundleVerificationAdapterV1, R: HostComponentSetRegistrationV1>(
+        &mut self,
+        component_set: &HostComponentSetV1,
+        request: &HostComponentSetExecutionRequestV1,
+        verifier: &V,
+        registration: &mut R,
+    ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
+        self.recover(registration)?;
+        self.writer
+            .execute_component_set(component_set, request, verifier, registration)
+    }
+}
+
 /// Production-composition seam for independently injected cryptographic and
 /// filesystem authorities. It verifies before it asks storage to recover or
-/// mutate, so a bad signature cannot trigger a lifecycle filesystem attempt.
+/// mutate, so an incompatible catalog entry cannot trigger filesystem access.
 pub struct HostBundleLifecycleRuntimeV1<V, S> {
     verifier: V,
     storage: S,
@@ -780,6 +1361,58 @@ where
     V: HostBundleVerificationAdapterV1,
     S: HostBundleLifecycleStorageV1,
 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn dry_run(
+        &self,
+        manifest: &HostBundleManifestV1,
+        request: &HostBundleExecutionRequestV1,
+        manifest_observed: &[ObservedHostArtifactV1],
+        owned_receipt: Option<&HostBundleInstallReceiptV1>,
+        orphan_observed: &[ObservedHostArtifactV1],
+        competing_extension_claims: &[CompetingHostExtensionClaimV1],
+    ) -> Result<HostBundleLifecyclePreviewV1, HostBundleError> {
+        if request.operation_id == [0; 16] {
+            return Err(HostBundleError::InvalidManifest);
+        }
+        validate_competing_extension_claims(competing_extension_claims)?;
+        self.verifier.verify_manifest(manifest)?;
+        let mut planning_request = request.lifecycle.clone();
+        planning_request.explicit_confirmation = true;
+        let plan = plan_verified_complete_lifecycle_mutation(
+            manifest,
+            &planning_request,
+            manifest_observed,
+            owned_receipt,
+            orphan_observed,
+            &self.verifier,
+        )?;
+        let backup_relative_paths = plan
+            .mutations
+            .iter()
+            .filter(|mutation| {
+                matches!(
+                    mutation.action,
+                    HostArtifactActionV1::BackupThenReplace
+                        | HostArtifactActionV1::BackupThenRemove
+                )
+            })
+            .map(|mutation| mutation.relative_path.clone())
+            .collect();
+        Ok(HostBundleLifecyclePreviewV1 {
+            confirmation_required: !request.lifecycle.explicit_confirmation
+                || !competing_extension_claims.is_empty(),
+            competing_extension_claims: competing_extension_claims.to_vec(),
+            rollback: HostBundleRollbackSeamV1 {
+                operation_id: request.operation_id,
+                host: manifest.host,
+                component: manifest.component,
+                backup_relative_paths,
+                interrupted_recovery_required: plan.rollback_required,
+            },
+            plan,
+        })
+    }
+
     pub fn recover(&mut self) -> Result<(), HostBundleError> {
         self.storage.recover_lifecycle()
     }
@@ -795,6 +1428,811 @@ where
         self.storage
             .execute_lifecycle(manifest, request, contents, &self.verifier)
     }
+
+    pub fn execute_confirmed(
+        &mut self,
+        manifest: &HostBundleManifestV1,
+        request: &HostBundleExecutionRequestV1,
+        contents: &[HostBundleArtifactContentV1],
+        competing_extension_claims: &[CompetingHostExtensionClaimV1],
+    ) -> Result<HostBundleInstallReceiptV1, HostBundleError> {
+        validate_competing_extension_claims(competing_extension_claims)?;
+        if !competing_extension_claims.is_empty() && !request.lifecycle.explicit_confirmation {
+            return Err(HostBundleError::ConfirmationRequired);
+        }
+        self.execute(manifest, request, contents)
+    }
+}
+
+/// Read-only host-root preview used by the official CLI. It verifies the
+/// manifest, reads existing receipts and artifact digests, and produces the
+/// same immutable plan as apply without creating control files, backups, or
+/// directories and without recovering an interrupted journal.
+pub fn dry_run_host_bundle_lifecycle_at(
+    root: &Path,
+    manifest: &HostBundleManifestV1,
+    request: &HostBundleExecutionRequestV1,
+    verifier: &impl HostBundleVerificationAdapterV1,
+    competing_extension_claims: &[CompetingHostExtensionClaimV1],
+) -> Result<HostBundleLifecyclePreviewV1, HostBundleError> {
+    dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
+        root,
+        root,
+        manifest,
+        request,
+        verifier,
+        competing_extension_claims,
+    )
+}
+
+pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
+    artifact_root: &Path,
+    lifecycle_root: &Path,
+    manifest: &HostBundleManifestV1,
+    request: &HostBundleExecutionRequestV1,
+    verifier: &impl HostBundleVerificationAdapterV1,
+    competing_extension_claims: &[CompetingHostExtensionClaimV1],
+) -> Result<HostBundleLifecyclePreviewV1, HostBundleError> {
+    if request.operation_id == [0; 16] {
+        return Err(HostBundleError::InvalidManifest);
+    }
+    validate_competing_extension_claims(competing_extension_claims)?;
+    verifier.verify_manifest(manifest)?;
+    let previous_receipt = read_receipt_at(lifecycle_root, manifest.host, manifest.component)?;
+    let owned_receipt = previous_receipt
+        .as_ref()
+        .filter(|receipt| receipt.operation != HostBundleLifecycleOpV1::Uninstall);
+    let manifest_observed = if request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall {
+        Vec::new()
+    } else {
+        manifest
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                let owned = owned_receipt.and_then(|receipt| {
+                    receipt
+                        .artifacts
+                        .iter()
+                        .find(|owned| owned.relative_path == artifact.relative_path)
+                });
+                observe_artifact_at(
+                    artifact_root,
+                    &artifact.relative_path,
+                    owned.map(|owned| owned.ownership_marker.clone()),
+                    owned.map(|owned| owned.artifact_digest),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let orphan_observed = if matches!(
+        request.lifecycle.operation,
+        HostBundleLifecycleOpV1::Update
+            | HostBundleLifecycleOpV1::Repair
+            | HostBundleLifecycleOpV1::Uninstall
+    ) {
+        owned_receipt
+            .into_iter()
+            .flat_map(|receipt| &receipt.artifacts)
+            .filter(|owned| {
+                request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall
+                    || !manifest
+                        .artifacts
+                        .iter()
+                        .any(|artifact| artifact.relative_path == owned.relative_path)
+            })
+            .map(|owned| {
+                observe_artifact_at(
+                    artifact_root,
+                    &owned.relative_path,
+                    Some(owned.ownership_marker.clone()),
+                    Some(owned.artifact_digest),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    let mut planning_request = request.lifecycle.clone();
+    planning_request.explicit_confirmation = true;
+    let plan = plan_verified_complete_lifecycle_mutation(
+        manifest,
+        &planning_request,
+        &manifest_observed,
+        owned_receipt,
+        &orphan_observed,
+        verifier,
+    )?;
+    let backup_relative_paths = plan
+        .mutations
+        .iter()
+        .filter(|mutation| {
+            matches!(
+                mutation.action,
+                HostArtifactActionV1::BackupThenReplace | HostArtifactActionV1::BackupThenRemove
+            )
+        })
+        .map(|mutation| mutation.relative_path.clone())
+        .collect();
+    Ok(HostBundleLifecyclePreviewV1 {
+        confirmation_required: !request.lifecycle.explicit_confirmation
+            || !competing_extension_claims.is_empty(),
+        competing_extension_claims: competing_extension_claims.to_vec(),
+        rollback: HostBundleRollbackSeamV1 {
+            operation_id: request.operation_id,
+            host: manifest.host,
+            component: manifest.component,
+            backup_relative_paths,
+            interrupted_recovery_required: plan.rollback_required,
+        },
+        plan,
+    })
+}
+
+pub fn inspect_installed_host_bundle_components_at(
+    artifact_root: &Path,
+    lifecycle_root: &Path,
+    registrations: &impl HostBundleRegistrationInspectorV1,
+) -> Result<HostBundleDoctorReportV1, HostBundleError> {
+    match fs::symlink_metadata(lifecycle_root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(HostBundleDoctorReportV1::default());
+        }
+        Err(_) => return Err(HostBundleError::StorageFailure),
+    }
+    let control_root = lifecycle_root.join(HOST_BUNDLE_CONTROL_DIR);
+    match fs::symlink_metadata(&control_root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(HostBundleDoctorReportV1::default());
+        }
+        Err(_) => return Err(HostBundleError::StorageFailure),
+    }
+    let entries = match fs::read_dir(&control_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(HostBundleDoctorReportV1::default());
+        }
+        Err(_) => return Err(HostBundleError::StorageFailure),
+    };
+    let mut receipt_paths = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("receipt.") && name.ends_with(".v1.json"))
+        })
+        .collect::<Vec<_>>();
+    receipt_paths.sort();
+
+    let mut components = Vec::with_capacity(receipt_paths.len());
+    for receipt_path in receipt_paths {
+        let receipt_identity = receipt_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(receipt_identity_from_file_name);
+        let bytes = match fs::read(&receipt_path) {
+            Ok(bytes) if !bytes.is_empty() && bytes.len() <= MAX_CONTROL_FILE_BYTES => bytes,
+            _ => {
+                components.push(corrupt_component_result(
+                    receipt_path,
+                    receipt_identity.map(|identity| identity.0),
+                    receipt_identity.map(|identity| identity.1),
+                ));
+                continue;
+            }
+        };
+        let receipt = match serde_json::from_slice::<HostBundleInstallReceiptV1>(&bytes) {
+            Ok(receipt) => receipt,
+            Err(_) => {
+                components.push(corrupt_component_result(
+                    receipt_path,
+                    receipt_identity.map(|identity| identity.0),
+                    receipt_identity.map(|identity| identity.1),
+                ));
+                continue;
+            }
+        };
+        if validate_receipt(&receipt).is_err() {
+            components.push(corrupt_component_result(
+                receipt_path,
+                Some(receipt.host),
+                Some(receipt.component),
+            ));
+            continue;
+        }
+        let expected_file = receipt_file(receipt.host, receipt.component);
+        if receipt_path.file_name().and_then(|name| name.to_str()) != Some(expected_file.as_str()) {
+            components.push(corrupt_component_result(
+                receipt_path,
+                Some(receipt.host),
+                Some(receipt.component),
+            ));
+            continue;
+        }
+        if receipt.operation == HostBundleLifecycleOpV1::Uninstall {
+            continue;
+        }
+
+        let catalog_current = crate::agents::host_bundle_registry::verified_embedded_host_bundle(
+            receipt.host,
+            receipt.component,
+            0,
+        )
+        .ok()
+        .is_none_or(|bundle| {
+            bundle.manifest.canonical_digest() == Ok(receipt.manifest_digest)
+                && receipt.artifacts.len() == bundle.manifest.artifacts.len()
+                && receipt.artifacts.iter().all(|artifact| {
+                    bundle.manifest.artifacts.iter().any(|expected| {
+                        artifact.relative_path == expected.relative_path
+                            && artifact.artifact_digest == expected.artifact_digest
+                            && artifact.ownership_marker == expected.ownership_marker
+                    })
+                })
+        });
+        let registration = registrations.inspect_registration(receipt.host, receipt.component);
+        let mut artifacts = Vec::with_capacity(receipt.artifacts.len());
+        for artifact in &receipt.artifacts {
+            let observed = observe_artifact_at(
+                artifact_root,
+                &artifact.relative_path,
+                Some(artifact.ownership_marker.clone()),
+                Some(artifact.artifact_digest),
+            );
+            let (observed_digest, state) = match observed {
+                Ok(observed) if observed.kind == ObservedArtifactKindV1::Missing => {
+                    (None, HostBundleComponentDoctorStateV1::Missing)
+                }
+                Ok(observed) if observed.kind != ObservedArtifactKindV1::RegularFile => (
+                    observed.artifact_digest,
+                    HostBundleComponentDoctorStateV1::Corrupt,
+                ),
+                Ok(observed) if observed.artifact_digest == Some(artifact.artifact_digest) => (
+                    observed.artifact_digest,
+                    HostBundleComponentDoctorStateV1::Current,
+                ),
+                Ok(observed) => (
+                    observed.artifact_digest,
+                    HostBundleComponentDoctorStateV1::OwnershipConflict,
+                ),
+                Err(_) => (None, HostBundleComponentDoctorStateV1::Corrupt),
+            };
+            artifacts.push(HostBundleArtifactDoctorResultV1 {
+                relative_path: artifact.relative_path.clone(),
+                expected_digest: artifact.artifact_digest,
+                observed_digest,
+                ownership_marker: artifact.ownership_marker.clone(),
+                state,
+            });
+        }
+        let state = if receipt.rollback_boundary != HostBundleRollbackBoundaryV1::Passed {
+            HostBundleComponentDoctorStateV1::Corrupt
+        } else if artifacts
+            .iter()
+            .any(|artifact| artifact.state == HostBundleComponentDoctorStateV1::Corrupt)
+        {
+            HostBundleComponentDoctorStateV1::Corrupt
+        } else if artifacts
+            .iter()
+            .any(|artifact| artifact.state == HostBundleComponentDoctorStateV1::OwnershipConflict)
+        {
+            HostBundleComponentDoctorStateV1::OwnershipConflict
+        } else if artifacts
+            .iter()
+            .any(|artifact| artifact.state == HostBundleComponentDoctorStateV1::Missing)
+        {
+            HostBundleComponentDoctorStateV1::Missing
+        } else if !catalog_current {
+            HostBundleComponentDoctorStateV1::Repairable
+        } else {
+            match registration {
+                HostBundleRegistrationStateV1::Current => HostBundleComponentDoctorStateV1::Current,
+                HostBundleRegistrationStateV1::Repairable
+                | HostBundleRegistrationStateV1::Missing => {
+                    HostBundleComponentDoctorStateV1::Repairable
+                }
+                HostBundleRegistrationStateV1::Corrupt => HostBundleComponentDoctorStateV1::Corrupt,
+            }
+        };
+        components.push(HostBundleComponentDoctorResultV1 {
+            receipt_path,
+            host: Some(receipt.host),
+            component: Some(receipt.component),
+            state,
+            registration: Some(registration),
+            artifacts,
+            repair_action: repair_action(receipt.host, receipt.component, state, registration),
+        });
+    }
+    let journal_path = control_root.join(HOST_BUNDLE_JOURNAL_FILE);
+    if journal_path.exists() {
+        let journal = fs::read(&journal_path)
+            .ok()
+            .filter(|bytes| !bytes.is_empty() && bytes.len() <= MAX_CONTROL_FILE_BYTES)
+            .and_then(|bytes| serde_json::from_slice::<HostBundleJournalV1>(&bytes).ok())
+            .filter(|journal| validate_journal(journal).is_ok());
+        match journal {
+            Some(journal) => {
+                if let Some(component) = components.iter_mut().find(|component| {
+                    component.host == Some(journal.host)
+                        && component.component == Some(journal.component)
+                }) {
+                    component.state = HostBundleComponentDoctorStateV1::Repairable;
+                    component.repair_action = repair_action(
+                        journal.host,
+                        journal.component,
+                        HostBundleComponentDoctorStateV1::Repairable,
+                        HostBundleRegistrationStateV1::Current,
+                    );
+                } else {
+                    components.push(HostBundleComponentDoctorResultV1 {
+                        receipt_path: journal_path.clone(),
+                        host: Some(journal.host),
+                        component: Some(journal.component),
+                        state: HostBundleComponentDoctorStateV1::Repairable,
+                        registration: None,
+                        artifacts: Vec::new(),
+                        repair_action: repair_action(
+                            journal.host,
+                            journal.component,
+                            HostBundleComponentDoctorStateV1::Repairable,
+                            HostBundleRegistrationStateV1::Current,
+                        ),
+                    });
+                }
+            }
+            None => components.push(corrupt_component_result(journal_path, None, None)),
+        }
+    }
+    let component_set_journal_path = control_root.join(HOST_COMPONENT_SET_JOURNAL_FILE);
+    if component_set_journal_path.exists() {
+        let journal = fs::read(&component_set_journal_path)
+            .ok()
+            .filter(|bytes| !bytes.is_empty() && bytes.len() <= MAX_CONTROL_FILE_BYTES)
+            .and_then(|bytes| serde_json::from_slice::<HostComponentSetJournalV1>(&bytes).ok())
+            .filter(|journal| validate_component_set_journal(journal).is_ok());
+        match journal {
+            Some(journal) => {
+                for set_component in journal.components {
+                    let host = set_component.manifest.host;
+                    let component = set_component.manifest.component;
+                    if let Some(result) = components.iter_mut().find(|result| {
+                        result.host == Some(host) && result.component == Some(component)
+                    }) {
+                        result.state = HostBundleComponentDoctorStateV1::Repairable;
+                        result.repair_action = repair_action(
+                            host,
+                            component,
+                            HostBundleComponentDoctorStateV1::Repairable,
+                            HostBundleRegistrationStateV1::Current,
+                        );
+                    } else {
+                        components.push(HostBundleComponentDoctorResultV1 {
+                            receipt_path: component_set_journal_path.clone(),
+                            host: Some(host),
+                            component: Some(component),
+                            state: HostBundleComponentDoctorStateV1::Repairable,
+                            registration: None,
+                            artifacts: Vec::new(),
+                            repair_action: repair_action(
+                                host,
+                                component,
+                                HostBundleComponentDoctorStateV1::Repairable,
+                                HostBundleRegistrationStateV1::Current,
+                            ),
+                        });
+                    }
+                }
+            }
+            None => components.push(corrupt_component_result(
+                component_set_journal_path,
+                None,
+                None,
+            )),
+        }
+    }
+    for entry in fs::read_dir(&control_root)
+        .map_err(|_| HostBundleError::StorageFailure)?
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("feedback-rollback.") || !name.ends_with(".v1.json") {
+            continue;
+        }
+        let Some(value) = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        else {
+            components.push(corrupt_component_result(path, None, None));
+            continue;
+        };
+        if value.get("status").and_then(serde_json::Value::as_str) == Some("restored") {
+            continue;
+        }
+        let Some(host) = value
+            .get("host")
+            .cloned()
+            .and_then(|host| serde_json::from_value::<HostKindV1>(host).ok())
+        else {
+            components.push(corrupt_component_result(path, None, None));
+            continue;
+        };
+        let state_path = value
+            .get("state_path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<state-path>");
+        let restore_action = format!(
+            "run `tracedecay feedback-rollback restore --state {} --yes` for {}",
+            state_path,
+            host_cli_id(host)
+        );
+        let component = HostBundleComponentV1::Core;
+        if let Some(result) = components
+            .iter_mut()
+            .find(|result| result.host == Some(host) && result.component == Some(component))
+        {
+            result.state = HostBundleComponentDoctorStateV1::Repairable;
+            result.receipt_path = path.clone();
+            result.repair_action = restore_action.clone();
+        } else {
+            components.push(HostBundleComponentDoctorResultV1 {
+                receipt_path: path,
+                host: Some(host),
+                component: Some(component),
+                state: HostBundleComponentDoctorStateV1::Repairable,
+                registration: None,
+                artifacts: Vec::new(),
+                repair_action: restore_action,
+            });
+        }
+    }
+    Ok(HostBundleDoctorReportV1 { components })
+}
+
+/// Load the newest durable aggregate receipt for one host. This is used by
+/// the official feedback rollback CLI to bind the currently installed route
+/// to a compiled target without accepting an external bundle.
+pub fn latest_host_component_set_receipt_at(
+    lifecycle_root: &Path,
+    host: HostKindV1,
+) -> Result<Option<HostComponentSetReceiptV1>, HostBundleError> {
+    let control_root = lifecycle_root.join(HOST_BUNDLE_CONTROL_DIR);
+    let entries = match fs::read_dir(&control_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(HostBundleError::StorageFailure),
+    };
+    let mut latest: Option<(std::time::SystemTime, HostComponentSetReceiptV1)> = None;
+    for entry in entries {
+        let entry = entry.map_err(|_| HostBundleError::StorageFailure)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("component-set-receipt.") || !name.ends_with(".v1.json") {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|_| HostBundleError::StorageFailure)?;
+        if !metadata.is_file() || metadata.len() > MAX_CONTROL_FILE_BYTES as u64 {
+            continue;
+        }
+        let bytes = fs::read(entry.path()).map_err(|_| HostBundleError::StorageFailure)?;
+        let Ok(receipt) = serde_json::from_slice::<HostComponentSetReceiptV1>(&bytes) else {
+            continue;
+        };
+        if receipt.host != host
+            || receipt.operation == HostBundleLifecycleOpV1::Uninstall
+            || validate_component_set_receipt(&receipt).is_err()
+        {
+            continue;
+        }
+        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+        if latest
+            .as_ref()
+            .is_none_or(|(current, _)| modified > *current)
+        {
+            latest = Some((modified, receipt));
+        }
+    }
+    Ok(latest.map(|(_, receipt)| receipt))
+}
+
+fn corrupt_component_result(
+    receipt_path: PathBuf,
+    host: Option<HostKindV1>,
+    component: Option<HostBundleComponentV1>,
+) -> HostBundleComponentDoctorResultV1 {
+    let repair_action = match (host, component) {
+        (Some(host), Some(component)) => format!(
+            "remove the corrupt receipt {}, then run `tracedecay install --agent {} --component {} --yes`",
+            receipt_path.display(),
+            host_cli_id(host),
+            component_slug(component)
+        ),
+        _ => format!(
+            "quarantine the unidentifiable corrupt receipt {} and reinstall its owning host component",
+            receipt_path.display()
+        ),
+    };
+    HostBundleComponentDoctorResultV1 {
+        repair_action,
+        receipt_path,
+        host,
+        component,
+        state: HostBundleComponentDoctorStateV1::Corrupt,
+        registration: None,
+        artifacts: Vec::new(),
+    }
+}
+
+fn repair_action(
+    host: HostKindV1,
+    component: HostBundleComponentV1,
+    state: HostBundleComponentDoctorStateV1,
+    registration: HostBundleRegistrationStateV1,
+) -> String {
+    let component = component_slug(component);
+    let host = host_cli_id(host);
+    match state {
+        HostBundleComponentDoctorStateV1::Current => "none".to_string(),
+        HostBundleComponentDoctorStateV1::Repairable
+            if registration != HostBundleRegistrationStateV1::Current =>
+        {
+            format!("run `tracedecay install --agent {host}`")
+        }
+        HostBundleComponentDoctorStateV1::OwnershipConflict => format!(
+            "resolve the foreign or modified files for {host}/{component}, then run `tracedecay reinstall --component {component} --yes`"
+        ),
+        HostBundleComponentDoctorStateV1::Repairable
+        | HostBundleComponentDoctorStateV1::Missing
+        | HostBundleComponentDoctorStateV1::Corrupt => {
+            format!("run `tracedecay reinstall --component {component} --yes`")
+        }
+    }
+}
+
+fn host_cli_id(host: HostKindV1) -> &'static str {
+    match host {
+        HostKindV1::ClaudeCode => "claude",
+        HostKindV1::CursorDesktop | HostKindV1::CursorCloud => "cursor",
+        HostKindV1::Codex => "codex",
+        HostKindV1::Hermes => "hermes",
+        HostKindV1::Kiro => "kiro",
+        HostKindV1::ClineFamily => "cline",
+        HostKindV1::Cline => "cline",
+        HostKindV1::RooCode => "roo-code",
+        HostKindV1::Kilo => "kilo",
+        HostKindV1::KimiCode => "kimi",
+        HostKindV1::OpenCode => "opencode",
+    }
+}
+
+fn read_receipt_at(
+    root: &Path,
+    host: HostKindV1,
+    component: HostBundleComponentV1,
+) -> Result<Option<HostBundleInstallReceiptV1>, HostBundleError> {
+    match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(HostBundleError::StorageFailure),
+    }
+    let relative = Path::new(HOST_BUNDLE_CONTROL_DIR).join(receipt_file(host, component));
+    let path = inspect_install_target(root, &relative)?;
+    let bytes = match fs::read(&path) {
+        Ok(bytes) if bytes.len() <= MAX_CONTROL_FILE_BYTES => bytes,
+        Ok(_) => return Err(HostBundleError::ReceiptCorrupted),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(HostBundleError::StorageFailure),
+    };
+    let receipt = serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)?;
+    validate_receipt(&receipt)?;
+    if receipt.host != host || receipt.component != component {
+        return Err(HostBundleError::ReceiptCorrupted);
+    }
+    Ok(Some(receipt))
+}
+
+fn observe_artifact_at(
+    root: &Path,
+    relative_path: &str,
+    ownership_marker: Option<String>,
+    owned_artifact_digest: Option<[u8; 32]>,
+) -> Result<ObservedHostArtifactV1, HostBundleError> {
+    let path = inspect_install_target(root, Path::new(relative_path))?;
+    let (kind, artifact_digest) = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {
+            if metadata.len() > MAX_ARTIFACT_CONTENT_BYTES as u64 {
+                return Err(HostBundleError::ArtifactContentMismatch);
+            }
+            let bytes = fs::read(&path).map_err(|_| HostBundleError::StorageFailure)?;
+            (
+                ObservedArtifactKindV1::RegularFile,
+                Some(Sha256::digest(&bytes).into()),
+            )
+        }
+        Ok(metadata) if metadata.is_dir() => (ObservedArtifactKindV1::Directory, None),
+        Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            (ObservedArtifactKindV1::Missing, None)
+        }
+        Err(_) => return Err(HostBundleError::StorageFailure),
+    };
+    Ok(ObservedHostArtifactV1 {
+        relative_path: relative_path.to_string(),
+        kind,
+        artifact_digest,
+        ownership_marker,
+        owned_artifact_digest,
+    })
+}
+
+fn validate_competing_extension_claims(
+    claims: &[CompetingHostExtensionClaimV1],
+) -> Result<(), HostBundleError> {
+    for (index, claim) in claims.iter().enumerate() {
+        validate_identifier(&claim.extension_id)?;
+        if claim.evidence_digest == [0; 32]
+            || claims[..index]
+                .iter()
+                .any(|existing| existing.extension_id == claim.extension_id)
+        {
+            return Err(HostBundleError::InvalidObservedState);
+        }
+    }
+    Ok(())
+}
+
+/// Durable evidence that one host's feedback path moved from a previously
+/// signed core bundle to a newly signed core bundle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackPathRollbackReceiptV1 {
+    pub host: HostKindV1,
+    pub previous_manifest_digest: [u8; 32],
+    pub applied_manifest_digest: [u8; 32],
+    pub apply_receipt: HostBundleInstallReceiptV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackPathRestoreReceiptV1 {
+    pub switch_operation_id: [u8; 16],
+    pub restore_receipt: HostBundleInstallReceiptV1,
+}
+
+/// Concrete feedback rollback switch backed by the same signed, receipt-based,
+/// atomic host-bundle lifecycle as install/update/repair/uninstall. It owns no
+/// host-local scorer, scheduler, store, or feedback business logic.
+pub struct FeedbackPathRollbackSwitchV1<V, S> {
+    lifecycle: HostBundleLifecycleRuntimeV1<V, S>,
+}
+
+impl<V, S> FeedbackPathRollbackSwitchV1<V, S> {
+    pub fn new(lifecycle: HostBundleLifecycleRuntimeV1<V, S>) -> Self {
+        Self { lifecycle }
+    }
+
+    pub fn into_lifecycle(self) -> HostBundleLifecycleRuntimeV1<V, S> {
+        self.lifecycle
+    }
+}
+
+impl<V, S> FeedbackPathRollbackSwitchV1<V, S>
+where
+    V: HostBundleVerificationAdapterV1,
+    S: HostBundleLifecycleStorageV1,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub fn feedback_rollback_switch_dry_run(
+        &self,
+        previous_manifest: &HostBundleManifestV1,
+        target_manifest: &HostBundleManifestV1,
+        request: &HostBundleExecutionRequestV1,
+        manifest_observed: &[ObservedHostArtifactV1],
+        owned_receipt: Option<&HostBundleInstallReceiptV1>,
+        orphan_observed: &[ObservedHostArtifactV1],
+        competing_extension_claims: &[CompetingHostExtensionClaimV1],
+    ) -> Result<HostBundleLifecyclePreviewV1, HostBundleError> {
+        validate_feedback_switch_manifests(previous_manifest, target_manifest)?;
+        self.lifecycle.verifier.verify_manifest(previous_manifest)?;
+        self.lifecycle.dry_run(
+            target_manifest,
+            request,
+            manifest_observed,
+            owned_receipt,
+            orphan_observed,
+            competing_extension_claims,
+        )
+    }
+
+    pub fn feedback_rollback_switch_apply(
+        &mut self,
+        previous_manifest: &HostBundleManifestV1,
+        target_manifest: &HostBundleManifestV1,
+        request: &HostBundleExecutionRequestV1,
+        target_contents: &[HostBundleArtifactContentV1],
+        competing_extension_claims: &[CompetingHostExtensionClaimV1],
+    ) -> Result<FeedbackPathRollbackReceiptV1, HostBundleError> {
+        validate_feedback_switch_manifests(previous_manifest, target_manifest)?;
+        self.lifecycle.verifier.verify_manifest(previous_manifest)?;
+        if !request.lifecycle.explicit_confirmation {
+            return Err(HostBundleError::ConfirmationRequired);
+        }
+        let previous_manifest_digest = previous_manifest.canonical_digest()?;
+        let applied_manifest_digest = target_manifest.canonical_digest()?;
+        let apply_receipt = self.lifecycle.execute_confirmed(
+            target_manifest,
+            request,
+            target_contents,
+            competing_extension_claims,
+        )?;
+        Ok(FeedbackPathRollbackReceiptV1 {
+            host: target_manifest.host,
+            previous_manifest_digest,
+            applied_manifest_digest,
+            apply_receipt,
+        })
+    }
+
+    pub fn feedback_rollback_switch_restore(
+        &mut self,
+        switch_receipt: &FeedbackPathRollbackReceiptV1,
+        previous_manifest: &HostBundleManifestV1,
+        request: &HostBundleExecutionRequestV1,
+        previous_contents: &[HostBundleArtifactContentV1],
+        competing_extension_claims: &[CompetingHostExtensionClaimV1],
+    ) -> Result<FeedbackPathRestoreReceiptV1, HostBundleError> {
+        if !request.lifecycle.explicit_confirmation {
+            return Err(HostBundleError::ConfirmationRequired);
+        }
+        if previous_manifest.host != switch_receipt.host
+            || previous_manifest.component != HostBundleComponentV1::Core
+            || previous_manifest.canonical_digest()? != switch_receipt.previous_manifest_digest
+            || request.lifecycle.operation != HostBundleLifecycleOpV1::Repair
+            || request.lifecycle.expected_host != switch_receipt.host
+            || request.lifecycle.expected_component != HostBundleComponentV1::Core
+            || switch_receipt.apply_receipt.host != switch_receipt.host
+            || switch_receipt.apply_receipt.component != HostBundleComponentV1::Core
+            || switch_receipt.apply_receipt.manifest_digest
+                != switch_receipt.applied_manifest_digest
+        {
+            return Err(HostBundleError::WrongTarget);
+        }
+        let restore_receipt = self.lifecycle.execute_confirmed(
+            previous_manifest,
+            request,
+            previous_contents,
+            competing_extension_claims,
+        )?;
+        Ok(FeedbackPathRestoreReceiptV1 {
+            switch_operation_id: switch_receipt.apply_receipt.operation_id,
+            restore_receipt,
+        })
+    }
+}
+
+fn validate_feedback_switch_manifests(
+    previous_manifest: &HostBundleManifestV1,
+    target_manifest: &HostBundleManifestV1,
+) -> Result<(), HostBundleError> {
+    if previous_manifest.host != target_manifest.host
+        || previous_manifest.component != HostBundleComponentV1::Core
+        || target_manifest.component != HostBundleComponentV1::Core
+        || previous_manifest.canonical_digest()? == target_manifest.canonical_digest()?
+    {
+        return Err(HostBundleError::WrongTarget);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -828,11 +2266,51 @@ struct HostBundleJournalV1 {
     entries: Vec<HostBundleJournalEntryV1>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HostComponentSetJournalStateV1 {
+    Prepared,
+    Staged,
+    Applied,
+    Verified,
+    Committed,
+    RolledBack,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostComponentSetJournalComponentV1 {
+    manifest: HostBundleManifestV1,
+    previous_receipt: Option<HostBundleInstallReceiptV1>,
+    entries: Vec<HostBundleJournalEntryV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostComponentSetJournalV1 {
+    schema_version: u16,
+    operation_id: [u8; 16],
+    host: HostKindV1,
+    operation: HostBundleLifecycleOpV1,
+    state: HostComponentSetJournalStateV1,
+    registration_staged: bool,
+    registration_applied: bool,
+    components: Vec<HostComponentSetJournalComponentV1>,
+}
+
+struct PreparedHostComponentSetComponentV1 {
+    manifest: HostBundleManifestV1,
+    content_by_path: BTreeMap<String, Vec<u8>>,
+    plan: HostBundleMutationPlanV1,
+    previous_receipt: Option<HostBundleInstallReceiptV1>,
+}
+
 /// Atomic, capability-rooted host-bundle writer. Every descendant directory
 /// is opened without following symlinks; files are staged, fsynced, renamed,
 /// and followed by a directory sync before receipt publication.
 pub struct HostBundleWriterV1 {
     root_path: PathBuf,
+    lifecycle_root_path: PathBuf,
     root: Dir,
     control: Dir,
     _writer_lock: fs::File,
@@ -841,13 +2319,26 @@ pub struct HostBundleWriterV1 {
 impl HostBundleWriterV1 {
     pub fn open(root_path: impl Into<PathBuf>) -> Result<Self, HostBundleError> {
         let root_path = root_path.into();
+        Self::open_with_lifecycle_root(root_path.clone(), root_path)
+    }
+
+    pub fn open_with_lifecycle_root(
+        root_path: impl Into<PathBuf>,
+        lifecycle_root_path: impl Into<PathBuf>,
+    ) -> Result<Self, HostBundleError> {
+        let root_path = root_path.into();
+        let lifecycle_root_path = lifecycle_root_path.into();
         ensure_bundle_root(&root_path)?;
+        ensure_bundle_root(&lifecycle_root_path)?;
         let root = Dir::open_ambient_dir(&root_path, ambient_authority())
             .map_err(|_| HostBundleError::UnsafeInstallPath)?;
-        let control = open_or_create_nofollow_dir(&root, HOST_BUNDLE_CONTROL_DIR)?;
+        let lifecycle_root = Dir::open_ambient_dir(&lifecycle_root_path, ambient_authority())
+            .map_err(|_| HostBundleError::UnsafeInstallPath)?;
+        let control = open_or_create_nofollow_dir(&lifecycle_root, HOST_BUNDLE_CONTROL_DIR)?;
         let writer_lock = open_writer_lock(&control)?;
         let mut writer = Self {
             root_path,
+            lifecycle_root_path,
             root,
             control,
             _writer_lock: writer_lock,
@@ -865,16 +2356,18 @@ impl HostBundleWriterV1 {
             return Ok(());
         };
         validate_journal(&journal)?;
-        if self
-            .load_receipt(journal.host, journal.component)?
-            .as_ref()
-            .is_some_and(|receipt| {
-                receipt.operation_id == journal.operation_id
-                    && receipt.operation == journal.operation
-                    && receipt.manifest_digest == journal.manifest_digest
-            })
+        if let Some(receipt) =
+            self.load_receipt(journal.host, journal.component)?
+                .filter(|receipt| {
+                    receipt.operation_id == journal.operation_id
+                        && receipt.operation == journal.operation
+                        && receipt.manifest_digest == journal.manifest_digest
+                })
         {
             self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)?;
+            if receipt.rollback_boundary == HostBundleRollbackBoundaryV1::Passed {
+                self.cleanup_unreferenced_backup_dir(journal.operation_id)?;
+            }
             return Ok(());
         }
 
@@ -929,10 +2422,11 @@ impl HostBundleWriterV1 {
             Some(receipt) => self.write_receipt(&receipt)?,
             None => self.remove_receipt(journal.host, journal.component)?,
         }
-        self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)
+        self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)?;
+        self.cleanup_unreferenced_backup_dir(journal.operation_id)
     }
 
-    /// Verify JCS/Ed25519 first, validate artifact bytes, plan ownership-aware
+    /// Verify first-party catalog identity, validate artifact bytes, plan ownership-aware
     /// mutations, then execute them atomically with a recoverable journal.
     pub fn execute(
         &mut self,
@@ -946,9 +2440,12 @@ impl HostBundleWriterV1 {
         }
         verifier.verify_manifest(manifest)?;
         let content_by_path = validate_artifact_contents(manifest, request, contents)?;
+        if self.load_component_set_journal()?.is_some() {
+            return Err(HostBundleError::RecoveryRequired);
+        }
         self.recover_interrupted_operation()?;
         let previous_receipt = self.load_receipt(manifest.host, manifest.component)?;
-        let manifest_digest = manifest.canonical_signed_digest()?;
+        let manifest_digest = manifest.canonical_digest()?;
         if let Some(receipt) = previous_receipt.as_ref()
             && receipt.operation_id == request.operation_id
         {
@@ -1101,12 +2598,532 @@ impl HostBundleWriterV1 {
                     })
                     .collect()
             },
+            rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
+            rollback_history: previous_receipt
+                .as_ref()
+                .map(|receipt| receipt.rollback_history.clone())
+                .unwrap_or_default(),
         };
         self.write_receipt(&receipt)?;
         journal.state = HostBundleJournalStateV1::Committed;
         self.write_journal(&journal)?;
         self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)?;
+        if receipt.rollback_boundary == HostBundleRollbackBoundaryV1::Passed {
+            self.cleanup_unreferenced_backup_dir(request.operation_id)?;
+        }
         Ok(receipt)
+    }
+
+    /// Execute a complete canonical host component set under one aggregate
+    /// journal. Every component is preflighted and staged before any owned
+    /// file is moved; receipts are published only after all artifacts and the
+    /// host registration adapter verify successfully.
+    pub fn execute_component_set<
+        V: HostBundleVerificationAdapterV1,
+        R: HostComponentSetRegistrationV1,
+    >(
+        &mut self,
+        component_set: &HostComponentSetV1,
+        request: &HostComponentSetExecutionRequestV1,
+        verifier: &V,
+        registration: &mut R,
+    ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
+        validate_component_set_request(component_set, request)?;
+        if self.load_journal()?.is_some() {
+            return Err(HostBundleError::RecoveryRequired);
+        }
+        if let Some(receipt) = self.load_component_set_receipt(request.operation_id)? {
+            return if component_set_receipt_matches(&receipt, component_set, request)? {
+                Ok(receipt)
+            } else {
+                Err(HostBundleError::ReceiptCorrupted)
+            };
+        }
+
+        let prepared = self.preflight_component_set(component_set, request, verifier)?;
+        registration.preflight(component_set, request)?;
+
+        let mut journal = HostComponentSetJournalV1 {
+            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+            operation_id: request.operation_id,
+            host: component_set.host,
+            operation: request.lifecycle.operation,
+            state: HostComponentSetJournalStateV1::Prepared,
+            registration_staged: false,
+            registration_applied: false,
+            components: prepared
+                .iter()
+                .map(|component| HostComponentSetJournalComponentV1 {
+                    manifest: component.manifest.clone(),
+                    previous_receipt: component.previous_receipt.clone(),
+                    entries: component
+                        .plan
+                        .mutations
+                        .iter()
+                        .map(|mutation| HostBundleJournalEntryV1 {
+                            relative_path: mutation.relative_path.clone(),
+                            backup_name: matches!(
+                                mutation.action,
+                                HostArtifactActionV1::BackupThenReplace
+                                    | HostArtifactActionV1::BackupThenRemove
+                            )
+                            .then(|| backup_name(request.operation_id, &mutation.relative_path)),
+                            backup_created: false,
+                            wrote_new: false,
+                            installed_digest: component
+                                .manifest
+                                .artifacts
+                                .iter()
+                                .find(|artifact| artifact.relative_path == mutation.relative_path)
+                                .map(|artifact| artifact.artifact_digest)
+                                .filter(|_| {
+                                    !matches!(
+                                        mutation.action,
+                                        HostArtifactActionV1::BackupThenRemove
+                                    )
+                                }),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        self.write_component_set_journal(&journal)?;
+
+        let result = (|| {
+            self.stage_component_set_assets(&prepared, request.operation_id)?;
+            journal.registration_staged = true;
+            self.write_component_set_journal(&journal)?;
+            registration.stage(component_set, request)?;
+            journal.state = HostComponentSetJournalStateV1::Staged;
+            self.write_component_set_journal(&journal)?;
+
+            let backup_dir = self.open_or_create_backup_dir(request.operation_id)?;
+            self.backup_component_set_entries(&prepared, &mut journal, &backup_dir)?;
+            self.write_component_set_entries(&prepared, &mut journal)?;
+
+            // Mark this before calling into host registration: a failing
+            // adapter can still have made a partial native mutation.
+            journal.registration_applied = true;
+            self.write_component_set_journal(&journal)?;
+            registration.apply(component_set, request)?;
+            journal.state = HostComponentSetJournalStateV1::Applied;
+            self.write_component_set_journal(&journal)?;
+
+            self.verify_component_set_artifacts(&journal)?;
+            registration.verify(component_set, request)?;
+            journal.state = HostComponentSetJournalStateV1::Verified;
+            self.write_component_set_journal(&journal)?;
+
+            let receipt = component_set_receipt_from_prepared(&prepared, request)?;
+            for component_receipt in &receipt.component_receipts {
+                self.write_receipt(component_receipt)?;
+            }
+            self.write_component_set_receipt(&receipt)?;
+            journal.state = HostComponentSetJournalStateV1::Committed;
+            self.write_component_set_journal(&journal)?;
+
+            // Registration cleanup and backup retirement happen only after the
+            // aggregate and every component receipt have crossed commit.
+            registration.commit(component_set, request)?;
+            self.cleanup_component_set_boundary(request.operation_id)?;
+            self.remove_component_set_journal()?;
+            Ok(receipt)
+        })();
+
+        match result {
+            Ok(receipt) => Ok(receipt),
+            Err(error) if journal.state == HostComponentSetJournalStateV1::Committed => {
+                // The durable receipts prove commit. Keep the journal for a
+                // restarted transaction to finish registration/backup cleanup.
+                Err(error)
+            }
+            Err(error) => {
+                if self
+                    .rollback_component_set(component_set, request, registration, &mut journal)
+                    .is_err()
+                {
+                    Err(HostBundleError::RecoveryRequired)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    /// Resume a component-set operation left by a failed apply or a process
+    /// interruption. A fully published aggregate receipt wins; any other
+    /// state is rolled back in reverse component and artifact order.
+    fn recover_component_set_operation<R: HostComponentSetRegistrationV1>(
+        &mut self,
+        registration: &mut R,
+    ) -> Result<(), HostBundleError> {
+        let Some(mut journal) = self.load_component_set_journal()? else {
+            return Ok(());
+        };
+        validate_component_set_journal(&journal)?;
+        let component_set = component_set_from_journal(&journal);
+        let request = HostComponentSetExecutionRequestV1 {
+            lifecycle: HostComponentSetLifecycleRequestV1 {
+                operation: journal.operation,
+                expected_host: journal.host,
+                expected_components: journal
+                    .components
+                    .iter()
+                    .map(|component| component.manifest.component)
+                    .collect(),
+                explicit_confirmation: true,
+                hermes_profile_bindings: u8::from(journal.host == HostKindV1::Hermes),
+            },
+            operation_id: journal.operation_id,
+        };
+
+        if journal.state == HostComponentSetJournalStateV1::Committed
+            || self.component_set_commit_is_complete(&journal)?
+        {
+            registration.commit(&component_set, &request)?;
+            self.cleanup_component_set_boundary(journal.operation_id)?;
+            self.remove_component_set_journal()?;
+            return Ok(());
+        }
+
+        if journal.state == HostComponentSetJournalStateV1::RolledBack {
+            if journal.registration_staged || journal.registration_applied {
+                registration.rollback(&component_set, &request)?;
+            }
+            self.cleanup_component_set_boundary(journal.operation_id)?;
+            self.remove_component_set_journal()?;
+            return Ok(());
+        }
+
+        if journal.registration_staged || journal.registration_applied {
+            registration.rollback(&component_set, &request)?;
+        }
+        self.restore_component_set_artifacts(&journal)?;
+        journal.state = HostComponentSetJournalStateV1::RolledBack;
+        self.write_component_set_journal(&journal)?;
+        self.cleanup_component_set_boundary(journal.operation_id)?;
+        self.remove_component_set_journal()
+    }
+
+    fn preflight_component_set<V: HostBundleVerificationAdapterV1>(
+        &self,
+        component_set: &HostComponentSetV1,
+        request: &HostComponentSetExecutionRequestV1,
+        verifier: &V,
+    ) -> Result<Vec<PreparedHostComponentSetComponentV1>, HostBundleError> {
+        let mut prepared = Vec::with_capacity(component_set.components.len());
+        let mut claimed_paths = BTreeMap::new();
+
+        for component in &component_set.components {
+            component.manifest.validate_structure()?;
+            verifier.verify_manifest(&component.manifest)?;
+            let content_by_path = validate_artifact_contents_for_operation(
+                &component.manifest,
+                request.lifecycle.operation,
+                &component.contents,
+            )?;
+            let previous_receipt =
+                self.load_receipt(component.manifest.host, component.manifest.component)?;
+            let owned_receipt = previous_receipt
+                .as_ref()
+                .filter(|receipt| receipt.operation != HostBundleLifecycleOpV1::Uninstall);
+            let manifest_observed =
+                if request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall {
+                    Vec::new()
+                } else {
+                    component
+                        .manifest
+                        .artifacts
+                        .iter()
+                        .map(|artifact| {
+                            let owned = owned_receipt.and_then(|receipt| {
+                                receipt
+                                    .artifacts
+                                    .iter()
+                                    .find(|owned| owned.relative_path == artifact.relative_path)
+                            });
+                            observe_artifact_at(
+                                &self.root_path,
+                                &artifact.relative_path,
+                                owned.map(|owned| owned.ownership_marker.clone()),
+                                owned.map(|owned| owned.artifact_digest),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+            let orphan_observed = if matches!(
+                request.lifecycle.operation,
+                HostBundleLifecycleOpV1::Update
+                    | HostBundleLifecycleOpV1::Repair
+                    | HostBundleLifecycleOpV1::Uninstall
+            ) {
+                owned_receipt
+                    .into_iter()
+                    .flat_map(|receipt| &receipt.artifacts)
+                    .filter(|owned| {
+                        request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall
+                            || !component
+                                .manifest
+                                .artifacts
+                                .iter()
+                                .any(|artifact| artifact.relative_path == owned.relative_path)
+                    })
+                    .map(|owned| {
+                        observe_artifact_at(
+                            &self.root_path,
+                            &owned.relative_path,
+                            Some(owned.ownership_marker.clone()),
+                            Some(owned.artifact_digest),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
+            let lifecycle = HostBundleLifecycleRequestV1 {
+                operation: request.lifecycle.operation,
+                expected_host: request.lifecycle.expected_host,
+                expected_component: component.manifest.component,
+                explicit_confirmation: request.lifecycle.explicit_confirmation,
+                hermes_profile_bindings: request.lifecycle.hermes_profile_bindings,
+            };
+            let plan = plan_verified_complete_lifecycle_mutation(
+                &component.manifest,
+                &lifecycle,
+                &manifest_observed,
+                owned_receipt,
+                &orphan_observed,
+                verifier,
+            )?;
+            for mutation in &plan.mutations {
+                if claimed_paths
+                    .insert(mutation.relative_path.clone(), component.manifest.component)
+                    .is_some()
+                {
+                    return Err(HostBundleError::InvalidObservedState);
+                }
+            }
+            prepared.push(PreparedHostComponentSetComponentV1 {
+                manifest: component.manifest.clone(),
+                content_by_path,
+                plan,
+                previous_receipt,
+            });
+        }
+        Ok(prepared)
+    }
+
+    fn stage_component_set_assets(
+        &self,
+        prepared: &[PreparedHostComponentSetComponentV1],
+        operation_id: [u8; 16],
+    ) -> Result<(), HostBundleError> {
+        let stage = self.open_or_create_component_set_stage_dir(operation_id)?;
+        for component in prepared {
+            for (relative_path, bytes) in &component.content_by_path {
+                let stage_name =
+                    component_set_stage_name(component.manifest.component, relative_path);
+                atomic_write_nofollow(&stage, &stage_name, bytes, false)?;
+            }
+        }
+        sync_cap_dir(&stage)
+    }
+
+    fn backup_component_set_entries(
+        &self,
+        prepared: &[PreparedHostComponentSetComponentV1],
+        journal: &mut HostComponentSetJournalV1,
+        backup_dir: &Dir,
+    ) -> Result<(), HostBundleError> {
+        for (component_index, prepared_component) in prepared.iter().enumerate() {
+            for (entry_index, mutation) in prepared_component.plan.mutations.iter().enumerate() {
+                if !matches!(
+                    mutation.action,
+                    HostArtifactActionV1::BackupThenReplace
+                        | HostArtifactActionV1::BackupThenRemove
+                ) {
+                    continue;
+                }
+                let backup_name = journal.components[component_index].entries[entry_index]
+                    .backup_name
+                    .clone()
+                    .ok_or(HostBundleError::ReceiptCorrupted)?;
+                let (parent, name) =
+                    self.open_parent_nofollow(Path::new(&mutation.relative_path))?;
+                move_regular_to_backup(&parent, &name, backup_dir, &backup_name)?;
+                journal.components[component_index].entries[entry_index].backup_created = true;
+                self.write_component_set_journal(journal)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_component_set_entries(
+        &self,
+        prepared: &[PreparedHostComponentSetComponentV1],
+        journal: &mut HostComponentSetJournalV1,
+    ) -> Result<(), HostBundleError> {
+        for (component_index, prepared_component) in prepared.iter().enumerate() {
+            for (entry_index, mutation) in prepared_component.plan.mutations.iter().enumerate() {
+                let (parent, name) =
+                    self.open_parent_nofollow(Path::new(&mutation.relative_path))?;
+                match mutation.action {
+                    HostArtifactActionV1::Noop | HostArtifactActionV1::BackupThenRemove => {}
+                    HostArtifactActionV1::WriteNew | HostArtifactActionV1::BackupThenReplace => {
+                        journal.components[component_index].entries[entry_index].wrote_new = true;
+                        self.write_component_set_journal(journal)?;
+                        atomic_write_nofollow(
+                            &parent,
+                            &name,
+                            prepared_component
+                                .content_by_path
+                                .get(&mutation.relative_path)
+                                .ok_or(HostBundleError::ArtifactContentMismatch)?,
+                            false,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_component_set_artifacts(
+        &self,
+        journal: &HostComponentSetJournalV1,
+    ) -> Result<(), HostBundleError> {
+        for component in &journal.components {
+            for entry in &component.entries {
+                let (parent, name) = self.open_parent_nofollow(Path::new(&entry.relative_path))?;
+                let observed = read_regular_nofollow(&parent, &name)?;
+                match (entry.installed_digest, observed) {
+                    (Some(expected), Some(bytes)) => {
+                        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+                        if digest != expected {
+                            return Err(HostBundleError::ArtifactContentMismatch);
+                        }
+                    }
+                    (Some(_), None) => return Err(HostBundleError::ArtifactContentMismatch),
+                    (None, None) => {}
+                    (None, Some(_)) => return Err(HostBundleError::OwnershipConflict),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_component_set<R: HostComponentSetRegistrationV1>(
+        &mut self,
+        component_set: &HostComponentSetV1,
+        request: &HostComponentSetExecutionRequestV1,
+        registration: &mut R,
+        journal: &mut HostComponentSetJournalV1,
+    ) -> Result<(), HostBundleError> {
+        if journal.registration_staged || journal.registration_applied {
+            registration.rollback(component_set, request)?;
+        }
+        self.restore_component_set_artifacts(journal)?;
+        self.remove_component_set_receipt(journal.operation_id)?;
+        journal.state = HostComponentSetJournalStateV1::RolledBack;
+        // Leave the completed rollback journal and its backups for an explicit
+        // restart reconciliation boundary; a new transaction invokes recover.
+        self.write_component_set_journal(journal)
+    }
+
+    fn restore_component_set_artifacts(
+        &self,
+        journal: &HostComponentSetJournalV1,
+    ) -> Result<(), HostBundleError> {
+        let backup_dir = self.open_existing_backup_dir(journal.operation_id)?;
+        for component in journal.components.iter().rev() {
+            for entry in component.entries.iter().rev() {
+                self.restore_component_set_entry(entry, backup_dir.as_ref())?;
+            }
+        }
+        for component in journal.components.iter().rev() {
+            match &component.previous_receipt {
+                Some(receipt) => self.write_receipt(receipt)?,
+                None => self.remove_receipt(journal.host, component.manifest.component)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_component_set_entry(
+        &self,
+        entry: &HostBundleJournalEntryV1,
+        backup_dir: Option<&Dir>,
+    ) -> Result<(), HostBundleError> {
+        let (parent, name) = self.open_parent_nofollow(Path::new(&entry.relative_path))?;
+        if let Some(backup_name) = &entry.backup_name {
+            let backup_exists = backup_dir
+                .map(|backups| regular_file_exists(backups, backup_name))
+                .transpose()?
+                .unwrap_or(false);
+            if !entry.backup_created {
+                if !backup_exists {
+                    return Ok(());
+                }
+                if regular_file_exists(&parent, &name)? {
+                    return Err(HostBundleError::RecoveryRequired);
+                }
+            }
+            let backups = backup_dir
+                .filter(|_| backup_exists)
+                .ok_or(HostBundleError::RecoveryRequired)?;
+            if entry.wrote_new {
+                remove_if_digest_matches(
+                    &parent,
+                    &name,
+                    entry
+                        .installed_digest
+                        .ok_or(HostBundleError::ReceiptCorrupted)?,
+                )?;
+            } else if regular_file_exists(&parent, &name)? {
+                return Err(HostBundleError::RecoveryRequired);
+            }
+            backups
+                .rename(backup_name, &parent, &name)
+                .map_err(|_| HostBundleError::StorageFailure)?;
+            sync_cap_dir(backups)?;
+            sync_cap_dir(&parent)
+        } else if entry.wrote_new {
+            remove_if_digest_matches(
+                &parent,
+                &name,
+                entry
+                    .installed_digest
+                    .ok_or(HostBundleError::ReceiptCorrupted)?,
+            )?;
+            sync_cap_dir(&parent)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn component_set_commit_is_complete(
+        &self,
+        journal: &HostComponentSetJournalV1,
+    ) -> Result<bool, HostBundleError> {
+        let Some(receipt) = self.load_component_set_receipt(journal.operation_id)? else {
+            return Ok(false);
+        };
+        let component_set = component_set_from_journal(journal);
+        let request = HostComponentSetExecutionRequestV1 {
+            lifecycle: HostComponentSetLifecycleRequestV1 {
+                operation: journal.operation,
+                expected_host: journal.host,
+                expected_components: component_set
+                    .components
+                    .iter()
+                    .map(|component| component.manifest.component)
+                    .collect(),
+                explicit_confirmation: true,
+                hermes_profile_bindings: u8::from(journal.host == HostKindV1::Hermes),
+            },
+            operation_id: journal.operation_id,
+        };
+        component_set_receipt_matches(&receipt, &component_set, &request)
     }
 
     fn observe_artifacts(
@@ -1198,6 +3215,14 @@ impl HostBundleWriterV1 {
         open_or_create_nofollow_dir(&backups, &hex::encode(operation_id))
     }
 
+    fn open_or_create_component_set_stage_dir(
+        &self,
+        operation_id: [u8; 16],
+    ) -> Result<Dir, HostBundleError> {
+        let stages = open_or_create_nofollow_dir(&self.control, HOST_COMPONENT_SET_STAGE_DIR)?;
+        open_or_create_nofollow_dir(&stages, &hex::encode(operation_id))
+    }
+
     fn open_existing_backup_dir(
         &self,
         operation_id: [u8; 16],
@@ -1253,8 +3278,51 @@ impl HostBundleWriterV1 {
         self.remove_control_file(&receipt_file(host, component))
     }
 
+    fn load_component_set_receipt(
+        &self,
+        operation_id: [u8; 16],
+    ) -> Result<Option<HostComponentSetReceiptV1>, HostBundleError> {
+        let receipt = read_control_json(&self.control, &component_set_receipt_file(operation_id))?
+            .map(|bytes| {
+                serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)
+            })
+            .transpose()?;
+        if let Some(receipt) = &receipt {
+            validate_component_set_receipt(receipt)?;
+        }
+        Ok(receipt)
+    }
+
+    fn write_component_set_receipt(
+        &self,
+        receipt: &HostComponentSetReceiptV1,
+    ) -> Result<(), HostBundleError> {
+        validate_component_set_receipt(receipt)?;
+        let bytes = serde_json::to_vec(receipt).map_err(|_| HostBundleError::ReceiptCorrupted)?;
+        atomic_write_nofollow(
+            &self.control,
+            &component_set_receipt_file(receipt.operation_id),
+            &bytes,
+            false,
+        )
+    }
+
+    fn remove_component_set_receipt(&self, operation_id: [u8; 16]) -> Result<(), HostBundleError> {
+        self.remove_control_file(&component_set_receipt_file(operation_id))
+    }
+
     fn load_journal(&self) -> Result<Option<HostBundleJournalV1>, HostBundleError> {
         read_control_json(&self.control, HOST_BUNDLE_JOURNAL_FILE)?
+            .map(|bytes| {
+                serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)
+            })
+            .transpose()
+    }
+
+    fn load_component_set_journal(
+        &self,
+    ) -> Result<Option<HostComponentSetJournalV1>, HostBundleError> {
+        read_control_json(&self.control, HOST_COMPONENT_SET_JOURNAL_FILE)?
             .map(|bytes| {
                 serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)
             })
@@ -1267,13 +3335,130 @@ impl HostBundleWriterV1 {
         atomic_write_nofollow(&self.control, HOST_BUNDLE_JOURNAL_FILE, &bytes, true)
     }
 
+    fn write_component_set_journal(
+        &self,
+        journal: &HostComponentSetJournalV1,
+    ) -> Result<(), HostBundleError> {
+        validate_component_set_journal(journal)?;
+        let bytes = serde_json::to_vec(journal).map_err(|_| HostBundleError::ReceiptCorrupted)?;
+        atomic_write_nofollow(&self.control, HOST_COMPONENT_SET_JOURNAL_FILE, &bytes, true)
+    }
+
     fn remove_control_file(&self, name: &str) -> Result<(), HostBundleError> {
         remove_regular_if_exists(&self.control, name)?;
         sync_cap_dir(&self.control)
     }
 
+    fn remove_component_set_journal(&self) -> Result<(), HostBundleError> {
+        self.remove_control_file(HOST_COMPONENT_SET_JOURNAL_FILE)
+    }
+
+    fn cleanup_unreferenced_backup_dir(
+        &self,
+        operation_id: [u8; 16],
+    ) -> Result<(), HostBundleError> {
+        let control_path = self.lifecycle_root_path.join(HOST_BUNDLE_CONTROL_DIR);
+        let mut referenced = false;
+        for entry in fs::read_dir(&control_path).map_err(|_| HostBundleError::StorageFailure)? {
+            let Ok(entry) = entry else {
+                return Ok(());
+            };
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with("receipt.") || !name.ends_with(".v1.json") {
+                continue;
+            }
+            let Ok(bytes) = fs::read(entry.path()) else {
+                return Ok(());
+            };
+            let Ok(receipt) = serde_json::from_slice::<HostBundleInstallReceiptV1>(&bytes) else {
+                return Ok(());
+            };
+            if validate_receipt(&receipt).is_err() {
+                return Ok(());
+            }
+            referenced |= receipt.rollback_history.contains(&operation_id);
+        }
+        if referenced {
+            return Ok(());
+        }
+        let backup_path = control_path.join("backups").join(hex::encode(operation_id));
+        match fs::symlink_metadata(&backup_path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                fs::remove_dir_all(&backup_path).map_err(|_| HostBundleError::StorageFailure)?;
+            }
+            Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(HostBundleError::StorageFailure),
+        }
+        if let Some(backups) = backup_path.parent() {
+            let _ = fs::remove_dir(backups);
+        }
+        Ok(())
+    }
+
+    fn cleanup_component_set_boundary(
+        &self,
+        operation_id: [u8; 16],
+    ) -> Result<(), HostBundleError> {
+        self.cleanup_unreferenced_backup_dir(operation_id)?;
+        self.remove_component_set_stage_dir(operation_id)
+    }
+
+    fn remove_component_set_stage_dir(
+        &self,
+        operation_id: [u8; 16],
+    ) -> Result<(), HostBundleError> {
+        let stage_path = self
+            .lifecycle_root_path
+            .join(HOST_BUNDLE_CONTROL_DIR)
+            .join(HOST_COMPONENT_SET_STAGE_DIR)
+            .join(hex::encode(operation_id));
+        match fs::symlink_metadata(&stage_path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                fs::remove_dir_all(&stage_path).map_err(|_| HostBundleError::StorageFailure)?;
+            }
+            Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(HostBundleError::StorageFailure),
+        }
+        if let Some(stages) = stage_path.parent() {
+            let _ = fs::remove_dir(stages);
+        }
+        Ok(())
+    }
+
+    pub fn publish_feedback_component_set_receipt(
+        &self,
+        manifest: &HostBundleManifestV1,
+        component_receipt: &HostBundleInstallReceiptV1,
+    ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
+        if manifest.host != component_receipt.host
+            || manifest.component != component_receipt.component
+            || manifest.canonical_digest()? != component_receipt.manifest_digest
+        {
+            return Err(HostBundleError::WrongTarget);
+        }
+        let receipt = HostComponentSetReceiptV1 {
+            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+            operation_id: component_receipt.operation_id,
+            host: component_receipt.host,
+            operation: component_receipt.operation,
+            component_manifests: vec![manifest.clone()],
+            component_receipts: vec![component_receipt.clone()],
+        };
+        self.write_component_set_receipt(&receipt)?;
+        Ok(receipt)
+    }
+
     pub fn root_path(&self) -> &Path {
         &self.root_path
+    }
+
+    pub fn lifecycle_root_path(&self) -> &Path {
+        &self.lifecycle_root_path
     }
 }
 
@@ -1298,12 +3483,17 @@ fn validate_artifact_contents(
     request: &HostBundleExecutionRequestV1,
     contents: &[HostBundleArtifactContentV1],
 ) -> Result<BTreeMap<String, Vec<u8>>, HostBundleError> {
-    if request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall {
-        return if contents.is_empty() {
-            Ok(BTreeMap::new())
-        } else {
-            Err(HostBundleError::ArtifactContentMismatch)
-        };
+    validate_artifact_contents_for_operation(manifest, request.lifecycle.operation, contents)
+}
+
+fn validate_artifact_contents_for_operation(
+    manifest: &HostBundleManifestV1,
+    operation: HostBundleLifecycleOpV1,
+    contents: &[HostBundleArtifactContentV1],
+) -> Result<BTreeMap<String, Vec<u8>>, HostBundleError> {
+    let uninstall = operation == HostBundleLifecycleOpV1::Uninstall;
+    if uninstall && contents.is_empty() {
+        return Ok(BTreeMap::new());
     }
     if contents.len() != manifest.artifacts.len() {
         return Err(HostBundleError::ArtifactContentMismatch);
@@ -1326,7 +3516,14 @@ fn validate_artifact_contents(
         }
         values.insert(content.relative_path.clone(), content.bytes.clone());
     }
-    Ok(values)
+    // A canonical component set keeps its embedded assets for every lifecycle
+    // operation. Validate supplied uninstall content, but do not stage bytes
+    // that are only needed to prove the compiled catalog identity.
+    if uninstall {
+        Ok(BTreeMap::new())
+    } else {
+        Ok(values)
+    }
 }
 
 fn ensure_bundle_root(root: &Path) -> Result<(), HostBundleError> {
@@ -1562,6 +3759,7 @@ fn validate_receipt(receipt: &HostBundleInstallReceiptV1) -> Result<(), HostBund
         || receipt.operation_id == [0; 16]
         || receipt.manifest_digest == [0; 32]
         || receipt.artifacts.len() > MAX_MANIFEST_ARTIFACTS
+        || receipt.rollback_history.len() > MAX_MANIFEST_ARTIFACTS
         || (receipt.operation == HostBundleLifecycleOpV1::Uninstall) != receipt.artifacts.is_empty()
     {
         return Err(HostBundleError::ReceiptCorrupted);
@@ -1570,10 +3768,17 @@ fn validate_receipt(receipt: &HostBundleInstallReceiptV1) -> Result<(), HostBund
         validate_relative_install_path(Path::new(&artifact.relative_path))?;
         validate_identifier(&artifact.ownership_marker)?;
         if artifact.artifact_digest == [0; 32]
+            || artifact.ownership_marker
+                != expected_ownership_marker(receipt.host, receipt.component)
             || receipt.artifacts[..index]
                 .iter()
                 .any(|existing| existing.relative_path == artifact.relative_path)
         {
+            return Err(HostBundleError::ReceiptCorrupted);
+        }
+    }
+    for (index, operation_id) in receipt.rollback_history.iter().enumerate() {
+        if *operation_id == [0; 16] || receipt.rollback_history[..index].contains(operation_id) {
             return Err(HostBundleError::ReceiptCorrupted);
         }
     }
@@ -1614,6 +3819,248 @@ fn validate_journal(journal: &HostBundleJournalV1) -> Result<(), HostBundleError
     Ok(())
 }
 
+fn validate_component_set_request(
+    component_set: &HostComponentSetV1,
+    request: &HostComponentSetExecutionRequestV1,
+) -> Result<(), HostBundleError> {
+    if request.operation_id == [0; 16]
+        || component_set.components.is_empty()
+        || component_set.components.len() > MAX_HOST_COMPONENTS
+        || component_set.host != request.lifecycle.expected_host
+    {
+        return Err(HostBundleError::InvalidManifest);
+    }
+    if !request.lifecycle.explicit_confirmation {
+        return Err(HostBundleError::ConfirmationRequired);
+    }
+    match component_set.host {
+        HostKindV1::Hermes if request.lifecycle.hermes_profile_bindings != 1 => {
+            return Err(HostBundleError::InvalidHermesProfileBinding);
+        }
+        HostKindV1::Hermes => {}
+        _ if request.lifecycle.hermes_profile_bindings != 0 => {
+            return Err(HostBundleError::InvalidHermesProfileBinding);
+        }
+        _ => {}
+    }
+
+    let mut expected = request.lifecycle.expected_components.clone();
+    let mut actual = Vec::with_capacity(component_set.components.len());
+    let mut claimed_paths = BTreeMap::new();
+    for component in &component_set.components {
+        component.manifest.validate_structure()?;
+        if component.manifest.host != component_set.host {
+            return Err(HostBundleError::WrongTarget);
+        }
+        actual.push(component.manifest.component);
+        for artifact in &component.manifest.artifacts {
+            if claimed_paths
+                .insert(artifact.relative_path.clone(), component.manifest.component)
+                .is_some()
+            {
+                return Err(HostBundleError::InvalidManifest);
+            }
+        }
+    }
+    actual.sort_unstable();
+    expected.sort_unstable();
+    if actual
+        .windows(2)
+        .any(|components| components[0] == components[1])
+        || expected
+            .windows(2)
+            .any(|components| components[0] == components[1])
+        || actual != expected
+    {
+        return Err(HostBundleError::WrongTarget);
+    }
+    Ok(())
+}
+
+fn component_set_receipt_from_prepared(
+    prepared: &[PreparedHostComponentSetComponentV1],
+    request: &HostComponentSetExecutionRequestV1,
+) -> Result<HostComponentSetReceiptV1, HostBundleError> {
+    let component_receipts = prepared
+        .iter()
+        .map(|component| {
+            Ok(HostBundleInstallReceiptV1 {
+                schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+                operation_id: request.operation_id,
+                host: component.manifest.host,
+                component: component.manifest.component,
+                operation: request.lifecycle.operation,
+                manifest_digest: component.manifest.canonical_digest()?,
+                artifacts: if request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall {
+                    Vec::new()
+                } else {
+                    component
+                        .manifest
+                        .artifacts
+                        .iter()
+                        .map(|artifact| HostBundleReceiptArtifactV1 {
+                            relative_path: artifact.relative_path.clone(),
+                            artifact_digest: artifact.artifact_digest,
+                            ownership_marker: artifact.ownership_marker.clone(),
+                        })
+                        .collect()
+                },
+                rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
+                rollback_history: component
+                    .previous_receipt
+                    .as_ref()
+                    .map(|receipt| receipt.rollback_history.clone())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect::<Result<Vec<_>, HostBundleError>>()?;
+    let receipt = HostComponentSetReceiptV1 {
+        schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+        operation_id: request.operation_id,
+        host: request.lifecycle.expected_host,
+        operation: request.lifecycle.operation,
+        component_manifests: prepared
+            .iter()
+            .map(|component| component.manifest.clone())
+            .collect(),
+        component_receipts,
+    };
+    validate_component_set_receipt(&receipt)?;
+    Ok(receipt)
+}
+
+fn component_set_receipt_matches(
+    receipt: &HostComponentSetReceiptV1,
+    component_set: &HostComponentSetV1,
+    request: &HostComponentSetExecutionRequestV1,
+) -> Result<bool, HostBundleError> {
+    validate_component_set_request(component_set, request)?;
+    validate_component_set_receipt(receipt)?;
+    if receipt.operation_id != request.operation_id
+        || receipt.host != component_set.host
+        || receipt.operation != request.lifecycle.operation
+        || receipt.component_receipts.len() != component_set.components.len()
+    {
+        return Ok(false);
+    }
+    for component in &component_set.components {
+        let manifest_digest = component.manifest.canonical_digest()?;
+        let receipt_matches = receipt.component_receipts.iter().any(|component_receipt| {
+            component_receipt.host == component.manifest.host
+                && component_receipt.component == component.manifest.component
+                && component_receipt.operation_id == request.operation_id
+                && component_receipt.operation == request.lifecycle.operation
+                && component_receipt.manifest_digest == manifest_digest
+                && component_receipt.rollback_boundary == HostBundleRollbackBoundaryV1::Passed
+        });
+        if !receipt_matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_component_set_receipt(
+    receipt: &HostComponentSetReceiptV1,
+) -> Result<(), HostBundleError> {
+    if receipt.schema_version != HOST_BUNDLE_RECEIPT_SCHEMA_VERSION
+        || receipt.operation_id == [0; 16]
+        || receipt.component_manifests.is_empty()
+        || receipt.component_receipts.is_empty()
+        || receipt.component_manifests.len() != receipt.component_receipts.len()
+        || receipt.component_receipts.len() > MAX_HOST_COMPONENTS
+    {
+        return Err(HostBundleError::ReceiptCorrupted);
+    }
+    for (index, component_receipt) in receipt.component_receipts.iter().enumerate() {
+        validate_receipt(component_receipt)?;
+        let manifest = receipt
+            .component_manifests
+            .iter()
+            .find(|manifest| manifest.component == component_receipt.component)
+            .ok_or(HostBundleError::ReceiptCorrupted)?;
+        manifest.validate_structure()?;
+        if component_receipt.host != receipt.host
+            || manifest.host != receipt.host
+            || manifest.canonical_digest()? != component_receipt.manifest_digest
+            || component_receipt.operation_id != receipt.operation_id
+            || component_receipt.operation != receipt.operation
+            || component_receipt.rollback_boundary != HostBundleRollbackBoundaryV1::Passed
+            || receipt.component_receipts[..index]
+                .iter()
+                .any(|previous| previous.component == component_receipt.component)
+        {
+            return Err(HostBundleError::ReceiptCorrupted);
+        }
+    }
+    Ok(())
+}
+
+fn component_set_from_journal(journal: &HostComponentSetJournalV1) -> HostComponentSetV1 {
+    HostComponentSetV1 {
+        host: journal.host,
+        components: journal
+            .components
+            .iter()
+            .map(|component| HostComponentSetEntryV1 {
+                manifest: component.manifest.clone(),
+                contents: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
+fn validate_component_set_journal(
+    journal: &HostComponentSetJournalV1,
+) -> Result<(), HostBundleError> {
+    if journal.schema_version != HOST_BUNDLE_RECEIPT_SCHEMA_VERSION
+        || journal.operation_id == [0; 16]
+        || journal.components.is_empty()
+        || journal.components.len() > MAX_HOST_COMPONENTS
+    {
+        return Err(HostBundleError::ReceiptCorrupted);
+    }
+    let mut components = BTreeMap::new();
+    let mut paths = BTreeMap::new();
+    for component in &journal.components {
+        component.manifest.validate_structure()?;
+        if component.manifest.host != journal.host
+            || components
+                .insert(component.manifest.component, ())
+                .is_some()
+            || (component.entries.is_empty()
+                && journal.operation != HostBundleLifecycleOpV1::Uninstall)
+            || component.entries.len() > MAX_MANIFEST_ARTIFACTS
+        {
+            return Err(HostBundleError::ReceiptCorrupted);
+        }
+        if let Some(receipt) = &component.previous_receipt {
+            validate_receipt(receipt)?;
+            if receipt.host != journal.host || receipt.component != component.manifest.component {
+                return Err(HostBundleError::ReceiptCorrupted);
+            }
+        }
+        for (index, entry) in component.entries.iter().enumerate() {
+            validate_relative_install_path(Path::new(&entry.relative_path))?;
+            if entry
+                .backup_name
+                .as_deref()
+                .is_some_and(|backup| !is_safe_component(backup))
+                || component.entries[..index]
+                    .iter()
+                    .any(|previous| previous.relative_path == entry.relative_path)
+                || paths.insert(entry.relative_path.clone(), ()).is_some()
+                || (entry.backup_created && entry.backup_name.is_none())
+                || (entry.backup_name.is_some() && entry.wrote_new && !entry.backup_created)
+                || (entry.wrote_new && entry.installed_digest.is_none())
+            {
+                return Err(HostBundleError::ReceiptCorrupted);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn backup_name(operation_id: [u8; 16], relative_path: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(operation_id);
@@ -1621,603 +4068,932 @@ fn backup_name(operation_id: [u8; 16], relative_path: &str) -> String {
     format!("artifact-{}", hex::encode(hasher.finalize()))
 }
 
+fn component_set_stage_name(component: HostBundleComponentV1, relative_path: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(component_slug(component).as_bytes());
+    hasher.update(relative_path.as_bytes());
+    format!(
+        "{}-{}",
+        component_slug(component),
+        hex::encode(hasher.finalize())
+    )
+}
+
 fn receipt_file(host: HostKindV1, component: HostBundleComponentV1) -> String {
     format!(
         "receipt.{}.{}.v1.json",
-        match host {
-            HostKindV1::ClaudeCode => "claude-code",
-            HostKindV1::CursorDesktop => "cursor-desktop",
-            HostKindV1::CursorCloud => "cursor-cloud",
-            HostKindV1::Codex => "codex",
-            HostKindV1::Hermes => "hermes",
-            HostKindV1::Kiro => "kiro",
-        },
-        match component {
-            HostBundleComponentV1::Core => "core",
-            HostBundleComponentV1::ContextMcp => "context-mcp",
-            HostBundleComponentV1::OperatorMcp => "operator-mcp",
-        }
+        host_slug(host),
+        component_slug(component)
     )
+}
+
+fn component_set_receipt_file(operation_id: [u8; 16]) -> String {
+    format!(
+        "component-set-receipt.{}.v1.json",
+        hex::encode(operation_id)
+    )
+}
+
+fn receipt_identity_from_file_name(file_name: &str) -> Option<(HostKindV1, HostBundleComponentV1)> {
+    let components = [
+        HostBundleComponentV1::Core,
+        HostBundleComponentV1::Agent,
+        HostBundleComponentV1::ContextMcp,
+        HostBundleComponentV1::OperatorMcp,
+    ];
+    stock_host_kinds().into_iter().find_map(|host| {
+        components
+            .iter()
+            .copied()
+            .find(|component| receipt_file(host, *component) == file_name)
+            .map(|component| (host, component))
+    })
+}
+
+fn expected_ownership_marker(host: HostKindV1, component: HostBundleComponentV1) -> String {
+    format!(
+        "tracedecay.{}.{}.v1",
+        host_slug(host),
+        component_slug(component)
+    )
+}
+
+fn host_slug(host: HostKindV1) -> &'static str {
+    match host {
+        HostKindV1::ClaudeCode => "claude-code",
+        HostKindV1::CursorDesktop => "cursor-desktop",
+        HostKindV1::CursorCloud => "cursor-cloud",
+        HostKindV1::Codex => "codex",
+        HostKindV1::Hermes => "hermes",
+        HostKindV1::Kiro => "kiro",
+        HostKindV1::ClineFamily => "cline-family",
+        HostKindV1::Cline => "cline",
+        HostKindV1::RooCode => "roo-code",
+        HostKindV1::Kilo => "kilo",
+        HostKindV1::KimiCode => "kimi-code",
+        HostKindV1::OpenCode => "opencode",
+    }
+}
+
+fn component_slug(component: HostBundleComponentV1) -> &'static str {
+    match component {
+        HostBundleComponentV1::Core => "core",
+        HostBundleComponentV1::Agent => "agent",
+        HostBundleComponentV1::ContextMcp => "context-mcp",
+        HostBundleComponentV1::OperatorMcp => "operator-mcp",
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
 
-    fn manifest(host: HostKindV1) -> HostBundleManifestV1 {
+    #[derive(Clone)]
+    struct FirstPartyVerifier([u8; 32]);
+
+    impl HostBundleVerificationAdapterV1 for FirstPartyVerifier {
+        fn verify_manifest(&self, manifest: &HostBundleManifestV1) -> Result<(), HostBundleError> {
+            manifest.validate_structure()?;
+            if manifest.canonical_digest()? == self.0 {
+                Ok(())
+            } else {
+                Err(HostBundleError::CatalogMismatch)
+            }
+        }
+    }
+
+    fn manifest(host: HostKindV1, bytes: &[u8]) -> HostBundleManifestV1 {
+        let identity: [u8; 32] = Sha256::digest(b"first-party.catalog.v1").into();
         HostBundleManifestV1 {
             schema_version: HOST_BUNDLE_SCHEMA_VERSION,
             host,
             component: HostBundleComponentV1::Core,
-            integration_manifest_digest: [1; 32],
-            catalog_digest: [2; 32],
-            configuration_snapshot_id: "config.v1".to_owned(),
-            effective_behavior_digest: [3; 32],
-            resolution_provenance_digest: [4; 32],
+            integration_manifest_digest: identity,
+            catalog_digest: identity,
+            configuration_snapshot_id: "first-party.v1".to_string(),
+            effective_behavior_digest: identity,
+            resolution_provenance_digest: identity,
             protocol_min: 1,
-            protocol_max: 2,
-            signer_key_id: "release-key.v1".to_owned(),
-            signature: vec![5; 64],
+            protocol_max: 1,
             artifacts: vec![HostBundleArtifactV1 {
-                relative_path: "plugins/tracedecay.json".to_owned(),
-                artifact_digest: [6; 32],
-                ownership_marker: "tracedecay.install.v1".to_owned(),
+                relative_path: "plugins/tracedecay.json".to_string(),
+                artifact_digest: Sha256::digest(bytes).into(),
+                ownership_marker: expected_ownership_marker(host, HostBundleComponentV1::Core),
             }],
         }
     }
 
-    fn request(
-        host: HostKindV1,
-        operation: HostBundleLifecycleOpV1,
-    ) -> HostBundleLifecycleRequestV1 {
-        HostBundleLifecycleRequestV1 {
-            operation,
-            expected_host: host,
-            expected_component: HostBundleComponentV1::Core,
-            explicit_confirmation: true,
-            hermes_profile_bindings: u8::from(host == HostKindV1::Hermes),
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    struct TestTrustResolver([u8; 32]);
-
-    impl HostBundleTrustResolverV1 for TestTrustResolver {
-        fn resolve_ed25519_public_key(
-            &self,
-            signer_key_id: &str,
-        ) -> Result<[u8; 32], HostBundleError> {
-            (signer_key_id == "release-key.v1")
-                .then_some(self.0)
-                .ok_or(HostBundleError::VerificationFailed)
-        }
-    }
-
-    struct RejectingVerifier;
-
-    impl HostBundleVerificationAdapterV1 for RejectingVerifier {
-        fn verify_manifest(&self, _manifest: &HostBundleManifestV1) -> Result<(), HostBundleError> {
-            Err(HostBundleError::VerificationFailed)
-        }
-    }
-
-    #[derive(Default)]
-    struct RecordingLifecycleStorage {
-        recovery_calls: usize,
-        execute_calls: usize,
-    }
-
-    impl HostBundleLifecycleStorageV1 for RecordingLifecycleStorage {
-        fn recover_lifecycle(&mut self) -> Result<(), HostBundleError> {
-            self.recovery_calls = self.recovery_calls.saturating_add(1);
-            Ok(())
-        }
-
-        fn execute_lifecycle<V: HostBundleVerificationAdapterV1>(
-            &mut self,
-            _manifest: &HostBundleManifestV1,
-            _request: &HostBundleExecutionRequestV1,
-            _contents: &[HostBundleArtifactContentV1],
-            _verifier: &V,
-        ) -> Result<HostBundleInstallReceiptV1, HostBundleError> {
-            self.execute_calls = self.execute_calls.saturating_add(1);
-            Err(HostBundleError::StorageFailure)
-        }
-    }
-
-    fn signed_manifest(
-        host: HostKindV1,
-        bytes: &[u8],
-    ) -> (HostBundleManifestV1, TestTrustResolver) {
-        let key = SigningKey::from_bytes(&[42; 32]);
-        let digest: [u8; 32] = Sha256::digest(bytes).into();
-        let mut manifest = manifest(host);
-        manifest.artifacts[0].artifact_digest = digest;
-        manifest.signature = key
-            .sign(&manifest.canonical_signed_bytes().unwrap())
-            .to_bytes()
-            .to_vec();
-        (manifest, TestTrustResolver(key.verifying_key().to_bytes()))
+    fn verifier(manifest: &HostBundleManifestV1) -> FirstPartyVerifier {
+        FirstPartyVerifier(manifest.canonical_digest().unwrap())
     }
 
     fn execution(
         host: HostKindV1,
         operation: HostBundleLifecycleOpV1,
-        byte: u8,
+        operation_id: u8,
+        confirmed: bool,
     ) -> HostBundleExecutionRequestV1 {
         HostBundleExecutionRequestV1 {
-            lifecycle: request(host, operation),
-            operation_id: [byte; 16],
+            lifecycle: HostBundleLifecycleRequestV1 {
+                operation,
+                expected_host: host,
+                expected_component: HostBundleComponentV1::Core,
+                explicit_confirmation: confirmed,
+                hermes_profile_bindings: u8::from(host == HostKindV1::Hermes),
+            },
+            operation_id: [operation_id; 16],
         }
     }
 
-    fn content(manifest: &HostBundleManifestV1, bytes: &[u8]) -> Vec<HostBundleArtifactContentV1> {
+    fn content(bytes: &[u8]) -> Vec<HostBundleArtifactContentV1> {
         vec![HostBundleArtifactContentV1 {
-            relative_path: manifest.artifacts[0].relative_path.clone(),
+            relative_path: "plugins/tracedecay.json".to_string(),
             bytes: bytes.to_vec(),
         }]
     }
 
-    #[test]
-    fn claude_and_cursor_project_only_native_diagnostic_routes() {
-        assert!(require_capability(HostKindV1::ClaudeCode, HostCapabilityV1::Lsp).is_ok());
-        assert_eq!(
-            require_capability(HostKindV1::ClaudeCode, HostCapabilityV1::NativeDiagnostics),
-            Err(HostBundleError::UnsupportedCapability)
-        );
-        assert!(
-            require_capability(
-                HostKindV1::CursorDesktop,
-                HostCapabilityV1::NativeDiagnostics
-            )
-            .is_ok()
-        );
-        assert_eq!(
-            require_capability(HostKindV1::CursorCloud, HostCapabilityV1::Lsp),
-            Err(HostBundleError::UnsupportedCapability)
-        );
-    }
-
-    #[test]
-    fn unsafe_manifest_paths_are_rejected() {
-        let mut bundle = manifest(HostKindV1::Codex);
-        bundle.artifacts[0].relative_path = "../credentials".to_owned();
-        assert_eq!(
-            bundle.validate_structure(),
-            Err(HostBundleError::UnsafeInstallPath)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_install_component_is_rejected() {
-        use std::os::unix::fs::symlink;
-
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        symlink(outside.path(), root.path().join("plugins")).unwrap();
-        assert_eq!(
-            inspect_install_target(root.path(), Path::new("plugins/tracedecay.json")),
-            Err(HostBundleError::UnsafeInstallPath)
-        );
-    }
-
-    #[test]
-    fn signature_failure_prevents_any_mutation_plan() {
-        let bundle = manifest(HostKindV1::Codex);
-        let error = plan_lifecycle_mutation(
-            &bundle,
-            &request(HostKindV1::Codex, HostBundleLifecycleOpV1::Install),
-            &[],
-            |_| Err(HostBundleError::VerificationFailed),
-        )
-        .unwrap_err();
-        assert_eq!(error, HostBundleError::VerificationFailed);
-    }
-
-    #[test]
-    fn runtime_rejects_signature_before_injected_storage_recovery_or_mutation() {
-        let bundle = manifest(HostKindV1::Codex);
-        let mut runtime = HostBundleLifecycleRuntimeV1::new(
-            RejectingVerifier,
-            RecordingLifecycleStorage::default(),
-        );
-        assert_eq!(
-            runtime.execute(
-                &bundle,
-                &execution(HostKindV1::Codex, HostBundleLifecycleOpV1::Install, 1),
-                &[],
-            ),
-            Err(HostBundleError::VerificationFailed)
-        );
-        let storage = runtime.into_storage();
-        assert_eq!(storage.recovery_calls, 0);
-        assert_eq!(storage.execute_calls, 0);
-    }
-
-    #[test]
-    fn owned_replacement_is_backed_up_and_conflicts_are_refused() {
-        let bundle = manifest(HostKindV1::Codex);
-        let mut state = ObservedHostArtifactV1 {
-            relative_path: bundle.artifacts[0].relative_path.clone(),
-            kind: ObservedArtifactKindV1::RegularFile,
-            artifact_digest: Some([9; 32]),
-            ownership_marker: Some(bundle.artifacts[0].ownership_marker.clone()),
-            owned_artifact_digest: Some([9; 32]),
-        };
-        let plan = plan_lifecycle_mutation(
-            &bundle,
-            &request(HostKindV1::Codex, HostBundleLifecycleOpV1::Update),
-            &[state.clone()],
-            |_| Ok(()),
-        )
-        .unwrap();
-        assert_eq!(
-            plan.mutations[0].action,
-            HostArtifactActionV1::BackupThenReplace
-        );
-        assert!(plan.rollback_required);
-
-        state.ownership_marker = Some("somebody-else".to_owned());
-        assert_eq!(
-            plan_lifecycle_mutation(
-                &bundle,
-                &request(HostKindV1::Codex, HostBundleLifecycleOpV1::Update),
-                &[state],
-                |_| Ok(()),
-            ),
-            Err(HostBundleError::OwnershipConflict)
-        );
-    }
-
-    #[test]
-    fn uninstall_removes_only_owned_artifacts() {
-        let bundle = manifest(HostKindV1::ClaudeCode);
-        let state = ObservedHostArtifactV1 {
-            relative_path: bundle.artifacts[0].relative_path.clone(),
-            kind: ObservedArtifactKindV1::RegularFile,
-            artifact_digest: Some(bundle.artifacts[0].artifact_digest),
-            ownership_marker: Some(bundle.artifacts[0].ownership_marker.clone()),
-            owned_artifact_digest: Some(bundle.artifacts[0].artifact_digest),
-        };
-        let plan = plan_lifecycle_mutation(
-            &bundle,
-            &request(HostKindV1::ClaudeCode, HostBundleLifecycleOpV1::Uninstall),
-            &[state],
-            |_| Ok(()),
-        )
-        .unwrap();
-        assert_eq!(
-            plan.mutations[0].action,
-            HostArtifactActionV1::BackupThenRemove
-        );
-    }
-
-    #[test]
-    fn complete_uninstall_plan_derives_removals_from_receipt_orphans() {
-        let bundle = manifest(HostKindV1::ClaudeCode);
-        let receipt = HostBundleInstallReceiptV1 {
-            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
-            operation_id: [1; 16],
-            host: bundle.host,
-            component: bundle.component,
-            operation: HostBundleLifecycleOpV1::Install,
-            manifest_digest: [2; 32],
-            artifacts: vec![HostBundleReceiptArtifactV1 {
-                relative_path: bundle.artifacts[0].relative_path.clone(),
-                artifact_digest: bundle.artifacts[0].artifact_digest,
-                ownership_marker: bundle.artifacts[0].ownership_marker.clone(),
+    fn component_manifest(
+        host: HostKindV1,
+        component: HostBundleComponentV1,
+        relative_path: &str,
+        bytes: &[u8],
+    ) -> HostBundleManifestV1 {
+        let identity: [u8; 32] = Sha256::digest(b"first-party.catalog.v1").into();
+        HostBundleManifestV1 {
+            schema_version: HOST_BUNDLE_SCHEMA_VERSION,
+            host,
+            component,
+            integration_manifest_digest: identity,
+            catalog_digest: identity,
+            configuration_snapshot_id: "first-party.v1".to_string(),
+            effective_behavior_digest: identity,
+            resolution_provenance_digest: identity,
+            protocol_min: 1,
+            protocol_max: 1,
+            artifacts: vec![HostBundleArtifactV1 {
+                relative_path: relative_path.to_string(),
+                artifact_digest: Sha256::digest(bytes).into(),
+                ownership_marker: expected_ownership_marker(host, component),
             }],
-        };
-        let orphan_observed = vec![ObservedHostArtifactV1 {
-            relative_path: bundle.artifacts[0].relative_path.clone(),
-            kind: ObservedArtifactKindV1::RegularFile,
-            artifact_digest: Some(bundle.artifacts[0].artifact_digest),
-            ownership_marker: Some(bundle.artifacts[0].ownership_marker.clone()),
-            owned_artifact_digest: Some(bundle.artifacts[0].artifact_digest),
-        }];
-        let plan = plan_complete_lifecycle_mutation(
-            &bundle,
-            &request(HostKindV1::ClaudeCode, HostBundleLifecycleOpV1::Uninstall),
-            &[],
-            Some(&receipt),
-            &orphan_observed,
-            |_| Ok(()),
-        )
-        .unwrap();
-        assert_eq!(plan.mutations.len(), 1);
-        assert_eq!(
-            plan.mutations[0].action,
-            HostArtifactActionV1::BackupThenRemove
-        );
-        assert!(plan.rollback_required);
+        }
     }
 
-    #[test]
-    fn hermes_requires_exactly_one_profile_binding() {
-        let bundle = manifest(HostKindV1::Hermes);
-        let mut lifecycle = request(HostKindV1::Hermes, HostBundleLifecycleOpV1::Install);
-        lifecycle.hermes_profile_bindings = 2;
-        assert_eq!(
-            plan_lifecycle_mutation(&bundle, &lifecycle, &[], |_| Ok(())),
-            Err(HostBundleError::InvalidHermesProfileBinding)
-        );
+    fn component_entry(manifest: HostBundleManifestV1, bytes: &[u8]) -> HostComponentSetEntryV1 {
+        HostComponentSetEntryV1 {
+            contents: vec![HostBundleArtifactContentV1 {
+                relative_path: manifest.artifacts[0].relative_path.clone(),
+                bytes: bytes.to_vec(),
+            }],
+            manifest,
+        }
     }
 
-    #[test]
-    fn jcs_ed25519_verifier_rejects_a_tampered_signed_manifest() {
-        let (manifest, resolver) = signed_manifest(HostKindV1::Codex, b"one");
-        let verifier = JcsEd25519HostBundleVerifierV1::new(resolver);
-        verifier.verify_manifest(&manifest).unwrap();
-
-        let mut tampered = manifest.clone();
-        tampered.protocol_max += 1;
-        assert_eq!(
-            verifier.verify_manifest(&tampered),
-            Err(HostBundleError::VerificationFailed)
-        );
+    fn component_set(
+        host: HostKindV1,
+        core_bytes: &[u8],
+        agent_bytes: &[u8],
+    ) -> HostComponentSetV1 {
+        HostComponentSetV1 {
+            host,
+            components: vec![
+                component_entry(
+                    component_manifest(
+                        host,
+                        HostBundleComponentV1::Core,
+                        "plugins/core.json",
+                        core_bytes,
+                    ),
+                    core_bytes,
+                ),
+                component_entry(
+                    component_manifest(
+                        host,
+                        HostBundleComponentV1::Agent,
+                        "plugins/agent.json",
+                        agent_bytes,
+                    ),
+                    agent_bytes,
+                ),
+            ],
+        }
     }
 
-    #[test]
-    fn atomic_writer_install_update_repair_and_uninstall_preserve_ownership() {
-        for host in [
-            HostKindV1::ClaudeCode,
-            HostKindV1::Codex,
-            HostKindV1::CursorDesktop,
-            HostKindV1::Hermes,
-            HostKindV1::Kiro,
-        ] {
-            let root = tempfile::tempdir().unwrap();
-            let (first, resolver) = signed_manifest(host, b"first");
-            let verifier = JcsEd25519HostBundleVerifierV1::new(resolver);
-            let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
-            assert!(matches!(
-                HostBundleWriterV1::open(root.path()),
-                Err(HostBundleError::RecoveryRequired)
-            ));
-            let install_request = execution(host, HostBundleLifecycleOpV1::Install, 1);
-            let receipt = writer
-                .execute(
-                    &first,
-                    &install_request,
-                    &content(&first, b"first"),
-                    &verifier,
-                )
-                .unwrap();
-            assert_eq!(
-                writer
-                    .execute(
-                        &first,
-                        &install_request,
-                        &content(&first, b"first"),
-                        &verifier,
-                    )
-                    .unwrap(),
-                receipt
-            );
-            assert_eq!(receipt.host, host);
-            let installed = root.path().join("plugins/tracedecay.json");
-            assert_eq!(std::fs::read(&installed).unwrap(), b"first");
+    fn component_set_request(
+        host: HostKindV1,
+        operation: HostBundleLifecycleOpV1,
+        operation_id: u8,
+    ) -> HostComponentSetExecutionRequestV1 {
+        HostComponentSetExecutionRequestV1 {
+            lifecycle: HostComponentSetLifecycleRequestV1 {
+                operation,
+                expected_host: host,
+                expected_components: vec![
+                    HostBundleComponentV1::Core,
+                    HostBundleComponentV1::Agent,
+                ],
+                explicit_confirmation: true,
+                hermes_profile_bindings: u8::from(host == HostKindV1::Hermes),
+            },
+            operation_id: [operation_id; 16],
+        }
+    }
 
-            let (second, resolver) = signed_manifest(host, b"second");
-            let verifier = JcsEd25519HostBundleVerifierV1::new(resolver);
-            writer
-                .execute(
-                    &second,
-                    &execution(host, HostBundleLifecycleOpV1::Update, 2),
-                    &content(&second, b"second"),
-                    &verifier,
-                )
-                .unwrap();
-            assert_eq!(std::fs::read(&installed).unwrap(), b"second");
-            assert!(
-                root.path()
-                    .join(HOST_BUNDLE_CONTROL_DIR)
-                    .join("backups")
-                    .exists()
-            );
+    #[derive(Clone)]
+    struct ComponentSetVerifier(Vec<[u8; 32]>);
 
-            std::fs::write(&installed, b"locally modified").unwrap();
-            writer
-                .execute(
-                    &second,
-                    &execution(host, HostBundleLifecycleOpV1::Repair, 3),
-                    &content(&second, b"second"),
-                    &verifier,
-                )
-                .unwrap();
-            assert_eq!(std::fs::read(&installed).unwrap(), b"second");
+    impl ComponentSetVerifier {
+        fn from_set(component_set: &HostComponentSetV1) -> Self {
+            Self(
+                component_set
+                    .components
+                    .iter()
+                    .map(|component| component.manifest.canonical_digest().unwrap())
+                    .collect(),
+            )
+        }
+    }
 
-            writer
-                .execute(
-                    &second,
-                    &execution(host, HostBundleLifecycleOpV1::Uninstall, 4),
-                    &[],
-                    &verifier,
-                )
-                .unwrap();
-            assert!(!installed.exists());
-            let uninstall_receipt = writer
-                .load_receipt(host, HostBundleComponentV1::Core)
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                uninstall_receipt.operation,
-                HostBundleLifecycleOpV1::Uninstall
-            );
-            assert!(uninstall_receipt.artifacts.is_empty());
+    impl HostBundleVerificationAdapterV1 for ComponentSetVerifier {
+        fn verify_manifest(&self, manifest: &HostBundleManifestV1) -> Result<(), HostBundleError> {
+            manifest.validate_structure()?;
+            self.0
+                .contains(&manifest.canonical_digest()?)
+                .then_some(())
+                .ok_or(HostBundleError::CatalogMismatch)
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingSetRegistration {
+        applied: bool,
+        rolled_back: bool,
+    }
+
+    struct ArtifactOnlyTestRegistration;
+
+    impl HostComponentSetRegistrationV1 for ArtifactOnlyTestRegistration {}
+
+    impl HostComponentSetRegistrationV1 for FailingSetRegistration {
+        fn apply(
+            &mut self,
+            _component_set: &HostComponentSetV1,
+            _request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.applied = true;
+            Ok(())
+        }
+
+        fn verify(
+            &mut self,
+            _component_set: &HostComponentSetV1,
+            _request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            Err(HostBundleError::StorageFailure)
+        }
+
+        fn rollback(
+            &mut self,
+            _component_set: &HostComponentSetV1,
+            _request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.rolled_back = true;
+            Ok(())
         }
     }
 
     #[test]
-    fn uninstall_refuses_a_user_modified_owned_artifact() {
+    fn component_set_transaction_is_idempotent_and_rolls_back_every_component() {
         let root = tempfile::tempdir().unwrap();
-        let (manifest, resolver) = signed_manifest(HostKindV1::ClaudeCode, b"installed");
-        let verifier = JcsEd25519HostBundleVerifierV1::new(resolver);
+        let initial = component_set(HostKindV1::OpenCode, b"core-v1", b"agent-v1");
+        let initial_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 21);
+        let initial_verifier = ComponentSetVerifier::from_set(&initial);
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let mut registration = ArtifactOnlyTestRegistration;
+        let first = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &initial,
+                &initial_request,
+                &initial_verifier,
+                &mut registration,
+            )
+            .unwrap();
+        let repeated = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &initial,
+                &initial_request,
+                &initial_verifier,
+                &mut registration,
+            )
+            .unwrap();
+        assert_eq!(repeated, first);
+
+        let updated = component_set(HostKindV1::OpenCode, b"core-v2", b"agent-v2");
+        let update_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Update, 22);
+        let updated_verifier = ComponentSetVerifier::from_set(&updated);
+        let mut failing_registration = FailingSetRegistration::default();
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer).execute(
+                &updated,
+                &update_request,
+                &updated_verifier,
+                &mut failing_registration,
+            ),
+            Err(HostBundleError::StorageFailure)
+        );
+        assert!(failing_registration.applied);
+        assert!(failing_registration.rolled_back);
+        assert_eq!(
+            std::fs::read(root.path().join("plugins/core.json")).unwrap(),
+            b"core-v1"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("plugins/agent.json")).unwrap(),
+            b"agent-v1"
+        );
+        assert_eq!(
+            writer
+                .load_receipt(HostKindV1::OpenCode, HostBundleComponentV1::Core)
+                .unwrap()
+                .expect("previous core receipt remains published")
+                .operation_id,
+            [21; 16]
+        );
+        assert_eq!(
+            writer
+                .load_receipt(HostKindV1::OpenCode, HostBundleComponentV1::Agent)
+                .unwrap()
+                .expect("previous agent receipt remains published")
+                .operation_id,
+            [21; 16]
+        );
+        assert!(
+            root.path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join(HOST_COMPONENT_SET_JOURNAL_FILE)
+                .is_file(),
+            "a rollback journal must remain available for restart reconciliation"
+        );
+        let doctor = inspect_installed_host_bundle_components_at(
+            root.path(),
+            root.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert!(
+            doctor.components.iter().any(|component| {
+                component.host == Some(HostKindV1::OpenCode)
+                    && component.component == Some(HostBundleComponentV1::Core)
+                    && component.state == HostBundleComponentDoctorStateV1::Repairable
+            }),
+            "Doctor keeps the component receipt API while surfacing the aggregate recovery boundary"
+        );
+        drop(writer);
+
+        let mut reopened = HostBundleWriterV1::open(root.path()).unwrap();
+        HostComponentSetTransactionV1::new(&mut reopened)
+            .recover(&mut failing_registration)
+            .unwrap();
+        assert!(
+            !root
+                .path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join(HOST_COMPONENT_SET_JOURNAL_FILE)
+                .exists(),
+            "restart recovery clears only a completed rollback boundary"
+        );
+    }
+
+    #[test]
+    fn component_set_preflights_cross_component_path_conflicts_before_artifact_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let component_set = HostComponentSetV1 {
+            host: HostKindV1::OpenCode,
+            components: vec![
+                component_entry(
+                    component_manifest(
+                        HostKindV1::OpenCode,
+                        HostBundleComponentV1::Core,
+                        "plugins/shared.json",
+                        b"core",
+                    ),
+                    b"core",
+                ),
+                component_entry(
+                    component_manifest(
+                        HostKindV1::OpenCode,
+                        HostBundleComponentV1::Agent,
+                        "plugins/shared.json",
+                        b"agent",
+                    ),
+                    b"agent",
+                ),
+            ],
+        };
+        let request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 23);
+        let verifier = ComponentSetVerifier::from_set(&component_set);
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let mut registration = ArtifactOnlyTestRegistration;
+
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer).execute(
+                &component_set,
+                &request,
+                &verifier,
+                &mut registration,
+            ),
+            Err(HostBundleError::InvalidManifest)
+        );
+        assert!(
+            !root.path().join("plugins").exists(),
+            "cross-component conflicts are rejected before artifact paths are created"
+        );
+    }
+
+    #[test]
+    fn feedback_switch_apply_restore_and_aggregate_receipt_share_writer_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let previous = manifest(HostKindV1::KimiCode, b"previous");
+        let target = manifest(HostKindV1::KimiCode, b"target");
+        let verifier = ComponentSetVerifier(vec![
+            previous.canonical_digest().unwrap(),
+            target.canonical_digest().unwrap(),
+        ]);
         let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
         writer
             .execute(
-                &manifest,
-                &execution(HostKindV1::ClaudeCode, HostBundleLifecycleOpV1::Install, 20),
-                &content(&manifest, b"installed"),
+                &previous,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Install,
+                    31,
+                    true,
+                ),
+                &content(b"previous"),
                 &verifier,
             )
             .unwrap();
-        let installed = root.path().join(&manifest.artifacts[0].relative_path);
-        std::fs::write(&installed, b"user-owned modification").unwrap();
-        assert_eq!(
-            writer.execute(
-                &manifest,
+        let lifecycle = HostBundleLifecycleRuntimeV1::new(verifier.clone(), writer);
+        let mut switch = FeedbackPathRollbackSwitchV1::new(lifecycle);
+        let apply = switch
+            .feedback_rollback_switch_apply(
+                &previous,
+                &target,
                 &execution(
-                    HostKindV1::ClaudeCode,
-                    HostBundleLifecycleOpV1::Uninstall,
-                    21,
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Update,
+                    32,
+                    true,
                 ),
+                &content(b"target"),
                 &[],
-                &verifier,
-            ),
-            Err(HostBundleError::OwnershipConflict)
-        );
+            )
+            .unwrap();
+        let restore = switch
+            .feedback_rollback_switch_restore(
+                &apply,
+                &previous,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Repair,
+                    33,
+                    true,
+                ),
+                &content(b"previous"),
+                &[],
+            )
+            .unwrap();
+        let writer = switch.into_lifecycle().into_storage();
+        let aggregate = writer
+            .publish_feedback_component_set_receipt(&previous, &restore.restore_receipt)
+            .unwrap();
+        assert_eq!(aggregate.component_manifests, vec![previous]);
         assert_eq!(
-            std::fs::read(installed).unwrap(),
-            b"user-owned modification"
+            std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
+            b"previous"
         );
     }
 
     #[test]
-    fn writer_refuses_foreign_or_symlinked_targets() {
+    fn static_catalog_validates_schema_version_and_capabilities() {
+        let bundle = crate::agents::host_bundle_registry::verified_embedded_host_bundle(
+            HostKindV1::OpenCode,
+            HostBundleComponentV1::Core,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::agents::host_bundle_registry::FIRST_PARTY_COMPONENT_CATALOG_VERSION,
+            1
+        );
+        bundle.manifest.validate_structure().unwrap();
+        assert!(require_capability(HostKindV1::OpenCode, HostCapabilityV1::Lsp).is_ok());
+        assert!(require_capability(HostKindV1::KimiCode, HostCapabilityV1::Hooks).is_ok());
+    }
+
+    #[test]
+    fn cursor_native_diagnostics_are_supported_by_the_packaged_extension() {
+        assert_eq!(
+            stock_host_capabilities(HostKindV1::CursorDesktop)
+                .into_iter()
+                .find(|record| record.capability == HostCapabilityV1::NativeDiagnostics)
+                .map(|record| record.state),
+            Some(HostCapabilityStateV1::Supported)
+        );
+        assert!(
+            stock_host_registration_evidence(HostKindV1::CursorDesktop)
+                .into_iter()
+                .any(|evidence| {
+                    evidence.route == HostRegistrationRouteV1::CursorNativeDiagnostics
+                        && evidence.state == HostCapabilityStateV1::Supported
+                        && evidence.evidence_ref == "plugin/cursor-native-extension/package.json"
+                })
+        );
+    }
+
+    #[test]
+    fn corruption_and_external_bundle_paths_are_rejected() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("plugins")).unwrap();
-        std::fs::write(root.path().join("plugins/tracedecay.json"), b"foreign").unwrap();
-        let (manifest, resolver) = signed_manifest(HostKindV1::ClaudeCode, b"ours");
-        let verifier = JcsEd25519HostBundleVerifierV1::new(resolver);
+        let bundle = manifest(HostKindV1::OpenCode, b"expected");
         let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
         assert_eq!(
             writer.execute(
-                &manifest,
-                &execution(HostKindV1::ClaudeCode, HostBundleLifecycleOpV1::Install, 5),
-                &content(&manifest, b"ours"),
-                &verifier,
+                &bundle,
+                &execution(
+                    HostKindV1::OpenCode,
+                    HostBundleLifecycleOpV1::Install,
+                    1,
+                    true
+                ),
+                &content(b"corrupt"),
+                &verifier(&bundle),
+            ),
+            Err(HostBundleError::ArtifactContentMismatch)
+        );
+        let mut external = bundle.clone();
+        external.artifacts[0].relative_path = "/tmp/third-party.json".to_string();
+        assert_eq!(
+            external.validate_structure(),
+            Err(HostBundleError::UnsafeInstallPath)
+        );
+    }
+
+    #[test]
+    fn lifecycle_preserves_ownership_receipts_and_rollback_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let first = manifest(HostKindV1::KimiCode, b"first");
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let receipt = writer
+            .execute(
+                &first,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Install,
+                    2,
+                    true,
+                ),
+                &content(b"first"),
+                &verifier(&first),
+            )
+            .unwrap();
+        assert_eq!(receipt.host, HostKindV1::KimiCode);
+        assert_eq!(receipt.artifacts.len(), 1);
+        drop(writer);
+
+        let second = manifest(HostKindV1::KimiCode, b"second");
+        let preview = dry_run_host_bundle_lifecycle_at(
+            root.path(),
+            &second,
+            &execution(
+                HostKindV1::KimiCode,
+                HostBundleLifecycleOpV1::Update,
+                3,
+                false,
+            ),
+            &verifier(&second),
+            &[],
+        )
+        .unwrap();
+        assert!(preview.confirmation_required);
+        assert!(preview.plan.rollback_required);
+        assert_eq!(preview.rollback.backup_relative_paths.len(), 1);
+
+        std::fs::write(root.path().join("plugins/tracedecay.json"), b"foreign").unwrap();
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        assert_eq!(
+            writer.execute(
+                &second,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Update,
+                    4,
+                    true
+                ),
+                &content(b"second"),
+                &verifier(&second),
             ),
             Err(HostBundleError::OwnershipConflict)
         );
+    }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
+    struct CurrentRegistration;
 
-            let symlink_root = tempfile::tempdir().unwrap();
-            let outside = tempfile::tempdir().unwrap();
-            symlink(outside.path(), symlink_root.path().join("plugins")).unwrap();
-            let mut writer = HostBundleWriterV1::open(symlink_root.path()).unwrap();
-            assert_eq!(
-                writer.execute(
-                    &manifest,
-                    &execution(HostKindV1::ClaudeCode, HostBundleLifecycleOpV1::Install, 6),
-                    &content(&manifest, b"ours"),
-                    &verifier,
-                ),
-                Err(HostBundleError::UnsafeInstallPath)
-            );
+    impl HostBundleRegistrationInspectorV1 for CurrentRegistration {
+        fn inspect_registration(
+            &self,
+            _host: HostKindV1,
+            _component: HostBundleComponentV1,
+        ) -> HostBundleRegistrationStateV1 {
+            HostBundleRegistrationStateV1::Current
+        }
+    }
+
+    struct MissingRegistration;
+
+    impl HostBundleRegistrationInspectorV1 for MissingRegistration {
+        fn inspect_registration(
+            &self,
+            _host: HostKindV1,
+            _component: HostBundleComponentV1,
+        ) -> HostBundleRegistrationStateV1 {
+            HostBundleRegistrationStateV1::Missing
         }
     }
 
     #[test]
-    fn interrupted_update_rolls_back_from_durable_backups() {
-        let root = tempfile::tempdir().unwrap();
-        let (first, resolver) = signed_manifest(HostKindV1::Hermes, b"first");
-        let verifier = JcsEd25519HostBundleVerifierV1::new(resolver);
-        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+    fn profile_lifecycle_dry_run_does_not_create_missing_control_root() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let lifecycle = profile.path().join("host-components");
+        let manifest = manifest(HostKindV1::Hermes, b"first");
+
+        let preview = dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
+            artifacts.path(),
+            &lifecycle,
+            &manifest,
+            &execution(
+                HostKindV1::Hermes,
+                HostBundleLifecycleOpV1::Install,
+                10,
+                false,
+            ),
+            &verifier(&manifest),
+            &[],
+        )
+        .unwrap();
+
+        assert!(preview.confirmation_required);
+        assert!(!lifecycle.exists());
+    }
+
+    #[test]
+    fn profile_owned_receipts_enumerate_only_installed_components_and_retire_backups() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let first = manifest(HostKindV1::Hermes, b"first");
+        let second = manifest(HostKindV1::Hermes, b"second");
+        let mut writer =
+            HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path())
+                .unwrap();
+
         writer
             .execute(
                 &first,
-                &execution(HostKindV1::Hermes, HostBundleLifecycleOpV1::Install, 7),
-                &content(&first, b"first"),
-                &verifier,
+                &execution(
+                    HostKindV1::Hermes,
+                    HostBundleLifecycleOpV1::Install,
+                    11,
+                    true,
+                ),
+                &content(b"first"),
+                &verifier(&first),
             )
             .unwrap();
-        let old_receipt = writer
-            .load_receipt(HostKindV1::Hermes, HostBundleComponentV1::Core)
+        let receipt = writer
+            .execute(
+                &second,
+                &execution(
+                    HostKindV1::Hermes,
+                    HostBundleLifecycleOpV1::Update,
+                    12,
+                    true,
+                ),
+                &content(b"second"),
+                &verifier(&second),
+            )
             .unwrap();
-        let expected_receipt = old_receipt.clone().unwrap();
-        let operation_id = [8; 16];
-        let relative = first.artifacts[0].relative_path.clone();
-        let mut journal = HostBundleJournalV1 {
-            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
-            operation_id,
-            host: HostKindV1::Hermes,
-            component: HostBundleComponentV1::Core,
-            operation: HostBundleLifecycleOpV1::Update,
-            manifest_digest: first.canonical_signed_digest().unwrap(),
-            state: HostBundleJournalStateV1::Prepared,
-            previous_receipt: old_receipt.clone(),
-            entries: vec![
-                HostBundleJournalEntryV1 {
-                    relative_path: relative.clone(),
-                    backup_name: Some(backup_name(operation_id, &relative)),
-                    backup_created: false,
-                    wrote_new: false,
-                    installed_digest: Some(Sha256::digest(b"second").into()),
-                },
-                HostBundleJournalEntryV1 {
-                    relative_path: "agents/hermes/not-started.json".to_owned(),
-                    backup_name: Some(backup_name(operation_id, "agents/hermes/not-started.json")),
-                    backup_created: false,
-                    wrote_new: false,
-                    installed_digest: Some(Sha256::digest(b"not-started").into()),
-                },
-            ],
-        };
-        writer.write_journal(&journal).unwrap();
-        let (parent, name) = writer.open_parent_nofollow(Path::new(&relative)).unwrap();
-        let backups = writer.open_or_create_backup_dir(operation_id).unwrap();
-        move_regular_to_backup(
-            &parent,
-            &name,
-            &backups,
-            journal.entries[0].backup_name.as_deref().unwrap(),
+
+        assert_eq!(
+            receipt.rollback_boundary,
+            HostBundleRollbackBoundaryV1::Passed
+        );
+        assert!(
+            lifecycle
+                .path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join(receipt_file(
+                    HostKindV1::Hermes,
+                    HostBundleComponentV1::Core
+                ))
+                .is_file()
+        );
+        assert!(
+            !artifacts.path().join(HOST_BUNDLE_CONTROL_DIR).exists(),
+            "receipts must be profile-owned rather than ambient-home-owned"
+        );
+        assert!(
+            !lifecycle
+                .path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join("backups")
+                .join(hex::encode([12; 16]))
+                .exists(),
+            "a committed receipt that passed the rollback boundary retires its backups"
+        );
+
+        let referenced_operation = [14; 16];
+        let referenced_backup = lifecycle
+            .path()
+            .join(HOST_BUNDLE_CONTROL_DIR)
+            .join("backups")
+            .join(hex::encode(referenced_operation));
+        drop(
+            writer
+                .open_or_create_backup_dir(referenced_operation)
+                .unwrap(),
+        );
+        let mut receipt_with_history = receipt.clone();
+        receipt_with_history
+            .rollback_history
+            .push(referenced_operation);
+        writer.write_receipt(&receipt_with_history).unwrap();
+        writer
+            .cleanup_unreferenced_backup_dir(referenced_operation)
+            .unwrap();
+        assert!(
+            referenced_backup.is_dir(),
+            "receipt-referenced rollback history must be preserved"
+        );
+
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
         )
         .unwrap();
-        journal.entries[0].backup_created = true;
-        journal.entries[0].wrote_new = true;
-        writer.write_journal(&journal).unwrap();
-        atomic_write_nofollow(&parent, &name, b"second", false).unwrap();
-        let mut misleading_receipt = expected_receipt.clone();
-        misleading_receipt.operation_id = operation_id;
-        misleading_receipt.operation = HostBundleLifecycleOpV1::Update;
-        misleading_receipt.manifest_digest = [9; 32];
-        writer.write_receipt(&misleading_receipt).unwrap();
-        journal.state = HostBundleJournalStateV1::Committed;
-        writer.write_journal(&journal).unwrap();
-        drop(writer);
-
-        let recovered = HostBundleWriterV1::open(root.path()).unwrap();
-        assert_eq!(std::fs::read(root.path().join(relative)).unwrap(), b"first");
-        assert!(recovered.load_journal().unwrap().is_none());
+        assert_eq!(report.components.len(), 1);
         assert_eq!(
-            recovered
-                .load_receipt(HostKindV1::Hermes, HostBundleComponentV1::Core)
-                .unwrap()
-                .unwrap(),
-            expected_receipt
+            report.components[0].state,
+            HostBundleComponentDoctorStateV1::Current
+        );
+        assert_eq!(report.components[0].host, Some(HostKindV1::Hermes));
+        assert_eq!(
+            report.components[0].component,
+            Some(HostBundleComponentV1::Core)
+        );
+        let repairable = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &MissingRegistration,
+        )
+        .unwrap();
+        assert_eq!(
+            repairable.components[0].state,
+            HostBundleComponentDoctorStateV1::Repairable
+        );
+        assert_eq!(
+            repairable.components[0].repair_action,
+            "run `tracedecay install --agent hermes`"
+        );
+
+        writer
+            .execute(
+                &second,
+                &execution(
+                    HostKindV1::Hermes,
+                    HostBundleLifecycleOpV1::Uninstall,
+                    15,
+                    true,
+                ),
+                &[],
+                &verifier(&second),
+            )
+            .unwrap();
+        let uninstalled = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert!(uninstalled.components.is_empty());
+    }
+
+    #[test]
+    fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let manifest = manifest(HostKindV1::OpenCode, b"current");
+        let mut writer =
+            HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path())
+                .unwrap();
+        writer
+            .execute(
+                &manifest,
+                &execution(
+                    HostKindV1::OpenCode,
+                    HostBundleLifecycleOpV1::Install,
+                    13,
+                    true,
+                ),
+                &content(b"current"),
+                &verifier(&manifest),
+            )
+            .unwrap();
+
+        let artifact = artifacts.path().join("plugins/tracedecay.json");
+        std::fs::remove_file(&artifact).unwrap();
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert_eq!(
+            report.components[0].state,
+            HostBundleComponentDoctorStateV1::Missing
+        );
+
+        std::fs::write(&artifact, b"foreign").unwrap();
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert_eq!(
+            report.components[0].state,
+            HostBundleComponentDoctorStateV1::OwnershipConflict
+        );
+
+        let receipt_path = lifecycle
+            .path()
+            .join(HOST_BUNDLE_CONTROL_DIR)
+            .join(receipt_file(
+                HostKindV1::OpenCode,
+                HostBundleComponentV1::Core,
+            ));
+        std::fs::write(receipt_path, b"{").unwrap();
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert_eq!(
+            report.components[0].state,
+            HostBundleComponentDoctorStateV1::Corrupt
         );
     }
 
     #[test]
-    fn five_host_capability_matrix_is_explicit_and_hermes_is_single_profile() {
-        for host in [
-            HostKindV1::ClaudeCode,
-            HostKindV1::CursorDesktop,
-            HostKindV1::Codex,
-            HostKindV1::Hermes,
-            HostKindV1::Kiro,
-        ] {
-            assert_eq!(stock_host_capabilities(host).len(), 5);
-        }
-        let bundle = manifest(HostKindV1::Hermes);
-        let mut lifecycle = request(HostKindV1::Hermes, HostBundleLifecycleOpV1::Install);
-        lifecycle.hermes_profile_bindings = 1;
-        assert!(plan_lifecycle_mutation(&bundle, &lifecycle, &[], |_| Ok(())).is_ok());
+    fn doctor_surfaces_restart_safe_feedback_rollback_state() {
+        let root = tempfile::tempdir().unwrap();
+        let writer = HostBundleWriterV1::open(root.path()).unwrap();
+        std::fs::write(
+            root.path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join("feedback-rollback.kimi.v1.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "host": "kimi_code",
+                "status": "applied"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        drop(writer);
+
+        let report = inspect_installed_host_bundle_components_at(
+            root.path(),
+            root.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert_eq!(report.components.len(), 1);
+        assert_eq!(report.components[0].host, Some(HostKindV1::KimiCode));
+        assert_eq!(
+            report.components[0].component,
+            Some(HostBundleComponentV1::Core)
+        );
+        assert_eq!(
+            report.components[0].state,
+            HostBundleComponentDoctorStateV1::Repairable
+        );
+        assert!(
+            report.components[0]
+                .repair_action
+                .contains("feedback-rollback restore")
+        );
     }
 }

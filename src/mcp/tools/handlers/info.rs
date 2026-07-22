@@ -3,11 +3,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::context::read_modes::{LineRange, ReadMode, render_symbol_context};
+use crate::context::read_modes::{LineRange, ReadMode};
+use crate::context::source_read::{SourceReadRequest, read_source, resolve_indexed_source_file};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, SessionIngestHealth, global_db_path};
 use crate::path_tree::format_compact_annotated_path_list;
@@ -2196,100 +2197,8 @@ pub(super) async fn handle_todos(
     ))
 }
 
-fn relative_source_key(path: &Path) -> Result<Option<String>> {
-    if path.is_absolute() {
-        return Ok(None);
-    }
-
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
-            _ => {
-                return Err(TraceDecayError::Config {
-                    message: format!("path '{}' contains unsafe components", path.display()),
-                });
-            }
-        }
-    }
-
-    if parts.is_empty() {
-        return Err(TraceDecayError::Config {
-            message: "path must name a project file".to_string(),
-        });
-    }
-
-    Ok(Some(parts.join("/")))
-}
-
-fn absolute_source_key(project_root: &Path, path: &Path) -> Result<Option<String>> {
-    if !path.is_absolute() {
-        return Ok(None);
-    }
-    let Ok(relative) = path.strip_prefix(project_root) else {
-        return Ok(None);
-    };
-    relative_source_key(relative)
-}
-
-async fn resolve_indexed_source_file(cg: &TraceDecay, file: &str) -> Result<(PathBuf, String)> {
-    if file.contains('\0') {
-        return Err(TraceDecayError::Config {
-            message: "path contains NUL byte".to_string(),
-        });
-    }
-
-    let project_root = cg.project_root().to_path_buf();
-    let input = Path::new(file);
-
-    if let Ok(project_path) = ProjectPath::resolve(&project_root, input) {
-        let display_file = match relative_source_key(input)? {
-            Some(relative) => relative,
-            None => project_path.relative_path_string(),
-        };
-        return Ok((project_path.absolute_path(), display_file));
-    }
-
-    let display_file = if let Some(relative) = relative_source_key(input)? {
-        relative
-    } else if let Some(relative) = absolute_source_key(&project_root, input)? {
-        relative
-    } else {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "path '{}' escapes project root '{}'",
-                input.display(),
-                project_root.display()
-            ),
-        });
-    };
-
-    let nodes = cg.get_nodes_by_file(&display_file).await?;
-    if nodes.is_empty() {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "path '{}' escapes project root '{}' and is not indexed",
-                input.display(),
-                project_root.display()
-            ),
-        });
-    }
-
-    let abs_path = if input.is_absolute() {
-        input.to_path_buf()
-    } else {
-        project_root.join(input)
-    };
-    Ok((abs_path, display_file))
-}
-
 /// Handles `tracedecay_read` — mode-aware file read with cross-session cache.
 pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    use crate::context::read_cache::{self, GLOBAL_SESSION};
-    use crate::context::read_modes::{
-        self, LineRange, ReadMode, render_full, render_lines, render_map, render_signatures,
-    };
-
     let file =
         args.get("file")
             .and_then(|v| v.as_str())
@@ -2323,123 +2232,34 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
         None
     };
 
-    let (abs_path, display_file) = resolve_indexed_source_file(cg, file).await?;
-    let project_root = cg.project_root().to_path_buf();
-    let project_id = project_root.to_string_lossy().to_string();
-
-    let mtime_ns = read_cache::file_mtime_ns(&abs_path).map_err(|e| TraceDecayError::Config {
-        message: format!("cannot read file metadata for '{file}': {e}"),
-    })?;
-
-    let last_sync_at = match mode {
-        ReadMode::Map | ReadMode::Signatures => {
-            cg.db().get_metadata("last_sync_at").await.unwrap_or(None)
-        }
-        _ => None,
-    };
-    let hash_input = json!({
-        "lines": args.get("lines").cloned(),
-        "last_sync_at": last_sync_at,
-    });
-    let args_hash = read_cache::args_hash(&hash_input);
-
-    let conn = cg.db().conn();
-
-    if let Some(cached) = read_cache::get(
-        conn,
-        &project_id,
-        GLOBAL_SESSION,
-        &display_file,
-        mode.as_str(),
-        &args_hash,
-        mtime_ns,
+    let project_id = cg.project_root().to_string_lossy();
+    let output = read_source(
+        cg,
+        SourceReadRequest {
+            file,
+            mode,
+            line_range,
+            raw_lines: args.get("lines").and_then(Value::as_str),
+            include_symbols,
+            project_id: &project_id,
+        },
     )
-    .await?
-    {
-        let mut stub = json!({
-            "unchanged": true,
-            "file": display_file,
-            "mode": mode.as_str(),
-            "mtime_ns": cached.mtime_ns,
-            "digest": cached.digest,
-            "token_count": cached.token_count,
-        });
-        if let Some(context) =
-            read_symbol_context(cg.db(), &display_file, mode, line_range, include_symbols).await?
-        {
-            stub["context"] = context;
-        }
-        let text = render::finalize(Some(cg.project_root()), &args, &stub, || {
-            render_read_md(&stub)
-        });
-        return Ok(ToolResult::new(
-            json!({
-                "content": [{ "type": "text", "text": text }]
-            }),
-            vec![display_file],
-        ));
-    }
-
-    let body_text = match mode {
-        ReadMode::Full => {
-            let source =
-                crate::sync::read_source_file(&abs_path).map_err(|e| TraceDecayError::Config {
-                    message: format!("cannot read '{file}': {e}"),
-                })?;
-            render_full(&source)
-        }
-        ReadMode::Lines => {
-            let range = line_range.ok_or_else(|| TraceDecayError::Config {
-                message: "internal error: lines mode reached without a parsed range".to_string(),
-            })?;
-            let source =
-                crate::sync::read_source_file(&abs_path).map_err(|e| TraceDecayError::Config {
-                    message: format!("cannot read '{file}': {e}"),
-                })?;
-            render_lines(&source, range)
-        }
-        ReadMode::Map => {
-            let v = render_map(cg.db(), &display_file, None).await?;
-            serde_json::to_string_pretty(&v).unwrap_or_default()
-        }
-        ReadMode::Signatures => {
-            let v = render_signatures(cg.db(), &display_file).await?;
-            serde_json::to_string_pretty(&v).unwrap_or_default()
-        }
-    };
-
-    let context =
-        read_symbol_context(cg.db(), &display_file, mode, line_range, include_symbols).await?;
-    let token_count = read_modes::estimate_tokens(&body_text);
-    let digest = read_cache::digest_bytes(body_text.as_bytes());
-
-    if !cg.is_read_only() {
-        read_cache::put_write(
-            cg.db(),
-            read_cache::ReadCacheWrite {
-                project_id: &project_id,
-                session_id: GLOBAL_SESSION,
-                file_path: &display_file,
-                mtime_ns,
-                mode: mode.as_str(),
-                args_hash: &args_hash,
-                digest: &digest,
-                body: body_text.as_bytes(),
-                token_count,
-            },
-        )
-        .await?;
-    }
-
+    .await?;
+    let display_file = output.file;
     let mut payload = json!({
-        "file": display_file,
-        "mode": mode.as_str(),
-        "mtime_ns": mtime_ns,
-        "digest": digest,
-        "token_count": token_count,
-        "body": body_text,
+        "file": &display_file,
+        "mode": output.mode.as_str(),
+        "mtime_ns": output.mtime_ns,
+        "digest": output.digest,
+        "token_count": output.token_count,
     });
-    if let Some(context) = context {
+    if output.unchanged {
+        payload["unchanged"] = Value::Bool(true);
+    }
+    if let Some(body) = output.body {
+        payload["body"] = Value::String(body);
+    }
+    if let Some(context) = output.context {
         payload["context"] = context;
     }
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
@@ -2481,21 +2301,6 @@ fn render_read_md(value: &Value) -> String {
     let lang = file.rsplit_once('.').map_or("", |(_, ext)| ext);
     md.code(lang, render::field_str(value, "body"));
     md.render()
-}
-
-async fn read_symbol_context(
-    db: &crate::db::Database,
-    display_file: &str,
-    mode: ReadMode,
-    line_range: Option<LineRange>,
-    include_symbols: bool,
-) -> Result<Option<Value>> {
-    if !include_symbols || !matches!(mode, ReadMode::Full | ReadMode::Lines) {
-        return Ok(None);
-    }
-    Ok(Some(
-        render_symbol_context(db, display_file, line_range).await?,
-    ))
 }
 
 fn render_read_context_md(md: &mut Md, context: Option<&Value>) {

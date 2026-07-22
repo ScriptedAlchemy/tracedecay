@@ -643,6 +643,7 @@ async fn portable_project_warmup_cancels_before_shutdown_snapshot() {
         lifecycle.clone(),
         store_administration,
         project_open_gates,
+        super::super::DaemonInvocationState::default(),
         handshake,
         initialize_request,
         Some(Arc::clone(&attempts)),

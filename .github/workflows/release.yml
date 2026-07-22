@@ -121,11 +121,55 @@ jobs:
           shared-key: release-${{ matrix.target }}
           cache-on-failure: true
 
-      - name: Build release binary
-        # Default features only (`full` + `token-counting`). Do not pass
-        # `--all-features`: that enables `test-transport`, which can fall back
-        # to project_for_test paths unsuitable for production binaries.
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Test release distribution
+        run: cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
+
+      - name: Validate default release build
+        run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: Build all-feature release binary
+        run: cargo build --release --target ${{ matrix.target }} --all-features --locked
+
+      - name: Install modern Bash for distribution acceptance
+        if: runner.os == 'macOS'
+        run: brew install bash
+
+      - name: Validate immutable FastEmbed fixture pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          gate="scripts/check-distribution-acceptance.sh"
+          prepare="tests/distribution/fastembed/prepare_fixture.py"
+          validator="tests/distribution/fastembed/validate_fixture.py"
+          if [[ ! -x "$gate" || ! -f "$prepare" || ! -f "$validator" ]]; then
+            echo "::error title=FastEmbed acceptance setup missing::Expected executable $gate plus $prepare and $validator from the distribution fixture work."
+            exit 1
+          fi
+          # Pins live in-repo; real model bytes are acquired later by the gate.
+          if ! python3 "$prepare" --check tests/distribution/fastembed; then
+            echo "::error title=FastEmbed fixture pins invalid::The immutable Jina fixture pins must validate before release acceptance acquires real model bytes."
+            exit 1
+          fi
+          cargo fetch --locked --target ${{ matrix.target }}
+
+      - name: Run distribution acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          gate_shell="bash"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            gate_shell="$(brew --prefix)/bin/bash"
+          fi
+          lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
+          # Allow curl fixture acquisition; keep Cargo and HF hub offline for the
+          # packaged library/CLI and ORT inference phases inside the gate.
+          CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 \
+            "$gate_shell" scripts/check-distribution-acceptance.sh
+          actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
+          if [[ "$actual_lockfile_sha" != "$lockfile_sha" ]]; then
+            echo "::error title=Cargo.lock changed::Distribution acceptance must preserve the checked-in lockfile."
+            exit 1
+          fi
 
       - name: Get version
         id: version
@@ -150,6 +194,19 @@ jobs:
           tar czf ../../../tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.tar.gz tracedecay
           cd ../../..
 
+      - name: Verify binary archive (unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.tar.gz"
+          rm -rf verify-binary
+          mkdir verify-binary
+          tar xzf "$archive" -C verify-binary
+          test -x verify-binary/tracedecay
+          verify-binary/tracedecay --version
+          verify-binary/tracedecay --help >/dev/null
+
       - name: Generate archive attestation (unix)
         if: matrix.archive == 'tar.gz' && github.event_name == 'release'
         uses: actions/attest@v4
@@ -168,6 +225,18 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path target/${{ matrix.target }}/release/tracedecay.exe -DestinationPath tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.zip -Force
+
+      - name: Verify binary archive (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $archive = "tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.zip"
+          Remove-Item verify-binary -Recurse -Force -ErrorAction SilentlyContinue
+          Expand-Archive -Path $archive -DestinationPath verify-binary
+          & "./verify-binary/tracedecay.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --version" }
+          & "./verify-binary/tracedecay.exe" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --help" }
 
       - name: Generate archive attestation (windows)
         if: matrix.archive == 'zip' && github.event_name == 'release'
@@ -194,6 +263,22 @@ jobs:
           chmod +x tracedecay/${VERSION}/bin/tracedecay
           tar czf "tracedecay-${VERSION}.${BOTTLE_TAG}.bottle.tar.gz" tracedecay/
 
+      - name: Verify Homebrew bottle
+        if: matrix.bottle_tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          BOTTLE_TAG="${{ matrix.bottle_tag }}"
+          archive="tracedecay-${VERSION}.${BOTTLE_TAG}.bottle.tar.gz"
+          rm -rf verify-bottle
+          mkdir verify-bottle
+          tar xzf "$archive" -C verify-bottle
+          binary="verify-bottle/tracedecay/${VERSION}/bin/tracedecay"
+          test -x "$binary"
+          "$binary" --version
+          "$binary" --help >/dev/null
+
       - name: Generate bottle attestation
         if: matrix.bottle_tag && github.event_name == 'release'
         uses: actions/attest@v4
@@ -207,15 +292,80 @@ jobs:
           name: bottle-${{ matrix.bottle_tag }}
           path: "tracedecay-*.bottle.tar.gz"
 
+  package-workspace:
+    name: Validate workspace packages
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    needs: validate-stable-release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build packaged dashboard assets
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test publishable workspace
+        run: cargo test --workspace --release --all-features --locked
+
+      - name: Verify all-feature Cargo install
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_root="${RUNNER_TEMP}/tracedecay-install"
+          cargo install --path . --root "$install_root" --all-features --locked
+          "$install_root/bin/tracedecay" --version
+          "$install_root/bin/tracedecay" --help >/dev/null
+
+      - name: Generate publishable workspace packages
+        # Keep the V2 crates in one dependency-ordered package batch until
+        # release-plz publishes their first registry releases.
+        run: cargo package --workspace --all-features --locked --allow-dirty --no-verify
+
+      - name: Verify generated crate archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(target/package/*.crate)
+          test "${#archives[@]}" -gt 0
+          for archive in "${archives[@]}"; do
+            test -s "$archive"
+            tar tzf "$archive" >/dev/null
+          done
+
+          metadata="$(cargo metadata --no-deps --locked --format-version 1)"
+          while IFS= read -r expected; do
+            test -s "target/package/${expected}"
+          done < <(jq -r '.packages[] | "\(.name)-\(.version).crate"' <<<"$metadata")
+
+          version="$(jq -r '.packages[] | select(.name == "tracedecay") | .version' <<<"$metadata")"
+          root_archive="target/package/tracedecay-${version}.crate"
+          test -s "$root_archive"
+          tar tzf "$root_archive" > root-archive-contents.txt
+          grep -q "/dashboard/graph/dist/" root-archive-contents.txt
+
   publish-assets:
     name: Publish release assets
     if: |
       needs.build.result == 'success' &&
+      needs.package-workspace.result == 'success' &&
       (
         (github.event_name == 'release' && !github.event.release.prerelease) ||
         (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
       )
-    needs: build
+    needs: [build, package-workspace]
     runs-on: ubuntu-latest
     steps:
       - name: Get release tag
@@ -328,10 +478,11 @@ jobs:
               sha256 cellar: :any_skip_relocation, x86_64_linux: "${X86_64_LINUX_SHA}"
             end
 
+            depends_on "node" => :build
             depends_on "rust" => :build
 
             def install
-              system "cargo", "install", *std_cargo_args
+              system "cargo", "install", *std_cargo_args, "--all-features", "--locked"
             end
 
             test do

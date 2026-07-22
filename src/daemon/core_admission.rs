@@ -11,9 +11,10 @@ use tokio::time::{Duration, Instant, timeout, timeout_at};
 use super::{
     BrokerStream, BrokerStreamTransport, DaemonAuthPreface, DaemonHandshake, JsonRpcRequest,
     JsonRpcResponse, Result, StoreAdministration, TraceDecayError, log_daemon_event,
-    read_line_handling_wire_oversized, write_json_rpc_response,
+    parse_daemon_invocation_request, read_line_handling_wire_oversized, write_json_rpc_response,
 };
 use crate::mcp::ErrorCode;
+use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 
 pub(crate) const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
 pub(crate) const RESERVED_DAEMON_CONTROL_CLIENTS: usize = 4;
@@ -281,6 +282,43 @@ impl DaemonClientSaturationResponse {
     }
 }
 
+fn invocation_saturation_response(
+    request_line: &str,
+    saturation: &DaemonClientSaturationResponse,
+) -> Option<super::DaemonInvocationResponse> {
+    let request = parse_daemon_invocation_request(request_line)?.ok()?;
+    let code = match saturation.kind {
+        DaemonClientSaturationKind::ClientCapacityReached => "daemon_client_capacity_saturated",
+        DaemonClientSaturationKind::PerClientCapacityReached => {
+            "daemon_per_client_capacity_saturated"
+        }
+        DaemonClientSaturationKind::BulkCapacityReached => "daemon_bulk_capacity_saturated",
+    };
+    Some(super::DaemonInvocationResponse::application_problem(
+        request.request_id,
+        ApplicationProblem::Saturated {
+            diagnostic: SafeDiagnostic {
+                code: code.to_owned(),
+                message: "The owning TraceDecay daemon has no request capacity".to_owned(),
+            },
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
+        },
+    ))
+}
+
+async fn write_invocation_response(
+    transport: &mut impl crate::mcp::McpTransport,
+    response: &super::DaemonInvocationResponse,
+) -> Result<()> {
+    transport
+        .write_line(&serde_json::to_string(response)?)
+        .await?;
+    transport.write_line("\n").await?;
+    transport.flush().await?;
+    Ok(())
+}
+
 pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
     let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
         return false;
@@ -332,19 +370,21 @@ pub(crate) async fn reject_admitted_request(
         DaemonClientSaturationKind::PerClientCapacityReached => "per_client_capacity_reached",
         DaemonClientSaturationKind::BulkCapacityReached => "bulk_capacity_reached",
     };
-    let request_id = serde_json::from_str::<JsonRpcRequest>(request_line)
-        .ok()
-        .and_then(|request| request.id)
-        .unwrap_or(serde_json::Value::Null);
-    let response = saturation.into_json_rpc_with_id(request_id);
-    write_json_rpc_response(transport, &response).await?;
+    if let Some(response) = invocation_saturation_response(request_line, &saturation) {
+        write_invocation_response(transport, &response).await?;
+    } else {
+        let request_id = serde_json::from_str::<JsonRpcRequest>(request_line)
+            .ok()
+            .and_then(|request| request.id)
+            .unwrap_or(serde_json::Value::Null);
+        let response = saturation.into_json_rpc_with_id(request_id);
+        write_json_rpc_response(transport, &response).await?;
+    }
     log_daemon_event("daemon_client", &[("outcome", outcome.to_string())]);
     Ok(())
 }
 
-async fn saturated_request_id(
-    transport: &mut BrokerStreamTransport,
-) -> Result<Option<serde_json::Value>> {
+async fn saturated_request_line(transport: &mut BrokerStreamTransport) -> Result<Option<String>> {
     // A broker client sends a handshake before its JSON-RPC request, optionally
     // preceded by an auth preface. Consume those frames so the rejection uses
     // the request ID instead of being discarded as a notification.
@@ -360,11 +400,7 @@ async fn saturated_request_id(
         first_line
     };
     DaemonHandshake::from_line(&handshake_line)?;
-    let Some(request_line) = read_line_handling_wire_oversized(transport).await? else {
-        return Ok(None);
-    };
-    let request: JsonRpcRequest = serde_json::from_str(&request_line)?;
-    Ok(request.id)
+    read_line_handling_wire_oversized(transport).await
 }
 
 pub(crate) async fn reject_saturated_daemon_client(
@@ -373,10 +409,19 @@ pub(crate) async fn reject_saturated_daemon_client(
 ) {
     let mut transport = BrokerStreamTransport::new(stream);
     let response = async {
-        let request_id = saturated_request_id(&mut transport)
+        let request_line = saturated_request_line(&mut transport)
             .await?
-            .unwrap_or(serde_json::Value::Null);
-        write_json_rpc_response(&mut transport, &response.into_json_rpc_with_id(request_id)).await
+            .unwrap_or_default();
+        if let Some(invocation) = invocation_saturation_response(&request_line, &response) {
+            write_invocation_response(&mut transport, &invocation).await
+        } else {
+            let request_id = serde_json::from_str::<JsonRpcRequest>(&request_line)
+                .ok()
+                .and_then(|request| request.id)
+                .unwrap_or(serde_json::Value::Null);
+            write_json_rpc_response(&mut transport, &response.into_json_rpc_with_id(request_id))
+                .await
+        }
     };
     match timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, response).await {
         Ok(Ok(())) => log_daemon_event(

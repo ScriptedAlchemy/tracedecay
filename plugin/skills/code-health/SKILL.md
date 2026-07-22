@@ -10,10 +10,10 @@ and the specific scans the user asked for — don't run every tool by reflex.
 
 ## Quality scorecard
 
-1. **Composite signal → `tracedecay_health`** (`details: true`, optional
-   `path`): the 0–10000 score plus the 5-dimension breakdown (acyclicity,
-   depth, equality, redundancy, modularity) and the `coverage_discipline`
-   penalty. The weak dimensions choose the drill-downs.
+1. **Composite signal → `tracedecay_health` / `tracedecay_health_read`**
+   (`details: true`, optional `path`): the 0–10000 score plus the 5-dimension
+   breakdown (acyclicity, depth, equality, redundancy, modularity) and the
+   `coverage_discipline` penalty. The weak dimensions choose the drill-downs.
 2. **Inequality / god files → `tracedecay_gini`** (`metric`:
    `complexity`|`lines`|`fan_in`|`fan_out`|`members`, `scope`, `path?`).
 3. **Complexity & size offenders:** `tracedecay_complexity`,

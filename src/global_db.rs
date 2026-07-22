@@ -55,8 +55,6 @@ use project_registry::{
 };
 pub use session_temporal::GlobalDbSessionTemporalExecution;
 pub(crate) use session_temporal::{
-    AuthorizedSessionDescribeRequest, AuthorizedSessionExpandCursorBinding,
-    AuthorizedSessionExpandRequest, CompatibilityReadError, CompatibilityTemporalMetadata,
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
 pub(crate) use transcript::TranscriptPersistenceError;

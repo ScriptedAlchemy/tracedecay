@@ -377,11 +377,14 @@ pub trait HookFeedbackDeliveryPortV1<T> {
     fn deliver_legacy(&self, feedback: &T) -> HookFeedbackDeliveryOutcomeV1;
 }
 
-pub fn deliver_feedback_with_rollback<T>(
+pub fn deliver_feedback_with_rollback<T, P>(
     rollback: HookFeedbackRollbackSwitchV1,
     feedback: &T,
-    port: &impl HookFeedbackDeliveryPortV1<T>,
-) -> Result<HookFeedbackDeliveryOutcomeV1, HookRuntimeErrorV1> {
+    port: &P,
+) -> Result<HookFeedbackDeliveryOutcomeV1, HookRuntimeErrorV1>
+where
+    P: HookFeedbackDeliveryPortV1<T> + ?Sized,
+{
     if rollback.configuration_revision == 0 {
         return Err(HookRuntimeErrorV1::InvalidControl);
     }

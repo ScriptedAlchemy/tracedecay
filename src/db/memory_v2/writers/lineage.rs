@@ -6,10 +6,12 @@
 
 use libsql::{Connection, params};
 use tracedecay_domain::{
-    Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId,
-    FactLineageEventV1, LegacyFactMappingV1, PayloadAccessState, SourceStoreId, UtcMicros,
+    Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId,
+    FactEvidenceRelationV1, FactId, FactLineageEventV1, LegacyFactMappingV1, PayloadAccessState,
+    SourceStoreId, UtcMicros,
 };
 
+use crate::db::{AnchorDerivativeKindV1, RetrievalAnchorDerivativeV1, publish_anchor_derivative};
 use crate::errors::Result;
 
 use super::super::types::{OwnerKey, StoredAssertionHeaderV1};
@@ -587,6 +589,20 @@ async fn insert_assertion_evidence(
             .await
             .map_err(|error| db_error(OPERATION, error))?;
         }
+        let direct_evidence = matches!(
+            evidence.relation(),
+            FactEvidenceRelationV1::Supports
+                | FactEvidenceRelationV1::Contradicts
+                | FactEvidenceRelationV1::Corrects
+        );
+        let derivative = RetrievalAnchorDerivativeV1::new(
+            evidence.anchor_id().clone(),
+            assertion.owner().clone(),
+            AnchorDerivativeKindV1::Contribution,
+            evidence.evidence_id().as_str(),
+            direct_evidence,
+        )?;
+        publish_anchor_derivative(conn, &derivative).await?;
         let existing = optional_string(
             conn,
             "SELECT evidence_id FROM memory_v2_assertion_evidence

@@ -1,5 +1,6 @@
 //! One canonical branch/PR fixture proving the four advisory pillars coexist.
 
+use tracedecay_application::feedback::{GitHubReviewReadRequestV1, GitHubReviewReadResponseV1};
 use tracedecay_application::feedback_surface_catalog_contribution;
 use tracedecay_domain::feedback::*;
 use tracedecay_domain::{
@@ -7,7 +8,6 @@ use tracedecay_domain::{
     ProviderId, RepositoryId, RetrievalAnchorId, SourceSpan, SymbolOccurrenceId, UtcMicros,
     WorktreeId,
 };
-use tracedecay_tool_catalog::{AvailabilityContract, UnavailabilityReason};
 
 const SHA_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -42,7 +42,7 @@ fn finding(id: &str, retrieval_anchor_id: RetrievalAnchorId) -> FeedbackFindingV
 }
 
 #[test]
-fn four_pillars_share_one_cycle_result_and_reference_identities() {
+fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
     let scope = scope();
     let file = FileOccurrenceId::new("file.pr13.fixture").unwrap();
     let symbol = SymbolOccurrenceId::new("symbol.pr13.fixture").unwrap();
@@ -105,6 +105,12 @@ fn four_pillars_share_one_cycle_result_and_reference_identities() {
         0,
     )
     .unwrap();
+    let canonical_packet = FeedbackEvidencePacketV1::from_request(
+        &request,
+        cycle_result.termination,
+        &cycle_result.provider_states,
+    )
+    .unwrap();
 
     let ci = CiFailureLocalizationResultV1 {
         provider: ProviderId::new("provider.github-actions").unwrap(),
@@ -124,7 +130,6 @@ fn four_pillars_share_one_cycle_result_and_reference_identities() {
         coverage: CiFailureCoverageV1::Complete,
         failure_kind: CiFailureKindV1::TestFailure,
         failure_anchor: ci_anchor.clone(),
-        failure_excerpt_digest: digest(SHA_A),
         branch: CiFailureBranchEvidenceV1 {
             scope: scope.clone(),
             provider_head_commit_id: scope.head_commit_id.clone(),
@@ -204,6 +209,59 @@ fn four_pillars_share_one_cycle_result_and_reference_identities() {
         fetched_at: UtcMicros(2),
     };
     github.validate().unwrap();
+    let github_request = GitHubReviewReadRequestV1 {
+        operation: github.operation,
+        scope: scope.clone(),
+        pull_request_id: github.pull_request_id.clone(),
+    };
+    let mut stale_without_evidence = github.clone();
+    stale_without_evidence.outcome = GitHubReviewIngressProviderOutcomeV1::Stale;
+    stale_without_evidence.coverage = GitHubReviewCoverageV1::Stale;
+    stale_without_evidence.items[0].provider_outcome = GitHubReviewIngressProviderOutcomeV1::Stale;
+    let empty_checkpoint = GitHubReviewReadCheckpointV1 {
+        etag: None,
+        next_cursor: None,
+        rate_limit: None,
+    };
+    assert!(
+        GitHubReviewReadResponseV1 {
+            ingress: stale_without_evidence.clone(),
+            checkpoint: empty_checkpoint.clone(),
+        }
+        .validate_for(&github_request)
+        .is_err()
+    );
+    GitHubReviewReadResponseV1 {
+        ingress: stale_without_evidence,
+        checkpoint: GitHubReviewReadCheckpointV1 {
+            etag: Some(GitHubReviewEtagV1::new("W/\"pr13-fixture\"").unwrap()),
+            ..empty_checkpoint.clone()
+        },
+    }
+    .validate_for(&github_request)
+    .unwrap();
+    assert!(
+        GitHubReviewReadResponseV1 {
+            ingress: github.clone(),
+            checkpoint: GitHubReviewReadCheckpointV1 {
+                next_cursor: Some(GitHubReviewCursorV1::new("cursor.pr13.fixture").unwrap()),
+                ..empty_checkpoint
+            },
+        }
+        .validate_for(&github_request)
+        .is_err(),
+        "complete coverage cannot retain a continuation cursor"
+    );
+    let mut stale_github = github.clone();
+    stale_github.provider_head_commit_id = CommitId::new("commit.pr13.stale-head").unwrap();
+    stale_github.outcome = GitHubReviewIngressProviderOutcomeV1::Stale;
+    stale_github.coverage = GitHubReviewCoverageV1::Stale;
+    stale_github.items[0].provider_outcome = GitHubReviewIngressProviderOutcomeV1::Stale;
+    stale_github.validate().unwrap();
+    stale_github.outcome = GitHubReviewIngressProviderOutcomeV1::Complete;
+    stale_github.coverage = GitHubReviewCoverageV1::Complete;
+    stale_github.items[0].provider_outcome = GitHubReviewIngressProviderOutcomeV1::Complete;
+    assert!(stale_github.validate().is_err());
 
     let proximity = ProximityContributionV1 {
         contribution_id: ProximityContributionIdV1::new("proximity-contribution.1").unwrap(),
@@ -237,76 +295,31 @@ fn four_pillars_share_one_cycle_result_and_reference_identities() {
         inclusion: ProximityInclusionV1::Included,
     };
     proximity.validate().unwrap();
+    let mut stale_proximity = proximity.clone();
+    stale_proximity.inclusion = ProximityInclusionV1::Stale;
+    assert!(stale_proximity.validate().is_err());
+    stale_proximity.coverage = ProximityCoverageV1::Stale;
+    stale_proximity.validate().unwrap();
 
-    let reference_findings = vec![
-        FeedbackReferenceFindingV1 {
-            finding_id: FeedbackFindingId::new("finding.pr13.post-edit").unwrap(),
-            kind: FeedbackReferenceFindingKindV1::PostEditDiagnostic,
-            retrieval_anchor_id: post_edit_anchor,
-            source_record_id: FeedbackReferenceSourceRecordIdV1::new("diagnostic.1").unwrap(),
-            source_state: FeedbackReferenceSourceStateV1::PostEditDiagnostic(
-                ProviderEvaluationStateV1::SupportedCompletedComplete,
-            ),
-            coverage: FeedbackReferenceCoverageV1::Complete,
-            observed_at: UtcMicros(1),
-            valid_at: UtcMicros(2),
-            expires_at: UtcMicros(100),
-            safe_bounded_preview: None,
-        },
-        FeedbackReferenceFindingV1 {
-            finding_id: FeedbackFindingId::new("finding.pr13.ci").unwrap(),
-            kind: FeedbackReferenceFindingKindV1::CiLocalization,
-            retrieval_anchor_id: ci.failure_anchor.clone(),
-            source_record_id: FeedbackReferenceSourceRecordIdV1::new("ci-failure.1").unwrap(),
-            source_state: FeedbackReferenceSourceStateV1::CiLocalization(ci.state),
-            coverage: FeedbackReferenceCoverageV1::Complete,
-            observed_at: UtcMicros(1),
-            valid_at: UtcMicros(2),
-            expires_at: UtcMicros(100),
-            safe_bounded_preview: None,
-        },
-        FeedbackReferenceFindingV1 {
-            finding_id: FeedbackFindingId::new("finding.pr13.github").unwrap(),
-            kind: FeedbackReferenceFindingKindV1::GitHubReview,
-            retrieval_anchor_id: github.items[0].body_anchor.clone(),
-            source_record_id: FeedbackReferenceSourceRecordIdV1::new("github-comment.1").unwrap(),
-            source_state: FeedbackReferenceSourceStateV1::GitHubReview {
-                lifecycle: github.items[0].lifecycle,
-                provider_outcome: github.outcome,
-            },
-            coverage: FeedbackReferenceCoverageV1::Complete,
-            observed_at: UtcMicros(1),
-            valid_at: UtcMicros(2),
-            expires_at: UtcMicros(100),
-            safe_bounded_preview: None,
-        },
-        FeedbackReferenceFindingV1 {
-            finding_id: FeedbackFindingId::new("finding.pr13.proximity").unwrap(),
-            kind: FeedbackReferenceFindingKindV1::Proximity,
-            retrieval_anchor_id: proximity_anchor,
-            source_record_id: FeedbackReferenceSourceRecordIdV1::new("proximity-warning.1")
-                .unwrap(),
-            source_state: FeedbackReferenceSourceStateV1::Proximity(ProximityInclusionV1::Included),
-            coverage: FeedbackReferenceCoverageV1::Complete,
-            observed_at: UtcMicros(1),
-            valid_at: UtcMicros(2),
-            expires_at: UtcMicros(100),
-            safe_bounded_preview: None,
-        },
-    ];
-    let packet = FeedbackReferencePacketV1::from_cycle_result(
-        &cycle_result,
-        reference_findings,
-        vec![proximity],
-    )
-    .unwrap();
-    packet.validate_against(&cycle_result).unwrap();
-    let packet_json = serde_json::to_string(&packet).unwrap();
-    for prohibited in ["task_id", "workflow", "rank", "review_body", "ci_log"] {
-        assert!(
-            !packet_json.contains(prohibited),
-            "reference packet leaked prohibited field {prohibited}"
-        );
+    assert_eq!(
+        cycle_result.termination,
+        FeedbackCycleTerminationV1::Blocked
+    );
+    assert_eq!(
+        canonical_packet.termination,
+        FeedbackCycleTerminationV1::Blocked,
+        "the canonical packet carries exactly one terminal cycle state"
+    );
+    for expected_anchor in [
+        &post_edit_anchor,
+        &ci_anchor,
+        &github_anchor,
+        &proximity_anchor,
+    ] {
+        assert!(cycle_result.findings.iter().any(|finding| {
+            finding.retrieval_anchor_id.as_ref() == Some(expected_anchor)
+                && finding.safe_bounded_preview.is_none()
+        }));
     }
 
     let catalog = feedback_surface_catalog_contribution().expect("feedback surface");
@@ -319,10 +332,7 @@ fn four_pillars_share_one_cycle_result_and_reference_identities() {
     assert!(operations.contains("github_review_ingest"));
     assert!(operations.contains("ci_failure_localize"));
     assert!(operations.contains("feedback_proximity"));
-    assert!(catalog.capabilities().iter().all(|capability| matches!(
-        capability.availability(),
-        AvailabilityContract::Unavailable {
-            reason: UnavailabilityReason::NotImplemented,
-        }
-    )));
+    for capability in catalog.capabilities() {
+        assert!(capability.availability().is_callable());
+    }
 }

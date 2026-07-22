@@ -1,10 +1,15 @@
 # TraceDecay Plugin Bundle
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
-Cursor, and Kimi Code. The installed bundles expose a host-specific MCP server
+Cursor, Kimi Code, and OpenCode. The installed bundles expose a host-specific MCP server
 key (`graph` for Claude/Codex, `tracedecay` for Cursor and Kimi Code), shared
 workflow skills, and host-specific lifecycle hooks (Kimi Code ships none in
-v1).
+older installs; the current manifest ships native `PostToolUse` and `Stop`).
+
+The manifest-driven package inventory also exposes an MCP-free core and
+independently installable MCP companions. See `README-host-bundles.md` for the
+host capability matrix, lifecycle/rollback contract, and Cline evidence
+boundary.
 
 ## Naming convention
 
@@ -34,6 +39,7 @@ doubled `tracedecay` — and that single convention is applied to every
 - `hooks/hooks-codex.json`: repo-local Codex hook seed. It is intentionally
   empty; the global Codex plugin fills hooks at install time.
 - `hooks/hooks-cursor.json`: Cursor lifecycle hooks.
+- `.lsp.json`: Claude Code's single configured-language TraceDecay LSP bridge.
 - `.mcp.json`: shared Claude/Codex MCP config. Codex rewrites args/env by
   install scope; Claude rewrites the command to the resolved binary path.
 - `mcp-cursor.json`: Cursor MCP config, deployed as `mcp.json`.

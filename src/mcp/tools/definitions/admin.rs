@@ -42,7 +42,13 @@ pub(super) fn def_storage_status() -> ToolDefinition {
         "Return read-only health and path metadata for the resolved active project store backing this MCP session. Use this to answer which store is active and whether it is writable, stale, missing, or branch-fallback backed.",
         json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                "include_details": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include bounded storage details when true."
+                }
+            }
         }),
     )
 }

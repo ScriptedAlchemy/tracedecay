@@ -326,6 +326,17 @@ pub async fn hook_codex_stop() -> i32 {
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = codex_project_root_from_parsed_event_with_identity(&parsed).await;
     let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Codex, "Stop", &event);
+    if let Some(root) = root.as_deref()
+        && let super::v2::HookV2Dispatch::Handled { guidance, .. } =
+            super::v2::dispatch(tracedecay_hooks::HookHostV1::Codex, &event, root).await
+    {
+        if let Some(guidance) = guidance {
+            println!("{}", codex_additional_context_json("Stop", &guidance));
+        } else {
+            println!("{}", serde_json::json!({}));
+        }
+        return 0;
+    }
     let session_id = event_session_id(&parsed);
     hook_telemetry.note_timeout_budget(CODEX_STOP_INGEST_BUDGET);
     let ingested = if let Ok(ingested) = tokio::time::timeout(

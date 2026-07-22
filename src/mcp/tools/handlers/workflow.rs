@@ -7,12 +7,22 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::time::timeout;
+use tracedecay_application::{
+    CancellationObservation, CancellationStage, Deadline, OperationBudgetUsage, OperationReceipt,
+    OperationTermination, RequestId,
+};
+use tracedecay_domain::UtcMicros;
+use url::Url;
 
+use crate::application::operation_stream::{
+    OperationEmitter, OperationEventError, operation_event_authority,
+};
 use crate::diagnose::{Severity, parse_cargo_output};
 use crate::errors::{Result, TraceDecayError};
 use crate::redundancy::{Fingerprint, body_token_window, redundancy_match_score, round4};
@@ -27,6 +37,7 @@ use super::support::unique_file_paths;
 /// cap — libtest filters are passed as positional args so very long lists
 /// can blow past OS argv limits on some platforms.
 const MAX_TESTS_HARD_CAP: usize = 500;
+static NEXT_TEST_RUN_OPERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Cap on cached fingerprint rows the near-duplicate lookup pulls per
 /// diagnostic. A single diagnose call can resolve many diagnostics, so we
@@ -495,6 +506,16 @@ where
 
     let (selected_targets, test_names, truncated) =
         select_test_targets(test_targets, run_args.max_tests);
+    let started_at = test_run_now();
+    let effective_deadline = Deadline::new(UtcMicros(
+        started_at.0.saturating_add(
+            i64::try_from(run_args.timeout_secs)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(1_000_000),
+        ),
+    ))
+    .map_err(test_run_contract_error)?;
+    let emitter = begin_test_run(cg).await?;
 
     // 3) Run cargo test --no-fail-fast with each test name as a libtest
     // filter. We use `--` to pass them through.
@@ -508,6 +529,13 @@ where
     {
         Ok(output) => output,
         Err(TestRunFailure::Spawn(error)) => {
+            finish_test_run(
+                &emitter,
+                started_at,
+                &effective_deadline,
+                OperationTermination::Failed,
+            )
+            .await?;
             return Ok(error_result(
                 &args,
                 "cargo",
@@ -516,6 +544,13 @@ where
             ));
         }
         Err(TestRunFailure::Timeout) => {
+            finish_test_run(
+                &emitter,
+                started_at,
+                &effective_deadline,
+                OperationTermination::TimedOut,
+            )
+            .await?;
             return Ok(error_result(
                 &args,
                 "cargo",
@@ -526,6 +561,23 @@ where
     };
 
     let results = parse_libtest_output(&output.stdout);
+    for (test, passed) in &results {
+        emitter
+            .test_result(test.clone(), *passed)
+            .await
+            .map_err(test_run_event_error)?;
+    }
+    emitter
+        .progress(results.len() as u64, Some(test_names.len() as u64))
+        .await
+        .map_err(test_run_event_error)?;
+    finish_test_run(
+        &emitter,
+        started_at,
+        &effective_deadline,
+        OperationTermination::Completed,
+    )
+    .await?;
 
     let touched_files: Vec<String> = unique_file_paths(changed_paths.iter().map(String::as_str));
     let body = run_affected_tests_body(
@@ -547,6 +599,86 @@ where
         }),
         touched_files,
     ))
+}
+
+async fn begin_test_run(cg: &TraceDecay) -> Result<OperationEmitter> {
+    let root = cg
+        .project_root()
+        .canonicalize()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("managed test-run root is unavailable: {error}"),
+        })?;
+    let root_uri = Url::from_directory_path(root)
+        .map_err(|_| TraceDecayError::Config {
+            message: "managed test-run root URI is invalid".to_owned(),
+        })?
+        .to_string();
+    let sequence = NEXT_TEST_RUN_OPERATION.fetch_add(1, Ordering::Relaxed);
+    let request_id = RequestId::new(format!("request.managed-test-run.{sequence}"))
+        .map_err(test_run_contract_error)?;
+    operation_event_authority()
+        .begin_managed_test_run(root_uri, request_id)
+        .await
+        .map_err(test_run_event_error)
+}
+
+async fn finish_test_run(
+    emitter: &OperationEmitter,
+    started_at: UtcMicros,
+    effective_deadline: &Deadline,
+    termination: OperationTermination,
+) -> Result<()> {
+    let ended_at = test_run_now();
+    let elapsed_micros = ended_at.0.saturating_sub(started_at.0) as u64;
+    let cancellation = matches!(
+        termination,
+        OperationTermination::Cancelled | OperationTermination::TimedOut
+    )
+    .then_some(CancellationObservation {
+        stage: CancellationStage::DuringRead,
+        observed_at: ended_at,
+    });
+    let receipt = OperationReceipt {
+        started_at,
+        ended_at,
+        effective_deadline: effective_deadline.clone(),
+        cancellation,
+        budget: OperationBudgetUsage {
+            units_consumed: 1,
+            bytes_consumed: 0,
+            elapsed_micros,
+        },
+        termination,
+    };
+    emitter
+        .terminal(receipt)
+        .await
+        .map_err(test_run_event_error)?;
+    Ok(())
+}
+
+fn test_run_now() -> UtcMicros {
+    UtcMicros(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros(),
+        )
+        .unwrap_or(i64::MAX),
+    )
+}
+
+fn test_run_event_error(error: OperationEventError) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("managed test-run lifecycle failed: {error}"),
+    }
+}
+
+fn test_run_contract_error(error: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("managed test-run contract failed: {error}"),
+    }
 }
 
 async fn resolve_changed_paths(

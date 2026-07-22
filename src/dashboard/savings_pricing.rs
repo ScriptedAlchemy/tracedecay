@@ -225,7 +225,7 @@ pub(crate) fn ensure_background_refresh() {
     }
     tokio::task::spawn_blocking(|| {
         if refresh_pricing_blocking() {
-            eprintln!("Savings dashboard: refreshed model prices from OpenRouter.");
+            tracing::info!(provider = "openrouter", "refreshed savings model prices");
         }
     });
 }

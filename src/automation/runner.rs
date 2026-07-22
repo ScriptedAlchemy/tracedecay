@@ -298,7 +298,7 @@ async fn run_skill_writer_for_store(
     )
     .await
     {
-        eprintln!("[tracedecay] warning: failed to refresh skill outcomes: {err}");
+        tracing::warn!(error = %err, "failed to refresh skill outcomes");
     }
 
     let activation_policy = skill_writer_activation_policy(config);
@@ -667,7 +667,7 @@ async fn run_combined_review_for_retrieval(
     if let Err(err) =
         super::outcomes::refresh_fact_outcomes(&dashboard_root, &memory, current_timestamp()).await
     {
-        eprintln!("[tracedecay] warning: failed to refresh fact outcomes: {err}");
+        tracing::warn!(error = %err, "failed to refresh fact outcomes");
     }
 
     let run_id = options

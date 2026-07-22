@@ -33,6 +33,14 @@ Announce: "Using tracedecay:reviewing-changes for <diff/PR>."
    on changed files (`exclude_tests: true` for production-only — unwrap/panic
    in tests is normal, and an `unsafe { }` block is an attention site, not
    automatically a finding).
+7. Git index preview/apply stays on the application surfaces
+   `tracedecay_git_preview` then `tracedecay_git_apply` — never invent a
+   parallel git write path.
+8. Branch feedback cycle (CI localization, GitHub review comments, proximity):
+   `tracedecay_feedback_diagnostics` → `tracedecay_feedback_list` /
+   `tracedecay_feedback_get` → `tracedecay_feedback_expand` /
+   `tracedecay_feedback_impact`. Read-only; never post, update, resolve, or
+   reply on GitHub.
 
 ## Safety audit (ship-readiness) and dead-code cleanup
 

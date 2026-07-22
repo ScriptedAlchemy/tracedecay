@@ -5,18 +5,24 @@
 //! query stores, or render results.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
+use tokio::sync::Mutex as AsyncMutex;
 
 use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemKind, CancellationContext, Deadline, LegalAction,
-    OpaqueCursor, OperationTermination, PageRequest, RequestId, RetryDirective, SafeDiagnostic,
-    StreamEvent, StreamEventKind, StreamTermination,
+    ApplicationProblem, ApplicationProblemKind, CancellationSignal, CancellationStage, Deadline,
+    LegalAction, OpaqueCursor, OperationTermination, PageRequest, RequestId, RetryDirective,
+    SafeDiagnostic, StreamEvent, StreamEventKind, StreamTermination,
 };
-use tracedecay_domain::ProjectId;
+use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_tool_catalog::{
     BindingId, BindingSurface, CatalogSnapshotV1, FeatureId, ProfileId, SchemaRef,
     SurfaceOperationName,
 };
+
+use crate::application::feedback::observations::Plan26FeedbackSourceEventV1;
 
 /// A path-free project selector accepted by adapters before daemon resolution.
 ///
@@ -36,7 +42,7 @@ pub enum RequestedOutputFormat {
 }
 
 /// The shared cancellation reference carried into an application invocation.
-pub type CancellationRef = CancellationContext;
+pub type CancellationRef = CancellationSignal;
 
 /// The transport-neutral invocation constructed by CLI and MCP adapters.
 ///
@@ -265,6 +271,7 @@ pub fn resolve_dispatch<T>(
 
     Ok(DispatchedInvocation::new(
         request_id,
+        surface,
         BoundInvocation::new(resolved, invocation),
     ))
 }
@@ -272,13 +279,19 @@ pub fn resolve_dispatch<T>(
 /// An invocation paired with the request identity used for daemon correlation.
 pub struct DispatchedInvocation<T> {
     pub request_id: RequestId,
+    pub surface: BindingSurface,
     pub invocation: BoundInvocation<T>,
 }
 
 impl<T> DispatchedInvocation<T> {
-    pub fn new(request_id: RequestId, invocation: BoundInvocation<T>) -> Self {
+    pub fn new(
+        request_id: RequestId,
+        surface: BindingSurface,
+        invocation: BoundInvocation<T>,
+    ) -> Self {
         Self {
             request_id,
+            surface,
             invocation,
         }
     }
@@ -507,10 +520,414 @@ pub fn canonical_stream_termination<T>(event: &StreamEvent<T>) -> Option<&Stream
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InvocationCancellationPolicy {
+    ReadOnly,
+    AuthoritativeEffect,
+}
+
+impl InvocationCancellationPolicy {
+    pub(crate) const fn may_interrupt(self, stage: CancellationStage) -> bool {
+        match self {
+            Self::ReadOnly => true,
+            Self::AuthoritativeEffect => matches!(stage, CancellationStage::BeforeAdmission),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DaemonInvocationError {
+    Cancelled { stage: CancellationStage },
+    TimedOut { stage: CancellationStage },
+    Saturated { class: DaemonAdmissionClass },
+    Backpressured { stage: CancellationStage },
+    Unavailable,
+}
+
+impl DaemonInvocationError {
+    pub(crate) fn into_application_problem(self) -> ApplicationProblem {
+        match self {
+            Self::Cancelled { .. } => ApplicationProblem::cancelled_before_admission(),
+            Self::TimedOut { .. } => ApplicationProblem::timed_out_before_admission(),
+            Self::Saturated { class } => AdmissionOutcome::Saturated { class }
+                .into_application_problem()
+                .expect("saturation always maps to an application problem"),
+            Self::Backpressured { stage } => ApplicationProblem::Saturated {
+                diagnostic: SafeDiagnostic {
+                    code: format!("daemon_backpressured_{}", cancellation_stage_name(stage)),
+                    message: "The owning TraceDecay daemon applied request backpressure".to_owned(),
+                },
+                retry: RetryDirective::AfterDelay,
+                legal_actions: vec![LegalAction::Retry],
+            },
+            Self::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "daemon_unavailable".to_owned(),
+                message: "The owning TraceDecay daemon is unavailable".to_owned(),
+            }),
+        }
+    }
+}
+
+const fn cancellation_stage_name(stage: CancellationStage) -> &'static str {
+    match stage {
+        CancellationStage::BeforeAdmission => "before_admission",
+        CancellationStage::BeforeRead => "before_read",
+        CancellationStage::DuringRead => "during_read",
+        CancellationStage::BeforeEffect => "before_effect",
+        CancellationStage::EffectInFlight => "effect_in_flight",
+        CancellationStage::Reconciling => "reconciling",
+        CancellationStage::AfterCommit => "after_commit",
+    }
+}
+
+/// Authenticated socket client for the daemon's closed invocation protocol.
+///
+/// This client shares the daemon connection/authentication path with MCP but
+/// sends only versioned invocation envelopes. It deliberately cannot issue an
+/// arbitrary daemon method or reconstruct a Git/feedback application request.
+#[derive(Clone)]
+pub struct DaemonInvocationClient {
+    connection: crate::daemon::DaemonConnection,
+    handshake: crate::daemon::DaemonHandshake,
+    state: Arc<AsyncMutex<Option<DaemonInvocationConnection>>>,
+}
+
+struct DaemonInvocationConnection {
+    reader: BufReader<ReadHalf<crate::daemon::transport::BrokerStream>>,
+    writer: WriteHalf<crate::daemon::transport::BrokerStream>,
+}
+
+impl DaemonInvocationClient {
+    pub fn for_current(handshake: crate::daemon::DaemonHandshake) -> crate::errors::Result<Self> {
+        Ok(Self {
+            connection: crate::daemon::current_daemon_connection()?,
+            handshake,
+            state: Arc::new(AsyncMutex::new(None)),
+        })
+    }
+
+    pub(crate) async fn invoke(
+        &self,
+        request: crate::daemon::DaemonInvocationRequest,
+    ) -> crate::errors::Result<crate::daemon::DaemonInvocationResponse> {
+        let request_id = request.request_id.clone();
+        let request_label = request.operation().as_str();
+        let mut state = self.state.lock().await;
+        if state.is_none() {
+            let stream = crate::daemon::connect_to_daemon_connection(&self.connection).await?;
+            let (reader, mut writer) = stream.into_split();
+            crate::daemon::write_daemon_preamble(&mut writer, &self.connection, &self.handshake)
+                .await?;
+            *state = Some(DaemonInvocationConnection {
+                reader: BufReader::new(reader),
+                writer,
+            });
+        }
+        let result = async {
+            let connection = state.as_mut().ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "daemon invocation connection was not initialized".to_owned(),
+            })?;
+            connection
+                .writer
+                .write_all(serde_json::to_string(&request)?.as_bytes())
+                .await?;
+            connection.writer.write_all(b"\n").await?;
+            connection.writer.flush().await?;
+
+            let Some(line) = crate::daemon::next_daemon_response_line(
+                &mut connection.reader,
+                &self.connection,
+                request_label,
+                crate::daemon::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+            )
+            .await?
+            else {
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: format!(
+                        "daemon closed the invocation connection after '{}' was sent; the outcome is unknown",
+                        request_label
+                    ),
+                });
+            };
+            let response: crate::daemon::DaemonInvocationResponse =
+                serde_json::from_str(&line).map_err(|_| crate::errors::TraceDecayError::Config {
+                    message: "daemon returned an invalid invocation response".to_owned(),
+                })?;
+            if response.protocol != crate::daemon::DAEMON_INVOCATION_PROTOCOL
+                || response.revision != crate::daemon::DAEMON_INVOCATION_REVISION
+                || response.request_id != request_id
+            {
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: "daemon invocation response did not match the request".to_owned(),
+                });
+            }
+            Ok(response)
+        }
+        .await;
+        if result.is_err() {
+            *state = None;
+        }
+        result
+    }
+
+    pub async fn observe_plan26_feedback(
+        &self,
+        subject_digest: ManifestDigest,
+        observed_at: UtcMicros,
+        event: Plan26FeedbackSourceEventV1,
+    ) -> crate::errors::Result<()> {
+        let response = self
+            .invoke(
+                crate::daemon::DaemonInvocationRequest::feedback_observation(
+                    format!("request.feedback-observe.{}", observed_at.0.max(1)),
+                    subject_digest,
+                    observed_at,
+                    event,
+                ),
+            )
+            .await?;
+        if matches!(
+            response.outcome,
+            crate::daemon::DaemonInvocationOutcome::ObservationAccepted
+        ) {
+            Ok(())
+        } else {
+            Err(crate::errors::TraceDecayError::Config {
+                message: "daemon did not accept the feedback observation".to_owned(),
+            })
+        }
+    }
+
+    pub(crate) async fn invoke_controlled(
+        &self,
+        request: crate::daemon::DaemonInvocationRequest,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+        policy: InvocationCancellationPolicy,
+    ) -> Result<crate::daemon::DaemonInvocationResponse, DaemonInvocationError> {
+        if cancellation.is_cancelled() {
+            return Err(DaemonInvocationError::Cancelled {
+                stage: CancellationStage::BeforeAdmission,
+            });
+        }
+        let remaining = deadline_remaining(&deadline).ok_or(DaemonInvocationError::TimedOut {
+            stage: CancellationStage::BeforeAdmission,
+        })?;
+        let client = self.clone();
+        tokio::spawn(async move {
+            let stage = match policy {
+                InvocationCancellationPolicy::ReadOnly => CancellationStage::DuringRead,
+                InvocationCancellationPolicy::AuthoritativeEffect => {
+                    CancellationStage::EffectInFlight
+                }
+            };
+            if !policy.may_interrupt(stage) {
+                return client
+                    .invoke(request)
+                    .await
+                    .map_err(|_| DaemonInvocationError::Unavailable);
+            }
+            let outcome = {
+                let invocation = client.invoke(request);
+                tokio::pin!(invocation);
+                let cancellation_wait = wait_for_cancellation(cancellation);
+                tokio::pin!(cancellation_wait);
+                tokio::select! {
+                    result = &mut invocation => result.map_err(|_| DaemonInvocationError::Unavailable),
+                    () = &mut cancellation_wait => Err(DaemonInvocationError::Cancelled { stage }),
+                    () = tokio::time::sleep(remaining) => {
+                        Err(DaemonInvocationError::TimedOut { stage })
+                    }
+                }
+            };
+            if matches!(
+                outcome,
+                Err(
+                    DaemonInvocationError::Cancelled { .. }
+                        | DaemonInvocationError::TimedOut { .. }
+                )
+            ) {
+                *client.state.lock().await = None;
+            }
+            outcome
+        })
+        .await
+        .map_err(|_| DaemonInvocationError::Unavailable)?
+    }
+}
+
+fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_micros()).ok())
+        .unwrap_or(i64::MAX);
+    let remaining = deadline.expires_at.0.checked_sub(now)?;
+    (remaining > 0).then(|| Duration::from_micros(remaining as u64))
+}
+
+async fn wait_for_cancellation(cancellation: CancellationSignal) {
+    while !cancellation.is_cancelled() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Typed client for one daemon-owned LSP session. Every method maps to a
+/// closed invocation operation; no method exposes a generic local socket.
+pub struct DaemonLspSessionClient {
+    invocation: DaemonInvocationClient,
+    session: crate::daemon::DaemonLspSessionAccess,
+    next_request: u64,
+}
+
+impl DaemonLspSessionClient {
+    pub async fn open(
+        invocation: DaemonInvocationClient,
+        client_revision: impl Into<String>,
+        requested_root_uri: Option<String>,
+        workspace_folders: Vec<String>,
+    ) -> crate::errors::Result<Self> {
+        let response = invocation
+            .invoke(crate::daemon::DaemonInvocationRequest::lsp_open(
+                "lsp.1",
+                client_revision,
+                requested_root_uri,
+                workspace_folders,
+            ))
+            .await?;
+        let crate::daemon::DaemonInvocationOutcome::LspOpened { session, .. } = response.outcome
+        else {
+            return Err(invocation_outcome_error(response.outcome));
+        };
+        Ok(Self {
+            invocation,
+            session,
+            next_request: 2,
+        })
+    }
+
+    pub async fn try_send_client_frame(
+        &mut self,
+        frame: &str,
+    ) -> crate::errors::Result<crate::lsp_bridge::FrameSend> {
+        let request_id = self.next_request_id();
+        let response = self
+            .invoke(crate::daemon::DaemonInvocationRequest::lsp_frame(
+                request_id,
+                self.session.clone(),
+                frame,
+            ))
+            .await?;
+        match response.outcome {
+            crate::daemon::DaemonInvocationOutcome::LspFrameAccepted {
+                backpressured,
+                closed,
+            } => Ok(if closed {
+                crate::lsp_bridge::FrameSend::Closed
+            } else if backpressured {
+                crate::lsp_bridge::FrameSend::Backpressured
+            } else {
+                crate::lsp_bridge::FrameSend::Sent
+            }),
+            outcome => Err(invocation_outcome_error(outcome)),
+        }
+    }
+
+    pub async fn poll_daemon_frame(
+        &mut self,
+    ) -> crate::errors::Result<crate::lsp_bridge::FramePoll> {
+        let request_id = self.next_request_id();
+        let response = self
+            .invoke(crate::daemon::DaemonInvocationRequest::lsp_poll(
+                request_id,
+                self.session.clone(),
+            ))
+            .await?;
+        match response.outcome {
+            crate::daemon::DaemonInvocationOutcome::LspFrame { frame, closed } => {
+                Ok(match (frame, closed) {
+                    (Some(frame), _) => crate::lsp_bridge::FramePoll::Frame(frame.into_bytes()),
+                    (None, true) => crate::lsp_bridge::FramePoll::Closed,
+                    (None, false) => crate::lsp_bridge::FramePoll::Pending,
+                })
+            }
+            outcome => Err(invocation_outcome_error(outcome)),
+        }
+    }
+
+    pub async fn acknowledge_daemon_frame(&mut self) -> crate::errors::Result<()> {
+        let request_id = self.next_request_id();
+        let response = self
+            .invoke(crate::daemon::DaemonInvocationRequest::lsp_acknowledge(
+                request_id,
+                self.session.clone(),
+            ))
+            .await?;
+        match response.outcome {
+            crate::daemon::DaemonInvocationOutcome::LspAcknowledged { .. } => Ok(()),
+            outcome => Err(invocation_outcome_error(outcome)),
+        }
+    }
+
+    pub async fn detach(&mut self) -> crate::errors::Result<()> {
+        let request_id = self.next_request_id();
+        let response = self
+            .invoke(crate::daemon::DaemonInvocationRequest::lsp_detach(
+                request_id,
+                self.session.clone(),
+            ))
+            .await?;
+        match response.outcome {
+            crate::daemon::DaemonInvocationOutcome::LspDetached => Ok(()),
+            outcome => Err(invocation_outcome_error(outcome)),
+        }
+    }
+
+    async fn invoke(
+        &self,
+        request: crate::daemon::DaemonInvocationRequest,
+    ) -> crate::errors::Result<crate::daemon::DaemonInvocationResponse> {
+        self.invocation.invoke(request).await
+    }
+
+    fn next_request_id(&mut self) -> String {
+        let request_id = format!("lsp.{}", self.next_request);
+        self.next_request = self.next_request.saturating_add(1);
+        request_id
+    }
+}
+
+fn invocation_outcome_error(
+    outcome: crate::daemon::DaemonInvocationOutcome,
+) -> crate::errors::TraceDecayError {
+    let message = match outcome {
+        crate::daemon::DaemonInvocationOutcome::Problem { problem } => match problem {
+            crate::daemon::DaemonInvocationProblem::InvalidRequest => {
+                "daemon rejected the invocation input"
+            }
+            crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
+                "daemon does not support this invocation revision"
+            }
+            crate::daemon::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                "daemon invocation was not found or is not authorized"
+            }
+            crate::daemon::DaemonInvocationProblem::Unavailable => {
+                "daemon invocation authority is unavailable"
+            }
+        },
+        _ => "daemon returned an unexpected invocation response",
+    };
+    crate::errors::TraceDecayError::Config {
+        message: message.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AdmissionOutcome;
-    use tracedecay_application::{ApplicationProblem, ApplicationProblemKind, RetryDirective};
+    use super::{AdmissionOutcome, InvocationCancellationPolicy};
+    use tracedecay_application::{
+        ApplicationProblem, ApplicationProblemKind, CancellationStage, RetryDirective,
+    };
 
     #[test]
     fn pre_admission_outcomes_keep_canonical_problem_categories() {
@@ -559,5 +976,16 @@ mod tests {
                 ..
             } if legal_actions == vec![tracedecay_application::LegalAction::Retry]
         ));
+    }
+
+    #[test]
+    fn effect_dispatch_waits_for_the_authoritative_commit_receipt() {
+        assert!(
+            !InvocationCancellationPolicy::AuthoritativeEffect
+                .may_interrupt(CancellationStage::EffectInFlight)
+        );
+        assert!(
+            InvocationCancellationPolicy::ReadOnly.may_interrupt(CancellationStage::DuringRead)
+        );
     }
 }

@@ -902,6 +902,6 @@ pub async fn refresh_memory_digest_after_memory_change<A: FactCompatibilityStore
         refresh_memory_digest_after_memory_change_for_profile(&profile_root, memory, project_root)
             .await
     {
-        eprintln!("warning: memory digest refresh failed: {err}");
+        tracing::warn!(error = %err, "memory digest refresh failed");
     }
 }

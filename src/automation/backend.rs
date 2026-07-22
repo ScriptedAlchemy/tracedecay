@@ -91,6 +91,19 @@ impl AgentTaskRequest {
         self
     }
 
+    #[must_use]
+    pub fn with_contract(mut self, contract: AgentTaskContract) -> Self {
+        self.contract = contract;
+        self.input_hash = request_input_hash(
+            self.task,
+            &self.contract,
+            &self.prompt,
+            self.evidence_hash.as_deref(),
+            &self.context,
+        );
+        self
+    }
+
     pub fn backend_message(&self) -> Result<String> {
         serde_json::to_string_pretty(&serde_json::json!({
             "run_id": self.run_id,
@@ -586,10 +599,47 @@ fn validate_response_schema(value: &Value, contract: &AgentTaskContract) -> Resu
         return Ok(());
     };
     for property in required.iter().filter_map(Value::as_str) {
-        if value.get(property).and_then(Value::as_array).is_none() {
+        let expected_type = contract
+            .response_schema
+            .pointer(&format!("/properties/{property}/type"))
+            .and_then(Value::as_str);
+        let property_value = value.get(property);
+        let valid_type = match expected_type {
+            Some("array") => property_value.is_some_and(Value::is_array),
+            Some("string") => property_value.is_some_and(Value::is_string),
+            Some("number") => property_value.is_some_and(Value::is_number),
+            Some("integer") => property_value.is_some_and(Value::is_i64),
+            Some("boolean") => property_value.is_some_and(Value::is_boolean),
+            Some("object") => property_value.is_some_and(Value::is_object),
+            _ => property_value.is_some(),
+        };
+        if !valid_type {
+            let suffix = expected_type
+                .map(|kind| format!(" {kind}"))
+                .unwrap_or_default();
             return config_error(format!(
-                "automation backend output must include a {property} array"
+                "automation backend output must include a {property}{suffix}"
             ));
+        }
+    }
+    if contract
+        .response_schema
+        .get("additionalProperties")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        let allowed = contract
+            .response_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "strict automation response schema must define properties".to_string(),
+            })?;
+        if value
+            .as_object()
+            .is_some_and(|object| object.keys().any(|key| !allowed.contains_key(key)))
+        {
+            return config_error("automation backend output contains an unknown property");
         }
     }
     Ok(())

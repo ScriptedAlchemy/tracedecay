@@ -77,7 +77,13 @@ fn representative_commands_route_to_their_dispatch_family() {
             },
             CommandFamily::Runtime,
         ),
-        (Commands::Reinstall, CommandFamily::Agent),
+        (
+            Commands::Reinstall {
+                local: false,
+                agent: None,
+            },
+            CommandFamily::Agent,
+        ),
         (Commands::HookStop, CommandFamily::Hook),
         (Commands::Dogfood, CommandFamily::Update),
         (Commands::DisableUploadCounter, CommandFamily::Configuration),
@@ -112,8 +118,14 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         automation: false,
         auto_apply: false,
     }));
-    assert!(should_skip_startup_maintenance(&Commands::Reinstall));
-    assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
+    assert!(should_skip_startup_maintenance(&Commands::Reinstall {
+        local: false,
+        agent: None,
+    }));
+    assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin {
+        local: false,
+        agent: None,
+    }));
     assert!(should_skip_startup_maintenance(&Commands::Upgrade {
         no_heal: false,
         no_reinstall: false
@@ -131,6 +143,7 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
     }));
     assert!(should_skip_startup_maintenance(&Commands::Uninstall {
         agent: Some("kiro".to_string()),
+        local: false,
     }));
 }
 
@@ -174,11 +187,19 @@ fn agent_install_maintenance_is_selective() {
         automation: false,
         auto_apply: false,
     }));
-    assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
+    assert!(should_skip_agent_install_maintenance(
+        &Commands::Reinstall {
+            local: false,
+            agent: None,
+        }
+    ));
     // `update-plugin` promises byte-identical configs; the implicit
     // silent-reinstall prelude would rewrite them.
     assert!(should_skip_agent_install_maintenance(
-        &Commands::UpdatePlugin
+        &Commands::UpdatePlugin {
+            local: false,
+            agent: None,
+        }
     ));
     assert!(should_skip_agent_install_maintenance(&Commands::Upgrade {
         no_heal: false,
@@ -202,6 +223,7 @@ fn agent_install_maintenance_is_selective() {
     assert!(should_skip_agent_install_maintenance(
         &Commands::Uninstall {
             agent: Some("cursor".to_string()),
+            local: false,
         }
     ));
     assert!(should_skip_agent_install_maintenance(&Commands::Doctor {

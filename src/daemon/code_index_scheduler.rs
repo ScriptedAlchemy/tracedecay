@@ -351,6 +351,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     owner: ProductionOwner,
     hints: Arc<Mutex<PendingHintsV1>>,
+    wake: Arc<tokio::sync::Notify>,
     epoch: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
     saved_trees: BTreeMap<String, SavedTreeV1>,
@@ -383,6 +384,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?;
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
+        let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
         let mut scheduler = Self {
             project_root,
@@ -391,6 +393,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             byte_pool,
             owner,
             hints,
+            wake,
             epoch,
             shutting_down: Arc::new(AtomicBool::new(false)),
             saved_trees: BTreeMap::new(),
@@ -403,6 +406,7 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     fn mount_watcher(&mut self) -> Result<(), CodeIndexSchedulerErrorV1> {
         let hints = Arc::clone(&self.hints);
+        let wake = Arc::clone(&self.wake);
         let epoch = Arc::clone(&self.epoch);
         let mut debouncer = new_debouncer(WATCH_DEBOUNCE, None, move |result: DebounceEventResult| {
             let mut hints = hints.lock().expect("code-index hint lock");
@@ -421,6 +425,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(_) => hints.overflow(),
             }
             DaemonCodeIndexControlV1::advance(&epoch);
+            wake.notify_one();
         })
         .map_err(|error| CodeIndexSchedulerErrorV1::Watch(error.to_string()))?;
         debouncer
@@ -436,6 +441,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .expect("code-index hint lock")
             .path(path);
         DaemonCodeIndexControlV1::advance(&self.epoch);
+        self.wake.notify_one();
     }
 
     pub fn notify_overflow(&self) {
@@ -444,6 +450,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .expect("code-index hint lock")
             .overflow();
         DaemonCodeIndexControlV1::advance(&self.epoch);
+        self.wake.notify_one();
     }
 
     pub fn reconcile_now(
@@ -702,9 +709,16 @@ impl Drop for CodeIndexWorktreeSchedulerV1 {
     }
 }
 
+struct MountedCodeIndexWorktreeV1 {
+    scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Clone)]
 pub(super) struct CodeIndexSchedulerRegistryV1 {
     max_worktrees: usize,
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
+    mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
 }
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -712,6 +726,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Self {
             max_worktrees,
             byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
+            mounted: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -734,6 +749,76 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub fn byte_pool_stats(&self) -> CodeIndexBytePoolStatsV1 {
         self.byte_pool.stats()
+    }
+
+    pub async fn mount_worktree(
+        &self,
+        project_root: &Path,
+        store_root: PathBuf,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        let project_root = project_root.canonicalize()?;
+        let mut mounted = self.mounted.lock().await;
+        if mounted.contains_key(&project_root) {
+            return Ok(false);
+        }
+        if mounted.len() >= self.max_worktrees {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler capacity is exhausted".to_owned(),
+            ));
+        }
+        let scheduler = Arc::new(Mutex::new(self.open_worktree(
+            &project_root,
+            store_root.join(sha256_hex(project_root.to_string_lossy().as_bytes())),
+        )?));
+        let (wake, shutting_down) = {
+            let scheduler = scheduler.lock().expect("code-index scheduler lock");
+            (
+                Arc::clone(&scheduler.wake),
+                Arc::clone(&scheduler.shutting_down),
+            )
+        };
+        let worker_scheduler = Arc::clone(&scheduler);
+        let worker_wake = Arc::clone(&wake);
+        let task = tokio::spawn(async move {
+            loop {
+                worker_wake.notified().await;
+                if shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
+                let scheduler = Arc::clone(&worker_scheduler);
+                let result = tokio::task::spawn_blocking(move || {
+                    scheduler
+                        .lock()
+                        .expect("code-index scheduler lock")
+                        .reconcile_now()
+                })
+                .await;
+                if result.is_err() || shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
+            }
+        });
+        mounted.insert(
+            project_root,
+            MountedCodeIndexWorktreeV1 { scheduler, task },
+        );
+        wake.notify_one();
+        Ok(true)
+    }
+
+    pub async fn shutdown(&self) {
+        let mounted = std::mem::take(&mut *self.mounted.lock().await);
+        for worktree in mounted.values() {
+            let scheduler = worktree
+                .scheduler
+                .lock()
+                .expect("code-index scheduler lock");
+            scheduler.shutting_down.store(true, Ordering::Release);
+            scheduler.wake.notify_one();
+        }
+        for (_, worktree) in mounted {
+            let _ = worktree.task.await;
+        }
     }
 }
 

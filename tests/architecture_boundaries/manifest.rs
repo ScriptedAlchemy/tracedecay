@@ -44,6 +44,7 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-application|tracedecay_application|lib|crates/tracedecay-application/src/lib.rs",
     "tracedecay-application|authorization_non_disclosure|test|crates/tracedecay-application/tests/authorization_non_disclosure.rs",
     "tracedecay-application|authorization_recheck|test|crates/tracedecay-application/tests/authorization_recheck.rs",
+    "tracedecay-application|callable_code_queries|test|crates/tracedecay-application/tests/callable_code_queries.rs",
     "tracedecay-application|catalog_contributions|test|crates/tracedecay-application/tests/catalog_contributions.rs",
     "tracedecay-application|deadline_cancellation|test|crates/tracedecay-application/tests/deadline_cancellation.rs",
     "tracedecay-application|diagnostic_provider_identity|test|crates/tracedecay-application/tests/diagnostic_provider_identity.rs",
@@ -52,6 +53,7 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-application|feedback_cycle|test|crates/tracedecay-application/tests/feedback_cycle.rs",
     "tracedecay-application|four_pillar_milestone|test|crates/tracedecay-application/tests/four_pillar_milestone.rs",
     "tracedecay-application|planner_boundary|test|crates/tracedecay-application/tests/planner_boundary.rs",
+    "tracedecay-application|policy_composition|test|crates/tracedecay-application/tests/policy_composition.rs",
     "tracedecay-application|pr13_advisory_runtime|test|crates/tracedecay-application/tests/pr13_advisory_runtime.rs",
     "tracedecay-application|surface_binding_parity|test|crates/tracedecay-application/tests/surface_binding_parity.rs",
     "tracedecay-application|retrieval_primitives|test|crates/tracedecay-application/tests/retrieval_primitives.rs",
@@ -62,6 +64,7 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-domain|configuration_contract|test|crates/tracedecay-domain/tests/configuration_contract.rs",
     "tracedecay-domain|feedback_contract|test|crates/tracedecay-domain/tests/feedback_contract.rs",
     "tracedecay-domain|git_index_transaction_contract|test|crates/tracedecay-domain/tests/git_index_transaction_contract.rs",
+    "tracedecay-domain|git_topology_anchor_contract|test|crates/tracedecay-domain/tests/git_topology_anchor_contract.rs",
     "tracedecay-domain|integration_catalog_contract|test|crates/tracedecay-domain/tests/integration_catalog_contract.rs",
     "tracedecay-domain|observation_contract|test|crates/tracedecay-domain/tests/observation_contract.rs",
     "tracedecay-domain|repository_state_contract|test|crates/tracedecay-domain/tests/repository_state_contract.rs",
@@ -74,6 +77,7 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-store|tracedecay_store|lib|crates/tracedecay-store/src/lib.rs",
     "tracedecay-store|configuration_contract|test|crates/tracedecay-store/tests/configuration_contract.rs",
     "tracedecay-store|diagnostics_contract|test|crates/tracedecay-store/tests/diagnostics_contract.rs",
+    "tracedecay-store|external_source_commit|test|crates/tracedecay-store/tests/external_source_commit.rs",
     "tracedecay-store|session_contract|test|crates/tracedecay-store/tests/session_contract.rs",
     "tracedecay-tool-catalog|tracedecay_tool_catalog|lib|crates/tracedecay-tool-catalog/src/lib.rs",
     "tracedecay-tool-catalog|manifest_contract|test|crates/tracedecay-tool-catalog/tests/manifest_contract.rs",
@@ -85,6 +89,7 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay|tracedecay-search-eval|bin|src/bin/tracedecay-search-eval.rs",
     "tracedecay|bench_extract|example|examples/bench_extract.rs",
     "tracedecay|agent_suite|test|tests/agent_suite/main.rs",
+    "tracedecay|api_application_parity|test|tests/api_application_parity.rs",
     "tracedecay|architecture_boundaries|test|tests/architecture_boundaries/main.rs",
     "tracedecay|automation_runner_test|test|tests/automation_runner_test/main.rs",
     "tracedecay|catalog_composition_contract|test|tests/catalog_composition_contract.rs",
@@ -105,6 +110,11 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay|memory_suite|test|tests/memory_suite/main.rs",
     "tracedecay|pr10_artifact_runtime_prep_test|test|tests/pr10_artifact_runtime_prep_test.rs",
     "tracedecay|pr10_vector_generation_prep_test|test|tests/pr10_vector_generation_prep_test.rs",
+    "tracedecay|pr11_pr12_runtime_acceptance|test|tests/pr11_pr12_runtime_acceptance.rs",
+    "tracedecay|pr12_production_reachability|test|tests/pr12_production_reachability.rs",
+    "tracedecay|pr13_advisory_runtime_acceptance|test|tests/pr13_advisory_runtime_acceptance.rs",
+    "tracedecay|pr13_daemon_runtime_acceptance|test|tests/pr13_daemon_runtime_acceptance.rs",
+    "tracedecay|pr13_host_bundle_acceptance|test|tests/pr13_host_bundle_acceptance.rs",
     "tracedecay|search_eval_cli_test|test|tests/search_eval_cli_test.rs",
     "tracedecay|search_eval_holdout_authority_test|test|tests/search_eval_holdout_authority_test.rs",
     "tracedecay|search_quality_suite|test|tests/search_quality_suite/main.rs",
@@ -157,6 +167,9 @@ const INTENTIONAL_STANDALONE_RUST_INPUTS: &[&str] = &[
     "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/time.rs",
     "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs",
     "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs",
+    // Distribution acceptance copies this into the packaged example path; it is
+    // not a workspace Cargo target in the development tree.
+    "tests/distribution/fastembed/acceptance.rs",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -429,7 +442,17 @@ fn validate_contract_package_dependencies(
 
 fn contract_allowed_packages(manifest_path: &Path) -> &'static [&'static str] {
     match manifest_path.to_str() {
-        Some("crates/tracedecay-api/Cargo.toml") | Some("crates/tracedecay-hooks/Cargo.toml") => &[
+        Some("crates/tracedecay-api/Cargo.toml") => &[
+            "axum",
+            "futures-util",
+            "serde",
+            "serde_json",
+            "thiserror",
+            "tracedecay-application",
+            "tracedecay-domain",
+            "tracedecay-tool-catalog",
+        ],
+        Some("crates/tracedecay-hooks/Cargo.toml") => &[
             "serde",
             "serde_json",
             "thiserror",

@@ -19,6 +19,8 @@ use crate::application::host_admission::{
     replay_backoff,
 };
 
+use super::log_daemon_event;
+
 const REPLAY_BACKOFF_SHIFT_CAP: u32 = 16;
 const IDLE_EVICTION_AFTER: Duration = Duration::from_secs(30);
 
@@ -309,9 +311,15 @@ impl ProfileHostAdmissionReplayWorker {
                     }
                     ReplayPassDecision::Stop => {
                         consecutive_retryable = 0;
-                        eprintln!(
-                            "[tracedecay] user-profile host admission disposition: {}",
-                            outcome.reason_code.unwrap_or("host_admission_unavailable")
+                        log_daemon_event(
+                            "profile_host_admission_replay_stopped",
+                            &[(
+                                "reason_code",
+                                outcome
+                                    .reason_code
+                                    .unwrap_or("host_admission_unavailable")
+                                    .to_string(),
+                            )],
                         );
                         // Non-retryable failure: stop until the next explicit kick.
                         break;
