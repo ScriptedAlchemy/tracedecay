@@ -17,7 +17,9 @@ use super::{
 
 pub(crate) const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
-const PROJECT_WARMING_RETRY_GRACE: Duration = Duration::from_secs(2);
+// Matches core_proxy: a cold project open outlasts 2s even on fast hosts;
+// the warming loop still exits immediately on a real failure.
+const PROJECT_WARMING_RETRY_GRACE: Duration = Duration::from_secs(15);
 const PROJECT_WARMING_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How long daemon clients keep retrying a failed connect before giving up.

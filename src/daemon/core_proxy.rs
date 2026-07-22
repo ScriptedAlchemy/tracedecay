@@ -23,7 +23,11 @@ use crate::errors::{Result, TraceDecayError};
 use crate::mcp::{ErrorCode, JsonRpcResponse};
 use crate::mcp::{JsonRpcRequest, McpTransport, StdioTransport};
 
-const PROJECT_WARMING_RETRY_GRACE: Duration = Duration::from_secs(2);
+// A cold project open (create/migrate DBs, config runtime, first index) takes
+// ~2.5s release / ~3.3s debug even for a tiny repo, so a 2s grace abandoned
+// legitimate opens just before they completed. The warming loop still exits
+// immediately on a real failure.
+const PROJECT_WARMING_RETRY_GRACE: Duration = Duration::from_secs(15);
 const PROJECT_WARMING_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.

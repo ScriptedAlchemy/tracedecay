@@ -142,10 +142,18 @@ async fn brokered_init(
             message: "brokered init does not yet support --skip-folders/--include-folders; configure tracedecay.toml first".to_string(),
         });
     }
-    tracedecay::daemon::call_default_tool(
+    // Init deliberately triggers a cold project open+index behind this single
+    // status call. The default warming-retry grace is far tighter than a cold
+    // open can take on a debug build or slow shared runner, which surfaced as
+    // "daemon tracedecay_status timed out during read before deadline" failures
+    // in CI. Give the bootstrap a generous budget so the client waits out the
+    // background open instead of abandoning it just before it completes.
+    let init_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    tracedecay::daemon::call_default_tool_within(
         handshake,
         "tracedecay_status",
         serde_json::json!({"format": "json"}),
+        init_deadline,
     )
     .await?;
     eprintln!(
