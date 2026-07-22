@@ -38,6 +38,10 @@
 #![allow(clippy::case_sensitive_file_extension_comparisons)]
 #![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::single_match_else)]
+// Several async fns and their test drivers hold futures that cross the 16KB
+// pedantic threshold only on Windows' struct layout; boxing every await site
+// across the tree churns far more than the lint is worth here.
+#![allow(clippy::large_futures)]
 
 pub mod accounting;
 pub mod agents;

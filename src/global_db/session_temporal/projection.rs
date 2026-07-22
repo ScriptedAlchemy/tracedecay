@@ -9,6 +9,7 @@ use super::super::GlobalDb;
 use super::query::{PERSIST_OPERATION, storage};
 use super::refresh::SessionRefreshRecoveryV1;
 
+mod derived;
 mod materialize;
 mod persist;
 mod receipts;

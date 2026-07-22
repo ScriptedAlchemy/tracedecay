@@ -541,3 +541,113 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = "
           + length(CAST(n.session_id AS BLOB)) + 9 <= ?11
     ORDER BY n.created_at DESC, n.session_id, n.summary_id
     LIMIT ?12";
+
+pub(super) const DERIVED_CANDIDATE_QUERY: &str = "
+    SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
+           first_occurrence.knowledge_at,
+           NULL, NULL, evidence.session_id, evidence.evidence_kind,
+           COALESCE(json_extract(
+               provider_observation.observation_json, '$.identity.source.provider'
+           ), 'claude')
+    FROM session_derived_evidence AS evidence
+    JOIN session_occurrences AS first_occurrence
+      ON first_occurrence.session_id = evidence.session_id
+     AND first_occurrence.generation = evidence.generation
+     AND first_occurrence.occurrence_id = evidence.first_occurrence_id
+    JOIN observations AS provider_observation
+      ON provider_observation.observation_id = first_occurrence.source_observation_id
+    WHERE evidence.session_id = ?1 AND evidence.generation = ?2
+      AND evidence.evidence_kind = ?3
+      AND (?4 IS NULL OR COALESCE(json_extract(
+          provider_observation.observation_json, '$.identity.source.provider'
+      ), 'claude') = ?4)
+      AND EXISTS (
+          SELECT 1
+          FROM session_derived_evidence_members AS member
+          JOIN session_occurrences AS member_occurrence
+            ON member_occurrence.session_id = member.session_id
+           AND member_occurrence.generation = member.generation
+           AND member_occurrence.occurrence_id = member.occurrence_id
+          JOIN session_occurrences_fts
+            ON session_occurrences_fts.rowid = member_occurrence.rowid
+          WHERE member.session_id = evidence.session_id
+            AND member.generation = evidence.generation
+            AND member.evidence_kind = evidence.evidence_kind
+            AND member.evidence_id = evidence.evidence_id
+            AND session_occurrences_fts MATCH ?5
+      )
+      AND (
+          first_occurrence.knowledge_at < ?6
+          OR (
+              first_occurrence.knowledge_at = ?6
+              AND evidence.evidence_id > ?7
+          )
+      )
+    ORDER BY first_occurrence.knowledge_at DESC, evidence.evidence_id
+    LIMIT ?8";
+
+pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = "
+    SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
+           first_occurrence.knowledge_at,
+           NULL, NULL, evidence.session_id, evidence.evidence_kind,
+           authority_session.provider
+    FROM session_temporal_generations AS frozen
+    JOIN session_derived_evidence AS evidence
+      ON evidence.session_id = frozen.session_id
+     AND evidence.generation = frozen.generation
+    JOIN session_occurrences AS first_occurrence
+      ON first_occurrence.session_id = evidence.session_id
+     AND first_occurrence.generation = evidence.generation
+     AND first_occurrence.occurrence_id = evidence.first_occurrence_id
+    JOIN observations AS provider_observation
+      ON provider_observation.observation_id = first_occurrence.source_observation_id
+    JOIN retrieval_anchors AS authority_anchor
+      ON authority_anchor.anchor_id = evidence.retrieval_anchor_id
+    JOIN sessions AS authority_session
+      ON authority_session.session_id = evidence.session_id
+     AND authority_session.provider = COALESCE(json_extract(
+         provider_observation.observation_json, '$.identity.source.provider'
+     ), 'claude')
+     AND authority_session.project_key = ?1
+    WHERE frozen.state = 'active'
+      AND evidence.evidence_kind = ?2
+      AND (?3 IS NULL OR authority_session.provider = ?3)
+      AND EXISTS (
+          SELECT 1
+          FROM session_derived_evidence_members AS member
+          JOIN session_occurrences AS member_occurrence
+            ON member_occurrence.session_id = member.session_id
+           AND member_occurrence.generation = member.generation
+           AND member_occurrence.occurrence_id = member.occurrence_id
+          JOIN session_occurrences_fts
+            ON session_occurrences_fts.rowid = member_occurrence.rowid
+          WHERE member.session_id = evidence.session_id
+            AND member.generation = evidence.generation
+            AND member.evidence_kind = evidence.evidence_kind
+            AND member.evidence_id = evidence.evidence_id
+            AND session_occurrences_fts MATCH ?4
+      )
+      AND (
+          (authority_session.project_key = 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+          OR
+          (authority_session.project_key <> 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+           AND json_extract(authority_anchor.owner_json, '$.project_id')
+               = authority_session.project_key)
+      )
+      AND (
+          first_occurrence.knowledge_at < ?5
+          OR (
+              first_occurrence.knowledge_at = ?5
+              AND (
+                  evidence.session_id > ?6
+                  OR (
+                      evidence.session_id = ?6
+                      AND evidence.evidence_id > ?7
+                  )
+              )
+          )
+      )
+    ORDER BY first_occurrence.knowledge_at DESC, evidence.session_id, evidence.evidence_id
+    LIMIT ?8";

@@ -527,6 +527,64 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_session_current_entities_occurrence
         ON session_current_entities(session_id, generation, current_occurrence_id);
 
+    CREATE TABLE IF NOT EXISTS session_derived_evidence (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        evidence_kind TEXT NOT NULL CHECK(evidence_kind IN ('span', 'burst')),
+        evidence_id TEXT NOT NULL,
+        retrieval_anchor_id TEXT NOT NULL,
+        thread_id TEXT,
+        first_occurrence_id TEXT NOT NULL,
+        last_occurrence_id TEXT NOT NULL,
+        algorithm_version TEXT NOT NULL,
+        configuration_digest TEXT NOT NULL,
+        member_count INTEGER NOT NULL CHECK(member_count > 0),
+        member_digest TEXT NOT NULL,
+        evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+        PRIMARY KEY(session_id, generation, evidence_kind, evidence_id),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE,
+        FOREIGN KEY(retrieval_anchor_id) REFERENCES retrieval_anchors(anchor_id),
+        FOREIGN KEY(session_id, generation, first_occurrence_id)
+            REFERENCES session_occurrences(session_id, generation, occurrence_id),
+        FOREIGN KEY(session_id, generation, last_occurrence_id)
+            REFERENCES session_occurrences(session_id, generation, occurrence_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_scope_order
+        ON session_derived_evidence(
+            session_id, generation, evidence_kind, first_occurrence_id, evidence_id
+        );
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_anchor
+        ON session_derived_evidence(
+            session_id, generation, retrieval_anchor_id, evidence_kind, evidence_id
+        );
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_thread_order
+        ON session_derived_evidence(
+            session_id, generation, thread_id, evidence_kind, first_occurrence_id, evidence_id
+        );
+
+    CREATE TABLE IF NOT EXISTS session_derived_evidence_members (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        evidence_kind TEXT NOT NULL CHECK(evidence_kind IN ('span', 'burst')),
+        evidence_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        occurrence_id TEXT NOT NULL,
+        member_role TEXT NOT NULL CHECK(member_role IN ('member', 'first', 'last')),
+        PRIMARY KEY(session_id, generation, evidence_kind, evidence_id, ordinal),
+        UNIQUE(session_id, generation, evidence_kind, evidence_id, occurrence_id),
+        FOREIGN KEY(session_id, generation, evidence_kind, evidence_id)
+            REFERENCES session_derived_evidence(
+                session_id, generation, evidence_kind, evidence_id
+            ) ON DELETE CASCADE,
+        FOREIGN KEY(session_id, generation, occurrence_id)
+            REFERENCES session_occurrences(session_id, generation, occurrence_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_members_occurrence
+        ON session_derived_evidence_members(
+            session_id, generation, occurrence_id, evidence_kind, evidence_id, ordinal
+        );
+
     CREATE TABLE IF NOT EXISTS session_summary_availability (
         session_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
@@ -904,6 +962,36 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "current_assertion_id",
             "current_occurrence_id",
             "coverage_json",
+        ],
+    ),
+    (
+        "session_derived_evidence",
+        &[
+            "session_id",
+            "generation",
+            "evidence_kind",
+            "evidence_id",
+            "retrieval_anchor_id",
+            "thread_id",
+            "first_occurrence_id",
+            "last_occurrence_id",
+            "algorithm_version",
+            "configuration_digest",
+            "member_count",
+            "member_digest",
+            "evidence_json",
+        ],
+    ),
+    (
+        "session_derived_evidence_members",
+        &[
+            "session_id",
+            "generation",
+            "evidence_kind",
+            "evidence_id",
+            "ordinal",
+            "occurrence_id",
+            "member_role",
         ],
     ),
     (

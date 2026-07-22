@@ -130,9 +130,10 @@
   "evidence": {
     "artifact": "result-provisional.json",
     "evidence_status": "provisional",
-    "attestation": "unavailable_dirty_worktree_no_clean_commit",
+    "provisional_reason": "dirty_worktree_no_clean_logical_snapshot",
+    "owner_receipt": "owner-receipts-v1.json",
     "index": "evidence-index.json",
-    "write_method": "locked_atomic_rename_from_measurement_test"
+    "evidence_contract": "canonical_json_sha256_executed_receipts_only"
   },
-  "command": "cargo test --lib store::memory_benchmark::pr7_memory_baseline -- --exact --nocapture --test-threads=1"
+  "command": "python3 benchmarks/pr7-memory/issue_receipt.py --manifest benchmarks/pr7-memory/gate-manifest-v1.json --out benchmarks/pr7-memory/owner-receipts-v1.json --log-dir benchmarks/pr7-memory/logs --evidence-index benchmarks/pr7-memory/evidence-index.json --workload benchmarks/pr7-memory/workload-v1.json --wait-aggregate"
 }

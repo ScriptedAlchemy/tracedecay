@@ -18,6 +18,7 @@ pub mod repository;
 pub mod research;
 pub mod retrieval;
 pub mod session;
+pub mod session_derived;
 
 pub use code_intelligence::*;
 pub use configuration::*;
@@ -34,3 +35,4 @@ pub use repository::*;
 pub use research::*;
 pub use retrieval::*;
 pub use session::*;
+pub use session_derived::*;

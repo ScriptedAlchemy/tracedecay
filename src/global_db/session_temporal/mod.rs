@@ -1,6 +1,7 @@
 mod cursor_keys;
 mod direct;
 mod doctor_health;
+mod expand;
 mod hydration;
 mod lcm_render;
 pub(crate) mod operations;

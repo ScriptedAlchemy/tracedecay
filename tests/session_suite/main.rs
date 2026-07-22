@@ -30,6 +30,7 @@ mod observation_workflow_projection;
 mod structured_backfill;
 mod temporal_application;
 mod temporal_benchmark;
+mod temporal_derived_evidence;
 mod temporal_privacy;
 mod temporal_projection;
 mod temporal_refresh;

@@ -1,6 +1,17 @@
 {
-  "schema_version": 1,
+  "blockers": [
+    {
+      "code": "dirty_worktree",
+      "detail": "clean_logical_snapshot requires an empty git status porcelain set"
+    }
+  ],
+  "clean_logical_snapshot": false,
   "current_acceptance": null,
+  "historical_stale": [],
+  "owner_receipt": "benchmarks/pr7-memory/owner-receipts-v1.json",
+  "owner_receipt_sha256": "sha256:dbcef8dfe9521cc362b1b24a7e7c34b375dde6d0858619954fd39affb2ea18b3",
   "provisional": "result-provisional.json",
-  "historical_stale": []
+  "schema_version": 1,
+  "source_repository_commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
+  "source_repository_tree": "3d8de57a843244229c3b19995c9d0b9e00081769"
 }

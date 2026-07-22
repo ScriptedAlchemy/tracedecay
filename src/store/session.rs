@@ -1,19 +1,23 @@
 use std::{future::Future, sync::LazyLock};
 
+use tracedecay_domain::{DerivedEvidenceIdV1, DerivedEvidenceKindV1};
 use tracedecay_store::{
-    SessionGenerationActivatePermit, SessionGenerationActivationReceiptV1,
-    SessionGenerationActivationRequestV1, SessionGenerationRebuildBeginPermit,
-    SessionGenerationRebuildReceiptV1, SessionGenerationRebuildRequestV1,
-    SessionProjectionBatchPersistPermit, SessionRefreshBeginOrJoinPermit,
-    SessionRefreshBeginOrJoinReceiptV1, SessionRefreshBeginOrJoinRequestV1,
-    SessionRefreshCancelPermit, SessionRefreshCancellationRequestV1, SessionRefreshCompletePermit,
+    DerivedEvidenceMemberPageV1, SessionGenerationActivatePermit,
+    SessionGenerationActivationReceiptV1, SessionGenerationActivationRequestV1,
+    SessionGenerationRebuildBeginPermit, SessionGenerationRebuildReceiptV1,
+    SessionGenerationRebuildRequestV1, SessionProjectionBatchPersistPermit,
+    SessionRefreshBeginOrJoinPermit, SessionRefreshBeginOrJoinReceiptV1,
+    SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancelPermit,
+    SessionRefreshCancellationRequestV1, SessionRefreshCompletePermit,
     SessionRefreshCompletionRequestV1, SessionRefreshFailPermit, SessionRefreshFailureRequestV1,
     SessionRefreshProgressPersistPermit, SessionRefreshProgressReadPermit,
     SessionRefreshProgressRequestV1, SessionRefreshProgressV1, SessionRefreshReceiptReadPermit,
     SessionRefreshReceiptRequestV1, SessionRefreshReceiptV1, SessionRefreshStore,
-    SessionStoreResult, SessionTemporalCapabilitiesV1, SessionTemporalCapabilityProvider,
-    SessionTemporalCapabilityV1, SessionTemporalProjectionBatchReceiptV1,
+    SessionRetrievalPageV1, SessionRetrievalStore, SessionSnapshotFreezePermit, SessionStoreResult,
+    SessionTemporalCapabilitiesV1, SessionTemporalCapabilityProvider, SessionTemporalCapabilityV1,
+    SessionTemporalPageRetrievePermit, SessionTemporalProjectionBatchReceiptV1,
     SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore,
+    SessionTemporalRetrievalRequestV1, SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 
 use crate::global_db::GlobalDb;
@@ -62,6 +66,7 @@ impl SessionTemporalCapabilityProvider for GlobalDbSessionTemporalStore<'_> {
     fn session_temporal_capabilities(&self) -> &SessionTemporalCapabilitiesV1 {
         static CAPABILITIES: LazyLock<SessionTemporalCapabilitiesV1> = LazyLock::new(|| {
             SessionTemporalCapabilitiesV1::new([
+                SessionTemporalCapabilityV1::FrozenWatermarks,
                 SessionTemporalCapabilityV1::GenerationRebuild,
                 SessionTemporalCapabilityV1::RefreshJoin,
                 SessionTemporalCapabilityV1::RefreshProgressPersistence,
@@ -69,6 +74,42 @@ impl SessionTemporalCapabilityProvider for GlobalDbSessionTemporalStore<'_> {
             ])
         });
         &CAPABILITIES
+    }
+}
+
+impl SessionRetrievalStore for GlobalDbSessionTemporalStore<'_> {
+    fn freeze_session_temporal_snapshot_supported(
+        &self,
+        _permit: SessionSnapshotFreezePermit,
+        request: SessionTemporalSnapshotRequestV1,
+    ) -> impl Future<Output = SessionStoreResult<SessionTemporalSnapshotV1>> + Send {
+        self.db.freeze_session_temporal_snapshot_result(request)
+    }
+
+    fn retrieve_session_temporal_page_supported(
+        &self,
+        _permit: SessionTemporalPageRetrievePermit,
+        request: SessionTemporalRetrievalRequestV1,
+    ) -> impl Future<Output = SessionStoreResult<SessionRetrievalPageV1>> + Send {
+        self.db.retrieve_session_temporal_page_result(request)
+    }
+
+    fn expand_derived_members_supported(
+        &self,
+        _permit: SessionTemporalPageRetrievePermit,
+        snapshot: SessionTemporalSnapshotV1,
+        evidence_kind: DerivedEvidenceKindV1,
+        evidence_id: DerivedEvidenceIdV1,
+        after_ordinal: Option<u32>,
+        limit: usize,
+    ) -> impl Future<Output = SessionStoreResult<DerivedEvidenceMemberPageV1>> + Send {
+        self.db.expand_derived_members_result(
+            snapshot,
+            evidence_kind,
+            evidence_id,
+            after_ordinal,
+            limit,
+        )
     }
 }
 

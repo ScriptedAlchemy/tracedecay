@@ -30,15 +30,15 @@ use tracedecay_store::{
 
 use crate::common::{isolated_lcm_db_path, open_lcm_db};
 
-fn session(value: &str) -> SessionId {
+pub(crate) fn session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
 }
 
-fn generation(value: u64) -> SessionProjectionGenerationV1 {
+pub(crate) fn generation(value: u64) -> SessionProjectionGenerationV1 {
     SessionProjectionGenerationV1::new(value).unwrap()
 }
 
-fn watermarks(active_generation: u64, source_frontier: u64) -> SessionFrozenWatermarksV1 {
+pub(crate) fn watermarks(active_generation: u64, source_frontier: u64) -> SessionFrozenWatermarksV1 {
     SessionFrozenWatermarksV1::new(
         generation(active_generation),
         source_frontier,
@@ -47,7 +47,7 @@ fn watermarks(active_generation: u64, source_frontier: u64) -> SessionFrozenWate
     )
 }
 
-fn snapshot(
+pub(crate) fn snapshot(
     session_id: &SessionId,
     active_generation: u64,
     source_frontier: u64,
@@ -63,7 +63,7 @@ fn snapshot(
     )
 }
 
-fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
+pub(crate) fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
     SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
             SanitizationReceiptId::new(receipt_id).unwrap(),
@@ -77,7 +77,7 @@ fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
     .unwrap()
 }
 
-fn observation(session_id: &SessionId, ordinal: u64, text: &str) -> DurableObservationV1 {
+pub(crate) fn observation(session_id: &SessionId, ordinal: u64, text: &str) -> DurableObservationV1 {
     observation_with_message_ids(
         session_id,
         ordinal,
@@ -87,7 +87,7 @@ fn observation(session_id: &SessionId, ordinal: u64, text: &str) -> DurableObser
     )
 }
 
-fn observation_with_message_ids(
+pub(crate) fn observation_with_message_ids(
     session_id: &SessionId,
     ordinal: u64,
     text: &str,
@@ -141,11 +141,11 @@ fn observation_with_message_ids(
     .unwrap()
 }
 
-fn anchored_write(observation: DurableObservationV1) -> AnchoredObservationWrite {
+pub(crate) fn anchored_write(observation: DurableObservationV1) -> AnchoredObservationWrite {
     anchored_write_with_lineage(observation, None, None)
 }
 
-fn anchored_write_with_lineage(
+pub(crate) fn anchored_write_with_lineage(
     observation: DurableObservationV1,
     lineage: Option<(AnchorProvenanceRelationV2, RetrievalAnchorId)>,
     occurred_at: Option<i64>,
@@ -189,7 +189,7 @@ fn anchored_write_with_lineage(
     AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap()
 }
 
-async fn persist_observation(
+pub(crate) async fn persist_observation(
     db: &GlobalDb,
     session_id: &SessionId,
     ordinal: u64,
@@ -208,7 +208,7 @@ async fn persist_observation(
     observation
 }
 
-async fn persist_custom_observation(
+pub(crate) async fn persist_custom_observation(
     db: &GlobalDb,
     observation: DurableObservationV1,
 ) -> DurableObservationV1 {
@@ -246,7 +246,7 @@ async fn persist_custom_observation_with_lineage(
     observation
 }
 
-async fn persist_observation_with_lineage(
+pub(crate) async fn persist_observation_with_lineage(
     db: &GlobalDb,
     session_id: &SessionId,
     ordinal: u64,
@@ -272,7 +272,7 @@ async fn persist_observation_with_lineage(
     observation
 }
 
-fn occurrence(
+pub(crate) fn occurrence(
     session_id: &SessionId,
     observation: &DurableObservationV1,
 ) -> MessageOccurrenceRecordV1 {
@@ -314,7 +314,7 @@ fn occurrence(
     .unwrap()
 }
 
-fn occurrence_with_message_id(
+pub(crate) fn occurrence_with_message_id(
     session_id: &SessionId,
     observation: &DurableObservationV1,
     message_id: &str,
@@ -324,7 +324,7 @@ fn occurrence_with_message_id(
     occurrence
 }
 
-fn parent_message_copy(
+pub(crate) fn parent_message_copy(
     target: &MessageOccurrenceRecordV1,
     source: &MessageOccurrenceRecordV1,
 ) -> tracedecay_domain::LogicalCopyRecordV1 {
@@ -356,7 +356,7 @@ fn explicit_anchor_copy(
     }
 }
 
-fn assertion(
+pub(crate) fn assertion(
     subject: &MessageOccurrenceRecordV1,
     object: &MessageOccurrenceRecordV1,
 ) -> TemporalAssertionRecordV1 {
@@ -400,7 +400,7 @@ fn assertion_with_kind(
     .unwrap()
 }
 
-fn batch(
+pub(crate) fn batch(
     session_id: &SessionId,
     candidate_generation: u64,
     source_frontier: u64,
@@ -419,14 +419,14 @@ fn batch(
     .unwrap()
 }
 
-async fn scalar(path: &std::path::Path, sql: &str) -> i64 {
+pub(crate) async fn scalar(path: &std::path::Path, sql: &str) -> i64 {
     let raw_db = libsql::Builder::new_local(path).build().await.unwrap();
     let conn = raw_db.connect().unwrap();
     let mut rows = conn.query(sql, ()).await.unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
-async fn rows(path: &std::path::Path, sql: &str) -> Vec<String> {
+pub(crate) async fn rows(path: &std::path::Path, sql: &str) -> Vec<String> {
     let raw_db = libsql::Builder::new_local(path).build().await.unwrap();
     let conn = raw_db.connect().unwrap();
     let mut result = Vec::new();
@@ -437,7 +437,7 @@ async fn rows(path: &std::path::Path, sql: &str) -> Vec<String> {
     result
 }
 
-async fn begin_candidate(
+pub(crate) async fn begin_candidate(
     store: &GlobalDbSessionTemporalStore<'_>,
     session_id: &SessionId,
     candidate_generation: u64,

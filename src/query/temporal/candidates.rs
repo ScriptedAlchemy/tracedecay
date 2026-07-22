@@ -12,6 +12,8 @@ pub enum CandidateChannel {
     Time,
     Lexical,
     Summary,
+    Span,
+    Burst,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,6 +128,18 @@ pub fn plan_candidates(query: &str) -> CandidatePlan {
         CandidateChannel::Summary,
         query.to_string(),
     );
+    push_clause(
+        &mut clauses,
+        &mut seen,
+        CandidateChannel::Span,
+        query.to_string(),
+    );
+    push_clause(
+        &mut clauses,
+        &mut seen,
+        CandidateChannel::Burst,
+        query.to_string(),
+    );
     CandidatePlan { clauses }
 }
 
@@ -144,6 +158,8 @@ fn push_clause(
             | CandidateChannel::Phrase
             | CandidateChannel::Entity
             | CandidateChannel::Time
+            | CandidateChannel::Span
+            | CandidateChannel::Burst
     );
     clauses.push(CandidateClause {
         channel,

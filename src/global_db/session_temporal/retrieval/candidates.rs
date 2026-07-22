@@ -157,6 +157,46 @@ pub(super) async fn require_candidate_root_authority(
                  LIMIT 1
              )"
         }
+        CandidateChannel::Span | CandidateChannel::Burst => {
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM retrieval_anchors AS authority_anchor
+                 JOIN session_derived_evidence AS evidence
+                   ON evidence.retrieval_anchor_id = authority_anchor.anchor_id
+                  AND evidence.session_id = ?2
+                  AND evidence.evidence_id = ?4
+                 JOIN session_temporal_generations AS generation
+                   ON generation.session_id = evidence.session_id
+                  AND generation.generation = evidence.generation
+                  AND generation.state = 'active'
+                 JOIN session_occurrences AS first_occurrence
+                   ON first_occurrence.session_id = evidence.session_id
+                  AND first_occurrence.generation = evidence.generation
+                  AND first_occurrence.occurrence_id = evidence.first_occurrence_id
+                 JOIN observations AS source_observation
+                   ON source_observation.observation_id =
+                      first_occurrence.source_observation_id
+                 JOIN sessions AS authority_session
+                   ON authority_session.session_id = evidence.session_id
+                  AND authority_session.provider = COALESCE(json_extract(
+                      source_observation.observation_json,
+                      '$.identity.source.provider'
+                  ), 'claude')
+                  AND authority_session.project_key = ?3
+                 WHERE authority_anchor.anchor_id = ?1
+                   AND (?5 IS NULL OR authority_session.provider = ?5)
+                   AND (
+                       (authority_session.project_key = 'user'
+                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+                       OR
+                       (authority_session.project_key <> 'user'
+                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+                        AND json_extract(authority_anchor.owner_json, '$.project_id')
+                            = authority_session.project_key)
+                   )
+                 LIMIT 1
+             )"
+        }
         CandidateChannel::Anchor
         | CandidateChannel::Scope
         | CandidateChannel::ExactMessage
@@ -368,6 +408,28 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(limit),
             ],
         ),
+        (
+            TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
+            CandidateChannel::Span | CandidateChannel::Burst,
+        ) => (
+            ROOT_DERIVED_CANDIDATE_QUERY,
+            vec![
+                root_project_key.clone().ok_or_else(|| {
+                    read_message(CANDIDATE_OPERATION, "authorized root is missing")
+                })?,
+                SqlValue::Text(match clause.channel {
+                    CandidateChannel::Span => "span".to_string(),
+                    CandidateChannel::Burst => "burst".to_string(),
+                    _ => unreachable!("derived candidate channel"),
+                }),
+                provider,
+                SqlValue::Text(fts_phrase(&clause.value)),
+                SqlValue::Integer(cursor.knowledge_at),
+                SqlValue::Text(cursor.session_id.clone()),
+                SqlValue::Text(cursor.stable_id.clone()),
+                SqlValue::Integer(limit),
+            ],
+        ),
         (TemporalRetrievalScope::Session(session_id), CandidateChannel::ExactMessage) => (
             EXACT_CANDIDATE_QUERY,
             vec![
@@ -467,6 +529,26 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(limit),
             ],
         ),
+        (
+            TemporalRetrievalScope::Session(session_id),
+            CandidateChannel::Span | CandidateChannel::Burst,
+        ) => (
+            DERIVED_CANDIDATE_QUERY,
+            vec![
+                SqlValue::Text(session_id.as_str().to_string()),
+                SqlValue::Integer(generation),
+                SqlValue::Text(match clause.channel {
+                    CandidateChannel::Span => "span".to_string(),
+                    CandidateChannel::Burst => "burst".to_string(),
+                    _ => unreachable!("derived candidate channel"),
+                }),
+                provider,
+                SqlValue::Text(fts_phrase(&clause.value)),
+                SqlValue::Integer(cursor.knowledge_at),
+                SqlValue::Text(cursor.stable_id.clone()),
+                SqlValue::Integer(limit),
+            ],
+        ),
     };
     conn.query(sql, params)
         .await
@@ -519,6 +601,8 @@ pub(super) const fn candidate_score(channel: CandidateChannel) -> i64 {
         CandidateChannel::Anchor => 1_100,
         CandidateChannel::ExactMessage => 1_000,
         CandidateChannel::Phrase => 800,
+        CandidateChannel::Span => 780,
+        CandidateChannel::Burst => 760,
         CandidateChannel::Entity => 700,
         CandidateChannel::Time => 600,
         CandidateChannel::Summary => 500,

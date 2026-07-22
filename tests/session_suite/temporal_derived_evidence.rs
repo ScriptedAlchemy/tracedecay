@@ -1,0 +1,365 @@
+//! Generation-bound session-derived spans/bursts: rebuild identity, expand,
+//! restart, scope isolation, and temporal-mode surface coverage.
+
+use std::collections::BTreeSet;
+use std::path::Path;
+
+use tempfile::TempDir;
+use tracedecay::global_db::GlobalDb;
+use tracedecay::store::GlobalDbSessionTemporalStore;
+use tracedecay_domain::{
+    AnchorProvenanceRelationV2, DerivedEvidenceIdV1, DerivedEvidenceKindV1, TemporalModeV1,
+    UtcMicros,
+};
+use tracedecay_store::{
+    SessionGenerationActivationRequestV1, SessionRetrievalStore, SessionTemporalProjectionStore,
+    SessionTemporalSnapshotRequestV1,
+};
+
+use crate::common::{isolated_lcm_db_path, open_lcm_db};
+use crate::temporal_projection::{
+    assertion, batch, begin_candidate, generation, occurrence, parent_message_copy,
+    persist_observation, persist_observation_with_lineage, rows, session, snapshot,
+};
+
+async fn derived_identity_rows(path: &Path, session_id: &str, generation: u64) -> Vec<String> {
+    rows(
+        path,
+        &format!(
+            "SELECT evidence_kind || '|' || evidence_id || '|' || member_digest || '|' ||
+                    configuration_digest || '|' || retrieval_anchor_id
+             FROM session_derived_evidence
+             WHERE session_id = '{session_id}' AND generation = {generation}
+             ORDER BY evidence_kind, evidence_id"
+        ),
+    )
+    .await
+}
+
+async fn project_and_activate(
+    db: &GlobalDb,
+    path: &Path,
+    session_name: &str,
+    candidate_generation: u64,
+) -> (
+    tracedecay_domain::SessionId,
+    Vec<String>,
+    tracedecay_domain::MessageOccurrenceRecordV1,
+    tracedecay_domain::MessageOccurrenceRecordV1,
+) {
+    let session_id = session(session_name);
+    let first = occurrence(
+        &session_id,
+        &persist_observation(db, &session_id, 0, "derived-alpha pipeline").await,
+    );
+    let second = occurrence(
+        &session_id,
+        &persist_observation_with_lineage(
+            db,
+            &session_id,
+            1,
+            "derived-beta pipeline",
+            AnchorProvenanceRelationV2::Supersedes,
+            first.retrieval_anchor_id.clone(),
+            None,
+        )
+        .await,
+    );
+    let store = GlobalDbSessionTemporalStore::new(db);
+    begin_candidate(&store, &session_id, candidate_generation, 2).await;
+    store
+        .persist_session_temporal_projection_batch(batch(
+            &session_id,
+            candidate_generation,
+            2,
+            vec![first.clone(), second.clone()],
+            vec![parent_message_copy(&second, &first)],
+            vec![assertion(&second, &first)],
+        ))
+        .await
+        .unwrap();
+    store
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(
+                session_id.clone(),
+                generation(candidate_generation),
+                snapshot(&session_id, candidate_generation.saturating_sub(1).max(1), 2),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let derived = derived_identity_rows(path, session_id.as_str(), candidate_generation).await;
+    assert!(
+        !derived.is_empty(),
+        "expected generation-bound span/burst rows after activation"
+    );
+    (session_id, derived, first, second)
+}
+
+#[tokio::test]
+async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
+    let tmp = TempDir::new().unwrap();
+    let path = isolated_lcm_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let session_id = session("session.temporal.derived.identity");
+    let first = occurrence(
+        &session_id,
+        &persist_observation(&db, &session_id, 0, "derived-alpha pipeline").await,
+    );
+    let second = occurrence(
+        &session_id,
+        &persist_observation_with_lineage(
+            &db,
+            &session_id,
+            1,
+            "derived-beta pipeline",
+            AnchorProvenanceRelationV2::Supersedes,
+            first.retrieval_anchor_id.clone(),
+            None,
+        )
+        .await,
+    );
+    let edge = parent_message_copy(&second, &first);
+    let assertion = assertion(&second, &first);
+    let store = GlobalDbSessionTemporalStore::new(&db);
+
+    // One-shot rebuild into generation 2.
+    begin_candidate(&store, &session_id, 2, 2).await;
+    // Parallel building generation for incremental parity.
+    begin_candidate(&store, &session_id, 3, 2).await;
+    store
+        .persist_session_temporal_projection_batch(batch(
+            &session_id,
+            2,
+            2,
+            vec![first.clone(), second.clone()],
+            vec![edge.clone()],
+            vec![assertion.clone()],
+        ))
+        .await
+        .unwrap();
+    // Incremental rebuild into generation 3.
+    store
+        .persist_session_temporal_projection_batch(batch(
+            &session_id,
+            3,
+            2,
+            vec![first.clone()],
+            vec![],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    store
+        .persist_session_temporal_projection_batch(
+            batch(
+                &session_id,
+                3,
+                2,
+                vec![second.clone()],
+                vec![edge],
+                vec![assertion],
+            )
+            .with_checkpoint(1, 2, 2)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let oneshot = derived_identity_rows(&path, session_id.as_str(), 2).await;
+    let incremental = derived_identity_rows(&path, session_id.as_str(), 3).await;
+    assert_eq!(
+        oneshot, incremental,
+        "one-shot and incremental rebuilds must mint identical derived identities"
+    );
+    assert!(!oneshot.is_empty());
+
+    store
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(
+                session_id.clone(),
+                generation(3),
+                snapshot(&session_id, 1, 2),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    drop(store);
+    drop(db);
+    let reopened = GlobalDb::open_at(&path).await.expect("reopen");
+    let store = GlobalDbSessionTemporalStore::new(&reopened);
+    let snapshot = store
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(
+            session_id.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.watermarks().active_generation().value(), 3);
+    let restarted = derived_identity_rows(&path, session_id.as_str(), 3).await;
+    assert_eq!(oneshot, restarted);
+}
+
+#[tokio::test]
+async fn paged_member_expand_reconstructs_every_occurrence() {
+    let tmp = TempDir::new().unwrap();
+    let path = isolated_lcm_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let (session_id, derived, _, _) =
+        project_and_activate(&db, &path, "session.temporal.derived.expand", 2).await;
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    let snapshot = store
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(
+            session_id.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let mut reconstructed = BTreeSet::new();
+    for row in &derived {
+        let mut parts = row.split('|');
+        let kind = match parts.next().unwrap() {
+            "span" => DerivedEvidenceKindV1::Span,
+            "burst" => DerivedEvidenceKindV1::Burst,
+            other => panic!("unexpected evidence kind {other}"),
+        };
+        let evidence_id = DerivedEvidenceIdV1::new(parts.next().unwrap().to_string()).unwrap();
+        let mut after = None;
+        let mut seen_ordinals = Vec::new();
+        loop {
+            let page = store
+                .expand_derived_members(snapshot.clone(), kind, evidence_id.clone(), after, 1)
+                .await
+                .unwrap();
+            assert_eq!(page.evidence_kind(), kind);
+            assert_eq!(page.evidence_id().as_str(), evidence_id.as_str());
+            if page.members().is_empty() {
+                break;
+            }
+            assert_eq!(page.members().len(), 1);
+            let member = &page.members()[0];
+            assert!(member.available, "member occurrence must remain available");
+            seen_ordinals.push(member.ordinal);
+            reconstructed.insert(member.occurrence_id.as_str().to_string());
+            after = page.next_after_ordinal();
+            if after.is_none() {
+                break;
+            }
+        }
+        assert!(
+            !seen_ordinals.is_empty(),
+            "derived evidence must expand at least one member"
+        );
+        for window in seen_ordinals.windows(2) {
+            assert!(window[0] < window[1], "member ordinals must be ascending");
+        }
+    }
+    assert!(
+        reconstructed.len() >= 2,
+        "paged expand must reconstruct every projected occurrence: {reconstructed:?}"
+    );
+}
+
+#[tokio::test]
+async fn derived_evidence_stays_session_scoped_across_privacy_boundary() {
+    let tmp = TempDir::new().unwrap();
+    let path = isolated_lcm_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let (session_a, derived_a, _, _) =
+        project_and_activate(&db, &path, "session.temporal.derived.scope-a", 2).await;
+    let (session_b, _, _, _) =
+        project_and_activate(&db, &path, "session.temporal.derived.scope-b", 2).await;
+    let store = GlobalDbSessionTemporalStore::new(&db);
+
+    let snapshot_a = store
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(session_a))
+        .await
+        .unwrap();
+    let snapshot_b = store
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(session_b))
+        .await
+        .unwrap();
+
+    let mut parts = derived_a[0].split('|');
+    let kind = match parts.next().unwrap() {
+        "span" => DerivedEvidenceKindV1::Span,
+        "burst" => DerivedEvidenceKindV1::Burst,
+        other => panic!("unexpected evidence kind {other}"),
+    };
+    let evidence_id = DerivedEvidenceIdV1::new(parts.next().unwrap().to_string()).unwrap();
+
+    let denied = store
+        .expand_derived_members(snapshot_b, kind, evidence_id.clone(), None, 8)
+        .await;
+    assert!(
+        denied.is_err(),
+        "cross-session expand must fail closed: {denied:?}"
+    );
+
+    let allowed = store
+        .expand_derived_members(snapshot_a, kind, evidence_id, None, 8)
+        .await
+        .unwrap();
+    assert!(!allowed.members().is_empty());
+}
+
+#[tokio::test]
+async fn temporal_modes_keep_generation_bound_derived_surface() {
+    let tmp = TempDir::new().unwrap();
+    let path = isolated_lcm_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let (session_id, derived, _, _) =
+        project_and_activate(&db, &path, "session.temporal.derived.modes", 2).await;
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    let snapshot = store
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(
+            session_id.clone(),
+        ))
+        .await
+        .unwrap();
+
+    for mode in [
+        TemporalModeV1::Current,
+        TemporalModeV1::AsOf {
+            cutoff: UtcMicros(10),
+        },
+        TemporalModeV1::Evolution,
+        TemporalModeV1::Forensic,
+    ] {
+        let mut parts = derived[0].split('|');
+        let kind = match parts.next().unwrap() {
+            "span" => DerivedEvidenceKindV1::Span,
+            "burst" => DerivedEvidenceKindV1::Burst,
+            other => panic!("unexpected evidence kind {other}"),
+        };
+        let evidence_id = parts.next().unwrap().to_string();
+        let digest = parts.next().unwrap().to_string();
+        let page = store
+            .expand_derived_members(
+                snapshot.clone(),
+                kind,
+                DerivedEvidenceIdV1::new(evidence_id.clone()).unwrap(),
+                None,
+                32,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("mode {mode:?} expand failed: {error:?}"));
+        assert!(!page.members().is_empty());
+        assert_eq!(
+            rows(
+                &path,
+                &format!(
+                    "SELECT member_digest FROM session_derived_evidence
+                     WHERE session_id = '{}' AND generation = {} AND evidence_id = '{}'",
+                    session_id.as_str(),
+                    snapshot.watermarks().active_generation().value(),
+                    evidence_id
+                ),
+            )
+            .await,
+            vec![digest]
+        );
+    }
+}

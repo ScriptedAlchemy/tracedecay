@@ -199,4 +199,25 @@ impl SessionRetrievalStore for InMemorySessionPorts {
             )
         }
     }
+
+    fn expand_derived_members_supported(
+        &self,
+        _permit: SessionTemporalPageRetrievePermit,
+        _snapshot: SessionTemporalSnapshotV1,
+        evidence_kind: tracedecay_domain::DerivedEvidenceKindV1,
+        evidence_id: tracedecay_domain::DerivedEvidenceIdV1,
+        _after_ordinal: Option<u32>,
+        _limit: usize,
+    ) -> impl Future<Output = SessionStoreResult<tracedecay_store::DerivedEvidenceMemberPageV1>> + Send
+    {
+        async move {
+            yield_once().await;
+            tracedecay_store::DerivedEvidenceMemberPageV1::new(
+                evidence_id,
+                evidence_kind,
+                vec![],
+                None,
+            )
+        }
+    }
 }

@@ -1046,10 +1046,71 @@ fn coverage_and_anchor_entity_kinds_have_stable_wire_values() {
         (EntityKind::Agent, "agent"),
         (EntityKind::MessageOccurrence, "message_occurrence"),
         (EntityKind::SessionSummary, "session_summary"),
+        (EntityKind::EvidenceSpan, "evidence_span"),
+        (EntityKind::EvidenceBurst, "evidence_burst"),
     ];
     for (kind, expected) in kinds {
         let encoded = serde_json::to_value(&kind).unwrap();
         assert_eq!(encoded, json!(expected));
         assert_eq!(serde_json::from_value::<EntityKind>(encoded).unwrap(), kind);
     }
+}
+
+#[test]
+fn derived_evidence_ids_and_manifests_are_stable_and_reject_malformed_inputs() {
+    use sha2::{Digest, Sha256};
+    use tracedecay_domain::{
+        DerivedEvidenceKindV1, DerivedEvidenceOccurrenceRefV1, MessageId, MessageOccurrenceIdV1,
+        RetrievalAnchorId, SESSION_DERIVED_SPAN_MAX_MEMBERS_V1, SessionDerivedEvidencePolicyV1,
+        SessionId, ThreadId, UtcMicros, derive_session_evidence_from_occurrences,
+    };
+
+    fn sha_id(label: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(label.as_bytes());
+        let digest = hasher.finalize();
+        let mut encoded = String::with_capacity(71);
+        encoded.push_str("sha256:");
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "{byte:02x}").unwrap();
+        }
+        encoded
+    }
+
+    let session_id = SessionId::new("session.derived.contract").unwrap();
+    let policy = SessionDerivedEvidencePolicyV1 {
+        span_max_members: SESSION_DERIVED_SPAN_MAX_MEMBERS_V1,
+    };
+    let occurrences = (0..3)
+        .map(|index| DerivedEvidenceOccurrenceRefV1 {
+            occurrence_id: MessageOccurrenceIdV1::new(sha_id(&format!("occurrence-{index}"))).unwrap(),
+            retrieval_anchor_id: RetrievalAnchorId::new(sha_id(&format!("anchor-{index}"))).unwrap(),
+            thread_id: Some(ThreadId::new("thread.derived").unwrap()),
+            message_id: Some(MessageId::new(format!("message.derived.{index}")).unwrap()),
+            knowledge_at: UtcMicros(index),
+            observation_sequence: index as u64,
+            projection_output_ordinal: 0,
+        })
+        .collect::<Vec<_>>();
+
+    let first = derive_session_evidence_from_occurrences(&session_id, &occurrences, &policy).unwrap();
+    let second =
+        derive_session_evidence_from_occurrences(&session_id, &occurrences, &policy).unwrap();
+    assert_eq!(first, second);
+    assert!(first
+        .iter()
+        .any(|record| record.evidence_kind() == DerivedEvidenceKindV1::Burst));
+    assert!(first
+        .iter()
+        .any(|record| record.evidence_kind() == DerivedEvidenceKindV1::Span));
+    let encoded = serde_json::to_value(&first).unwrap();
+    assert_eq!(encoded, serde_json::to_value(&second).unwrap());
+
+    let mut disordered = occurrences.clone();
+    disordered.swap(0, 2);
+    assert!(matches!(
+        derive_session_evidence_from_occurrences(&session_id, &disordered, &policy),
+        Err(SessionContractError::NoncontiguousDerivedEvidenceOrdinals)
+    ));
 }

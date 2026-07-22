@@ -103,6 +103,7 @@ pub(crate) async fn persist_session_temporal_projection_batch_in_transaction(
     }
     rebuild_current_occurrences(conn, batch).await?;
     rebuild_assertion_derivatives(conn, batch).await?;
+    super::derived::rebuild_derived_evidence(conn, batch).await?;
 
     let committed_at = now_micros(PERSIST_OPERATION)?;
     let coverage = projection_coverage(conn, batch).await?;
@@ -205,6 +206,27 @@ pub(crate) async fn seed_active_projection_in_transaction(
          SELECT session_id, ?2, entity_kind, entity_id,
                 current_assertion_id, current_occurrence_id, coverage_json
          FROM session_current_entities WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_derived_evidence (
+            session_id, generation, evidence_kind, evidence_id,
+            retrieval_anchor_id, thread_id,
+            first_occurrence_id, last_occurrence_id,
+            algorithm_version, configuration_digest,
+            member_count, member_digest, evidence_json
+         )
+         SELECT session_id, ?2, evidence_kind, evidence_id,
+                retrieval_anchor_id, thread_id,
+                first_occurrence_id, last_occurrence_id,
+                algorithm_version, configuration_digest,
+                member_count, member_digest, evidence_json
+         FROM session_derived_evidence WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_derived_evidence_members (
+            session_id, generation, evidence_kind, evidence_id,
+            ordinal, occurrence_id, member_role
+         )
+         SELECT session_id, ?2, evidence_kind, evidence_id,
+                ordinal, occurrence_id, member_role
+         FROM session_derived_evidence_members
+         WHERE session_id = ?1 AND generation = ?3",
     ];
     if batch.batch_ordinal() != 0 || batch.watermarks().active_generation() == batch.generation() {
         return Ok(());

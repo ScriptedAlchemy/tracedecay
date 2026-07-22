@@ -74,6 +74,20 @@ pub enum SessionContractError {
     DuplicateRefreshSource,
     #[error("a refresh source target regresses its observed frontier")]
     InvalidRefreshSourceFrontier,
+    #[error("derived evidence requires at least one ordered member")]
+    DerivedEvidenceMembersRequired,
+    #[error("derived evidence contains a duplicate occurrence member")]
+    DuplicateDerivedEvidenceMember,
+    #[error("derived evidence membership ordinals are not contiguous")]
+    NoncontiguousDerivedEvidenceOrdinals,
+    #[error("derived evidence endpoints do not match the ordered manifest")]
+    DerivedEvidenceEndpointMismatch,
+    #[error("derived evidence session identity mismatches its members")]
+    DerivedEvidenceSessionMismatch,
+    #[error("derived evidence authority must be derived_projection")]
+    DerivedEvidenceAuthorityMismatch,
+    #[error("derived evidence member digest does not match membership")]
+    DerivedEvidenceMemberDigestMismatch,
 }
 
 macro_rules! session_string_id {
@@ -304,6 +318,8 @@ pub enum RetrievalGrainV1 {
     Thread,
     Agent,
     Summary,
+    EvidenceSpan,
+    EvidenceBurst,
 }
 
 impl RetrievalGrainV1 {
@@ -316,6 +332,8 @@ impl RetrievalGrainV1 {
             Self::Thread => "thread",
             Self::Agent => "agent",
             Self::Summary => "summary",
+            Self::EvidenceSpan => "evidence_span",
+            Self::EvidenceBurst => "evidence_burst",
         }
     }
 }

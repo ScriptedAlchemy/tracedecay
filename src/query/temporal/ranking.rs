@@ -354,7 +354,9 @@ fn fill_missing_metadata(existing: &mut RankingCandidate, candidate: &RankingCan
 const fn rank_tier(channel: CandidateChannel) -> RankTier {
     match channel {
         CandidateChannel::Anchor | CandidateChannel::ExactMessage => RankTier::ExactMessage,
-        CandidateChannel::Phrase => RankTier::ExactPhrase,
+        CandidateChannel::Phrase | CandidateChannel::Span | CandidateChannel::Burst => {
+            RankTier::ExactPhrase
+        }
         CandidateChannel::Scope
         | CandidateChannel::Entity
         | CandidateChannel::Time

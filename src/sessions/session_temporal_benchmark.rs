@@ -648,7 +648,7 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
         retrieval
             .retrieve(
                 &prepared.context,
-                query(RetrievalGrainV1::Summary, "pipeline"),
+                query(RetrievalGrainV1::EvidenceSpan, "pipeline"),
             )
             .await,
     )?;

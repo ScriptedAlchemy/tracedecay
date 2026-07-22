@@ -1808,6 +1808,8 @@ impl MeasuredTemporalValue for RankingCandidate {
             super::candidates::CandidateChannel::Time => "time",
             super::candidates::CandidateChannel::Lexical => "lexical",
             super::candidates::CandidateChannel::Summary => "summary",
+            super::candidates::CandidateChannel::Span => "span",
+            super::candidates::CandidateChannel::Burst => "burst",
         };
         measured_json_bytes(
             "encode candidate",
