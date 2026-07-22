@@ -132,6 +132,9 @@ pub enum SemanticLaneReadinessV1<'a> {
     Unavailable(SemanticIndexStateV1),
 }
 
+// Boxing the large variant would ripple through in-flight construction/match
+// sites; the size gap is accepted here.
+#[allow(clippy::large_enum_variant)]
 pub enum SemanticQueryServiceOutcomeV1 {
     Augmented {
         semantic_lane: CompositionLaneInput,

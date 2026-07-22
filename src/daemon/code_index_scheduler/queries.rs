@@ -133,12 +133,12 @@ fn unavailable<T>(finished_at: tracedecay_domain::UtcMicros) -> RetrievalPortOut
         scores: Vec::new(),
         contributions: Vec::new(),
         page: PageState::first_page(
-            SortContractId::new(CALLABLE_CODE_SORT).expect("static sort id"),
+            SortContractId::new(CALLABLE_CODE_SORT).unwrap_or_else(|_| panic!("static sort id")),
             1,
             None,
             0,
         )
-        .expect("empty application page"),
+        .unwrap_or_else(|_| panic!("empty application page")),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
@@ -172,12 +172,12 @@ fn completed<T>(
     });
     RetrievalPortOutcome::Completed(RetrievalEvidence {
         page: PageState::first_page(
-            SortContractId::new(CALLABLE_CODE_SORT).expect("static sort id"),
+            SortContractId::new(CALLABLE_CODE_SORT).unwrap_or_else(|_| panic!("static sort id")),
             1,
             page.total,
             returned,
         )
-        .expect("bounded code query page"),
+        .unwrap_or_else(|_| panic!("bounded code query page")),
         payload: Some(page),
         temporal,
         evidence_authorities: Vec::new(),
@@ -262,7 +262,7 @@ fn exact_page(
         None,
         None,
     )
-    .expect("validated exact lane creates a valid page")
+    .unwrap_or_else(|_| panic!("validated exact lane creates a valid page"))
 }
 
 fn lexical_page(
@@ -300,7 +300,7 @@ fn lexical_page(
         None,
         None,
     )
-    .expect("validated lexical lane creates a valid page")
+    .unwrap_or_else(|_| panic!("validated lexical lane creates a valid page"))
 }
 
 fn symbol_record(
@@ -380,7 +380,7 @@ fn graph_page(
         None,
         None,
     )
-    .expect("validated graph lane creates a valid page")
+    .unwrap_or_else(|_| panic!("validated graph lane creates a valid page"))
 }
 
 fn lane_result<T, E>(
@@ -438,15 +438,15 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(query_view) = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
                 request.literal.clone(),
                 SanitizerRevision::new("query-sanitizer.daemon.v1")
-                    .expect("static sanitizer revision"),
+                    .unwrap_or_else(|_| panic!("static sanitizer revision")),
                 QueryNormalizationRevision::new("query-normalization.daemon.v1")
-                    .expect("static normalization revision"),
+                    .unwrap_or_else(|_| panic!("static normalization revision")),
             ) else {
                 return unavailable(finished_at);
             };
             let authority = CentralExactAdmissionAuthorityV1::new(
                 ExactAdmissionRuleRevision::new("exact-rules.daemon.v1")
-                    .expect("static exact rule revision"),
+                    .unwrap_or_else(|_| panic!("static exact rule revision")),
             );
             let lane_request = ExactLaneRequest {
                 literals: authority.parse_literals(&query_view, &base),
@@ -503,9 +503,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 field_filters: Vec::new(),
                 fuzzy_budget: MAX_FUZZY_TERM_EXPANSIONS_V1,
                 lexical_profile_revision: ComponentRevision::new("lexical-profile.daemon.v1")
-                    .expect("static lexical profile"),
+                    .unwrap_or_else(|_| panic!("static lexical profile")),
                 score_domain: ScoreDomainId::new("score.lexical.daemon.v1")
-                    .expect("static lexical score domain"),
+                    .unwrap_or_else(|_| panic!("static lexical score domain")),
                 budget: base.budget,
                 base,
             };
@@ -553,13 +553,13 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             };
             let source_occurrence =
                 SourceOccurrenceId::new(format!("code-symbol:{}", symbol.as_str()))
-                    .expect("validated symbol creates source occurrence");
+                    .unwrap_or_else(|_| panic!("validated symbol creates source occurrence"));
             let seed = CodeCandidateBindingV1 {
                 candidate_anchor: RetrievalAnchorId::new(format!(
                     "code-symbol:{}",
                     symbol.as_str()
                 ))
-                .expect("validated symbol creates anchor"),
+                .unwrap_or_else(|_| panic!("validated symbol creates anchor")),
                 occurrence: CodeOccurrenceRefV1 {
                     generation: request.scope.generation.clone(),
                     file: chunk.anchor.file_occurrence_id.clone(),

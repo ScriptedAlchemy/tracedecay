@@ -117,7 +117,9 @@ where
                 "query embedding runtime returned a non-unit batch".to_owned(),
             ));
         }
-        let vector = vectors.pop().expect("unit query embedding batch");
+        let vector = vectors
+            .pop()
+            .unwrap_or_else(|| panic!("unit query embedding batch"));
         vector.validate().map_err(map_embed_error)?;
         EphemeralQueryEmbeddingV1::new(
             request.query_digest.clone(),

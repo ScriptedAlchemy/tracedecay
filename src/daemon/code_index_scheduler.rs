@@ -84,7 +84,10 @@ pub(super) struct SharedCodeIndexBytePoolV1 {
 impl SharedCodeIndexBytePoolV1 {
     fn intern(&self, bytes: Vec<u8>) -> (ContentDigest, Arc<[u8]>) {
         let digest = content_digest(&bytes);
-        let mut pool = self.bytes.lock().expect("code-index byte-pool lock");
+        let mut pool = self
+            .bytes
+            .lock()
+            .unwrap_or_else(|_| panic!("code-index byte-pool lock"));
         if let Some(shared) = pool.get(&digest).and_then(Weak::upgrade) {
             self.reused.fetch_add(1, Ordering::Relaxed);
             return (digest, shared);
@@ -620,7 +623,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         let epoch = Arc::clone(&self.epoch);
         let mut debouncer =
             new_debouncer(WATCH_DEBOUNCE, None, move |result: DebounceEventResult| {
-                let mut hints = hints.lock().expect("code-index hint lock");
+                let mut hints = hints
+                    .lock()
+                    .unwrap_or_else(|_| panic!("code-index hint lock"));
                 match result {
                     Ok(events) => {
                         for event in events {
@@ -647,13 +652,19 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     pub fn notify_path(&self, path: PathBuf) {
-        self.hints.lock().expect("code-index hint lock").path(path);
+        self.hints
+            .lock()
+            .unwrap_or_else(|_| panic!("code-index hint lock"))
+            .path(path);
         DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
     }
 
     pub fn notify_overflow(&self) {
-        self.hints.lock().expect("code-index hint lock").overflow();
+        self.hints
+            .lock()
+            .unwrap_or_else(|_| panic!("code-index hint lock"))
+            .overflow();
         DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
     }
@@ -663,7 +674,11 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
-            let hints = self.hints.lock().expect("code-index hint lock").take();
+            let hints = self
+                .hints
+                .lock()
+                .unwrap_or_else(|_| panic!("code-index hint lock"))
+                .take();
             overflow_reconciled |= hints.overflow;
             let captured = self.capture_authoritative_snapshot()?;
             if self.latest_content_identity.as_ref() == Some(&captured.snapshot.content_identity) {
@@ -859,11 +874,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             let bytes = captured
                 .bytes_by_path
                 .get(&file.logical_path)
-                .expect("captured file bytes exist");
+                .unwrap_or_else(|| panic!("captured file bytes exist"));
             let language = file
                 .language
                 .as_ref()
-                .expect("present source has a language");
+                .unwrap_or_else(|| panic!("present source has a language"));
             let mut parser = Parser::new();
             parser
                 .set_language(
@@ -983,7 +998,9 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         let scheduler = Arc::new(Mutex::new(opened));
         let (wake, shutting_down) = {
-            let scheduler = scheduler.lock().expect("code-index scheduler lock");
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(|_| panic!("code-index scheduler lock"));
             (
                 Arc::clone(&scheduler.wake),
                 Arc::clone(&scheduler.shutting_down),
@@ -1001,7 +1018,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 let result = tokio::task::spawn_blocking(move || {
                     scheduler
                         .lock()
-                        .expect("code-index scheduler lock")
+                        .unwrap_or_else(|_| panic!("code-index scheduler lock"))
                         .reconcile_now()
                 })
                 .await;
@@ -1026,7 +1043,7 @@ impl CodeIndexSchedulerRegistryV1 {
         worktree
             .scheduler
             .lock()
-            .expect("code-index scheduler lock")
+            .unwrap_or_else(|_| panic!("code-index scheduler lock"))
             .notify_path(path);
         true
     }
@@ -1049,7 +1066,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let scheduler = worktree
                 .scheduler
                 .lock()
-                .expect("code-index scheduler lock");
+                .unwrap_or_else(|_| panic!("code-index scheduler lock"));
             scheduler.shutting_down.store(true, Ordering::Release);
             scheduler.wake.notify_one();
         }
@@ -1176,6 +1193,7 @@ fn single_input_edit(old: &[u8], new: &[u8]) -> InputEdit {
 
 fn point_for_offset(bytes: &[u8], offset: usize) -> Point {
     let prefix = &bytes[..offset.min(bytes.len())];
+    #[allow(clippy::naive_bytecount)] // no bytecount dependency; simple scan is fine
     let row = prefix.iter().filter(|byte| **byte == b'\n').count();
     let column = prefix
         .iter()

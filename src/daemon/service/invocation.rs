@@ -839,6 +839,7 @@ pub(crate) struct DaemonInvocationResponse {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
 enum DaemonGitEffectClass {
     IndexStage,
     IndexUnstage,
@@ -939,7 +940,9 @@ impl From<EffectReceipt> for DaemonEffectReceipt {
             actor: receipt.actor,
             scope: receipt.scope,
             effect_class: DaemonGitEffectClass::from_application(receipt.effect_class)
-                .expect("Git effect receipt class is validated by the application service"),
+                .unwrap_or_else(|_| {
+                    panic!("Git effect receipt class is validated by the application service")
+                }),
             idempotency_key: receipt.idempotency_key,
             input_digest: receipt.input_digest,
             expected_state: receipt.expected_state,

@@ -142,11 +142,6 @@ pub(crate) async fn register_project_open_production_owners(
         .await
     {
         Ok(_) | Err(DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered) => {}
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!("project-open primitive runtime registration failed: {error:?}"),
-            });
-        }
     }
 
     let Some((feedback_cycle, feedback_scope)) = register_production_feedback_cycle(
@@ -262,13 +257,15 @@ async fn register_production_lsp_owner(
     root_uri: String,
 ) -> Option<Arc<crate::daemon::lsp_gateway::Pr12LspSessionFactory>> {
     let revision = crate::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
-    let mut gateway_capabilities = GatewayCapabilities::default();
-    gateway_capabilities.context_projections = BTreeMap::from([
-        (ContextProjectionKind::diagnostics(), revision),
-        (ContextProjectionKind::post_edit_impact(), revision),
-        (ContextProjectionKind::affected_tests(), revision),
-        (ContextProjectionKind::test_run_results(), revision),
-    ]);
+    let gateway_capabilities = GatewayCapabilities {
+        context_projections: BTreeMap::from([
+            (ContextProjectionKind::diagnostics(), revision),
+            (ContextProjectionKind::post_edit_impact(), revision),
+            (ContextProjectionKind::affected_tests(), revision),
+            (ContextProjectionKind::test_run_results(), revision),
+        ]),
+        ..Default::default()
+    };
     let upstream_capabilities = UpstreamCapabilities {
         supports_diagnostics: true,
         semantic: SemanticCapability::ALL.into_iter().collect(),

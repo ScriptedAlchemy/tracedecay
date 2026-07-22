@@ -1089,6 +1089,9 @@ pub struct ContextScoutDurableClaimV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Boxing the large variant would ripple through in-flight construction/match
+// sites; the size gap is accepted here.
+#[allow(clippy::large_enum_variant)]
 pub enum ContextScoutDurableClaimOutcomeV1 {
     Claimed(ContextScoutDurableClaimV1),
     Empty,

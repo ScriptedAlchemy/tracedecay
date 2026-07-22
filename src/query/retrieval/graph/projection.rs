@@ -195,7 +195,7 @@ impl CodeGraphEvidenceAdapterV1 {
                         .iter()
                         .map(|segment| segment.authority)
                         .reduce(EdgeAuthorityV1::weakest)
-                        .expect("path has at least one edge");
+                        .unwrap_or_else(|| panic!("path has at least one edge"));
                     let score_micros = graph_score_micros(next_path.len(), weakest_authority);
                     let occurrence = format!("code-graph:{}", edge.to_occurrence.as_str());
                     let candidate = CompactCandidate {

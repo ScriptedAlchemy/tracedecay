@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use hmac::{Hmac, KeyInit, Mac};
 use libsql::Connection;
-use libsql::{Row, Transaction, TransactionBehavior, params};
+#[cfg(test)]
+use libsql::TransactionBehavior;
+use libsql::{Row, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;

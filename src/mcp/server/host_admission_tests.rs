@@ -126,12 +126,11 @@ async fn hook_event_is_durable_before_attempt_and_retained_on_failure() {
         McpServer::new_with_context(context_with_broker(cg, Arc::clone(&broker), writer)).await;
     let mut routes = HookProjectRouteCache::default();
 
-    let outcome = server
-        .handle_hook_event_notification(
-            Some(&session_start(project.path().to_path_buf())),
-            &mut routes,
-        )
-        .await;
+    let outcome = Box::pin(server.handle_hook_event_notification(
+        Some(&session_start(project.path().to_path_buf())),
+        &mut routes,
+    ))
+    .await;
 
     assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
     assert_eq!(outcome.reason_code, Some("canonical_admission_failed"));
@@ -165,12 +164,11 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
         McpServer::new_with_context(context_with_broker(cg, Arc::clone(&broker), failing_writer))
             .await;
     let mut routes = HookProjectRouteCache::default();
-    server
-        .handle_hook_event_notification(
-            Some(&session_start(project.path().to_path_buf())),
-            &mut routes,
-        )
-        .await;
+    Box::pin(server.handle_hook_event_notification(
+        Some(&session_start(project.path().to_path_buf())),
+        &mut routes,
+    ))
+    .await;
     assert!(*authoritative_commit.lock().unwrap());
     assert_eq!(broker.pending_count().await, 1);
     server.shutdown().await;
@@ -237,12 +235,11 @@ async fn authoritative_commit_deletes_the_durable_hook_event() {
         McpServer::new_with_context(context_with_broker(cg, Arc::clone(&broker), writer)).await;
     let mut routes = HookProjectRouteCache::default();
 
-    let outcome = server
-        .handle_hook_event_notification(
-            Some(&terminal_receipt(project.path().to_path_buf())),
-            &mut routes,
-        )
-        .await;
+    let outcome = Box::pin(server.handle_hook_event_notification(
+        Some(&terminal_receipt(project.path().to_path_buf())),
+        &mut routes,
+    ))
+    .await;
 
     assert_eq!(outcome.status, HostAdmissionStatus::Committed);
     assert_eq!(broker.pending_count().await, 0);
@@ -275,12 +272,11 @@ async fn oversized_event_is_rejected_before_canonical_attempt() {
         McpServer::new_with_context(context_with_broker(cg, Arc::clone(&broker), writer)).await;
     let mut routes = HookProjectRouteCache::default();
 
-    let outcome = server
-        .handle_hook_event_notification(
-            Some(&session_start(project.path().to_path_buf())),
-            &mut routes,
-        )
-        .await;
+    let outcome = Box::pin(server.handle_hook_event_notification(
+        Some(&session_start(project.path().to_path_buf())),
+        &mut routes,
+    ))
+    .await;
 
     assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
     assert_eq!(outcome.reason_code, Some("spool_record_too_large"));
@@ -588,9 +584,7 @@ async fn cancelled_canonical_attempt_is_recovered_and_replayed() {
         let server = Arc::clone(&server);
         tokio::spawn(async move {
             let mut routes = HookProjectRouteCache::default();
-            server
-                .handle_hook_event_notification(Some(&event), &mut routes)
-                .await
+            Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await
         })
     };
 
@@ -1186,12 +1180,11 @@ async fn failed_admission_does_not_emit_hook_route_analytics() {
     .await;
     let mut routes = HookProjectRouteCache::default();
 
-    let outcome = server
-        .handle_hook_event_notification(
-            Some(&session_start_with_route(project.path().to_path_buf())),
-            &mut routes,
-        )
-        .await;
+    let outcome = Box::pin(server.handle_hook_event_notification(
+        Some(&session_start_with_route(project.path().to_path_buf())),
+        &mut routes,
+    ))
+    .await;
 
     assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
     server.ledger_writes_settled().await;
@@ -1283,9 +1276,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
     .unwrap();
     let mut routes = HookProjectRouteCache::default();
 
-    let first = server
-        .handle_hook_event_notification(Some(&event), &mut routes)
-        .await;
+    let first = Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
     assert_eq!(first.status, HostAdmissionStatus::Unavailable);
     assert_eq!(broker.pending_count().await, 1);
 
@@ -1382,18 +1373,14 @@ async fn committed_admissions_emit_post_commit_private_route_analytics() {
     let mut routes = HookProjectRouteCache::default();
     let event = terminal_receipt(project.path().to_path_buf());
 
-    let first = server
-        .handle_hook_event_notification(Some(&event), &mut routes)
-        .await;
+    let first = Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
     assert!(matches!(
         first.status,
         HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
     ));
     server.ledger_writes_settled().await;
 
-    let second = server
-        .handle_hook_event_notification(Some(&event), &mut routes)
-        .await;
+    let second = Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
     assert!(matches!(
         second.status,
         HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
@@ -1536,9 +1523,8 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
     let mut routes = HookProjectRouteCache::default();
 
     for event in [&terminal, &turn_ingested] {
-        let outcome = server
-            .handle_hook_event_notification(Some(event), &mut routes)
-            .await;
+        let outcome =
+            Box::pin(server.handle_hook_event_notification(Some(event), &mut routes)).await;
         assert!(matches!(
             outcome.status,
             HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate

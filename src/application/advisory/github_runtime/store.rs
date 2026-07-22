@@ -5,7 +5,7 @@ use tracedecay_application::feedback::{
 };
 use tracedecay_domain::ManifestDigest;
 use tracedecay_domain::canonical_sha256;
-use tracedecay_domain::feedback::{FeedbackScopeV1, GitHubReviewReadCheckpointV1};
+use tracedecay_domain::feedback::FeedbackScopeV1;
 use tracedecay_store::{
     SourceCommitApplyOutcomeV1, SourceStoreErrorV1, SourceStoreStateV1, apply_source_commit,
 };

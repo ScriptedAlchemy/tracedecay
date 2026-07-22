@@ -1402,7 +1402,7 @@ mod tests {
         db: &GlobalDb,
         ordinal: u64,
     ) -> (DurableObservationV1, RetrievalAnchorRecord) {
-        persist_anchor_for_session(db, ordinal, "session-1").await
+        Box::pin(persist_anchor_for_session(db, ordinal, "session-1")).await
     }
 
     async fn persist_anchor_for_session(
@@ -1463,8 +1463,8 @@ mod tests {
             .await
             .expect("open database")
             .expect("database");
-        let (first, first_anchor) = persist_anchor(&db, 1).await;
-        let (second, second_anchor) = persist_anchor(&db, 2).await;
+        let (first, first_anchor) = Box::pin(persist_anchor(&db, 1)).await;
+        let (second, second_anchor) = Box::pin(persist_anchor(&db, 2)).await;
         assert_ne!(
             first.observation_id(),
             second.observation_id(),
@@ -1586,7 +1586,7 @@ mod tests {
             .await
             .expect("open database")
             .expect("database");
-        let (observation, anchor) = persist_anchor_for_session(&db, 1, "session-2").await;
+        let (observation, anchor) = Box::pin(persist_anchor_for_session(&db, 1, "session-2")).await;
         let provider = observation.source().provider().as_str();
         db.read_connection()
             .execute(
@@ -1689,9 +1689,9 @@ mod tests {
             .await
             .expect("open database")
             .expect("database");
-        let (occurrence_observation, occurrence_anchor) = persist_anchor(&db, 1).await;
-        let (_, summary_anchor) = persist_anchor(&db, 2).await;
-        let (_, authority_anchor) = persist_anchor(&db, 3).await;
+        let (occurrence_observation, occurrence_anchor) = Box::pin(persist_anchor(&db, 1)).await;
+        let (_, summary_anchor) = Box::pin(persist_anchor(&db, 2)).await;
+        let (_, authority_anchor) = Box::pin(persist_anchor(&db, 3)).await;
         let provider = occurrence_observation.source().provider().as_str();
         db.read_connection()
             .execute(

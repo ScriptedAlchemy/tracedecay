@@ -288,8 +288,10 @@ fn semantic_config_defaults_to_offline_healthy_baseline() {
 
 #[test]
 fn semantic_config_rejects_uncataloged_model_ids() {
-    let mut semantic = super::SemanticConfig::default();
-    semantic.selected_model = Some("NotInCatalog".to_owned());
+    let mut semantic = super::SemanticConfig {
+        selected_model: Some("NotInCatalog".to_owned()),
+        ..Default::default()
+    };
     assert!(semantic.validate().is_err());
     semantic.selected_model = None;
     assert!(semantic.validate().is_ok());

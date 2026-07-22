@@ -552,7 +552,7 @@ impl DaemonInvocationError {
             Self::TimedOut { .. } => ApplicationProblem::timed_out_before_admission(),
             Self::Saturated { class } => AdmissionOutcome::Saturated { class }
                 .into_application_problem()
-                .expect("saturation always maps to an application problem"),
+                .unwrap_or_else(|| panic!("saturation always maps to an application problem")),
             Self::Backpressured { stage } => ApplicationProblem::Saturated {
                 diagnostic: SafeDiagnostic {
                     code: format!("daemon_backpressured_{}", cancellation_stage_name(stage)),

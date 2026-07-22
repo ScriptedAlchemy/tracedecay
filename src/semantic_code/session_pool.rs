@@ -478,7 +478,8 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                 ceiling_bytes,
             });
         }
-        state.resident_bytes = projected_resident.expect("resident total checked above");
+        state.resident_bytes =
+            projected_resident.unwrap_or_else(|| panic!("resident total checked above"));
         state.sessions_opened += 1;
         Ok(self.make_guard(identity, session, resident_bytes))
     }
@@ -690,7 +691,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> Deref for PooledSession<R, C> {
     fn deref(&self) -> &Self::Target {
         self.session
             .as_ref()
-            .expect("pooled session present until drop")
+            .unwrap_or_else(|| panic!("pooled session present until drop"))
     }
 }
 
@@ -698,7 +699,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> DerefMut for PooledSession<R, C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.session
             .as_mut()
-            .expect("pooled session present until drop")
+            .unwrap_or_else(|| panic!("pooled session present until drop"))
     }
 }
 

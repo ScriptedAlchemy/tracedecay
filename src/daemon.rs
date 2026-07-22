@@ -2553,7 +2553,7 @@ async fn portable_project_server(
         .global_database(&cg.store_layout().sessions_db_path)
         .await?;
     ensure_git_index_transactions_before_advertising(
-        &store_administration,
+        store_administration,
         Arc::clone(&session_db),
         cg.project_root(),
         key.owner.project_id.as_deref(),

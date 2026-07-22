@@ -300,7 +300,7 @@ impl ProductionSemanticRuntimeV1 {
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                 let _ = lifecycle_for_stage.mark_indexing(total_units, total_units);
-                drop(store);
+                let _ = store;
                 let database_for_commit = Arc::clone(&database);
                 Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
                     let store = DatabaseVectorGenerationStoreV1::open(database_for_commit.as_ref())
@@ -912,7 +912,8 @@ fn index_state_from_status(status: SemanticRuntimeScheduleStatusV1) -> SemanticI
 
 fn provisional_vector_generation(source: &CodeGenerationId) -> VectorGenerationIdV1 {
     let digest = canonical_sha256(&("semantic.indexing.target", source)).unwrap_or_else(|_| {
-        ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).expect("digest")
+        ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
+            .unwrap_or_else(|_| panic!("digest"))
     });
     VectorGenerationIdV1::new(digest)
 }
@@ -1397,7 +1398,7 @@ mod tests {
                 },
                 profile_id: FusionProfileId::try_from("profile.semantic.v1".to_owned())
                     .expect("profile"),
-                budget: budget,
+                budget,
             },
             query_digest,
             query_view: &query_view,
@@ -1427,7 +1428,7 @@ mod tests {
             freshness: Vec::new(),
             cursor: None,
             digest: FallbackSubpayloadDigest::new(format!("sha256:{}", "0".repeat(64)))
-                .expect("digest"),
+                .unwrap_or_else(|_| panic!("digest")),
         };
         fallback.digest = fallback.compute_digest().expect("fallback digest");
 

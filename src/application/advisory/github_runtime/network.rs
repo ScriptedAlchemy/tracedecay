@@ -4,7 +4,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
+use tracedecay_application::feedback::FeedbackPortFuture;
+#[cfg(test)]
+use tracedecay_application::feedback::GitHubReviewReadRequestV1;
 use tracedecay_application::{RequestAdmission, RequestContext};
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::feedback::{

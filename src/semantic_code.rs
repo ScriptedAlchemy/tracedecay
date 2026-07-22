@@ -590,7 +590,9 @@ where
             session
         } else {
             self.session = Some(self.runtime.acquire().map_err(|error| error.to_string())?);
-            self.session.as_mut().expect("session was just installed")
+            self.session
+                .as_mut()
+                .unwrap_or_else(|| panic!("session was just installed"))
         };
         if session.authority().projection().embedding_key() != key {
             return Err("semantic projection authority changed".to_owned());
@@ -608,7 +610,7 @@ where
         if vectors.len() != 1 {
             return Err("semantic projector returned a non-unit vector batch".to_owned());
         }
-        let vector = vectors.pop().expect("unit vector batch");
+        let vector = vectors.pop().unwrap_or_else(|| panic!("unit vector batch"));
         vector.validate().map_err(|error| error.to_string())?;
         self.completed_units = self.completed_units.saturating_add(1);
         self.progress.set_completed_units(self.completed_units);

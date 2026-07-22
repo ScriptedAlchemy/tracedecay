@@ -306,7 +306,7 @@ async fn seed_temporal_message(
     let observation =
         fixture_observation(scope, ordinal, session_id, provider, message_id, content);
     let observation_id = observation.observation_id().clone();
-    let anchor = persist_fixture_observation(db, observation).await;
+    let anchor = Box::pin(persist_fixture_observation(db, observation)).await;
     let legacy_projection_content = format!("legacy projection poison {ordinal}");
     let session = SessionRecord {
         provider: provider.to_string(),
@@ -617,7 +617,7 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         (&project_db, "project", project_key.as_str(), project_scope),
         (&profile_db, "profile", "user", ObservationScopeV1::Profile),
     ] {
-        seed_temporal_message(
+        Box::pin(seed_temporal_message(
             database,
             project_key,
             scope.clone(),
@@ -626,9 +626,9 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
             "cursor",
             &format!("message-{suffix}-one"),
             &format!("orchard evidence {suffix} one"),
-        )
+        ))
         .await;
-        seed_temporal_message(
+        Box::pin(seed_temporal_message(
             database,
             project_key,
             scope,
@@ -637,7 +637,7 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
             "cursor",
             &format!("message-{suffix}-two"),
             &format!("orchard evidence {suffix} two"),
-        )
+        ))
         .await;
         database.checkpoint().await;
     }

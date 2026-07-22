@@ -272,7 +272,7 @@ fn ensure_enabled(text: &str) -> std::result::Result<String, String> {
     let document = parse_profile(text)?;
     let root = document
         .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
     let Some(plugins_node) = root.get("plugins") else {
         return Ok(append_root_block(
             text,
@@ -342,7 +342,7 @@ fn ensure_scalar(
     let document = parse_profile(text)?;
     let root = document
         .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
     let Some(container_node) = root.get(container) else {
         return Ok(append_root_block(
             text,
@@ -449,7 +449,7 @@ fn remove_legacy_project_pin(text: &str) -> std::result::Result<String, String> 
     let document = parse_profile(text)?;
     let root = document
         .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
     let Some(plugins) = root
         .get("plugins")
         .and_then(|node| node.as_mapping().cloned())
@@ -471,7 +471,7 @@ fn remove_legacy_project_pin(text: &str) -> std::result::Result<String, String> 
     let document = parse_profile(&after)?;
     let root = document
         .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
     if let Some(plugins) = root
         .get("plugins")
         .and_then(|node| node.as_mapping().cloned())
@@ -485,7 +485,7 @@ fn remove_seq_item(text: &str, path: &[&str], value: &str) -> std::result::Resul
     let document = parse_profile(text)?;
     let root = document
         .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
     let mut current = root.clone();
     for (index, key) in path.iter().enumerate() {
         let Some(node) = current.get(*key) else {
@@ -587,7 +587,7 @@ fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result
     let document = parse_profile(text)?;
     let root = document
         .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
     let Some(mapping) = root
         .get(container)
         .and_then(|node| node.as_mapping().cloned())
@@ -603,7 +603,7 @@ fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result
     let document = parse_profile(&after)?;
     let root = document
         .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
     collapse_if_empty(&after, &root, container)
 }
 

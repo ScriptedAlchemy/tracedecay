@@ -1708,11 +1708,10 @@ pub fn inspect_installed_host_bundle_components_at(
                 state,
             });
         }
-        let state = if receipt.rollback_boundary != HostBundleRollbackBoundaryV1::Passed {
-            HostBundleComponentDoctorStateV1::Corrupt
-        } else if artifacts
-            .iter()
-            .any(|artifact| artifact.state == HostBundleComponentDoctorStateV1::Corrupt)
+        let state = if receipt.rollback_boundary != HostBundleRollbackBoundaryV1::Passed
+            || artifacts
+                .iter()
+                .any(|artifact| artifact.state == HostBundleComponentDoctorStateV1::Corrupt)
         {
             HostBundleComponentDoctorStateV1::Corrupt
         } else if artifacts
@@ -1878,8 +1877,8 @@ pub fn inspect_installed_host_bundle_components_at(
             .find(|result| result.host == Some(host) && result.component == Some(component))
         {
             result.state = HostBundleComponentDoctorStateV1::Repairable;
-            result.receipt_path = path.clone();
-            result.repair_action = restore_action.clone();
+            result.receipt_path.clone_from(&path);
+            result.repair_action.clone_from(&restore_action);
         } else {
             components.push(HostBundleComponentDoctorResultV1 {
                 receipt_path: path,

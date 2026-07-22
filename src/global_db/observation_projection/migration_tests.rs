@@ -424,7 +424,7 @@ async fn seed_v1_legacy_claude_projection(
 async fn v1_upgrade_adopts_legacy_claude_source_path_and_preserves_ownership() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("global.db");
-    let seed = seed_v1_legacy_claude_projection(&db_path, None).await;
+    let seed = Box::pin(seed_v1_legacy_claude_projection(&db_path, None)).await;
     let reopened = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
     reopened.audit_observation_authority().await.unwrap();
     let mut rows = reopened
@@ -466,7 +466,11 @@ async fn v1_upgrade_adopts_legacy_claude_source_path_and_preserves_ownership() {
 async fn v1_upgrade_rejects_non_source_path_projection_differences() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("global.db");
-    seed_v1_legacy_claude_projection(&db_path, Some("Conflicting legacy text.")).await;
+    Box::pin(seed_v1_legacy_claude_projection(
+        &db_path,
+        Some("Conflicting legacy text."),
+    ))
+    .await;
 
     let Err(error) = GlobalDb::try_open_at(&db_path).await else {
         panic!("non-source-path mismatch must collide");

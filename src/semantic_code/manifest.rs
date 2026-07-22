@@ -99,7 +99,8 @@ impl Ed25519PublicKeyHex {
     }
 
     pub fn to_bytes(&self) -> [u8; 32] {
-        let decoded = hex::decode(&self.0).expect("validated 32-byte hex at construction");
+        let decoded = hex::decode(&self.0)
+            .unwrap_or_else(|_| panic!("validated 32-byte hex at construction"));
         let mut out = [0u8; 32];
         out.copy_from_slice(&decoded);
         out
@@ -146,7 +147,8 @@ impl Ed25519SignatureHex {
     }
 
     pub fn to_bytes(&self) -> [u8; 64] {
-        let decoded = hex::decode(&self.0).expect("validated 64-byte hex at construction");
+        let decoded = hex::decode(&self.0)
+            .unwrap_or_else(|_| panic!("validated 64-byte hex at construction"));
         let mut out = [0u8; 64];
         out.copy_from_slice(&decoded);
         out
@@ -424,7 +426,8 @@ impl ModelArtifactManifestV1 {
     /// payload contains no maps, so this encoding is byte-stable across
     /// processes and platforms; `canonical_digest` is its SHA-256.
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(&self.payload).expect("manifest payload serialization is infallible")
+        serde_json::to_vec(&self.payload)
+            .unwrap_or_else(|_| panic!("manifest payload serialization is infallible"))
     }
 
     /// SHA-256 over `canonical_bytes`. Stable identity for signature
@@ -462,7 +465,7 @@ impl ModelArtifactManifestV1 {
 
     /// Serialize to canonical JSON bytes (round-trips through `parse`).
     pub fn to_canonical_envelope_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("manifest serialization is infallible")
+        serde_json::to_vec(self).unwrap_or_else(|_| panic!("manifest serialization is infallible"))
     }
 
     /// Structural validation only: schema pin, non-empty identity fields,

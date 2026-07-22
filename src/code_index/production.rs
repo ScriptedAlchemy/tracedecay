@@ -903,7 +903,7 @@ where
                         manifest.generation_id.clone(),
                         file_occurrence_id.clone(),
                     ) {
-                        files.push(artifact)
+                        files.push(artifact);
                     } else {
                         // Opaque exact evidence may refuse generation-local
                         // occurrence rebinding. Re-extract through the

@@ -82,7 +82,7 @@ type FileDependentsByFile = HashMap<String, Vec<String>>;
 type AffectedDependentsFuture<'a> =
     Pin<Box<dyn Future<Output = Result<FileDependentsByFile>> + Send + 'a>>;
 
-trait AffectedTestDependents: Sync {
+pub(crate) trait AffectedTestDependents: Sync {
     fn get_file_dependents_batch<'a>(&'a self, files: &'a [String])
     -> AffectedDependentsFuture<'a>;
 }

@@ -159,14 +159,14 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
         let (first, first_write) = fixture_observation(&session_id, 0, None, false);
         let first_anchor =
             derive_exact_observation_anchor_id(first.scope(), first.observation_id()).unwrap();
-        persist_fixture(&db, first, first_write).await;
+        Box::pin(persist_fixture(&db, first, first_write)).await;
         let (second, second_write) = fixture_observation(
             &session_id,
             1,
             Some((AnchorProvenanceRelationV2::Supersedes, first_anchor)),
             true,
         );
-        persist_fixture(&db, second, second_write).await;
+        Box::pin(persist_fixture(&db, second, second_write)).await;
         let begin = db
             .begin_or_join_session_refresh_result(SessionRefreshBeginOrJoinRequestV1::new(
                 session_id.clone(),
@@ -264,14 +264,14 @@ async fn copied_from_lineage_is_not_auto_emitted_by_materializer() {
     let (first, first_write) = fixture_observation(&session_id, 0, None, false);
     let first_anchor =
         derive_exact_observation_anchor_id(first.scope(), first.observation_id()).unwrap();
-    persist_fixture(&db, first, first_write).await;
+    Box::pin(persist_fixture(&db, first, first_write)).await;
     let (second, second_write) = fixture_observation(
         &session_id,
         1,
         Some((AnchorProvenanceRelationV2::CopiedFrom, first_anchor)),
         false,
     );
-    persist_fixture(&db, second, second_write).await;
+    Box::pin(persist_fixture(&db, second, second_write)).await;
     db.begin_or_join_session_refresh_result(SessionRefreshBeginOrJoinRequestV1::new(
         session_id.clone(),
         SessionRefreshFrontierV1::new(2, 0).unwrap(),
@@ -302,7 +302,7 @@ async fn relation_derivation_backs_off_to_the_total_batch_limit() {
     let session_id = fixture_session("session.projector.derived-limit");
     for ordinal in 0..501 {
         let (observation, write) = fixture_observation(&session_id, ordinal, None, ordinal > 0);
-        persist_fixture(&db, observation, write).await;
+        Box::pin(persist_fixture(&db, observation, write)).await;
     }
     db.begin_or_join_session_refresh_result(SessionRefreshBeginOrJoinRequestV1::new(
         session_id.clone(),
@@ -401,14 +401,14 @@ async fn materialize_persists_copy_bitemporality_and_rejects_forged_assertion_id
     let (first, first_write) = fixture_observation(&session_id, 0, None, false);
     let first_anchor =
         derive_exact_observation_anchor_id(first.scope(), first.observation_id()).unwrap();
-    persist_fixture(&db, first, first_write).await;
+    Box::pin(persist_fixture(&db, first, first_write)).await;
     let (second, second_write) = fixture_observation(
         &session_id,
         1,
         Some((AnchorProvenanceRelationV2::Supersedes, first_anchor)),
         true,
     );
-    persist_fixture(&db, second, second_write).await;
+    Box::pin(persist_fixture(&db, second, second_write)).await;
     db.begin_or_join_session_refresh_result(SessionRefreshBeginOrJoinRequestV1::new(
         session_id.clone(),
         SessionRefreshFrontierV1::new(2, 0).unwrap(),
@@ -499,7 +499,7 @@ async fn multi_batch_refresh_progress_survives_restart_under_guard() {
         let db = GlobalDb::open_at(&path).await.unwrap();
         for ordinal in 0..3 {
             let (observation, write) = fixture_observation(&session_id, ordinal, None, ordinal > 0);
-            persist_fixture(&db, observation, write).await;
+            Box::pin(persist_fixture(&db, observation, write)).await;
         }
         let begin = db
             .begin_or_join_session_refresh_result(SessionRefreshBeginOrJoinRequestV1::new(

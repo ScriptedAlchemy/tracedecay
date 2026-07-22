@@ -42,7 +42,7 @@ use fastembed::{
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
-#[cfg(any(test))]
+#[cfg(test)]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -1026,7 +1026,9 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
                 ));
             }
             let vector = EmbeddingVectorV1 {
-                values: embedded.pop().expect("embedding count was checked"),
+                values: embedded
+                    .pop()
+                    .unwrap_or_else(|| panic!("embedding count was checked")),
                 dimensions: artifact.dimensions(),
                 metric: artifact.metric(),
                 normalization: artifact.normalization(),

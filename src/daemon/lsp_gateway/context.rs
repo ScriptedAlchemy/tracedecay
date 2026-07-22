@@ -193,6 +193,9 @@ pub enum ContextProjectionOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+// Boxing the large variant would ripple through in-flight construction/match
+// sites; the size gap is accepted here.
+#[allow(clippy::large_enum_variant)]
 pub enum ContextExpansionOutcome {
     Ready(ContextExpansionEnvelope),
     Denied,

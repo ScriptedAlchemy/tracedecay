@@ -88,12 +88,8 @@ async fn matrix_duplicate_is_exact_duplicate_without_frontier_corruption() {
     let mut routes = HookProjectRouteCache::default();
     let event = session_start(project.path().to_path_buf());
 
-    let first = server
-        .handle_hook_event_notification(Some(&event), &mut routes)
-        .await;
-    let second = server
-        .handle_hook_event_notification(Some(&event), &mut routes)
-        .await;
+    let first = Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
+    let second = Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
 
     assert!(matches!(
         first.status,
@@ -121,18 +117,16 @@ async fn matrix_reordered_completion_waits_for_contiguous_frontier() {
     .await;
     let mut routes = HookProjectRouteCache::default();
 
-    server
-        .handle_hook_event_notification(
-            Some(&session_start(project.path().to_path_buf())),
-            &mut routes,
-        )
-        .await;
-    server
-        .handle_hook_event_notification(
-            Some(&session_start(project.path().to_path_buf())),
-            &mut routes,
-        )
-        .await;
+    Box::pin(server.handle_hook_event_notification(
+        Some(&session_start(project.path().to_path_buf())),
+        &mut routes,
+    ))
+    .await;
+    Box::pin(server.handle_hook_event_notification(
+        Some(&session_start(project.path().to_path_buf())),
+        &mut routes,
+    ))
+    .await;
 
     let replay = broker.begin_replay().await.unwrap();
     let first = replay.lease_next().await.unwrap().unwrap();
@@ -221,12 +215,11 @@ async fn matrix_daemon_unavailable_without_broker_skips_writer_and_frontier() {
     let server = McpServer::new_with_context(context_without_broker(cg, writer)).await;
     let mut routes = HookProjectRouteCache::default();
 
-    let outcome = server
-        .handle_hook_event_notification(
-            Some(&session_start(project.path().to_path_buf())),
-            &mut routes,
-        )
-        .await;
+    let outcome = Box::pin(server.handle_hook_event_notification(
+        Some(&session_start(project.path().to_path_buf())),
+        &mut routes,
+    ))
+    .await;
 
     assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
     assert_eq!(outcome.reason_code, Some("spool_unavailable"));
@@ -267,16 +260,12 @@ async fn matrix_backpressure_overflow_rejects_before_writer_without_pending_grow
     let mut routes = HookProjectRouteCache::default();
     let event = session_start(project.path().to_path_buf());
 
-    let first = server
-        .handle_hook_event_notification(Some(&event), &mut routes)
-        .await;
+    let first = Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
     assert_eq!(first.status, HostAdmissionStatus::Unavailable);
     assert_eq!(broker.pending_count().await, 1);
     assert_eq!(*attempted.lock().unwrap(), 1);
 
-    let second = server
-        .handle_hook_event_notification(Some(&event), &mut routes)
-        .await;
+    let second = Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
     assert_eq!(second.status, HostAdmissionStatus::Backpressured);
     assert_eq!(second.reason_code, Some("spool_overflow"));
     assert_eq!(
@@ -308,12 +297,11 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
     .await;
     let mut routes = HookProjectRouteCache::default();
 
-    let failed = server
-        .handle_hook_event_notification(
-            Some(&session_start(project.path().to_path_buf())),
-            &mut routes,
-        )
-        .await;
+    let failed = Box::pin(server.handle_hook_event_notification(
+        Some(&session_start(project.path().to_path_buf())),
+        &mut routes,
+    ))
+    .await;
     assert_eq!(failed.status, HostAdmissionStatus::Unavailable);
     assert_eq!(broker.pending_count().await, 1);
 

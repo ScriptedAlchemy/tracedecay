@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -623,25 +624,25 @@ fn refresh_markdown(value: &Value) -> String {
         ("Handle", "handle"),
     ] {
         if let Some(value) = value.get(key).and_then(Value::as_str) {
-            output.push_str(&format!("- {label}: `{value}`\n"));
+            let _ = writeln!(output, "- {label}: `{value}`");
         }
     }
     if let Some(progress) = value.get("progress").and_then(Value::as_object) {
         append_refresh_record_markdown(&mut output, progress);
         if let Some(committed_batches) = progress.get("committed_batches").and_then(Value::as_u64) {
-            output.push_str(&format!("- Committed batches: {committed_batches}\n"));
+            let _ = writeln!(output, "- Committed batches: {committed_batches}");
         }
         if let Some(committed_records) = progress.get("committed_records").and_then(Value::as_u64) {
-            output.push_str(&format!("- Committed records: {committed_records}\n"));
+            let _ = writeln!(output, "- Committed records: {committed_records}");
         }
     }
     if let Some(receipt) = value.get("receipt").and_then(Value::as_object) {
         append_refresh_record_markdown(&mut output, receipt);
         if let Some(state) = receipt.get("state").and_then(Value::as_str) {
-            output.push_str(&format!("- Receipt state: `{state}`\n"));
+            let _ = writeln!(output, "- Receipt state: `{state}`");
         }
         if let Some(failure_code) = receipt.get("failure_code").and_then(Value::as_str) {
-            output.push_str(&format!("- Failure code: `{failure_code}`\n"));
+            let _ = writeln!(output, "- Failure code: `{failure_code}`");
         }
     }
     if let Some(message) = value
@@ -649,17 +650,17 @@ fn refresh_markdown(value: &Value) -> String {
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
     {
-        output.push_str(&format!("- Error: {message}\n"));
+        let _ = writeln!(output, "- Error: {message}");
     }
     output
 }
 
 fn append_refresh_record_markdown(output: &mut String, record: &serde_json::Map<String, Value>) {
     if let Some(operation_id) = record.get("operation_id").and_then(Value::as_str) {
-        output.push_str(&format!("- Durable operation: `{operation_id}`\n"));
+        let _ = writeln!(output, "- Durable operation: `{operation_id}`");
     }
     if let Some(session_id) = record.get("session_id").and_then(Value::as_str) {
-        output.push_str(&format!("- Session: `{session_id}`\n"));
+        let _ = writeln!(output, "- Session: `{session_id}`");
     }
     if let Some(frontier) = record.get("frontier").and_then(Value::as_object)
         && let (Some(observed), Some(committed)) = (
@@ -667,7 +668,7 @@ fn append_refresh_record_markdown(output: &mut String, record: &serde_json::Map<
             frontier.get("committed_through").and_then(Value::as_u64),
         )
     {
-        output.push_str(&format!("- Frontier: {committed}/{observed} committed\n"));
+        let _ = writeln!(output, "- Frontier: {committed}/{observed} committed");
     }
     if let Some(coverage) = record.get("coverage").and_then(Value::as_object) {
         let visible = coverage.get("visible").and_then(Value::as_u64).unwrap_or(0);
@@ -677,9 +678,10 @@ fn append_refresh_record_markdown(output: &mut String, record: &serde_json::Map<
             .get("redacted")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        output.push_str(&format!(
-            "- Coverage: visible {visible}, hidden {hidden}, unknown {unknown}, redacted {redacted}\n"
-        ));
+        let _ = writeln!(
+            output,
+            "- Coverage: visible {visible}, hidden {hidden}, unknown {unknown}, redacted {redacted}"
+        );
     }
 }
 

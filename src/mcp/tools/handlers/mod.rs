@@ -51,7 +51,9 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use crate::application_surface::{APPLICATION_SURFACE_OPERATIONS, ApplicationSurfaceOperation};
+#[cfg(test)]
+use crate::application_surface::APPLICATION_SURFACE_OPERATIONS;
+use crate::application_surface::ApplicationSurfaceOperation;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
