@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGua
 use serde::Serialize;
 use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
 
-#[cfg(feature = "semantic-fastembed")]
 use super::fastembed_adapter::FastEmbedEmbeddingRuntime;
 use super::fastembed_adapter::{
     AdmittedProjectionArtifactV1, CancellationSignal, EmbedError, EmbeddingRuntime,
@@ -33,8 +32,9 @@ use super::session_pool::{
 pub(super) type SharedEmbeddingRuntimeFactory<R> =
     Arc<dyn Fn() -> Result<R, EmbedError> + Send + Sync + 'static>;
 
-/// Owned factory for the only production model implementation.
-#[cfg(feature = "semantic-fastembed")]
+/// Owned factory for the only production model implementation. Without the
+/// `semantic-fastembed` feature this yields the unavailable stand-in runtime,
+/// whose operations fail with a typed runtime failure.
 pub(super) fn fastembed_runtime_factory() -> SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime>
 {
     Arc::new(|| Ok(FastEmbedEmbeddingRuntime))

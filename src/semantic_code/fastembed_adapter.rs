@@ -897,6 +897,63 @@ fn validate_batch_limits(
 #[derive(Default)]
 pub(super) struct FastEmbedEmbeddingRuntime;
 
+/// Feature-disabled stand-in: keeps every consumer type-compatible while the
+/// `semantic-fastembed` dependency is compiled out. Every operation fails
+/// with a typed runtime failure, so semantic retrieval degrades to its
+/// documented fallback states instead of the crate failing to build.
+#[cfg(not(feature = "semantic-fastembed"))]
+#[derive(Default)]
+pub(super) struct FastEmbedEmbeddingRuntime;
+
+/// Uninhabited session type for the feature-disabled runtime: `open_session`
+/// always fails, so no session value can ever exist.
+#[cfg(not(feature = "semantic-fastembed"))]
+pub(super) enum UnavailableEmbeddingSession {}
+
+#[cfg(not(feature = "semantic-fastembed"))]
+impl EmbeddingSession for UnavailableEmbeddingSession {
+    fn authority(&self) -> &AdmittedProjectionArtifactV1 {
+        match *self {}
+    }
+
+    fn resident_bytes_estimate(&self) -> u64 {
+        match *self {}
+    }
+
+    fn embed_batch(
+        &mut self,
+        _batch: &BoundedSanitizedTextBatchV1,
+        _cancel: &dyn CancellationSignal,
+    ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
+        match *self {}
+    }
+}
+
+#[cfg(not(feature = "semantic-fastembed"))]
+impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
+    type Session = UnavailableEmbeddingSession;
+
+    fn verify_artifact_compatibility(
+        &self,
+        _authority: &AdmittedProjectionArtifactV1,
+    ) -> Result<(), EmbedError> {
+        Err(fastembed_failure(
+            RuntimeFailureKindV1::IncompatibleRuntime,
+            "the semantic-fastembed feature is compiled out of this build",
+        ))
+    }
+
+    fn open_session(
+        &self,
+        _authority: &AdmittedProjectionArtifactV1,
+    ) -> Result<Self::Session, EmbedError> {
+        Err(fastembed_failure(
+            RuntimeFailureKindV1::IncompatibleRuntime,
+            "the semantic-fastembed feature is compiled out of this build",
+        ))
+    }
+}
+
 #[cfg(feature = "semantic-fastembed")]
 impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = FastEmbedEmbeddingSession;
@@ -1084,7 +1141,6 @@ fn fastembed_quantization(precision: EmbeddingPrecisionV1) -> QuantizationMode {
     }
 }
 
-#[cfg(feature = "semantic-fastembed")]
 fn fastembed_failure(kind: RuntimeFailureKindV1, detail: &str) -> EmbedError {
     EmbedError::Runtime(RuntimeFailureV1 {
         kind,
