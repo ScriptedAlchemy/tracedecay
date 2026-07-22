@@ -522,11 +522,7 @@ impl DaemonInvocationState {
         DaemonLspOwnerRegistrar::new(&self.service)
     }
 
-    async fn mount_code_index(
-        &self,
-        project_root: &Path,
-        store_root: PathBuf,
-    ) -> Result<()> {
+    async fn mount_code_index(&self, project_root: &Path, store_root: PathBuf) -> Result<()> {
         self.code_index_schedulers
             .mount_worktree(project_root, store_root)
             .await
@@ -1569,6 +1565,13 @@ impl DaemonEngine {
         .map_err(|_| TraceDecayError::Config {
             message: "semantic runtime resource ceilings are invalid".to_owned(),
         })?;
+        // Install/config stays offline-safe: queue bounded background FastEmbed
+        // acquisition for the selected catalog model unless disabled/overridden.
+        let semantic_config = &cg.configuration_runtime().configuration().config.semantic;
+        let _ = crate::semantic_code::apply_config_and_queue_startup(
+            semantic_config.selected_model.as_deref(),
+            semantic_config.auto_download,
+        );
 
         let existing = {
             let mut servers = self.store_administration.project_servers().lock().await;

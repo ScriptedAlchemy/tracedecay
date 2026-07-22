@@ -22,19 +22,18 @@ use notify_debouncer_full::{
 use serde::Serialize;
 use thiserror::Error;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest, ExactAdmissionRuleRevision,
-    FileOccurrenceId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1,
-    UtcMicros, WorktreeId, canonical_sha256,
+    ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
+    ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1,
+    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    ScoreDomainId, SnapshotFileDispositionV1, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tree_sitter::{InputEdit, Parser, Point, Range, Tree};
 
 use crate::{
     application::code_index::{
-        DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1,
-        open_production_code_index_owner_v1,
+        DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
     },
     code_index::{
         chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest},
@@ -330,8 +329,10 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
 impl LatestCompleteCodeIndexV1 {
     pub fn exact(
         &self,
-    ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, crate::code_index::chunks::ChunkingFailureV1>
-    {
+    ) -> Result<
+        Vec<ExtractionAdmittedCodeSearchChunkV1>,
+        crate::code_index::chunks::ChunkingFailureV1,
+    > {
         self.generation.admitted_chunks()
     }
 
@@ -343,9 +344,7 @@ impl LatestCompleteCodeIndexV1 {
         self.generation.edges()
     }
 
-    pub fn graph_abstentions(
-        &self,
-    ) -> &[crate::code_index::chunks::CodeIndexEdgeAbstentionV1] {
+    pub fn graph_abstentions(&self) -> &[crate::code_index::chunks::CodeIndexEdgeAbstentionV1] {
         self.generation.edge_abstentions()
     }
 
@@ -375,13 +374,15 @@ impl LatestCompleteCodeIndexV1 {
             .generation
             .admitted_chunks()
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-        let lexical_projection =
-            CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)?;
+        let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)?;
         let authority = CentralExactAdmissionAuthorityV1::new(
             ExactAdmissionRuleRevision::new("exact-rules.daemon.v1")
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
         );
-        let exact = ExactLane::new(authority.clone(), lexical_projection.exact_adapter(authority));
+        let exact = ExactLane::new(
+            authority.clone(),
+            lexical_projection.exact_adapter(authority),
+        );
         let lexical = LexicalLane::new(lexical_projection);
         let graph = GraphLane::new(CodeGraphEvidenceAdapterV1::new(
             generation_id,
@@ -478,26 +479,27 @@ impl CodeIndexWorktreeSchedulerV1 {
         let hints = Arc::clone(&self.hints);
         let wake = Arc::clone(&self.wake);
         let epoch = Arc::clone(&self.epoch);
-        let mut debouncer = new_debouncer(WATCH_DEBOUNCE, None, move |result: DebounceEventResult| {
-            let mut hints = hints.lock().expect("code-index hint lock");
-            match result {
-                Ok(events) => {
-                    for event in events {
-                        if event.need_rescan() {
-                            hints.overflow();
-                        } else {
-                            for path in &event.paths {
-                                hints.path(path.clone());
+        let mut debouncer =
+            new_debouncer(WATCH_DEBOUNCE, None, move |result: DebounceEventResult| {
+                let mut hints = hints.lock().expect("code-index hint lock");
+                match result {
+                    Ok(events) => {
+                        for event in events {
+                            if event.need_rescan() {
+                                hints.overflow();
+                            } else {
+                                for path in &event.paths {
+                                    hints.path(path.clone());
+                                }
                             }
                         }
                     }
+                    Err(_) => hints.overflow(),
                 }
-                Err(_) => hints.overflow(),
-            }
-            DaemonCodeIndexControlV1::advance(&epoch);
-            wake.notify_one();
-        })
-        .map_err(|error| CodeIndexSchedulerErrorV1::Watch(error.to_string()))?;
+                DaemonCodeIndexControlV1::advance(&epoch);
+                wake.notify_one();
+            })
+            .map_err(|error| CodeIndexSchedulerErrorV1::Watch(error.to_string()))?;
         debouncer
             .watch(&self.project_root, RecursiveMode::Recursive)
             .map_err(|error| CodeIndexSchedulerErrorV1::Watch(error.to_string()))?;
@@ -506,19 +508,13 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     pub fn notify_path(&self, path: PathBuf) {
-        self.hints
-            .lock()
-            .expect("code-index hint lock")
-            .path(path);
+        self.hints.lock().expect("code-index hint lock").path(path);
         DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
     }
 
     pub fn notify_overflow(&self) {
-        self.hints
-            .lock()
-            .expect("code-index hint lock")
-            .overflow();
+        self.hints.lock().expect("code-index hint lock").overflow();
         DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
     }
@@ -532,12 +528,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             overflow_reconciled |= hints.overflow;
             let captured = self.capture_authoritative_snapshot()?;
             if self.latest_content_identity.as_ref() == Some(&captured.snapshot.content_identity) {
-                return Ok(CodeIndexReconcileOutcomeV1::Noop(
-                    CodeIndexNoopEvidenceV1 {
-                        snapshot_content_identity: captured.snapshot.content_identity,
-                        overflow_reconciled,
-                    },
-                ));
+                return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
+                    snapshot_content_identity: captured.snapshot.content_identity,
+                    overflow_reconciled,
+                }));
             }
 
             let (next_trees, incremental_parse_files, changed_ranges) =
@@ -642,8 +636,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .into_iter(Vec::<gix::bstr::BString>::new())
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         for item in status {
-            let item =
-                item.map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+            let item = item.map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
             let path = item.location().to_str_lossy().into_owned();
             changed_paths.insert(path.clone());
             candidate_paths.insert(path);
@@ -690,7 +683,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             (&left.logical_path, &left.file_occurrence_id)
                 .cmp(&(&right.logical_path, &right.file_occurrence_id))
         });
-        captured_files.sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
+        captured_files
+            .sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
         let content_identity = snapshot_content_identity(&files);
         Ok(CapturedSnapshotV1 {
             snapshot: SanitizedCodeSnapshotV1 {
@@ -737,13 +731,11 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Some(saved) if saved.bytes.as_ref() != bytes.as_ref() => {
                     let mut edited = saved.tree.clone();
                     edited.edit(&single_input_edit(&saved.bytes, bytes));
-                    let tree = parser
-                        .parse(bytes.as_ref(), Some(&edited))
-                        .ok_or_else(|| {
-                            CodeIndexSchedulerErrorV1::Identity(
-                                "tree-sitter incremental parse returned no tree".to_owned(),
-                            )
-                        })?;
+                    let tree = parser.parse(bytes.as_ref(), Some(&edited)).ok_or_else(|| {
+                        CodeIndexSchedulerErrorV1::Identity(
+                            "tree-sitter incremental parse returned no tree".to_owned(),
+                        )
+                    })?;
                     let ranges = edited.changed_ranges(&tree).collect::<Vec<_>>();
                     incremental_files += 1;
                     changed_range_count += ranges.len().max(1);
@@ -810,11 +802,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler capacity is zero".to_owned(),
             ));
         }
-        CodeIndexWorktreeSchedulerV1::open(
-            project_root,
-            store_root,
-            Arc::clone(&self.byte_pool),
-        )
+        CodeIndexWorktreeSchedulerV1::open(project_root, store_root, Arc::clone(&self.byte_pool))
     }
 
     pub fn byte_pool_stats(&self) -> CodeIndexBytePoolStatsV1 {
@@ -868,10 +856,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
             }
         });
-        mounted.insert(
-            project_root,
-            MountedCodeIndexWorktreeV1 { scheduler, task },
-        );
+        mounted.insert(project_root, MountedCodeIndexWorktreeV1 { scheduler, task });
         wake.notify_one();
         Ok(true)
     }
@@ -892,10 +877,7 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
-    pub async fn latest_generation_id(
-        &self,
-        project_root: &Path,
-    ) -> Option<CodeGenerationId> {
+    pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {
         let project_root = project_root.canonicalize().ok()?;
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&project_root)?;
@@ -933,8 +915,8 @@ where
 }
 
 fn repository_id(project_root: &Path) -> Result<RepositoryId, CodeIndexSchedulerErrorV1> {
-    let common = crate::worktree::git_common_dir(project_root)
-        .unwrap_or_else(|| project_root.to_path_buf());
+    let common =
+        crate::worktree::git_common_dir(project_root).unwrap_or_else(|| project_root.to_path_buf());
     let digest = sha256_hex(common.to_string_lossy().as_bytes());
     id(&format!("repository.daemon.{digest}"))
 }

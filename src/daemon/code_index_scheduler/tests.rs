@@ -99,6 +99,12 @@ fn saved_edit_incremental_publish() {
         !latest.graph_edges().is_empty() || !latest.graph_abstentions().is_empty(),
         "graph lane must remain explicitly queryable"
     );
+    let owners = latest
+        .production_query_owners()
+        .expect("production exact/lexical/graph owners connect");
+    let _ = owners.exact;
+    let _ = owners.lexical;
+    let _ = owners.graph;
 }
 
 #[test]
@@ -177,6 +183,81 @@ fn one_symbol_unrelated_work_skip() {
     assert!(
         changed.reused_chunks > 0,
         "unrelated symbol chunks must skip projection work"
+    );
+}
+
+#[test]
+fn content_noop_suppresses_publication() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    let first = published(scheduler.reconcile_now().expect("baseline publish"));
+
+    match scheduler.reconcile_now().expect("content noop") {
+        CodeIndexReconcileOutcomeV1::Noop(evidence) => {
+            assert_eq!(
+                evidence.snapshot_content_identity, first.snapshot_content_identity,
+                "unchanged content must reuse the sealed snapshot identity"
+            );
+        }
+        CodeIndexReconcileOutcomeV1::Published(_) => {
+            panic!("identical content must not publish a new generation")
+        }
+    }
+    let _owners = scheduler
+        .latest_complete()
+        .expect("active generation")
+        .production_query_owners()
+        .expect("owners remain connected after content no-op");
+}
+
+#[test]
+fn superseding_notifies_publish_only_latest_content() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut live = scheduler(&fixture, store.path().join("live"), Arc::clone(&bytes));
+    let mut clean = scheduler(&fixture, store.path().join("clean"), bytes);
+    published(live.reconcile_now().expect("live baseline"));
+    published(clean.reconcile_now().expect("clean baseline"));
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    live.notify_path(fixture.path().join("src/lib.rs"));
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 3 }\n");
+    live.notify_path(fixture.path().join("src/lib.rs"));
+    live.notify_overflow();
+
+    let superseded = published(live.reconcile_now().expect("superseded reconcile"));
+    let expected = published(clean.reconcile_now().expect("clean latest reconcile"));
+    assert_eq!(
+        superseded.snapshot_content_identity, expected.snapshot_content_identity,
+        "fair supersession must publish only the latest reconciled content"
+    );
+    assert_eq!(superseded.lane_digest, expected.lane_digest);
+    assert!(superseded.overflow_reconciled);
+}
+
+#[test]
+fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    published(scheduler.reconcile_now().expect("publish"));
+    let owners = scheduler
+        .latest_complete()
+        .expect("latest generation")
+        .production_query_owners()
+        .expect("connect production query owners");
+    assert!(
+        std::mem::size_of_val(&owners.exact) > 0
+            && std::mem::size_of_val(&owners.lexical) > 0
+            && std::mem::size_of_val(&owners.graph) > 0,
+        "exact/lexical/graph production owners must be concrete lane values"
     );
 }
 

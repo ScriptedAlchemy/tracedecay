@@ -60,6 +60,13 @@ pub const DB_FILENAME: &str = "tracedecay.db";
 /// semantic selection.
 pub const SEMANTIC_RUNTIME_SETTING_KEY: &str = "semantic.runtime.v1";
 
+/// Default FastEmbed catalog model selected on install (offline-safe).
+pub const DEFAULT_FASTEMBED_MODEL_ID: &str = "JinaEmbeddingsV2BaseCode";
+
+/// Cataloged FastEmbed model ids settings may select. Membership is validated
+/// here without depending on the semantic_code acquisition module.
+const CATALOGED_FASTEMBED_MODEL_IDS: &[&str] = &[DEFAULT_FASTEMBED_MODEL_ID];
+
 const MAX_SEMANTIC_MODEL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_SEMANTIC_TOKENIZER_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_SEMANTIC_RESIDENT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -192,7 +199,7 @@ pub struct SemanticConfig {
 }
 
 fn default_selected_fastembed_model() -> Option<String> {
-    Some(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID.to_owned())
+    Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned())
 }
 
 fn default_true() -> bool {
@@ -220,10 +227,7 @@ impl SemanticConfig {
                     "semantic selected_model must be a non-empty catalog id at most 128 bytes",
                 ));
             }
-            if crate::semantic_code::production_fastembed_catalog()
-                .get(model_id)
-                .is_none()
-            {
+            if !CATALOGED_FASTEMBED_MODEL_IDS.contains(&model_id.as_str()) {
                 return Err(config_error(format!(
                     "semantic selected_model '{model_id}' is not a cataloged FastEmbed model"
                 )));

@@ -41,14 +41,15 @@ mod runtime_service;
 mod session_pool;
 mod trust_roots;
 
+pub(crate) use crate::config::DEFAULT_FASTEMBED_MODEL_ID;
 pub(crate) use model_catalog::{
-    DEFAULT_FASTEMBED_MODEL_ID, FastEmbedModelCatalogV1, catalog_package_digest,
-    production_fastembed_catalog,
+    FastEmbedModelCatalogV1, catalog_package_digest, production_fastembed_catalog,
 };
 pub(crate) use model_lifecycle::{
     HfHubModelMemberSourceV1, ModelLifecycleErrorV1, ModelMemberSourceV1,
     SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
-    SemanticModelRemediationV1, default_lifecycle_root,
+    SemanticModelRemediationV1, apply_config_and_queue_startup, default_lifecycle_root,
+    lifecycle_to_runtime_state, shared_lifecycle_owner,
 };
 
 pub(crate) use runtime_service::{

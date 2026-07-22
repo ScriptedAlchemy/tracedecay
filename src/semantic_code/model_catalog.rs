@@ -8,8 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Default production code-search model selected on install.
-pub const DEFAULT_FASTEMBED_MODEL_ID: &str = "JinaEmbeddingsV2BaseCode";
+use crate::config::DEFAULT_FASTEMBED_MODEL_ID;
 
 const CATALOG_SCHEMA_V1: &str = "tracedecay.fastembed.model-catalog.v1";
 

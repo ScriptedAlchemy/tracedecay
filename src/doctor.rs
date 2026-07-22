@@ -552,19 +552,53 @@ fn check_semantic_runtime_health(dc: &mut DoctorCounters, status: Option<&serde_
         ));
         return;
     }
-    match semantic.state {
+    match &semantic.state {
         SemanticRuntimeStateV1::Unavailable { reason } => dc.info(&format!(
             "Semantic runtime unavailable ({reason:?}); exact, lexical, and graph search remain healthy offline"
+        )),
+        SemanticRuntimeStateV1::SelectedNotDownloaded {
+            model_id,
+            artifact_digest,
+        } => {
+            dc.info(&format!(
+                "SelectedNotDownloaded: model {model_id} digest {artifact_digest}; exact/lexical/graph remain available (retry to download)"
+            ));
+        }
+        SemanticRuntimeStateV1::Downloading {
+            model_id,
+            artifact_digest,
+            bytes_received,
+            bytes_total,
+        } => dc.info(&format!(
+            "Downloading: model {model_id} digest {artifact_digest} ({bytes_received}/{bytes_total}); semantics omitted; exact/lexical/graph remain available"
+        )),
+        SemanticRuntimeStateV1::Verifying {
+            model_id,
+            artifact_digest,
+        } => dc.info(&format!(
+            "Verifying: model {model_id} digest {artifact_digest}; semantics omitted; exact/lexical/graph remain available"
+        )),
+        SemanticRuntimeStateV1::Installed {
+            model_id,
+            artifact_digest,
+        } => dc.pass(&format!(
+            "Installed: model {model_id} digest {artifact_digest}; load/index pending; exact/lexical/graph remain available"
+        )),
+        SemanticRuntimeStateV1::Loading {
+            model_id,
+            artifact_digest,
+        } => dc.info(&format!(
+            "Loading: model {model_id} digest {artifact_digest}; semantics omitted; exact/lexical/graph remain available"
         )),
         SemanticRuntimeStateV1::Indexing {
             target_generation,
             completed_units,
             total_units,
         } => dc.pass(&format!(
-            "Semantic generation {target_generation:?} indexing asynchronously ({completed_units}/{total_units}); exact, lexical, and graph search remain available"
+            "Indexing: generation {target_generation:?} ({completed_units}/{total_units}); exact/lexical/graph remain available"
         )),
         SemanticRuntimeStateV1::Current { receipt } => dc.pass(&format!(
-            "Semantic generation {:?} is atomically current and may influence search",
+            "Ready: semantic generation {:?} is atomically current and may influence search",
             receipt.activated_generation
         )),
         SemanticRuntimeStateV1::Degraded {
@@ -579,6 +613,21 @@ fn check_semantic_runtime_health(dc: &mut DoctorCounters, status: Option<&serde_
         } => dc.info(&format!(
             "Semantic rollback in progress ({from_generation:?} -> {target_generation:?}); semantic influence is omitted while exact, lexical, and graph search remain healthy"
         )),
+        SemanticRuntimeStateV1::Failed {
+            model_id,
+            artifact_digest,
+            detail,
+            retryable,
+        } => {
+            dc.warn(&format!(
+                "Failed: model {model_id} digest {artifact_digest} ({detail}); exact/lexical/graph remain available"
+            ));
+            if *retryable {
+                dc.info("Remediation: retry download, or remove/rollback the installed semantic model");
+            } else {
+                dc.info("Remediation: remove or rollback the installed semantic model");
+            }
+        }
     }
 }
 

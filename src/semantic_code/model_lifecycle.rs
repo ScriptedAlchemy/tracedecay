@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::config::DEFAULT_FASTEMBED_MODEL_ID;
+
 use super::model_catalog::{
-    CatalogErrorV1, CatalogedFastEmbedModelV1, DEFAULT_FASTEMBED_MODEL_ID,
-    FastEmbedModelCatalogV1, catalog_package_digest,
+    CatalogErrorV1, CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1, catalog_package_digest,
 };
 
 const LIFECYCLE_SCHEMA_V1: &str = "tracedecay.fastembed.model-lifecycle.v1";
@@ -934,6 +935,127 @@ fn verify_member_file(path: &Path, length: u64, sha256: &str) -> bool {
 /// Resolve the lifecycle store root under the user data directory.
 pub fn default_lifecycle_root() -> Option<PathBuf> {
     crate::config::user_data_dir().map(|root| root.join("semantic-models"))
+}
+
+/// Map lifecycle state into the Doctor/status semantic runtime state surface.
+pub fn lifecycle_to_runtime_state(
+    state: &SemanticModelLifecycleStateV1,
+) -> crate::application::semantic_runtime::SemanticRuntimeStateV1 {
+    use crate::application::semantic_runtime::SemanticRuntimeStateV1 as Runtime;
+    match state {
+        SemanticModelLifecycleStateV1::SelectedNotDownloaded {
+            model_id,
+            artifact_digest,
+            ..
+        } => Runtime::SelectedNotDownloaded {
+            model_id: model_id.clone(),
+            artifact_digest: artifact_digest.clone(),
+        },
+        SemanticModelLifecycleStateV1::Downloading {
+            model_id,
+            artifact_digest,
+            bytes_received,
+            bytes_total,
+            ..
+        } => Runtime::Downloading {
+            model_id: model_id.clone(),
+            artifact_digest: artifact_digest.clone(),
+            bytes_received: *bytes_received,
+            bytes_total: *bytes_total,
+        },
+        SemanticModelLifecycleStateV1::Verifying {
+            model_id,
+            artifact_digest,
+            ..
+        } => Runtime::Verifying {
+            model_id: model_id.clone(),
+            artifact_digest: artifact_digest.clone(),
+        },
+        SemanticModelLifecycleStateV1::Installed {
+            model_id,
+            artifact_digest,
+            ..
+        } => Runtime::Installed {
+            model_id: model_id.clone(),
+            artifact_digest: artifact_digest.clone(),
+        },
+        SemanticModelLifecycleStateV1::Loading {
+            model_id,
+            artifact_digest,
+            ..
+        } => Runtime::Loading {
+            model_id: model_id.clone(),
+            artifact_digest: artifact_digest.clone(),
+        },
+        SemanticModelLifecycleStateV1::Indexing {
+            completed_units,
+            total_units,
+            artifact_digest,
+            ..
+        } => {
+            // Generation id is not owned by acquisition; surface progress with a
+            // digest-derived placeholder that still routes as lexical fallback.
+            let digest = tracedecay_domain::ManifestDigest::new(format!(
+                "sha256:{artifact_digest}"
+            ))
+            .unwrap_or_else(|_| {
+                tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
+                    .expect("zero digest")
+            });
+            Runtime::Indexing {
+                target_generation: tracedecay_domain::VectorGenerationIdV1::new(digest),
+                completed_units: *completed_units,
+                total_units: *total_units,
+            }
+        }
+        SemanticModelLifecycleStateV1::Ready {
+            model_id,
+            artifact_digest,
+            ..
+        } => Runtime::Installed {
+            // Ready without an activation receipt still cannot route semantic
+            // search; Doctor treats Installed/Ready install as loaded package.
+            model_id: model_id.clone(),
+            artifact_digest: artifact_digest.clone(),
+        },
+        SemanticModelLifecycleStateV1::Failed {
+            model_id,
+            artifact_digest,
+            detail,
+            retryable,
+            ..
+        } => Runtime::Failed {
+            model_id: model_id.clone(),
+            artifact_digest: artifact_digest.clone(),
+            detail: detail.clone(),
+            retryable: *retryable,
+        },
+    }
+}
+
+/// Process-wide lifecycle owner under the user semantic-models root.
+pub fn shared_lifecycle_owner() -> Option<Arc<SemanticModelLifecycleOwnerV1>> {
+    use std::sync::OnceLock;
+    static OWNER: OnceLock<Option<Arc<SemanticModelLifecycleOwnerV1>>> = OnceLock::new();
+    OWNER
+        .get_or_init(|| {
+            let root = default_lifecycle_root()?;
+            SemanticModelLifecycleOwnerV1::open_default(root)
+                .ok()
+                .map(Arc::new)
+        })
+        .clone()
+}
+
+/// Apply config selection and queue first-startup acquisition when appropriate.
+pub fn apply_config_and_queue_startup(
+    selected_model: Option<&str>,
+    auto_download: bool,
+) -> Option<SemanticModelLifecycleStatusV1> {
+    let owner = shared_lifecycle_owner()?;
+    let _ = owner.select_model(selected_model, auto_download);
+    let _ = owner.enqueue_startup_acquisition_if_needed();
+    Some(owner.status())
 }
 
 #[cfg(test)]
