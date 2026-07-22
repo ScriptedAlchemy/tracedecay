@@ -15,6 +15,7 @@ use tracedecay_tool_catalog::CapabilityId;
 
 use crate::ResolvedScope;
 use crate::error::ApplicationContractError;
+use crate::policy::{PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1};
 use crate::result::{CoverageCompleteness, FreshnessState, PolicyDecisionRef};
 
 const PROVIDER_IDENTITY_DIGEST_DOMAIN: &str = "tracedecay.application.provider-identity.v1";
@@ -304,6 +305,27 @@ pub struct AnalyzerAdmittedDiagnosticProviderV1 {
 }
 
 impl AnalyzerAdmittedDiagnosticProviderV1 {
+    /// Evaluates the approved analyzer policy directly from the current,
+    /// exact Plan-20 application snapshot.
+    pub fn evaluate_current_plan20_snapshot(
+        composition: &PolicyEvaluatorCompositionV1,
+        context: &PolicyEvaluationContextV1,
+        identity: DiagnosticProviderIdentity,
+        admission_input: AnalyzerAdmissionInputV1,
+    ) -> Result<Self, ApplicationContractError> {
+        if &identity.scope != context.scope() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "analyzer policy application scope",
+            });
+        }
+        let evaluation = composition.admit_analyzer(
+            PolicyConsumerV1::AnalyzerAdmission,
+            context,
+            &admission_input,
+        )?;
+        Self::from_plan20_plan35_snapshot(identity, admission_input, evaluation.decision)
+    }
+
     /// Constructs only from the immutable Plan-20 configuration and Plan-35
     /// admission snapshot already selected by their owning daemon authorities.
     /// This application contract never resolves configuration, selects an

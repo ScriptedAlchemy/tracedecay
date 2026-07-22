@@ -6,3 +6,4 @@
 pub mod json;
 pub mod markdown;
 pub mod problem;
+pub(crate) mod view;

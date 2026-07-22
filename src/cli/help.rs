@@ -134,6 +134,8 @@ Related: tracedecay dashboard (uses these servers for diagnostics).";
 pub(crate) const INSTALL_LONG_ABOUT: &str = "\
 Writes the MCP server registration, permissions, hooks, and prompt rules for \
 an agent host (Cursor, Codex, Claude Code, Hermes, Kiro, and others). \
+With --component, selects one compiled first-party Core or MCP companion \
+and uses the receipt-based host lifecycle instead of the compatibility installer. \
 Auto-detects installed agents when --agent is omitted. Safe to re-run; use it \
 after installing a new agent or moving the tracedecay binary.";
 
@@ -141,6 +143,11 @@ pub(crate) const INSTALL_AFTER_HELP: &str = "\
 Examples:
   tracedecay install                             Configure every detected agent
   tracedecay install --agent cursor              One agent only
+  tracedecay install --agent cursor --component core --dry-run
+  tracedecay install --agent cursor --component core --yes
+  tracedecay install --agent opencode --component agent --yes
+  tracedecay install --agent kimi --component context-mcp --yes
+  tracedecay install --agent opencode --component context-mcp --yes
   tracedecay install --agent codex --automation  Also enable the automation loop
   tracedecay install --agent hermes --profile dev
   tracedecay install --local                     Project-local config in cwd
@@ -157,6 +164,8 @@ never adds integration to agents that were not installed before.";
 pub(crate) const REINSTALL_AFTER_HELP: &str = "\
 Examples:
   tracedecay reinstall                           Refresh all installed agents
+  tracedecay reinstall --component core --dry-run
+  tracedecay reinstall --component core --yes     Repair signed Core components
 
 Related: tracedecay install (add an agent), tracedecay update-plugin
 (refresh generated plugin assets without touching config files).";
@@ -164,6 +173,8 @@ Related: tracedecay install (add an agent), tracedecay update-plugin
 pub(crate) const UPDATE_PLUGIN_AFTER_HELP: &str = "\
 Examples:
   tracedecay update-plugin                       Refresh generated plugin assets
+  tracedecay update-plugin --component context-mcp --dry-run
+  tracedecay update-plugin --component context-mcp --yes
 
 Related: tracedecay reinstall (also rewrites agent config files),
 tracedecay update (binary + plugins + daemon + health pass).";
@@ -178,6 +189,8 @@ pub(crate) const UNINSTALL_AFTER_HELP: &str = "\
 Examples:
   tracedecay uninstall                           Remove from every agent
   tracedecay uninstall --agent cursor            Remove from one agent
+  tracedecay uninstall --agent cursor --component context-mcp --dry-run
+  tracedecay uninstall --agent cursor --component context-mcp --yes
   tracedecay uninstall --agent hermes --profile dev
 
 Related: tracedecay install, tracedecay wipe (delete project stores).";

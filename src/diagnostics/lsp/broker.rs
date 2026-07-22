@@ -6,9 +6,16 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::application::context::CancellationToken;
+use crate::daemon::lsp_gateway::{
+    AdmittedRoot, LspRequestId, LspRuntimeFuture, LspSemanticOperationOutcome,
+    LspSemanticRequestAuthority,
+};
 use crate::diagnostics::lsp::activity::adapter_workspace_root;
 use crate::diagnostics::lsp::adapters::{LspAdapterDefinition, LspInstallOption};
-use crate::diagnostics::lsp::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
+use crate::diagnostics::lsp::client::{
+    LspDocument, LspRefreshTimeouts, LspSemanticRequest, LspSemanticRequestError, StdioLspClient,
+};
 use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
 use crate::errors::{Result, TraceDecayError};
 
@@ -126,6 +133,207 @@ struct RefreshBatch {
     workspace_root: PathBuf,
     documents: Vec<LspDocument>,
     client: Arc<Mutex<Option<StdioLspClient>>>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct SemanticOperationKey {
+    root_uri: String,
+    request_id: LspRequestId,
+}
+
+struct StdioLspSemanticAuthorityInner {
+    command: String,
+    args: Vec<String>,
+    project_root: PathBuf,
+    root_uri: String,
+    timeouts: LspRefreshTimeouts,
+    client: Arc<Mutex<Option<StdioLspClient>>>,
+    operations: Mutex<BTreeMap<SemanticOperationKey, CancellationToken>>,
+}
+
+/// Retained analyzer authority sharing the broker's stdio client slot.
+///
+/// Queued operations race lock acquisition against their cancellation token;
+/// in-flight operations delegate cancellation to `StdioLspClient`, which
+/// writes the standard `$/cancelRequest` notification.
+#[derive(Clone)]
+pub struct StdioLspSemanticAuthority {
+    inner: Arc<StdioLspSemanticAuthorityInner>,
+}
+
+impl StdioLspSemanticAuthority {
+    pub fn new(
+        command: impl Into<String>,
+        args: Vec<String>,
+        project_root: PathBuf,
+        root_uri: impl Into<String>,
+        timeouts: LspRefreshTimeouts,
+    ) -> Arc<Self> {
+        Self::from_shared_client(
+            command,
+            args,
+            project_root,
+            root_uri,
+            timeouts,
+            Arc::new(Mutex::new(None)),
+        )
+    }
+
+    fn from_shared_client(
+        command: impl Into<String>,
+        args: Vec<String>,
+        project_root: PathBuf,
+        root_uri: impl Into<String>,
+        timeouts: LspRefreshTimeouts,
+        client: Arc<Mutex<Option<StdioLspClient>>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::new(StdioLspSemanticAuthorityInner {
+                command: command.into(),
+                args,
+                project_root,
+                root_uri: root_uri.into(),
+                timeouts,
+                client,
+                operations: Mutex::new(BTreeMap::new()),
+            }),
+        })
+    }
+}
+
+impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
+    fn start(
+        &self,
+        root: AdmittedRoot,
+        request_id: LspRequestId,
+        request: LspSemanticRequest,
+    ) -> LspRuntimeFuture<LspSemanticOperationOutcome> {
+        if root.uri() != self.inner.root_uri {
+            return Box::pin(async { LspSemanticOperationOutcome::Unavailable });
+        }
+        let key = SemanticOperationKey {
+            root_uri: root.uri().to_owned(),
+            request_id,
+        };
+        let cancellation = CancellationToken::new();
+        let inserted = match self.inner.operations.try_lock() {
+            Ok(mut operations) => {
+                if operations.contains_key(&key) {
+                    false
+                } else {
+                    operations.insert(key.clone(), cancellation.clone());
+                    true
+                }
+            }
+            Err(_) => {
+                return Box::pin(async {
+                    LspSemanticOperationOutcome::Partial {
+                        value: serde_json::Value::Null,
+                        coverage: "semantic-runtime-busy".to_owned(),
+                    }
+                });
+            }
+        };
+        if !inserted {
+            return Box::pin(async {
+                LspSemanticOperationOutcome::Partial {
+                    value: serde_json::Value::Null,
+                    coverage: "semantic-duplicate-operation".to_owned(),
+                }
+            });
+        }
+
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            let outcome = tokio::select! {
+                _ = cancellation.cancelled() => {
+                    LspSemanticOperationOutcome::Partial {
+                        value: serde_json::Value::Null,
+                        coverage: "semantic-cancelled".to_owned(),
+                    }
+                }
+                slot = inner.client.lock() => {
+                    let mut slot = slot;
+                    let client = match slot.take() {
+                        Some(client) => Ok(Some(client)),
+                        None => tokio::select! {
+                            _ = cancellation.cancelled() => Ok(None),
+                            client = StdioLspClient::start_with_timeouts(
+                                &inner.command,
+                                &inner.args,
+                                &inner.project_root,
+                                inner.timeouts,
+                            ) => client.map(Some),
+                        },
+                    };
+                    match client {
+                        Ok(Some(mut client)) => {
+                            let result = client
+                                .semantic_request(request, &cancellation, inner.timeouts)
+                                .await;
+                            if !matches!(
+                                &result,
+                                Err(LspSemanticRequestError::Transport { .. }
+                                    | LspSemanticRequestError::InvalidResponse { .. })
+                            ) {
+                                *slot = Some(client);
+                            }
+                            semantic_operation_outcome(result)
+                        }
+                        Ok(None) => LspSemanticOperationOutcome::Partial {
+                            value: serde_json::Value::Null,
+                            coverage: "semantic-cancelled".to_owned(),
+                        },
+                        Err(error) => LspSemanticOperationOutcome::Partial {
+                            value: serde_json::Value::Null,
+                            coverage: format!("analyzer-start-{}", bounded_failure(&error.to_string())),
+                        },
+                    }
+                }
+            };
+            inner.operations.lock().await.remove(&key);
+            outcome
+        })
+    }
+
+    fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
+        let key = SemanticOperationKey {
+            root_uri: root.uri().to_owned(),
+            request_id: request_id.clone(),
+        };
+        self.inner
+            .operations
+            .try_lock()
+            .ok()
+            .and_then(|operations| operations.get(&key).cloned())
+            .is_some_and(|cancellation| {
+                cancellation.cancel();
+                true
+            })
+    }
+}
+
+fn semantic_operation_outcome(
+    result: std::result::Result<serde_json::Value, LspSemanticRequestError>,
+) -> LspSemanticOperationOutcome {
+    match result {
+        Ok(value) => LspSemanticOperationOutcome::Complete(value),
+        Err(LspSemanticRequestError::Remote {
+            code: Some(-32601), ..
+        }) => LspSemanticOperationOutcome::Unavailable,
+        Err(error) => LspSemanticOperationOutcome::Partial {
+            value: serde_json::Value::Null,
+            coverage: format!("analyzer-{}", error.class()),
+        },
+    }
+}
+
+fn bounded_failure(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .take(64)
+        .collect()
 }
 
 pub struct PreparedRefresh {
@@ -290,6 +498,46 @@ impl DiagnosticBroker {
             .iter()
             .find(|adapter| adapter.language == language)
             .cloned()
+    }
+
+    /// Returns a concrete retained semantic authority over the same stdio
+    /// client slot used by diagnostic refreshes for this language/root.
+    pub fn semantic_authority(
+        &mut self,
+        language: &str,
+        workspace_root: PathBuf,
+        root_uri: impl Into<String>,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<Arc<StdioLspSemanticAuthority>> {
+        let adapter = self
+            .adapter_for(language)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("no LSP adapter registered for language '{language}'"),
+            })?;
+        let command = self.settings.command_for(language, &adapter.command);
+        if !command_available(&command) {
+            return Err(TraceDecayError::Config {
+                message: format!("LSP command '{command}' is not available on PATH"),
+            });
+        }
+        let key = LspSessionKey {
+            language: language.to_owned(),
+            command: command.clone(),
+            workspace_root: workspace_root.clone(),
+        };
+        let client = self
+            .clients
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone();
+        Ok(StdioLspSemanticAuthority::from_shared_client(
+            command,
+            adapter.args,
+            workspace_root,
+            root_uri,
+            timeouts,
+            client,
+        ))
     }
 
     pub fn update_adapters(&mut self, adapters: Vec<LspAdapterDefinition>) {

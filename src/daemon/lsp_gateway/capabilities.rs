@@ -5,9 +5,14 @@
 //! client, admitted-project, policy, and upstream facts before it advertises
 //! any capability.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
+
+use super::context::{
+    ContextProjectionKind, ContextProjectionRegistration, MAX_CONTEXT_PROJECTION_KINDS,
+    TRACEDECAY_CONTEXT_REVISION,
+};
 
 /// The protocol version implemented by the gateway contract.
 pub const LSP_PROTOCOL_VERSION: &str = "3.17";
@@ -92,6 +97,8 @@ pub struct ClientCapabilities {
     pub document_diagnostics_data: bool,
     pub workspace_diagnostic_refresh_support: bool,
     pub semantic: BTreeSet<SemanticCapability>,
+    pub context_projections: BTreeMap<ContextProjectionKind, u32>,
+    pub supports_context_expansion: bool,
 }
 
 impl ClientCapabilities {
@@ -190,6 +197,39 @@ impl ClientCapabilities {
                 .semantic
                 .insert(SemanticCapability::WorkspaceSymbol);
         }
+        if let Some(tracedecay) = root
+            .get("experimental")
+            .and_then(Value::as_object)
+            .and_then(|experimental| experimental.get("tracedecay"))
+        {
+            let tracedecay = tracedecay
+                .as_object()
+                .ok_or(CapabilityParseError::InvalidTraceDecayCapabilities)?;
+            if tracedecay.get("revision").and_then(Value::as_u64)
+                != Some(u64::from(TRACEDECAY_CONTEXT_REVISION))
+            {
+                return Err(CapabilityParseError::InvalidTraceDecayCapabilities);
+            }
+            let projections = tracedecay
+                .get("projections")
+                .and_then(Value::as_array)
+                .ok_or(CapabilityParseError::InvalidTraceDecayCapabilities)?;
+            if projections.len() > MAX_CONTEXT_PROJECTION_KINDS {
+                return Err(CapabilityParseError::InvalidTraceDecayCapabilities);
+            }
+            for projection in projections {
+                let registration: ContextProjectionRegistration =
+                    serde_json::from_value(projection.clone())
+                        .map_err(|_| CapabilityParseError::InvalidTraceDecayCapabilities)?;
+                if !registration.kind.is_valid() || registration.revision == 0 {
+                    return Err(CapabilityParseError::InvalidTraceDecayCapabilities);
+                }
+                capabilities
+                    .context_projections
+                    .insert(registration.kind, registration.revision);
+            }
+            capabilities.supports_context_expansion = bool_at(Some(tracedecay), "opaqueExpansion");
+        }
         Ok(capabilities)
     }
 }
@@ -198,6 +238,7 @@ impl ClientCapabilities {
 pub enum CapabilityParseError {
     ExpectedObject,
     InvalidPositionEncodings,
+    InvalidTraceDecayCapabilities,
 }
 
 /// Capabilities the daemon can safely guarantee for the admitted session.
@@ -212,6 +253,8 @@ pub struct GatewayCapabilities {
     /// when an upstream analyzer does not provide diagnostics.
     pub supports_managed_diagnostics: bool,
     pub semantic: BTreeSet<SemanticCapability>,
+    pub context_projections: BTreeMap<ContextProjectionKind, u32>,
+    pub supports_context_expansion: bool,
 }
 
 impl Default for GatewayCapabilities {
@@ -221,6 +264,8 @@ impl Default for GatewayCapabilities {
             supports_document_diagnostics: true,
             supports_managed_diagnostics: true,
             semantic: SemanticCapability::ALL.into_iter().collect(),
+            context_projections: BTreeMap::new(),
+            supports_context_expansion: true,
         }
     }
 }
@@ -244,6 +289,8 @@ pub struct EffectiveCapabilities {
     pub supports_document_diagnostics: bool,
     pub supports_workspace_diagnostic_refresh: bool,
     pub semantic: BTreeSet<SemanticCapability>,
+    pub context_projections: BTreeMap<ContextProjectionKind, u32>,
+    pub supports_context_expansion: bool,
     pub workspace_folders_supported: bool,
     pub workspace_diagnostics_supported: bool,
     pub rename_supported: bool,
@@ -354,6 +401,20 @@ impl EffectiveCapabilities {
                 capabilities.insert(key.into(), value);
             }
         }
+        if !self.context_projections.is_empty() {
+            capabilities.insert(
+                "experimental".into(),
+                json!({
+                    "tracedecay": {
+                        "revision": TRACEDECAY_CONTEXT_REVISION,
+                        "opaqueExpansion": self.supports_context_expansion,
+                        "projections": self.context_projections.iter().map(|(kind, revision)| {
+                            json!({ "kind": kind, "revision": revision })
+                        }).collect::<Vec<_>>(),
+                    }
+                }),
+            );
+        }
         Value::Object(capabilities)
     }
 }
@@ -405,6 +466,20 @@ pub fn negotiate_capabilities(
 
     let diagnostics_supported = client_supports_utf16
         && (gateway.supports_managed_diagnostics || upstream.supports_diagnostics);
+    let context_projections: BTreeMap<ContextProjectionKind, u32> = client
+        .context_projections
+        .iter()
+        .filter_map(|(kind, client_revision)| {
+            gateway
+                .context_projections
+                .get(kind)
+                .filter(|gateway_revision| *gateway_revision == client_revision)
+                .map(|revision| (kind.clone(), *revision))
+        })
+        .collect();
+    let supports_context_expansion = client.supports_context_expansion
+        && gateway.supports_context_expansion
+        && !context_projections.is_empty();
     let push_client_supported = client.supports_versioned_publish_diagnostics
         && client.publish_diagnostics_related_information
         && client.publish_diagnostics_code_description
@@ -430,6 +505,8 @@ pub fn negotiate_capabilities(
             && gateway.supports_document_diagnostics
             && client.workspace_diagnostic_refresh_support,
         semantic,
+        context_projections,
+        supports_context_expansion,
         workspace_folders_supported: false,
         workspace_diagnostics_supported: false,
         rename_supported: false,
@@ -594,6 +671,45 @@ mod tests {
         assert!(advertised.get("renameProvider").is_none());
         assert!(advertised.get("codeActionProvider").is_none());
         assert!(advertised.get("executeCommandProvider").is_none());
+    }
+
+    #[test]
+    fn context_expansion_requires_explicit_client_negotiation() {
+        let projection = ContextProjectionKind::diagnostics();
+        let mut gateway = GatewayCapabilities::default();
+        gateway
+            .context_projections
+            .insert(projection.clone(), TRACEDECAY_CONTEXT_REVISION);
+        let client = ClientCapabilities::from_initialize_capabilities(&json!({
+            "experimental": {
+                "tracedecay": {
+                    "revision": TRACEDECAY_CONTEXT_REVISION,
+                    "opaqueExpansion": true,
+                    "projections": [{
+                        "kind": "diagnostics",
+                        "revision": TRACEDECAY_CONTEXT_REVISION
+                    }]
+                }
+            }
+        }))
+        .expect("context capability");
+        let effective = negotiate_capabilities(&client, &gateway, &UpstreamCapabilities::default());
+        assert!(effective.supports_context_expansion);
+        assert_eq!(
+            effective.to_lsp_server_capabilities()["experimental"]["tracedecay"]["opaqueExpansion"],
+            true
+        );
+
+        let mut without_expansion = client;
+        without_expansion.supports_context_expansion = false;
+        assert!(
+            !negotiate_capabilities(
+                &without_expansion,
+                &gateway,
+                &UpstreamCapabilities::default()
+            )
+            .supports_context_expansion
+        );
     }
 
     #[test]

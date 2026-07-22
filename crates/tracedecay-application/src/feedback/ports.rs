@@ -2,19 +2,51 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::CodeGenerationId;
 use tracedecay_domain::feedback::{
     FeedbackAuthoritativeRuntimeStateV1, FeedbackCycleObservationV1, FeedbackCycleResultV1,
     FeedbackCycleTerminationV1, FeedbackDedupeKeyV1, FeedbackDiagnosticBaselineV1,
     FeedbackDiagnosticV1, FeedbackDurabilityV1, FeedbackEvaluationInputV1, FeedbackImpactV1,
 };
+use tracedecay_domain::{CodeGenerationId, UtcMicros};
+use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
 
+use crate::authorization::{AuthorizationPort, AuthorizationService};
 use crate::context::{RequestContext, ResolvedScope};
 use crate::diagnostics::{DiagnosticProviderIdentity, DiagnosticProviderResult};
 use crate::error::ApplicationContractError;
-use crate::result::AuthorityReceipt;
+use crate::handlers::ApplicationOperation;
+use crate::result::{ApplicationProblem, AuthorityReceipt};
 
 pub type FeedbackPortFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// One daemon-route authorization decision shared by feedback reads and the
+/// one-shot cycle. The route owner returns exactly one admission receipt; the
+/// feedback application never reloads source policy or invents a publication
+/// proof.
+pub trait FeedbackRouteAuthorizationPort {
+    fn admit(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorityReceipt, ApplicationProblem>;
+}
+
+impl<P, E> FeedbackRouteAuthorizationPort for AuthorizationService<P, E>
+where
+    P: AuthorizationPort,
+    E: SourceAuthorizationEvaluator,
+{
+    fn admit(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorityReceipt, ApplicationProblem> {
+        AuthorizationService::admit(self, context, operation, observed_at)
+            .map(|admission| admission.into_receipt())
+    }
+}
 
 /// Runtime state resolved by a daemon-owned authority. The current clean
 /// generation is intentionally separate from the domain runtime snapshot:

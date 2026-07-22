@@ -3,9 +3,11 @@
 //! Checks the binary, project index, global DB, user config, agent
 //! integrations, and network connectivity.
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
+use crate::application::semantic_runtime::{SemanticRuntimeStateV1, SemanticRuntimeStatusV1};
 use crate::display::{format_bytes, format_token_count};
 #[cfg(test)]
 use crate::storage::StoreLayout;
@@ -53,6 +55,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
         }
     };
     check_session_temporal_health(&mut dc, daemon_status.as_ref().ok());
+    check_semantic_runtime_health(&mut dc, daemon_status.as_ref().ok());
 
     check_global_db(&mut dc);
     check_stale_stores(&mut dc, daemon_status.as_ref().ok());
@@ -66,18 +69,27 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
             home: home.clone(),
             project_path: project_path.clone(),
         };
-        let agents_to_check: Vec<Box<dyn agents::AgentIntegration>> = match agent_filter {
+        let host_components = check_host_component_receipts(&mut dc, &hctx, agent_filter);
+        let receipt_agents = host_components
+            .components
+            .iter()
+            .filter_map(|component| component.host)
+            .map(agents::integration_id_for_host)
+            .collect::<BTreeSet<_>>();
+        let legacy_agents = match agent_filter {
             Some(id) => match agents::get_integration(id) {
-                Ok(ag) => vec![ag],
-                Err(e) => {
-                    dc.fail(&format!("{e}"));
-                    vec![]
+                Ok(agent) => vec![agent],
+                Err(error) => {
+                    dc.fail(&error.to_string());
+                    Vec::new()
                 }
             },
             None => agents::all_integrations(),
         };
-        for ag in &agents_to_check {
-            ag.healthcheck_with_daemon_status(&mut dc, &hctx, daemon_status.as_ref().ok());
+        for agent in legacy_agents {
+            if !receipt_agents.contains(agent.id()) && agent.has_tracedecay(home) {
+                agent.healthcheck_with_daemon_status(&mut dc, &hctx, daemon_status.as_ref().ok());
+            }
         }
         let materialization_root =
             crate::automation::skill_materialization::resolve_project_root(&project_path);
@@ -90,6 +102,80 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
     print_summary(&dc);
 
     doctor_result(&dc, daemon_status, storage_healthy)
+}
+
+fn check_host_component_receipts(
+    dc: &mut DoctorCounters,
+    context: &HealthcheckContext,
+    agent_filter: Option<&str>,
+) -> agents::host_bundle_v2::HostBundleDoctorReportV1 {
+    use agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
+
+    eprintln!("\n\x1b[1mReceipt-backed host components\x1b[0m");
+    let lifecycle_root = match agents::host_bundle_v2::resolved_host_bundle_lifecycle_root() {
+        Ok(root) => root,
+        Err(error) => {
+            dc.fail(&format!("Could not resolve host lifecycle root: {error}"));
+            return agents::host_bundle_v2::HostBundleDoctorReportV1::default();
+        }
+    };
+    let report = match agents::inspect_installed_host_components(context) {
+        Ok(report) => report,
+        Err(error) => {
+            dc.fail(&format!(
+                "Could not inspect host component receipts in {}: {error}",
+                lifecycle_root.display()
+            ));
+            return agents::host_bundle_v2::HostBundleDoctorReportV1::default();
+        }
+    };
+    if report.components.is_empty() {
+        dc.info(&format!(
+            "No installed host component receipts in {}",
+            lifecycle_root.display()
+        ));
+        return report;
+    }
+    for component in &report.components {
+        if agent_filter.is_some_and(|filter| {
+            component
+                .host
+                .is_some_and(|host| agents::integration_id_for_host(host) != filter)
+        }) {
+            continue;
+        }
+        let label = match (component.host, component.component) {
+            (Some(host), Some(component)) => format!("{host:?}/{component:?}"),
+            _ => component.receipt_path.display().to_string(),
+        };
+        match component.state {
+            State::Current => dc.pass(&format!("{label} is current")),
+            State::Repairable => dc.warn(&format!(
+                "{label} native registration is repairable; {}",
+                component.repair_action
+            )),
+            State::OwnershipConflict => dc.fail(&format!(
+                "{label} has an ownership conflict; {}",
+                component.repair_action
+            )),
+            State::Missing => dc.fail(&format!(
+                "{label} is missing receipt-owned artifacts; {}",
+                component.repair_action
+            )),
+            State::Corrupt => dc.fail(&format!(
+                "{label} receipt or deployed state is corrupt; {}",
+                component.repair_action
+            )),
+        }
+        for artifact in component
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.state != State::Current)
+        {
+            dc.info(&format!("{}: {:?}", artifact.relative_path, artifact.state));
+        }
+    }
+    report
 }
 
 fn doctor_result(
@@ -301,6 +387,7 @@ fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<se
         "cursor_session_ingest",
         "cursor_session_placeholder_paths",
         "session_temporal_health",
+        "semantic_runtime",
     ] {
         if let Some(value) = runtime.get(key).cloned() {
             status[key] = value;
@@ -439,6 +526,59 @@ fn check_session_temporal_health(dc: &mut DoctorCounters, status: Option<&serde_
             temporal_health::TemporalHealthLineLevel::Warn => dc.warn(&line.text),
             temporal_health::TemporalHealthLineLevel::Fail => dc.fail(&line.text),
         }
+    }
+}
+
+fn check_semantic_runtime_health(dc: &mut DoctorCounters, status: Option<&serde_json::Value>) {
+    eprintln!("\n\x1b[1mSemantic runtime\x1b[0m");
+    let Some(raw) = status.and_then(|status| status.get("semantic_runtime")) else {
+        dc.info(
+            "Semantic runtime unavailable; exact, lexical, and graph search remain healthy offline",
+        );
+        return;
+    };
+    let semantic: SemanticRuntimeStatusV1 = match serde_json::from_value(raw.clone()) {
+        Ok(status) => status,
+        Err(error) => {
+            dc.warn(&format!(
+                "Semantic runtime status is invalid ({error}); exact, lexical, and graph search remain healthy"
+            ));
+            return;
+        }
+    };
+    if let Err(error) = semantic.validate() {
+        dc.warn(&format!(
+            "Semantic runtime status failed validation ({error}); semantic influence is disabled while exact, lexical, and graph search remain healthy"
+        ));
+        return;
+    }
+    match semantic.state {
+        SemanticRuntimeStateV1::Unavailable { reason } => dc.info(&format!(
+            "Semantic runtime unavailable ({reason:?}); exact, lexical, and graph search remain healthy offline"
+        )),
+        SemanticRuntimeStateV1::Indexing {
+            target_generation,
+            completed_units,
+            total_units,
+        } => dc.pass(&format!(
+            "Semantic generation {target_generation:?} indexing asynchronously ({completed_units}/{total_units}); exact, lexical, and graph search remain available"
+        )),
+        SemanticRuntimeStateV1::Current { receipt } => dc.pass(&format!(
+            "Semantic generation {:?} is atomically current and may influence search",
+            receipt.activated_generation
+        )),
+        SemanticRuntimeStateV1::Degraded {
+            active_generation,
+            reason,
+        } => dc.warn(&format!(
+            "Semantic runtime degraded ({reason:?}, prior generation {active_generation:?} omitted); exact, lexical, and graph search remain healthy"
+        )),
+        SemanticRuntimeStateV1::Rollback {
+            from_generation,
+            target_generation,
+        } => dc.info(&format!(
+            "Semantic rollback in progress ({from_generation:?} -> {target_generation:?}); semantic influence is omitted while exact, lexical, and graph search remain healthy"
+        )),
     }
 }
 

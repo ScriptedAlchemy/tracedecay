@@ -1183,6 +1183,64 @@ fn classify_native_failure(error: &NativeGitIndexError) -> NativeGitIndexApplyOu
 }
 
 #[cfg(test)]
+pub(crate) fn capture_exact_snapshot_for_test(
+    repository_root: &std::path::Path,
+    project_id: ProjectId,
+    repository_id: RepositoryId,
+    worktree_id: WorktreeId,
+    captured_at: UtcMicros,
+) -> RepositoryStateSnapshotV1 {
+    let assembler = NativeGitIndexPreviewAssembler::new(
+        repository_root,
+        project_id,
+        repository_id,
+        worktree_id,
+    );
+    let runner = FixedGitIndexRunner::new(repository_root).expect("test Git runner");
+    let status = assembler
+        .read_authority()
+        .status()
+        .expect("test native status");
+    let lock = runner
+        .acquire_index_lock()
+        .expect("test snapshot index lock");
+    let tree = runner
+        .index_tree_under_lock(&lock)
+        .expect("test index tree");
+    let placeholder = RepositoryStateSnapshotV1::new(
+        assembler.project_id.clone(),
+        assembler.repository_id.clone(),
+        Some(assembler.worktree_id.clone()),
+        1,
+        tree.format(),
+        status.head,
+        RepositoryIndexSnapshotV1 {
+            checksum: canonical_sha256(&b"placeholder".as_slice()).expect("test digest"),
+            tree_id: Some(tree),
+            state: RepositoryIndexStateV1::Clean,
+            unmerged_stage_digest: None,
+        },
+        RepositoryWorkingTreeSnapshotV1 {
+            state: RepositoryWorkingTreeStateV1::Clean,
+            tracked_digest: canonical_sha256(&b"placeholder".as_slice()).expect("test digest"),
+            untracked_name_digest: None,
+            ignored_collision_digest: None,
+        },
+        tracedecay_domain::GitOperationStateV1::None,
+        None,
+        None,
+        None,
+        None,
+        captured_at,
+        tracedecay_domain::GitCoverageV1::complete(),
+    )
+    .expect("test placeholder snapshot");
+    assembler
+        .capture_snapshot(&placeholder, &runner, &lock)
+        .expect("exact test snapshot")
+}
+
+#[cfg(test)]
 mod tests {
     use std::fs;
 

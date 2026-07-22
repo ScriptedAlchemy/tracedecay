@@ -1,11 +1,12 @@
 use tracedecay_application::{
     application_catalog_contributions, application_handler_descriptors,
+    feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
     git::git_index_catalog_contribution, retrieval::catalog::symbol_search_contribution,
 };
-use tracedecay_tool_catalog::{AvailabilityContract, UnavailabilityReason};
+use tracedecay_tool_catalog::BindingSurface;
 
 #[test]
-fn inert_symbol_search_contribution_has_one_matching_handler_descriptor() {
+fn direct_symbol_search_contribution_has_one_matching_handler_descriptor() {
     let contribution = symbol_search_contribution().unwrap();
     let descriptors = application_handler_descriptors().unwrap();
     let capability = contribution
@@ -19,15 +20,19 @@ fn inert_symbol_search_contribution_has_one_matching_handler_descriptor() {
     assert_eq!(handler.operation().use_case_id(), capability.use_case_id());
     assert_eq!(handler.request_schema(), capability.request_schema());
     assert_eq!(handler.result_schema(), capability.result_schema());
+    assert!(capability.availability().is_callable());
     assert!(contribution.bindings().is_empty());
 }
 
 #[test]
-fn application_contribution_set_contains_only_declared_unwired_use_cases() {
+fn application_contribution_set_uses_registered_feedback_handlers() {
     let contributions = application_catalog_contributions().unwrap();
     let handlers = application_handler_descriptors().unwrap();
+    let feedback = feedback_surface_catalog_contribution().unwrap();
+    let feedback_handlers = feedback_surface_handler_descriptors().unwrap();
 
-    assert_eq!(contributions.len(), 2);
+    assert_eq!(contributions.len(), 6);
+    assert!(contributions.contains(&feedback));
     assert_eq!(
         contributions
             .iter()
@@ -39,15 +44,33 @@ fn application_contribution_set_contains_only_declared_unwired_use_cases() {
         .iter()
         .flat_map(|contribution| contribution.capabilities())
     {
-        assert!(matches!(
-            capability.availability(),
-            AvailabilityContract::Unavailable {
-                reason: UnavailabilityReason::NotImplemented,
-            }
-        ));
-        assert!(!capability.availability().is_callable());
-        assert!(handlers.get(capability.use_case_id()).is_some());
+        assert!(
+            handlers.get(capability.use_case_id()).is_some(),
+            "{} has a registered application handler",
+            capability.capability_id()
+        );
     }
+    for capability in feedback.capabilities() {
+        assert!(
+            feedback_handlers
+                .iter()
+                .any(|handler| handler.operation().capability_id() == capability.capability_id()),
+            "{} has a registered concrete feedback handler",
+            capability.capability_id()
+        );
+        assert!(
+            capability.availability().is_callable(),
+            "{} is callable after its production owner was registered",
+            capability.capability_id()
+        );
+        assert!(!capability.binding_ids().is_empty());
+    }
+    assert!(
+        feedback
+            .bindings()
+            .iter()
+            .all(|binding| binding.surface() != BindingSurface::Dashboard)
+    );
     assert!(
         git_index_catalog_contribution()
             .unwrap()

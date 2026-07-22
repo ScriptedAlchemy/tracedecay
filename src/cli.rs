@@ -15,6 +15,50 @@ fn agent_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(tracedecay::agents::available_integrations())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum HostBundleComponentArg {
+    Core,
+    Agent,
+    ContextMcp,
+    OperatorMcp,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostBundleCliOptions {
+    pub component: Option<HostBundleComponentArg>,
+    pub dry_run: bool,
+    pub yes: bool,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum FeedbackRollbackAction {
+    /// Preview switching the installed Core feedback route to this binary's compiled route
+    DryRun {
+        #[arg(long, value_parser = agent_value_parser())]
+        agent: String,
+    },
+    /// Apply the compiled Core feedback route and persist a restart-safe state file
+    Apply {
+        #[arg(long, value_parser = agent_value_parser())]
+        agent: String,
+        /// Durable rollback state file
+        #[arg(long)]
+        state: String,
+        /// Confirm the feedback-route mutation
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Restore the previous Core feedback route from a durable state file
+    Restore {
+        /// Durable rollback state file created by apply
+        #[arg(long)]
+        state: String,
+        /// Confirm the feedback-route restoration
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 /// Code intelligence for Rust codebases.
 #[derive(Parser)]
 #[command(
@@ -24,6 +68,16 @@ fn agent_value_parser() -> PossibleValuesParser {
     version
 )]
 pub struct Cli {
+    /// Select one compiled first-party host component; without it, lifecycle commands apply
+    /// the host's canonical component set atomically
+    #[arg(long, global = true, value_enum)]
+    pub component: Option<HostBundleComponentArg>,
+    /// Verify and print the exact signed lifecycle plan without mutating
+    #[arg(long, global = true, requires = "component", conflicts_with = "yes")]
+    pub dry_run: bool,
+    /// Confirm a first-party component mutation
+    #[arg(long, global = true, requires = "component")]
+    pub yes: bool,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -160,7 +214,14 @@ pub enum Commands {
     },
     /// Refresh settings for all already-installed agents
     #[command(long_about = REINSTALL_LONG_ABOUT, after_help = REINSTALL_AFTER_HELP)]
-    Reinstall,
+    Reinstall {
+        /// Reconcile one project-local integration in the current directory
+        #[arg(long, requires = "agent")]
+        local: bool,
+        /// Project-local host to reconcile (required with --local)
+        #[arg(long, value_parser = agent_value_parser(), requires = "local")]
+        agent: Option<String>,
+    },
     /// Refresh generated plugin code/assets for detected installs without
     /// touching agent config files.
     ///
@@ -176,7 +237,14 @@ pub enum Commands {
         visible_alias = "update-plugins",
         after_help = UPDATE_PLUGIN_AFTER_HELP
     )]
-    UpdatePlugin,
+    UpdatePlugin {
+        /// Update one project-local integration in the current directory
+        #[arg(long, requires = "agent")]
+        local: bool,
+        /// Project-local host to update (required with --local)
+        #[arg(long, value_parser = agent_value_parser(), requires = "local")]
+        agent: Option<String>,
+    },
     /// Remove agent integration (MCP server, permissions, hooks, prompt rules)
     #[command(
         name = "uninstall",
@@ -188,6 +256,15 @@ pub enum Commands {
         /// Agent to remove (removes all if omitted)
         #[arg(long, value_parser = agent_value_parser())]
         agent: Option<String>,
+        /// Remove the selected project-local integration from the current directory
+        #[arg(long, requires = "agent")]
+        local: bool,
+    },
+    /// Dry-run, apply, or restore the direct host feedback-route rollback switch
+    #[command(name = "feedback-rollback")]
+    FeedbackRollback {
+        #[command(subcommand)]
+        action: FeedbackRollbackAction,
     },
     /// Extraction worker (spawned by tracedecay itself; not for direct use).
     #[command(name = "extract-worker", hide = true)]
@@ -270,6 +347,15 @@ pub enum Commands {
     /// Hermes terminal receipt handler (called by the TraceDecay plugin)
     #[command(name = "hook-hermes-terminal-receipt", hide = true)]
     HookHermesTerminalReceipt,
+    /// Kimi Code native Hook V2 event handler.
+    #[command(name = "hook-kimi-event", hide = true)]
+    HookKimiEvent,
+    /// OpenCode event-bus Hook V2 handler.
+    #[command(name = "hook-opencode-event", hide = true)]
+    HookOpenCodeEvent,
+    /// OpenCode direct tool.execute.after Hook V2 handler.
+    #[command(name = "hook-opencode-tool-after", hide = true)]
+    HookOpenCodeToolAfter,
     /// Detached profile user-session automation review.
     #[command(name = "hook-user-session-review", hide = true)]
     HookUserSessionReview,
@@ -570,6 +656,15 @@ pub enum LspAction {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Bridge one host LSP stdio stream to an authenticated daemon session
+    Bridge {
+        /// Use standard input and output with strict Content-Length framing
+        #[arg(long, required = true)]
+        stdio: bool,
+        /// Explicit project root to authorize for this session
+        #[arg(long)]
+        project: String,
     },
 }
 

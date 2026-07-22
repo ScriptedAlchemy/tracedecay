@@ -5,6 +5,8 @@
 //! also own filesystem matching, fingerprint caching, and compatibility
 //! rendering. This module intentionally does not duplicate those algorithms.
 
+use std::sync::Arc;
+
 use tracedecay_application::CoverageCompleteness;
 use tracedecay_application::retrieval::grep_analysis::{
     AstGrepAuthorityV1, AstGrepHitV1, AstGrepRequestV1, AstGrepResultV1, ComplexityAuthorityV1,
@@ -23,43 +25,43 @@ use crate::types::NodeKind;
 
 macro_rules! graph_authority {
     ($name:ident) => {
-        pub struct $name<'a> {
-            graph: &'a TraceDecay,
+        pub struct $name {
+            graph: Arc<TraceDecay>,
         }
 
-        impl<'a> $name<'a> {
-            pub const fn new(graph: &'a TraceDecay) -> Self {
+        impl $name {
+            pub fn new(graph: Arc<TraceDecay>) -> Self {
                 Self { graph }
             }
         }
     };
 }
 
-pub type ProductionGrepAnalysisOperationsV1<'a, L, R> = GrepAnalysisOperationsV1<
+pub type ProductionGrepAnalysisOperationsV1<L, R> = GrepAnalysisOperationsV1<
     L,
-    TraceDecayAstGrepAuthorityV1<'a>,
-    TraceDecayComplexityAuthorityV1<'a>,
+    TraceDecayAstGrepAuthorityV1,
+    TraceDecayComplexityAuthorityV1,
     R,
-    TraceDecayDependencyDepthAuthorityV1<'a>,
+    TraceDecayDependencyDepthAuthorityV1,
 >;
 
 /// Compose the canonical application owner with the current production
 /// authorities. The caller supplies the legacy lexical and redundancy
 /// authorities so their regex, ignore-walk, fingerprint, cache, and structural
 /// matching behavior remains singular during compatibility migration.
-pub fn production_grep_analysis_operations<'a, L, R>(
-    graph: &'a TraceDecay,
+pub fn production_grep_analysis_operations<L, R>(
+    graph: Arc<TraceDecay>,
     lexical: L,
     redundancy: R,
-) -> ProductionGrepAnalysisOperationsV1<'a, L, R>
+) -> ProductionGrepAnalysisOperationsV1<L, R>
 where
     L: LexicalGrepAuthorityV1,
     R: RedundancyAuthorityV1,
 {
     GrepAnalysisOperationsV1::new(
         lexical,
-        TraceDecayAstGrepAuthorityV1::new(graph),
-        TraceDecayComplexityAuthorityV1::new(graph),
+        TraceDecayAstGrepAuthorityV1::new(Arc::clone(&graph)),
+        TraceDecayComplexityAuthorityV1::new(Arc::clone(&graph)),
         redundancy,
         TraceDecayDependencyDepthAuthorityV1::new(graph),
     )
@@ -67,7 +69,7 @@ where
 
 graph_authority!(TraceDecayAstGrepAuthorityV1);
 
-impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1<'_> {
+impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
     fn ast_grep<'a>(
         &'a self,
         context: &'a PrimitivePortContextV1<'a>,
@@ -146,7 +148,7 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1<'_> {
 
 graph_authority!(TraceDecayComplexityAuthorityV1);
 
-impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1<'_> {
+impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1 {
     fn complexity<'a>(
         &'a self,
         context: &'a PrimitivePortContextV1<'a>,
@@ -223,7 +225,7 @@ impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1<'_> {
 
 graph_authority!(TraceDecayDependencyDepthAuthorityV1);
 
-impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1<'_> {
+impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
     fn dependency_depth<'a>(
         &'a self,
         context: &'a PrimitivePortContextV1<'a>,

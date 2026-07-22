@@ -8,11 +8,7 @@ use tracedecay_application::{
     ApplicationOperation, ResultContractRef, application_catalog_contributions,
     application_handler_descriptors, retrieval::catalog::symbol_search_contribution,
 };
-use tracedecay_tool_catalog::{
-    AvailabilityContract, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, ProfileId, SchemaId, SchemaRef,
-    UnavailabilityReason, UseCaseId,
-};
+use tracedecay_tool_catalog::{CapabilityId, ProfileId, SchemaId, SchemaRef, UseCaseId};
 
 #[test]
 fn root_snapshot_validates_every_application_contribution_against_declared_descriptors() {
@@ -28,7 +24,6 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
     assert_eq!(snapshot.capabilities().count(), contributed_capabilities);
 
     for contribution in &contributions {
-        assert!(contribution.bindings().is_empty());
         for capability in contribution.capabilities() {
             let handler = handlers
                 .get(capability.use_case_id())
@@ -36,12 +31,12 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             assert_eq!(handler.operation().use_case_id(), capability.use_case_id());
             assert_eq!(handler.request_schema(), capability.request_schema());
             assert_eq!(handler.result_schema(), capability.result_schema());
-            assert!(matches!(
-                capability.availability(),
-                AvailabilityContract::Unavailable {
-                    reason: UnavailabilityReason::NotImplemented,
-                }
-            ));
+            assert_eq!(
+                capability.availability().is_callable(),
+                !capability.profile_eligibility().is_empty(),
+                "{} availability and profile eligibility disagree",
+                capability.capability_id()
+            );
         }
     }
 
@@ -54,35 +49,65 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
         snapshot
             .visible_capabilities(&default_profile, &BTreeSet::new())
             .into_iter()
-            .map(|capability| capability.capability_id())
+            .map(|capability| capability.capability_id().as_str())
             .collect::<Vec<_>>(),
-        Vec::<&CapabilityId>::new()
+        vec![
+            "capability.application.configuration.audit",
+            "capability.application.configuration.batch",
+            "capability.application.configuration.explain",
+            "capability.application.configuration.get",
+            "capability.application.configuration.list",
+            "capability.application.configuration.observed_state",
+            "capability.application.configuration.protected_apply",
+            "capability.application.configuration.protected_preview",
+            "capability.application.configuration.rollback_apply",
+            "capability.application.configuration.rollback_preview",
+            "capability.application.configuration.set",
+            "capability.application.configuration.unset",
+            "capability.application.configuration.write_credential",
+            "capability.application.feedback.affected-tests",
+            "capability.application.feedback.ci-failure-localize",
+            "capability.application.feedback.diagnostics",
+            "capability.application.feedback.expand",
+            "capability.application.feedback.get",
+            "capability.application.feedback.github-review-ingest",
+            "capability.application.feedback.impact",
+            "capability.application.feedback.list",
+            "capability.application.feedback.proximity",
+            "capability.application.feedback.test-results",
+            "capability.application.git.apply",
+            "capability.application.git.preview",
+            "capability.application.primitive.call-chain",
+            "capability.application.primitive.diagnostics-read",
+            "capability.application.primitive.file-dependents",
+            "capability.application.primitive.file-metadata",
+            "capability.application.primitive.health-read",
+            "capability.application.primitive.module-api",
+            "capability.application.primitive.qualified-name",
+            "capability.application.primitive.session-lookup",
+            "capability.application.primitive.source-body",
+            "capability.application.primitive.source-lines",
+            "capability.application.primitive.source-outline",
+            "capability.application.primitive.storage-status",
+            "capability.retrieval.symbol-search",
+        ]
     );
 }
 
 #[test]
-fn unwired_available_capability_is_rejected_before_snapshot_composition() {
-    let mut contributions = application_catalog_contributions().unwrap();
-    let symbol_contribution = contributions
-        .iter()
-        .find(|contribution| {
-            contribution
-                .capabilities()
-                .iter()
-                .any(|capability| capability.capability_id() == &symbol_search_capability())
-        })
-        .cloned()
-        .expect("symbol contribution is declared");
-    let index = contributions
-        .iter()
-        .position(|contribution| contribution == &symbol_contribution)
-        .expect("symbol contribution is present");
-    contributions[index] =
-        contribution_with_availability(&symbol_contribution, AvailabilityContract::Available);
-
+fn registered_capability_does_not_require_a_catalog_surface_binding() {
     assert_eq!(
-        validate_application_catalog(&contributions, &application_handler_descriptors().unwrap()),
-        inconsistent("unwired application capability availability")
+        validate_application_catalog(
+            &[symbol_search_contribution().unwrap()],
+            &ApplicationHandlerDescriptors::new([descriptor_with_contract(
+                "capability.retrieval.symbol-search",
+                "use-case.retrieval.symbol-search",
+                symbol_request_schema(),
+                symbol_result_schema(),
+            )])
+            .unwrap(),
+        ),
+        Ok(())
     );
 }
 
@@ -161,10 +186,6 @@ fn root_composition_is_deterministic() {
     assert_eq!(first.digest(), second.digest());
 }
 
-fn symbol_search_capability() -> CapabilityId {
-    CapabilityId::new("capability.retrieval.symbol-search").unwrap()
-}
-
 fn descriptor_with_contract(
     capability_id: &str,
     use_case_id: &str,
@@ -200,49 +221,4 @@ fn inconsistent(field: &'static str) -> Result<(), CatalogCompositionError> {
     Err(CatalogCompositionError::Application(
         ApplicationContractError::Inconsistent { field },
     ))
-}
-
-fn contribution_with_availability(
-    contribution: &CatalogContributionV1,
-    availability: AvailabilityContract,
-) -> CatalogContributionV1 {
-    let original = contribution
-        .capabilities()
-        .first()
-        .expect("test contribution has one capability");
-    let capability = CapabilityManifestV1::new(CapabilityManifestInputV1 {
-        capability_id: original.capability_id().clone(),
-        use_case_id: original.use_case_id().clone(),
-        routing: original.routing().clone(),
-        request_schema: original.request_schema().clone(),
-        result_schema: original.result_schema().clone(),
-        effect: original.effect(),
-        scope: original.scope().clone(),
-        authority: original.authority(),
-        denied_disclosure: original.denied_disclosure(),
-        privacy: original.privacy(),
-        lifecycle: original.lifecycle(),
-        streaming: original.streaming().clone(),
-        cancellation: original.cancellation().clone(),
-        deadline: original.deadline().clone(),
-        pagination: original.pagination().cloned(),
-        idempotency: original.idempotency(),
-        authority_revalidation: original.authority_revalidation().clone(),
-        reconciliation: original.reconciliation(),
-        receipt: original.receipt(),
-        terminal_states: original.terminal_states().clone(),
-        availability,
-        binding_ids: original.binding_ids().to_vec(),
-        profile_eligibility: original.profile_eligibility().to_vec(),
-        required_features: original.required_features().to_vec(),
-    })
-    .unwrap();
-    CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: contribution.contribution_id().clone(),
-        depends_on: contribution.depends_on().to_vec(),
-        capabilities: vec![capability],
-        retrieval_primitives: contribution.retrieval_primitives().to_vec(),
-        bindings: contribution.bindings().to_vec(),
-    })
-    .unwrap()
 }

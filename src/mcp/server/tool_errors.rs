@@ -208,7 +208,7 @@ pub(crate) fn serialize_response_line(resp: &JsonRpcResponse) -> String {
     match serde_json::to_string(resp) {
         Ok(line) => line,
         Err(e) => {
-            eprintln!("failed to serialize response: {e}");
+            tracing::error!(error = %e, "failed to serialize JSON-RPC response");
             let fallback = JsonRpcResponse::error_with_data(
                 resp.id.clone(),
                 ErrorCode::InternalError,

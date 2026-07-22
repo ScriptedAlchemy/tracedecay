@@ -210,7 +210,11 @@ pub fn atomic_write(
     )
 }
 
-pub fn append_durable(path: &Path, frame: &[u8], directory_policy: DirectorySyncPolicy) -> io::Result<u64> {
+pub fn append_durable(
+    path: &Path,
+    frame: &[u8],
+    directory_policy: DirectorySyncPolicy,
+) -> io::Result<u64> {
     tighten_existing_file(path)?;
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -227,7 +231,11 @@ pub fn append_durable(path: &Path, frame: &[u8], directory_policy: DirectorySync
     Ok(offset)
 }
 
-pub fn truncate_file(path: &Path, len: u64, directory_policy: DirectorySyncPolicy) -> io::Result<()> {
+pub fn truncate_file(
+    path: &Path,
+    len: u64,
+    directory_policy: DirectorySyncPolicy,
+) -> io::Result<()> {
     tighten_existing_file(path)?;
     let output = OpenOptions::new().write(true).open(path)?;
     output.set_len(len)?;

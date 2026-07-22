@@ -5,8 +5,8 @@ use std::path::Path;
 use tracedecay_application::framed_log::{
     DirectorySyncPolicy, append_durable, file_len as shared_file_len,
     read_bounded as shared_read_bounded, sync_parent_directory as shared_sync_parent_directory,
-    tighten_existing_file as shared_tighten_existing_file,
-    truncate_file as shared_truncate_file, validate_regular_or_missing as shared_validate_regular,
+    tighten_existing_file as shared_tighten_existing_file, truncate_file as shared_truncate_file,
+    validate_regular_or_missing as shared_validate_regular,
     with_owned_temp_publish as shared_with_owned_temp_publish,
 };
 
@@ -64,9 +64,7 @@ pub(crate) fn with_owned_temp_publish<T>(
             replace_file_atomically(temporary, destination, label)
                 .map_err(|_| io::Error::other("host admission spool publish failed"))
         },
-        |output| {
-            write(output).map_err(|_| io::Error::other("host admission spool write failed"))
-        },
+        |output| write(output).map_err(|_| io::Error::other("host admission spool write failed")),
         DIRECTORY_POLICY,
     )
     .map_err(io_error)

@@ -16,13 +16,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File};
 use same_file::Handle;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_application::feedback::{
-    FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1, FeedbackFindingReadV1,
-    FeedbackListResultV1,
+    FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1, FeedbackListResultV1,
 };
-use tracedecay_application::{ApplicationOutcome, OperationTermination};
+use tracedecay_application::{ApplicationOutcome, ApplicationResult, OperationTermination};
 use tracedecay_domain::feedback::{
     FeedbackCycleResultV1, FeedbackFindingV1, FeedbackImpactStateV1, ProviderEvaluationStateV1,
 };
@@ -36,16 +36,16 @@ use crate::application::feedback::concrete::{
     ConcretePr12FeedbackOwner, Pr12FeedbackRuntime, ProjectFeedbackStore,
 };
 use crate::application::feedback::owner::{
-    FeedbackReadInvocationResultV1, FeedbackReadOperationV1,
+    FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
 };
 use crate::application::operation_stream::{
     ManagedTestRunSnapshot, OperationEventAuthority, OperationEventError, operation_event_authority,
 };
-use crate::daemon::lsp_gateway::AnalyzerSemanticAdapter;
 use crate::daemon::lsp_gateway::LspAnalyzerCancellationAuthority;
 use crate::daemon::lsp_gateway::{
-    AdmittedRoot, AnalyzerState, BrokerDiagnosticSnapshotAuthority,
-    CanonicalContextProjectionAuthority, CanonicalDiagnosticRefreshRequest, ContextCoverage,
+    AdmittedRoot, BrokerDiagnosticSnapshotAuthority, CanonicalContextProjectionAuthority,
+    CanonicalDiagnosticRefreshRequest, ContextCoverage, ContextExpansionEnvelope,
+    ContextExpansionOutcome, ContextExpansionRequest, ContextExpansionScope,
     ContextProjectionChange, ContextProjectionEnvelope, ContextProjectionItem,
     ContextProjectionKind, ContextProjectionOutcome, ContextProjectionRegistration,
     ContextProjectionRequest, DiagnosticSeverity, DiagnosticSource, FeedbackCycleRequest,
@@ -60,6 +60,11 @@ use crate::diagnostics::lsp::adapters::builtin_adapters;
 use crate::diagnostics::lsp::broker::DiagnosticBroker;
 use crate::diagnostics::lsp::client::LspDocument;
 use crate::diagnostics_store::DiagnosticsStore;
+use crate::mcp::response_handles::{
+    ResponseHandleLookup, retrieve_response_handle, store_response_handle,
+};
+
+const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 
 /// Current canonical Git/graph address for an admitted LSP root.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,6 +72,32 @@ pub struct LspFeedbackProjectionScope {
     pub head_commit_id: CommitId,
     pub code_generation_id: CodeGenerationId,
     pub generation: u64,
+}
+
+struct CurrentFeedbackCycle {
+    scope: LspFeedbackProjectionScope,
+    result: FeedbackDiagnosticsReadResultV1,
+    canonical_handle: String,
+    observed_at: UtcMicros,
+    expires_at: UtcMicros,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredLspContextExpansionV1 {
+    schema_version: u16,
+    root_uri: String,
+    document_uri: Option<String>,
+    kind: ContextProjectionKind,
+    stable_id: String,
+    scope_digest: String,
+    head_commit_id: String,
+    code_generation_id: String,
+    generation: u64,
+    issued_at: UtcMicros,
+    expires_at: UtcMicros,
+    canonical_operation: FeedbackReadOperationV1,
+    canonical_handle: String,
 }
 
 /// Resolves current scope through the existing admitted Git/graph owner.
@@ -162,6 +193,21 @@ impl RegisteredProjectLspAuthority {
         Ok((document.absolute, relative_path))
     }
 
+    fn authorize_projection_root(
+        &self,
+        root: AdmittedRoot,
+        document_uri: Option<String>,
+    ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
+        let authority = self.clone();
+        Box::pin(async move {
+            authority.validate_root(&root)?;
+            if let Some(document_uri) = document_uri {
+                authority.document_path(&document_uri)?;
+            }
+            Ok(())
+        })
+    }
+
     async fn read_disk_document(&self, relative: &Path) -> Result<String, LspRuntimeFailure> {
         let (_canonical, file) = open_project_file(&self.project_dir, relative)?;
         let mut file = tokio::fs::File::from_std(file.into_std());
@@ -177,13 +223,15 @@ impl RegisteredProjectLspAuthority {
             .scope()
             .validate()
             .map_err(|_| LspRuntimeFailure::new("registered-project-scope-invalid"))?;
-        let repository = gix::open(&self.project_root)
-            .map_err(|_| LspRuntimeFailure::new("registered-repository-unavailable"))?;
-        let head_commit_id = repository
-            .head_commit()
-            .ok()
-            .and_then(|commit| CommitId::new(commit.id().to_hex().to_string()).ok())
-            .ok_or_else(|| LspRuntimeFailure::new("registered-head-unavailable"))?;
+        let head_commit_id = {
+            let repository = gix::open(&self.project_root)
+                .map_err(|_| LspRuntimeFailure::new("registered-repository-unavailable"))?;
+            repository
+                .head_commit()
+                .ok()
+                .and_then(|commit| CommitId::new(commit.id().to_hex().to_string()).ok())
+                .ok_or_else(|| LspRuntimeFailure::new("registered-head-unavailable"))?
+        };
         if self
             .database
             .get_metadata("last_synced_commit")
@@ -417,24 +465,24 @@ pub trait LspTestRunProjectionPort: Send + Sync {
 #[derive(Clone)]
 pub struct OperationEventTestRunProjection {
     events: OperationEventAuthority,
-    scope: Arc<dyn LspFeedbackProjectionScopePort>,
+    project: Arc<RegisteredProjectLspAuthority>,
 }
 
 impl OperationEventTestRunProjection {
     pub fn new(
         events: OperationEventAuthority,
-        scope: Arc<dyn LspFeedbackProjectionScopePort>,
+        project: Arc<RegisteredProjectLspAuthority>,
     ) -> Self {
-        Self { events, scope }
+        Self { events, project }
     }
 }
 
 pub fn lsp_test_result_port(
-    scope: Arc<dyn LspFeedbackProjectionScopePort>,
+    project: Arc<RegisteredProjectLspAuthority>,
 ) -> Arc<dyn LspTestRunProjectionPort> {
     Arc::new(OperationEventTestRunProjection::new(
         operation_event_authority(),
-        scope,
+        project,
     ))
 }
 
@@ -447,8 +495,8 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
         let projection = self.clone();
         Box::pin(async move {
             if let Err(error) = projection
-                .scope
-                .resolve(root.clone(), document_uri.clone())
+                .project
+                .authorize_projection_root(root.clone(), document_uri.clone())
                 .await
             {
                 return ContextProjectionOutcome::Deferred {
@@ -519,10 +567,13 @@ impl ConcretePr12FeedbackLspSource {
         &self,
         root: AdmittedRoot,
         document_uri: Option<String>,
-    ) -> Result<(LspFeedbackProjectionScope, FeedbackDiagnosticsReadResultV1), LspRuntimeFailure>
-    {
+    ) -> Result<CurrentFeedbackCycle, LspRuntimeFailure> {
         let scope = self.scope.resolve(root, document_uri).await?;
         let observed_at = now_micros();
+        let expires_at = self
+            .runtime
+            .request_expiry_at(observed_at)
+            .map_err(|_| LspRuntimeFailure::new("feedback-request-expiry-unavailable"))?;
         let sequence = self.next_request.fetch_add(1, Ordering::Relaxed);
         let handle = self
             .runtime
@@ -552,14 +603,26 @@ impl ConcretePr12FeedbackLspSource {
         let payload = evidence
             .payload
             .ok_or_else(|| LspRuntimeFailure::new("feedback-current-result-unavailable"))?;
-        Ok((scope, payload))
+        Ok(CurrentFeedbackCycle {
+            scope,
+            result: payload,
+            canonical_handle: handle,
+            observed_at,
+            expires_at,
+        })
     }
 
     async fn current_finding_items(
         &self,
+        root: &AdmittedRoot,
+        document_uri: Option<&str>,
         scope: &LspFeedbackProjectionScope,
     ) -> Result<Vec<ContextProjectionItem>, LspRuntimeFailure> {
         let observed_at = now_micros();
+        let expires_at = self
+            .runtime
+            .request_expiry_at(observed_at)
+            .map_err(|_| LspRuntimeFailure::new("feedback-list-expiry-unavailable"))?;
         let sequence = self.next_request.fetch_add(1, Ordering::Relaxed);
         let handle = self
             .runtime
@@ -588,7 +651,184 @@ impl ConcretePr12FeedbackLspSource {
         let FeedbackListResultV1 { findings } = evidence
             .payload
             .ok_or_else(|| LspRuntimeFailure::new("feedback-list-result-unavailable"))?;
-        Ok(findings.into_iter().filter_map(finding_read_item).collect())
+        findings
+            .into_iter()
+            .filter_map(|finding| {
+                let canonical_operation = if finding.expand_handle.is_some() {
+                    FeedbackReadOperationV1::Expand
+                } else {
+                    FeedbackReadOperationV1::Get
+                };
+                let canonical_handle = finding
+                    .expand_handle
+                    .as_ref()
+                    .unwrap_or(&finding.get_handle)
+                    .as_str()
+                    .to_owned();
+                finding_item(&finding.finding).map(|item| {
+                    self.attach_context_handle(
+                        root,
+                        document_uri,
+                        ContextProjectionKind::diagnostics(),
+                        scope,
+                        observed_at,
+                        expires_at,
+                        canonical_operation,
+                        &canonical_handle,
+                        item,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attach_context_handle(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: Option<&str>,
+        kind: ContextProjectionKind,
+        scope: &LspFeedbackProjectionScope,
+        observed_at: UtcMicros,
+        expires_at: UtcMicros,
+        canonical_operation: FeedbackReadOperationV1,
+        canonical_handle: &str,
+        mut item: ContextProjectionItem,
+    ) -> Result<ContextProjectionItem, LspRuntimeFailure> {
+        let record = StoredLspContextExpansionV1 {
+            schema_version: LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION,
+            root_uri: root.uri().to_owned(),
+            document_uri: document_uri.map(str::to_owned),
+            kind,
+            stable_id: item.stable_id.clone(),
+            scope_digest: self.runtime.scope().scope_digest.as_str().to_owned(),
+            head_commit_id: scope.head_commit_id.as_str().to_owned(),
+            code_generation_id: scope.code_generation_id.as_str().to_owned(),
+            generation: scope.generation,
+            issued_at: observed_at,
+            expires_at,
+            canonical_operation,
+            canonical_handle: canonical_handle.to_owned(),
+        };
+        let content = serde_json::to_string(&record)
+            .map_err(|_| LspRuntimeFailure::new("context-expansion-handle-invalid"))?;
+        let stored = store_response_handle(
+            self.runtime.project_root(),
+            &content,
+            micros_to_seconds(observed_at),
+        )
+        .map_err(|_| LspRuntimeFailure::new("context-expansion-handle-store-failed"))?;
+        item.retrieval_handle = Some(stored.handle);
+        Ok(item)
+    }
+
+    async fn expand_context(
+        &self,
+        root: AdmittedRoot,
+        request: ContextExpansionRequest,
+    ) -> ContextExpansionOutcome {
+        let observed_at = now_micros();
+        let record = match retrieve_response_handle(
+            self.runtime.project_root(),
+            &request.retrieval_handle,
+            micros_to_seconds(observed_at),
+        ) {
+            Ok(ResponseHandleLookup::Found(record)) => {
+                match serde_json::from_str::<StoredLspContextExpansionV1>(&record.content) {
+                    Ok(record) => record,
+                    Err(_) => return ContextExpansionOutcome::Denied,
+                }
+            }
+            Ok(ResponseHandleLookup::Missing | ResponseHandleLookup::Expired { .. }) => {
+                return ContextExpansionOutcome::Denied;
+            }
+            Err(_) => {
+                return ContextExpansionOutcome::Failed {
+                    reason: "context-expansion-handle-unavailable".to_owned(),
+                };
+            }
+        };
+        if self.runtime.request_expiry_at(record.issued_at).ok() != Some(record.expires_at) {
+            return ContextExpansionOutcome::Denied;
+        }
+        if !valid_context_expansion_record(
+            &record,
+            &root,
+            self.runtime.scope().scope_digest.as_str(),
+            observed_at,
+        ) {
+            return ContextExpansionOutcome::Denied;
+        }
+        let current = match self.scope.resolve(root, record.document_uri.clone()).await {
+            Ok(scope) => scope,
+            Err(error)
+                if matches!(
+                    error.class(),
+                    "registered-generation-not-current"
+                        | "registered-head-unavailable"
+                        | "current-generation-read-failed"
+                        | "current-generation-unavailable"
+                        | "current-generation-invalid"
+                ) =>
+            {
+                return ContextExpansionOutcome::Ready(context_expansion_envelope(
+                    record,
+                    ContextCoverage::Partial,
+                    None,
+                    Some("scope-revalidation-unavailable".to_owned()),
+                ));
+            }
+            Err(_) => return ContextExpansionOutcome::Denied,
+        };
+        if !context_expansion_scope_is_current(&record, &current) {
+            return ContextExpansionOutcome::Ready(context_expansion_envelope(
+                record,
+                ContextCoverage::Partial,
+                None,
+                Some("stale-generation".to_owned()),
+            ));
+        }
+        let invocation = match self
+            .owner
+            .invoke(
+                record.canonical_operation,
+                &record.canonical_handle,
+                observed_at,
+            )
+            .await
+        {
+            Ok(invocation) => invocation,
+            Err(FeedbackReadOwnerErrorV1::NotFoundOrNotAuthorized) => {
+                return ContextExpansionOutcome::Denied;
+            }
+            Err(FeedbackReadOwnerErrorV1::Unavailable) => {
+                return ContextExpansionOutcome::Ready(context_expansion_envelope(
+                    record,
+                    ContextCoverage::Partial,
+                    None,
+                    Some("canonical-feedback-unavailable".to_owned()),
+                ));
+            }
+        };
+        let (complete, evidence) =
+            match canonical_feedback_value(record.canonical_operation, invocation) {
+                Ok(value) => value,
+                Err(()) => {
+                    return ContextExpansionOutcome::Failed {
+                        reason: "context-expansion-kind-mismatch".to_owned(),
+                    };
+                }
+            };
+        ContextExpansionOutcome::Ready(context_expansion_envelope(
+            record,
+            if complete {
+                ContextCoverage::Complete
+            } else {
+                ContextCoverage::Partial
+            },
+            Some(evidence),
+            (!complete).then(|| "canonical-feedback-partial".to_owned()),
+        ))
     }
 }
 
@@ -608,16 +848,17 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
     ) -> LspRuntimeFuture<Result<ManagedDiagnosticSnapshot, LspRuntimeFailure>> {
         let source = self.clone();
         Box::pin(async move {
-            let (scope, result) = source
+            let current = source
                 .current_cycle(request.root.clone(), Some(request.document_uri.clone()))
                 .await?;
+            let scope = current.scope;
             let diagnostics = source
                 .diagnostic_projection
                 .project(
                     request.root,
                     request.document_uri,
                     scope.clone(),
-                    result.cycle,
+                    current.result.cycle,
                 )
                 .await?;
             Ok(ManagedDiagnosticSnapshot {
@@ -655,7 +896,7 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
         }
         let source = self.clone();
         Box::pin(async move {
-            let (scope, result) = match source
+            let current = match source
                 .current_cycle(root.clone(), request.document_uri.clone())
                 .await
             {
@@ -666,10 +907,21 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
                     };
                 }
             };
+            let CurrentFeedbackCycle {
+                scope,
+                result,
+                canonical_handle,
+                observed_at,
+                expires_at,
+            } = current;
             let cycle = result.cycle;
-            let (coverage, items, omitted_count) =
+            let kind = request.kind.clone();
+            let (coverage, mut items, omitted_count) =
                 if request.kind == ContextProjectionKind::diagnostics() {
-                    let items = match source.current_finding_items(&scope).await {
+                    let items = match source
+                        .current_finding_items(&root, request.document_uri.as_deref(), &scope)
+                        .await
+                    {
                         Ok(items) => items,
                         Err(error) => {
                             return ContextProjectionOutcome::Deferred {
@@ -687,18 +939,76 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
                 } else {
                     return ContextProjectionOutcome::Unsupported;
                 };
+            if kind != ContextProjectionKind::diagnostics() {
+                items = match items
+                    .into_iter()
+                    .map(|item| {
+                        source.attach_context_handle(
+                            &root,
+                            request.document_uri.as_deref(),
+                            kind.clone(),
+                            &scope,
+                            observed_at,
+                            expires_at,
+                            FeedbackReadOperationV1::Diagnostics,
+                            &canonical_handle,
+                            item,
+                        )
+                    })
+                    .collect()
+                {
+                    Ok(items) => items,
+                    Err(error) => {
+                        return ContextProjectionOutcome::Deferred {
+                            reason: error.class().to_owned(),
+                        };
+                    }
+                };
+            }
+            let retrieval_handle = match source.attach_context_handle(
+                &root,
+                request.document_uri.as_deref(),
+                kind.clone(),
+                &scope,
+                observed_at,
+                expires_at,
+                FeedbackReadOperationV1::Diagnostics,
+                &canonical_handle,
+                ContextProjectionItem {
+                    stable_id: "__projection__".to_owned(),
+                    summary: String::new(),
+                    retrieval_handle: None,
+                },
+            ) {
+                Ok(item) => item.retrieval_handle,
+                Err(error) => {
+                    return ContextProjectionOutcome::Deferred {
+                        reason: error.class().to_owned(),
+                    };
+                }
+            };
             ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
                 root_uri: root.uri().to_owned(),
                 document_uri: request.document_uri,
-                kind: request.kind,
+                kind,
                 generation: scope.generation,
                 coverage,
                 revision: TRACEDECAY_CONTEXT_REVISION,
                 items,
                 omitted_count,
-                retrieval_handle: None,
+                retrieval_handle,
             })
         })
+    }
+
+    fn expand(
+        &self,
+        root: AdmittedRoot,
+        _request_id: crate::daemon::lsp_gateway::LspRequestId,
+        request: ContextExpansionRequest,
+    ) -> LspRuntimeFuture<ContextExpansionOutcome> {
+        let source = self.clone();
+        Box::pin(async move { source.expand_context(root, request).await })
     }
 
     fn poll_changes(
@@ -710,17 +1020,112 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
     }
 }
 
+fn valid_context_expansion_record(
+    record: &StoredLspContextExpansionV1,
+    root: &AdmittedRoot,
+    scope_digest: &str,
+    observed_at: UtcMicros,
+) -> bool {
+    record.schema_version == LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION
+        && record.root_uri == root.uri()
+        && record
+            .document_uri
+            .as_deref()
+            .is_none_or(|uri| root.contains_document(uri))
+        && record.kind.is_valid()
+        && !record.stable_id.is_empty()
+        && record.stable_id.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
+        && record.scope_digest == scope_digest
+        && !record.head_commit_id.is_empty()
+        && !record.code_generation_id.is_empty()
+        && record.issued_at < record.expires_at
+        && record.issued_at <= observed_at
+        && observed_at < record.expires_at
+        && matches!(
+            record.canonical_operation,
+            FeedbackReadOperationV1::Diagnostics
+                | FeedbackReadOperationV1::Get
+                | FeedbackReadOperationV1::Expand
+        )
+        && !record.canonical_handle.is_empty()
+        && record.canonical_handle.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
+        && record
+            .canonical_handle
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic())
+}
+
+fn context_expansion_scope_is_current(
+    record: &StoredLspContextExpansionV1,
+    current: &LspFeedbackProjectionScope,
+) -> bool {
+    current.head_commit_id.as_str() == record.head_commit_id
+        && current.code_generation_id.as_str() == record.code_generation_id
+        && current.generation == record.generation
+}
+
+fn context_expansion_envelope(
+    record: StoredLspContextExpansionV1,
+    coverage: ContextCoverage,
+    evidence: Option<serde_json::Value>,
+    omission_reason: Option<String>,
+) -> ContextExpansionEnvelope {
+    ContextExpansionEnvelope {
+        root_uri: record.root_uri,
+        document_uri: record.document_uri,
+        kind: record.kind,
+        stable_id: record.stable_id,
+        generation: record.generation,
+        scope: ContextExpansionScope {
+            scope_digest: record.scope_digest,
+            head_commit_id: record.head_commit_id,
+            code_generation_id: record.code_generation_id,
+        },
+        expires_at: record.expires_at.0,
+        coverage,
+        revision: TRACEDECAY_CONTEXT_REVISION,
+        evidence,
+        omission_reason,
+    }
+}
+
+fn canonical_feedback_value(
+    operation: FeedbackReadOperationV1,
+    invocation: FeedbackReadInvocationResultV1,
+) -> Result<(bool, serde_json::Value), ()> {
+    match (operation, invocation) {
+        (
+            FeedbackReadOperationV1::Diagnostics,
+            FeedbackReadInvocationResultV1::Diagnostics(result),
+        ) => canonical_application_value(result),
+        (FeedbackReadOperationV1::Get, FeedbackReadInvocationResultV1::Get(result)) => {
+            canonical_application_value(result)
+        }
+        (FeedbackReadOperationV1::Expand, FeedbackReadInvocationResultV1::Expand(result)) => {
+            canonical_application_value(result)
+        }
+        _ => Err(()),
+    }
+}
+
+fn canonical_application_value<T: Serialize>(
+    result: ApplicationResult<T>,
+) -> Result<(bool, serde_json::Value), ()> {
+    let complete = result.is_ok();
+    serde_json::to_value(result)
+        .map(|value| (complete, value))
+        .map_err(|_| ())
+}
+
 /// Mount-ready bundle construction. The same concrete feedback source is
 /// shared by cycle triggers, managed diagnostics, and context projections.
 #[allow(clippy::too_many_arguments)]
-pub fn pr12_lsp_session_factory<F, U, G>(
+pub fn pr12_lsp_session_factory<F>(
     runtime: tokio::runtime::Handle,
     feedback_runtime: Arc<Pr12FeedbackRuntime>,
     database: Database,
     feedback_cycle: F,
-    analyzer_state: AnalyzerState,
-    upstream_semantics: U,
-    graph_semantics: G,
+    semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
     diagnostic_broker: Arc<AsyncMutex<DiagnosticBroker>>,
     diagnostics_quiet_window: Duration,
     cancellation: Arc<dyn LspAnalyzerCancellationAuthority>,
@@ -729,8 +1134,6 @@ pub fn pr12_lsp_session_factory<F, U, G>(
 ) -> Result<Pr12LspSessionFactory, LspRuntimeFailure>
 where
     F: FnOnce(ProjectFeedbackStore) -> Arc<dyn FeedbackCycleRuntimePort>,
-    U: SemanticProviderPort + Send + Sync + 'static,
-    G: SemanticProviderPort + Send + Sync + 'static,
 {
     let project = Arc::new(RegisteredProjectLspAuthority::new(
         feedback_runtime.clone(),
@@ -757,11 +1160,7 @@ where
     Ok(Pr12LspSessionFactory::new(
         runtime,
         feedback.clone(),
-        Arc::new(AnalyzerSemanticAdapter::new(
-            analyzer_state,
-            upstream_semantics,
-            graph_semantics,
-        )),
+        semantics,
         diagnostics,
         cancellation,
         feedback,
@@ -850,18 +1249,6 @@ fn finding_item(finding: &FeedbackFindingV1) -> Option<ContextProjectionItem> {
             .clone()
             .unwrap_or_else(|| "feedback finding".to_owned()),
     )
-}
-
-fn finding_read_item(finding: FeedbackFindingReadV1) -> Option<ContextProjectionItem> {
-    let retrieval_handle = finding
-        .expand_handle
-        .as_ref()
-        .unwrap_or(&finding.get_handle)
-        .as_str()
-        .to_owned();
-    let mut item = finding_item(&finding.finding)?;
-    item.retrieval_handle = Some(retrieval_handle);
-    Some(item)
 }
 
 fn impact_projection(
@@ -1176,6 +1563,10 @@ fn now_micros() -> UtcMicros {
     UtcMicros(micros)
 }
 
+fn micros_to_seconds(value: UtcMicros) -> i64 {
+    value.0.div_euclid(1_000_000)
+}
+
 #[cfg(test)]
 mod path_tests {
     use std::path::{Component, Path};
@@ -1284,5 +1675,83 @@ mod path_tests {
         assert!(strict_file_url("https://server/Share/Src/Lib.rs").is_err());
         assert!(strict_file_url("file:///C:/Workspace/../escape.rs").is_err());
         assert!(strict_file_url(r"file:///C:\Workspace\Src\Lib.rs").is_err());
+    }
+}
+
+#[cfg(test)]
+mod context_expansion_tests {
+    use super::{
+        LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION, LspFeedbackProjectionScope,
+        StoredLspContextExpansionV1, context_expansion_scope_is_current,
+        valid_context_expansion_record,
+    };
+    use crate::application::feedback::owner::FeedbackReadOperationV1;
+    use crate::daemon::lsp_gateway::{AdmittedRoot, ContextProjectionKind};
+    use tracedecay_domain::{CodeGenerationId, CommitId, UtcMicros};
+
+    fn record() -> StoredLspContextExpansionV1 {
+        StoredLspContextExpansionV1 {
+            schema_version: LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION,
+            root_uri: "file:///root".to_owned(),
+            document_uri: Some("file:///root/src/lib.rs".to_owned()),
+            kind: ContextProjectionKind::diagnostics(),
+            stable_id: "finding.1".to_owned(),
+            scope_digest: "sha256:scope".to_owned(),
+            head_commit_id: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            code_generation_id: "generation.v1.aaaaaaaa.00000001".to_owned(),
+            generation: 1,
+            issued_at: UtcMicros(10),
+            expires_at: UtcMicros(20),
+            canonical_operation: FeedbackReadOperationV1::Expand,
+            canonical_handle: "rh_0123456789abcdef01234567".to_owned(),
+        }
+    }
+
+    #[test]
+    fn expansion_handles_deny_expiry_wrong_root_and_wrong_scope() {
+        let record = record();
+        let root = AdmittedRoot::new("file:///root");
+        assert!(valid_context_expansion_record(
+            &record,
+            &root,
+            "sha256:scope",
+            UtcMicros(19)
+        ));
+        assert!(!valid_context_expansion_record(
+            &record,
+            &root,
+            "sha256:scope",
+            UtcMicros(20)
+        ));
+        assert!(!valid_context_expansion_record(
+            &record,
+            &AdmittedRoot::new("file:///other"),
+            "sha256:scope",
+            UtcMicros(19)
+        ));
+        assert!(!valid_context_expansion_record(
+            &record,
+            &root,
+            "sha256:other",
+            UtcMicros(19)
+        ));
+    }
+
+    #[test]
+    fn expansion_handles_become_stale_on_exact_generation_drift() {
+        let record = record();
+        let current = LspFeedbackProjectionScope {
+            head_commit_id: CommitId::new(record.head_commit_id.clone()).expect("commit"),
+            code_generation_id: CodeGenerationId::new(record.code_generation_id.clone())
+                .expect("generation"),
+            generation: record.generation,
+        };
+        assert!(context_expansion_scope_is_current(&record, &current));
+
+        let stale = LspFeedbackProjectionScope {
+            generation: current.generation + 1,
+            ..current
+        };
+        assert!(!context_expansion_scope_is_current(&record, &stale));
     }
 }

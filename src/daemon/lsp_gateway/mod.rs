@@ -9,14 +9,17 @@
 //! only frames and forwards one typed protocol actor per admitted session.
 
 mod capabilities;
+mod context;
 mod diagnostics;
 mod dispatch;
 mod endpoint;
+mod factory;
 mod gateway;
 mod overlay;
 mod protocol;
 mod provider;
 mod rpc;
+mod runtime_adapters;
 mod session;
 
 pub use capabilities::{
@@ -24,6 +27,16 @@ pub use capabilities::{
     CapabilityUnavailableReason, ClientCapabilities, EffectiveCapabilities, GatewayCapabilities,
     LSP_PROTOCOL_VERSION, PositionEncoding, SemanticCapability, TextDocumentSync,
     UpstreamCapabilities, negotiate_capabilities,
+};
+pub use context::{
+    ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
+    ContextExpansionScope, ContextProjectionChange, ContextProjectionEnvelope,
+    ContextProjectionItem, ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
+    ContextProjectionRegistration, ContextProjectionRequest, ContextSubscribeRequest,
+    MAX_CONTEXT_CHANGES_PER_POLL, MAX_CONTEXT_PROJECTION_BYTES, MAX_CONTEXT_PROJECTION_ITEMS,
+    MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
+    TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD,
+    TRACEDECAY_CONTEXT_REVISION, TRACEDECAY_SUBSCRIBE_METHOD,
 };
 pub use diagnostics::{
     DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
@@ -36,12 +49,17 @@ pub use endpoint::{
     LspSessionAccess, LspSessionAdmissionPort, LspSessionCredential, LspSessionId,
     LspSessionOpenRequest, LspSessionRegistry, MAX_LSP_SESSIONS,
 };
+pub use factory::{
+    DaemonLspProviderBundle, DaemonLspProviderFactory, DaemonLspRuntimeSession,
+    Pr12LspSessionFactory,
+};
 pub use gateway::{
     AdmittedRoot, CallHierarchyItem, DaemonLspGateway, DiagnosticTrigger, DocumentSymbol,
     FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleResponse, GatewayDocumentDiagnostics,
     GatewayMethod, GatewayResponse, Hover, IncomingCall, LspLocation, MethodUnavailable,
     MethodUnavailableReason, OutgoingCall, SemanticProviderOutcome, SemanticProviderPort,
-    SignatureHelp, TypeHierarchyItem, UnavailableSemanticProvider, WorkspaceSymbol,
+    SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem,
+    UnavailableSemanticProvider, WorkspaceSymbol,
 };
 pub use overlay::{
     DebouncedDiagnostic, DebouncedDiagnosticKind, MAX_OPEN_DOCUMENTS, MAX_OVERLAY_BYTES,
@@ -55,8 +73,19 @@ pub use protocol::{
 };
 pub use provider::{
     AnalyzerCancellationPort, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState,
-    AnalyzerSupervisor, AnalyzerTransitionError, DiagnosticSnapshotOutcome, DiagnosticSnapshotPort,
-    GenerationDiagnostics, MAX_ANALYZER_RESTARTS, UnavailableDiagnosticSnapshotProvider,
+    AnalyzerSupervisor, AnalyzerTransitionError, DiagnosticRefreshAdmission,
+    DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome, DiagnosticSnapshotPort,
+    GenerationDiagnostics, MAX_ANALYZER_RESTARTS, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,
+    UnavailableDiagnosticSnapshotProvider,
+};
+pub use runtime_adapters::{
+    BrokerDiagnosticSnapshotAuthority, CanonicalContextProjectionAuthority,
+    CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
+    FeedbackCycleRuntimePort, LspAnalyzerCancellationAuthority, LspDiagnosticDocumentPort,
+    LspRuntimeFailure, LspRuntimeFuture, LspSemanticOperationOutcome, LspSemanticRequestAuthority,
+    MAX_PR12_FEEDBACK_CYCLES, ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort,
+    Pr12AnalyzerCancellationAdapter, Pr12ContextProjectionAdapter, Pr12DiagnosticSnapshotAdapter,
+    Pr12FeedbackCycleAdapter, Pr12SemanticProviderAdapter,
 };
 pub use session::{
     CancellationOutcome, CompletionDisposition, LifecycleError, LspRequestFailure, LspRequestId,

@@ -6,13 +6,24 @@
 //!
 #![forbid(unsafe_code)]
 
+mod http;
+mod sse;
+
 use serde::Serialize;
 use thiserror::Error;
 use tracedecay_application::{
-    ApplicationEnvelope, ApplicationProblemEnvelope, ApplicationResult, OperationTermination,
-    RequestId, SafeDiagnostic, StreamEvent, StreamEventKind, StreamGap, StreamTermination,
+    ApplicationEnvelope, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
+    OperationTermination, RequestId, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
+    StreamTermination,
 };
 use tracedecay_tool_catalog::BindingId;
+
+pub use http::{
+    HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOperation,
+    HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest,
+    application_problem_response, application_router,
+};
+pub use sse::sse_response;
 
 /// Initial revision for the HTTP adapter's outbound DTOs.
 pub const HTTP_API_REVISION: u32 = 1;
@@ -34,10 +45,15 @@ impl<T> CanonicalInvocationResult<T> {
                 binding_id: self.binding_id,
                 application,
             })),
-            Err(application) => HttpJsonEnvelope::Problem(Box::new(HttpProblemEnvelope {
-                binding_id: self.binding_id,
-                application,
-            })),
+            Err(application) => {
+                let binding_id = (application.problem.kind()
+                    != ApplicationProblemKind::NotFoundOrNotAuthorized)
+                    .then_some(self.binding_id);
+                HttpJsonEnvelope::Problem(Box::new(HttpProblemEnvelope {
+                    binding_id,
+                    application,
+                }))
+            }
         }
     }
 }
@@ -63,19 +79,21 @@ pub struct HttpSuccessEnvelope<T> {
 /// HTTP problem preserves the application's safe problem record verbatim.
 #[derive(Serialize)]
 pub struct HttpProblemEnvelope {
-    pub binding_id: BindingId,
+    /// Concealed denials omit this field so binding existence cannot become an
+    /// authorization oracle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_id: Option<BindingId>,
     #[serde(flatten)]
     pub application: ApplicationProblemEnvelope,
 }
 
-/// SSE presentation of canonical stream events. A concrete server supplies
-/// framing, resume, heartbeat scheduling, and backpressure only.
+/// SSE presentation of canonical stream events.
 #[derive(Serialize)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum HttpSseEvent<T> {
     Open {
         correlation_id: RequestId,
-        next_sequence: u64,
+        frontier: StreamFrontier,
     },
     Item {
         sequence: u64,
@@ -86,16 +104,9 @@ pub enum HttpSseEvent<T> {
         completed: u64,
         total: Option<u64>,
     },
-    Gap {
+    ResumeGap {
         sequence: u64,
         gap: StreamGap,
-    },
-    Heartbeat {
-        sequence: u64,
-    },
-    Warning {
-        sequence: u64,
-        warning: SafeDiagnostic,
     },
     Completed {
         sequence: u64,
@@ -123,6 +134,50 @@ pub enum HttpSseEvent<T> {
     },
 }
 
+impl<T> HttpSseEvent<T> {
+    pub const fn event_name(&self) -> &'static str {
+        match self {
+            Self::Open { .. } => "open",
+            Self::Item { .. } => "item",
+            Self::Progress { .. } => "progress",
+            Self::ResumeGap { .. } => "resume_gap",
+            Self::Completed { .. } => "completed",
+            Self::Cancelled { .. } => "cancelled",
+            Self::TimedOut { .. } => "timed_out",
+            Self::Failed { .. } => "failed",
+            Self::Partial { .. } => "partial",
+            Self::EffectUnknown { .. } => "effect_unknown",
+        }
+    }
+
+    pub const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Open { .. } => None,
+            Self::Item { sequence, .. }
+            | Self::Progress { sequence, .. }
+            | Self::ResumeGap { sequence, .. }
+            | Self::Completed { sequence, .. }
+            | Self::Cancelled { sequence, .. }
+            | Self::TimedOut { sequence, .. }
+            | Self::Failed { sequence, .. }
+            | Self::Partial { sequence, .. }
+            | Self::EffectUnknown { sequence, .. } => Some(*sequence),
+        }
+    }
+
+    pub const fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed { .. }
+                | Self::Cancelled { .. }
+                | Self::TimedOut { .. }
+                | Self::Failed { .. }
+                | Self::Partial { .. }
+                | Self::EffectUnknown { .. }
+        )
+    }
+}
+
 impl<T> From<StreamEvent<T>> for HttpSseEvent<T> {
     fn from(event: StreamEvent<T>) -> Self {
         let sequence = event.sequence;
@@ -133,7 +188,7 @@ impl<T> From<StreamEvent<T>> for HttpSseEvent<T> {
                 completed,
                 total,
             },
-            StreamEventKind::Gap(gap) => Self::Gap { sequence, gap },
+            StreamEventKind::Gap(gap) => Self::ResumeGap { sequence, gap },
             StreamEventKind::Terminal(terminal) => match terminal.termination {
                 OperationTermination::Completed => Self::Completed { sequence, terminal },
                 OperationTermination::Cancelled => Self::Cancelled { sequence, terminal },
@@ -146,28 +201,30 @@ impl<T> From<StreamEvent<T>> for HttpSseEvent<T> {
     }
 }
 
-/// Placeholder for a transport-owned SSE source.
-pub trait HttpSseStream {
-    type Item;
-
-    fn next_event(&mut self) -> Result<Option<HttpSseEvent<Self::Item>>, HttpAdapterError>;
-}
-
-/// Transport wiring failures that reveal no application state.
+/// SSE framing failures. Application failures remain canonical terminal events.
 #[derive(Debug, Error)]
 pub enum HttpAdapterError {
-    #[error("HTTP/SSE transport wiring is not installed")]
-    NotImplemented,
+    #[error("canonical SSE event could not be encoded")]
+    EventEncoding,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::HttpSseEvent;
-    use tracedecay_application::{StreamEvent, StreamEventKind};
+    use super::http::invalid_request_problem;
+    use super::{
+        CanonicalInvocationResult, HttpApplicationOperation, HttpApplicationOwnerKind, HttpSseEvent,
+    };
+    use tracedecay_application::{
+        ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef,
+        RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind,
+    };
+    use tracedecay_tool_catalog::{BindingId, SchemaId};
 
     #[test]
     fn sse_preserves_canonical_item_and_progress_events() {
         let item = HttpSseEvent::from(StreamEvent::item(7, "value").expect("item"));
+        assert_eq!(item.sequence(), Some(7));
+        assert!(!item.is_terminal());
         assert_eq!(
             serde_json::to_value(item).expect("serialize item"),
             serde_json::json!({
@@ -183,6 +240,8 @@ mod tests {
                 total: Some(5),
             },
         });
+        assert_eq!(progress.sequence(), Some(8));
+        assert!(!progress.is_terminal());
         assert_eq!(
             serde_json::to_value(progress).expect("serialize progress"),
             serde_json::json!({
@@ -190,5 +249,83 @@ mod tests {
                 "data": {"sequence": 8, "completed": 2, "total": 5}
             })
         );
+    }
+
+    #[test]
+    fn http_operations_dispatch_to_concrete_owner_families() {
+        assert_eq!(
+            HttpApplicationOperation::GitPreview.owner_kind(),
+            HttpApplicationOwnerKind::Git
+        );
+        assert_eq!(
+            HttpApplicationOperation::FeedbackDiagnostics.owner_kind(),
+            HttpApplicationOwnerKind::Feedback
+        );
+        assert_eq!(
+            HttpApplicationOperation::AffectedTests.owner_kind(),
+            HttpApplicationOwnerKind::Primitive
+        );
+        assert_eq!(
+            HttpApplicationOperation::DiagnosticsRead.owner_kind(),
+            HttpApplicationOwnerKind::Primitive
+        );
+    }
+
+    #[test]
+    fn adapter_rejections_use_the_canonical_problem_envelope() {
+        let envelope = invalid_request_problem(
+            RequestId::new("request.http.invalid").unwrap(),
+            "http.invalid_query",
+            "The HTTP query is invalid",
+        );
+        let value = serde_json::to_value(envelope).expect("serialize canonical problem");
+
+        assert_eq!(value["request_id"], "request.http.invalid");
+        assert_eq!(value["problem"]["kind"], "invalid_request");
+        assert_eq!(value["problem"]["code"], "http.invalid_query");
+        assert_eq!(value["problem"]["owning_layer"], "adapter");
+        assert_eq!(value["problem"]["diagnostic"]["code"], "http.invalid_query");
+    }
+
+    #[test]
+    fn concealed_http_problem_omits_binding_identity() {
+        let result = Err(ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1).unwrap(),
+            RequestId::new("request.test").unwrap(),
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        ));
+        let value = serde_json::to_value(
+            CanonicalInvocationResult::<()>::new(
+                BindingId::new("binding.http.test.v1").unwrap(),
+                result,
+            )
+            .into_http_json(),
+        )
+        .unwrap();
+
+        assert_eq!(value["kind"], "problem");
+        assert!(value["value"].get("binding_id").is_none());
+    }
+
+    #[test]
+    fn non_concealed_http_problem_preserves_binding_identity() {
+        let result = Err(ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1).unwrap(),
+            RequestId::new("request.test").unwrap(),
+            ApplicationProblem::unavailable(
+                SafeDiagnostic::new("test.unavailable", "Temporarily unavailable").unwrap(),
+            ),
+        ));
+        let value = serde_json::to_value(
+            CanonicalInvocationResult::<()>::new(
+                BindingId::new("binding.http.test.v1").unwrap(),
+                result,
+            )
+            .into_http_json(),
+        )
+        .unwrap();
+
+        assert_eq!(value["kind"], "problem");
+        assert_eq!(value["value"]["binding_id"], "binding.http.test.v1");
     }
 }

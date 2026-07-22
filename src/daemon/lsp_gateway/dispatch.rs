@@ -2,17 +2,18 @@
 
 use serde_json::Value;
 
-use super::gateway::FeedbackCyclePort;
+use super::context::{
+    TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_SUBSCRIBE_METHOD,
+};
+use super::diagnostics::LspPosition;
+use super::gateway::{FeedbackCyclePort, SemanticProviderPort, SemanticRequest};
+use super::protocol::{DaemonLspProtocolSession, TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD};
 use super::provider::DiagnosticSnapshotPort;
-use super::protocol::DaemonLspProtocolSession;
 use super::rpc::{
-    RpcFailure, call_items_value, deferred_method_reason, document_uri, error_response,
-    hover_value, incoming_calls_value, locations_value, outgoing_calls_value, request_id,
-    response_value, signature_help_value, type_items_value, workspace_symbols_value,
+    RpcFailure, deferred_method_reason, document_position, document_uri, error_response,
+    parse_call_item, parse_type_item, request_id,
 };
 use super::session::LspRequestId;
-use super::gateway::SemanticProviderPort;
-use super::rpc::document_symbols_value;
 
 /// Known client-originated LSP methods handled by the daemon gateway.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,6 +43,10 @@ pub(super) enum LspClientMethod {
     TextDocumentPrepareTypeHierarchy,
     TypeHierarchySupertypes,
     TypeHierarchySubtypes,
+    TraceDecayContext,
+    TraceDecayContextExpand,
+    TraceDecaySubscribe,
+    TraceDecayNativeDiagnostics,
     Unknown(String),
 }
 
@@ -73,6 +78,10 @@ impl LspClientMethod {
             "textDocument/prepareTypeHierarchy" => Self::TextDocumentPrepareTypeHierarchy,
             "typeHierarchy/supertypes" => Self::TypeHierarchySupertypes,
             "typeHierarchy/subtypes" => Self::TypeHierarchySubtypes,
+            TRACEDECAY_CONTEXT_METHOD => Self::TraceDecayContext,
+            TRACEDECAY_CONTEXT_EXPAND_METHOD => Self::TraceDecayContextExpand,
+            TRACEDECAY_SUBSCRIBE_METHOD => Self::TraceDecaySubscribe,
+            TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD => Self::TraceDecayNativeDiagnostics,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -211,6 +220,9 @@ fn dispatch_notification<P, S, D>(
         LspClientMethod::TextDocumentDidSave => {
             let _ = session.handle_did_save(&params, now_ms);
         }
+        LspClientMethod::TraceDecayNativeDiagnostics => {
+            session.handle_native_diagnostics_notification(&params, now_ms);
+        }
         _ => {}
     }
 }
@@ -231,102 +243,181 @@ fn dispatch_request<P, S, D>(
         LspClientMethod::Initialized => session.handle_initialized_request(response_id),
         LspClientMethod::Shutdown => session.handle_shutdown_request(response_id),
         LspClientMethod::Exit => session.handle_exit_request(response_id),
-        LspClientMethod::TextDocumentDiagnostic => {
-            match document_uri(&params) {
-                Ok(uri) => {
-                    let version = session.document_version(&uri);
-                    session.with_request(
-                        response_id,
-                        Some((uri.clone(), version)),
-                        now_ms,
-                        move |session| session.pull_diagnostics(&uri, &params),
-                    );
-                }
-                Err(error) => {
-                    let _ = session.enqueue_value(error_response(response_id, error));
-                }
+        LspClientMethod::TextDocumentDiagnostic => match document_uri(&params) {
+            Ok(uri) => {
+                let version = session.document_version(&uri);
+                session.with_request(
+                    response_id,
+                    Some((uri.clone(), version)),
+                    now_ms,
+                    move |session| session.pull_diagnostics(&uri, &params),
+                );
             }
-        }
+            Err(error) => {
+                let _ = session.enqueue_value(error_response(response_id, error));
+            }
+        },
         LspClientMethod::TextDocumentDeclaration => {
-            session.handle_position_request(response_id, &params, now_ms, |gateway, uri, position| {
-                response_value(gateway.declaration(uri, position), locations_value)
-            });
+            start_position_semantic(
+                session,
+                response_id,
+                &params,
+                now_ms,
+                |document_uri, position| SemanticRequest::Declaration {
+                    document_uri,
+                    position,
+                },
+            );
         }
         LspClientMethod::TextDocumentDefinition => {
-            session.handle_position_request(response_id, &params, now_ms, |gateway, uri, position| {
-                response_value(gateway.definition(uri, position), locations_value)
-            });
+            start_position_semantic(
+                session,
+                response_id,
+                &params,
+                now_ms,
+                |document_uri, position| SemanticRequest::Definition {
+                    document_uri,
+                    position,
+                },
+            );
         }
         LspClientMethod::TextDocumentTypeDefinition => {
-            session.handle_position_request(response_id, &params, now_ms, |gateway, uri, position| {
-                response_value(gateway.type_definition(uri, position), locations_value)
-            });
+            start_position_semantic(
+                session,
+                response_id,
+                &params,
+                now_ms,
+                |document_uri, position| SemanticRequest::TypeDefinition {
+                    document_uri,
+                    position,
+                },
+            );
         }
         LspClientMethod::TextDocumentImplementation => {
-            session.handle_position_request(response_id, &params, now_ms, |gateway, uri, position| {
-                response_value(gateway.implementation(uri, position), locations_value)
-            });
+            start_position_semantic(
+                session,
+                response_id,
+                &params,
+                now_ms,
+                |document_uri, position| SemanticRequest::Implementation {
+                    document_uri,
+                    position,
+                },
+            );
         }
         LspClientMethod::TextDocumentReferences => {
-            session.handle_position_request(response_id, &params, now_ms, |gateway, uri, position| {
-                response_value(gateway.references(uri, position), locations_value)
-            });
+            start_position_semantic(
+                session,
+                response_id,
+                &params,
+                now_ms,
+                |document_uri, position| SemanticRequest::References {
+                    document_uri,
+                    position,
+                },
+            );
         }
         LspClientMethod::TextDocumentHover => {
-            session.handle_position_request(response_id, &params, now_ms, |gateway, uri, position| {
-                response_value(gateway.hover(uri, position), hover_value)
-            });
+            start_position_semantic(
+                session,
+                response_id,
+                &params,
+                now_ms,
+                |document_uri, position| SemanticRequest::Hover {
+                    document_uri,
+                    position,
+                },
+            );
         }
-        LspClientMethod::TextDocumentDocumentSymbol => {
-            session.handle_document_request(response_id, &params, now_ms, |gateway, uri| {
-                response_value(gateway.document_symbols(uri), document_symbols_value)
-            });
-        }
+        LspClientMethod::TextDocumentDocumentSymbol => match document_uri(&params) {
+            Ok(document_uri) => {
+                let version = session.document_version(&document_uri);
+                session.start_semantic_request(
+                    response_id,
+                    Some((document_uri.clone(), version)),
+                    SemanticRequest::DocumentSymbols { document_uri },
+                    now_ms,
+                );
+            }
+            Err(error) => {
+                let _ = session.enqueue_value(error_response(response_id, error));
+            }
+        },
         LspClientMethod::WorkspaceSymbol => {
             let query = params
                 .get("query")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            session.with_request(response_id, None, now_ms, move |session| {
-                response_value(
-                    session.gateway.workspace_symbols(&query),
-                    workspace_symbols_value,
-                )
-            });
+            session.start_semantic_request(
+                response_id,
+                None,
+                SemanticRequest::WorkspaceSymbols { query },
+                now_ms,
+            );
         }
         LspClientMethod::TextDocumentPrepareCallHierarchy => {
-            session.handle_position_request(response_id, &params, now_ms, |gateway, uri, position| {
-                response_value(
-                    gateway.prepare_call_hierarchy(uri, position),
-                    call_items_value,
-                )
-            });
+            start_position_semantic(
+                session,
+                response_id,
+                &params,
+                now_ms,
+                |document_uri, position| SemanticRequest::PrepareCallHierarchy {
+                    document_uri,
+                    position,
+                },
+            );
         }
         LspClientMethod::CallHierarchyIncomingCalls => {
-            session.handle_call_request(response_id, &params, now_ms, true);
+            start_call_semantic(session, response_id, &params, now_ms, true);
         }
         LspClientMethod::CallHierarchyOutgoingCalls => {
-            session.handle_call_request(response_id, &params, now_ms, false);
+            start_call_semantic(session, response_id, &params, now_ms, false);
         }
         LspClientMethod::TextDocumentSignatureHelp => {
-            session.handle_position_request(response_id, &params, now_ms, |gateway, uri, position| {
-                response_value(gateway.signature_help(uri, position), signature_help_value)
-            });
+            start_position_semantic(
+                session,
+                response_id,
+                &params,
+                now_ms,
+                |document_uri, position| SemanticRequest::SignatureHelp {
+                    document_uri,
+                    position,
+                },
+            );
         }
         LspClientMethod::TextDocumentPrepareTypeHierarchy => {
-            session.handle_position_request(response_id, &params, now_ms, |gateway, uri, position| {
-                response_value(
-                    gateway.prepare_type_hierarchy(uri, position),
-                    type_items_value,
-                )
-            });
+            start_position_semantic(
+                session,
+                response_id,
+                &params,
+                now_ms,
+                |document_uri, position| SemanticRequest::PrepareTypeHierarchy {
+                    document_uri,
+                    position,
+                },
+            );
         }
         LspClientMethod::TypeHierarchySupertypes => {
-            session.handle_type_request(response_id, &params, now_ms, true);
+            start_type_semantic(session, response_id, &params, now_ms, true);
         }
         LspClientMethod::TypeHierarchySubtypes => {
-            session.handle_type_request(response_id, &params, now_ms, false);
+            start_type_semantic(session, response_id, &params, now_ms, false);
+        }
+        LspClientMethod::TraceDecayContext => {
+            session.handle_context_request(response_id, &params, now_ms);
+        }
+        LspClientMethod::TraceDecayContextExpand => {
+            session.handle_context_expand_request(response_id, &params, now_ms);
+        }
+        LspClientMethod::TraceDecaySubscribe => {
+            session.handle_context_subscribe(response_id, &params, now_ms);
+        }
+        LspClientMethod::TraceDecayNativeDiagnostics => {
+            let _ = session.enqueue_value(error_response(
+                response_id,
+                RpcFailure::invalid_params("tracedecay/nativeDiagnostics must be a notification"),
+            ));
         }
         LspClientMethod::CancelRequest => session.handle_cancel(&params),
         LspClientMethod::TextDocumentDidOpen => {
@@ -346,6 +437,107 @@ fn dispatch_request<P, S, D>(
                 response_id,
                 RpcFailure::unavailable(&method, deferred_method_reason(&method)),
             ));
+        }
+    }
+}
+
+fn start_position_semantic<P, S, D>(
+    session: &mut DaemonLspProtocolSession<P, S, D>,
+    response_id: Value,
+    params: &Value,
+    now_ms: u64,
+    request: impl FnOnce(String, LspPosition) -> SemanticRequest,
+) where
+    P: FeedbackCyclePort,
+    S: SemanticProviderPort,
+    D: DiagnosticSnapshotPort,
+{
+    match document_position(params) {
+        Ok((document_uri, position)) => {
+            let version = session.document_version(&document_uri);
+            session.start_semantic_request(
+                response_id,
+                Some((document_uri.clone(), version)),
+                request(document_uri, position),
+                now_ms,
+            );
+        }
+        Err(error) => {
+            let _ = session.enqueue_value(error_response(response_id, error));
+        }
+    }
+}
+
+fn start_call_semantic<P, S, D>(
+    session: &mut DaemonLspProtocolSession<P, S, D>,
+    response_id: Value,
+    params: &Value,
+    now_ms: u64,
+    incoming: bool,
+) where
+    P: FeedbackCyclePort,
+    S: SemanticProviderPort,
+    D: DiagnosticSnapshotPort,
+{
+    let item = params
+        .get("item")
+        .ok_or_else(|| RpcFailure::invalid_params("item is required"))
+        .and_then(parse_call_item);
+    match item {
+        Ok(item) => {
+            let document_uri = item.uri.clone();
+            let version = session.document_version(&document_uri);
+            let request = if incoming {
+                SemanticRequest::IncomingCalls { item }
+            } else {
+                SemanticRequest::OutgoingCalls { item }
+            };
+            session.start_semantic_request(
+                response_id,
+                Some((document_uri, version)),
+                request,
+                now_ms,
+            );
+        }
+        Err(error) => {
+            let _ = session.enqueue_value(error_response(response_id, error));
+        }
+    }
+}
+
+fn start_type_semantic<P, S, D>(
+    session: &mut DaemonLspProtocolSession<P, S, D>,
+    response_id: Value,
+    params: &Value,
+    now_ms: u64,
+    supertypes: bool,
+) where
+    P: FeedbackCyclePort,
+    S: SemanticProviderPort,
+    D: DiagnosticSnapshotPort,
+{
+    let item = params
+        .get("item")
+        .ok_or_else(|| RpcFailure::invalid_params("item is required"))
+        .and_then(parse_type_item);
+    match item {
+        Ok(item) => {
+            let document_uri = item.uri.clone();
+            let version = session.document_version(&document_uri);
+            let request = if supertypes {
+                SemanticRequest::TypeHierarchySupertypes { item }
+            } else {
+                SemanticRequest::TypeHierarchySubtypes { item }
+            };
+            session.start_semantic_request(
+                response_id,
+                Some((document_uri, version)),
+                request,
+                now_ms,
+            );
+        }
+        Err(error) => {
+            let _ = session.enqueue_value(error_response(response_id, error));
         }
     }
 }

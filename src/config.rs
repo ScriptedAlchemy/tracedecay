@@ -2,14 +2,13 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
     DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
@@ -25,8 +24,14 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
     TELEMETRY_TIMINGS_SETTING_KEY,
 };
+use tracedecay_domain::{ProjectId, UtcMicros};
 
+use crate::application::configuration::ConfigurationControlStore;
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::GlobalDb;
+use crate::global_db::configuration::{
+    GlobalDbConfigurationControlStore, migrate_legacy_configuration_inputs,
+};
 
 pub mod registry;
 pub mod resolver;
@@ -46,6 +51,160 @@ pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
 
 /// Project graph database filename inside a `.tracedecay/` data dir.
 pub const DB_FILENAME: &str = "tracedecay.db";
+
+/// Atomic project-scoped semantic runtime selection.
+///
+/// The value is canonical JSON for [`SemanticConfig`]. Keeping the active
+/// profile, rollback profile, and local resource ceilings under one setting
+/// prevents a configuration revision from exposing a partially updated
+/// semantic selection.
+pub const SEMANTIC_RUNTIME_SETTING_KEY: &str = "semantic.runtime.v1";
+
+const MAX_SEMANTIC_MODEL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_SEMANTIC_TOKENIZER_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_SEMANTIC_RESIDENT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAX_SEMANTIC_THREADS: u32 = 64;
+const MAX_SEMANTIC_CONCURRENT_SESSIONS: u32 = 64;
+const MAX_SEMANTIC_BATCH_SIZE: u32 = 4096;
+const MAX_SEMANTIC_SEQUENCE_LENGTH: u32 = 32768;
+const MAX_SEMANTIC_LOAD_DEADLINE_MS: u64 = 10 * 60 * 1000;
+
+/// One explicitly installed local profile. Runtime code receives this path
+/// from the pinned configuration snapshot and never searches an ambient model
+/// cache or derives a download location from the profile identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticProfileSelection {
+    pub profile_id: String,
+    pub artifact_digest: String,
+    pub artifact_path: PathBuf,
+}
+
+impl SemanticProfileSelection {
+    fn validate(&self) -> Result<()> {
+        if self.profile_id.trim().is_empty() || self.profile_id.len() > 128 {
+            return Err(config_error(
+                "semantic profile_id must be non-empty and at most 128 bytes",
+            ));
+        }
+        if self.artifact_digest.len() != 64
+            || !self
+                .artifact_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(config_error(
+                "semantic artifact_digest must be 64 lowercase hexadecimal characters",
+            ));
+        }
+        if !self.artifact_path.is_absolute()
+            || self
+                .artifact_path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(config_error(
+                "semantic artifact_path must be an absolute normalized local path",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Process ceilings applied before an installed semantic profile is admitted.
+///
+/// The selected artifact manifest may impose tighter limits. These local
+/// ceilings never authorize a profile to exceed its own declared bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticResourceCeilings {
+    pub max_model_bytes: u64,
+    pub max_tokenizer_bytes: u64,
+    pub max_resident_bytes: u64,
+    pub max_threads: u32,
+    pub max_concurrent_sessions: u32,
+    pub max_batch_size: u32,
+    pub max_sequence_length: u32,
+    pub load_deadline_ms: u64,
+}
+
+impl Default for SemanticResourceCeilings {
+    fn default() -> Self {
+        Self {
+            max_model_bytes: 512 * 1024 * 1024,
+            max_tokenizer_bytes: 64 * 1024 * 1024,
+            max_resident_bytes: 1024 * 1024 * 1024,
+            max_threads: 4,
+            max_concurrent_sessions: 2,
+            max_batch_size: 32,
+            max_sequence_length: 512,
+            load_deadline_ms: 30_000,
+        }
+    }
+}
+
+impl SemanticResourceCeilings {
+    fn validate(self) -> Result<()> {
+        let valid = self.max_model_bytes > 0
+            && self.max_model_bytes <= MAX_SEMANTIC_MODEL_BYTES
+            && self.max_tokenizer_bytes > 0
+            && self.max_tokenizer_bytes <= MAX_SEMANTIC_TOKENIZER_BYTES
+            && self.max_resident_bytes > 0
+            && self.max_resident_bytes <= MAX_SEMANTIC_RESIDENT_BYTES
+            && self.max_model_bytes <= self.max_resident_bytes
+            && self.max_tokenizer_bytes <= self.max_resident_bytes
+            && (1..=MAX_SEMANTIC_THREADS).contains(&self.max_threads)
+            && (1..=MAX_SEMANTIC_CONCURRENT_SESSIONS).contains(&self.max_concurrent_sessions)
+            && (1..=MAX_SEMANTIC_BATCH_SIZE).contains(&self.max_batch_size)
+            && (1..=MAX_SEMANTIC_SEQUENCE_LENGTH).contains(&self.max_sequence_length)
+            && (1..=MAX_SEMANTIC_LOAD_DEADLINE_MS).contains(&self.load_deadline_ms);
+        if !valid {
+            return Err(config_error(
+                "semantic resource ceilings are zero, incoherent, or exceed supported maxima",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Pinned semantic runtime selection.
+///
+/// `None` means the optional semantic lane is unavailable while exact,
+/// lexical, and graph retrieval remain healthy. A rollback profile is retained
+/// explicitly and can never be inferred by scanning the artifact store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticConfig {
+    #[serde(default)]
+    pub active_profile: Option<SemanticProfileSelection>,
+    #[serde(default)]
+    pub rollback_profile: Option<SemanticProfileSelection>,
+    #[serde(default)]
+    pub resources: SemanticResourceCeilings,
+}
+
+impl SemanticConfig {
+    pub fn validate(&self) -> Result<()> {
+        self.resources.validate()?;
+        if let Some(active) = self.active_profile.as_ref() {
+            active.validate()?;
+        }
+        if let Some(rollback) = self.rollback_profile.as_ref() {
+            rollback.validate()?;
+            if self.active_profile.is_none() {
+                return Err(config_error(
+                    "semantic rollback profile requires an active profile",
+                ));
+            }
+        }
+        if self.active_profile == self.rollback_profile && self.active_profile.is_some() {
+            return Err(config_error(
+                "semantic active and rollback profiles must be distinct",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Directory-name segments treated as generated or vendored content:
 /// build output, package-manager caches, and vendored dependencies.
@@ -174,6 +333,10 @@ pub struct TraceDecayConfig {
     /// pinned snapshot during legacy migration, never during a tool call.
     #[serde(default)]
     pub diagnostics_prewarm: bool,
+    /// Optional installed local semantic profile selection. Missing or
+    /// unavailable semantics never disables exact, lexical, or graph search.
+    #[serde(default)]
+    pub semantic: SemanticConfig,
     /// Index-freshness auto-sync settings (git-metadata watcher, serve-stale,
     /// branch lifecycle). Absent in older `config.json` files, so defaulted.
     #[serde(default)]
@@ -458,6 +621,7 @@ impl Default for TraceDecayConfig {
             track_call_sites: true,
             git_ignore: default_git_ignore(),
             diagnostics_prewarm: false,
+            semantic: SemanticConfig::default(),
             sync: SyncConfig::default(),
             telemetry: TelemetryConfig::default(),
         }
@@ -614,19 +778,38 @@ fn runtime_configuration_cache() -> &'static RuntimeConfigurationCache {
     CACHE.get_or_init(RuntimeConfigurationCache::default)
 }
 
-fn configuration_daemon_client_slot() -> &'static RwLock<Option<Arc<dyn ConfigurationDaemonClient>>>
-{
-    static CLIENT: OnceLock<RwLock<Option<Arc<dyn ConfigurationDaemonClient>>>> = OnceLock::new();
-    CLIENT.get_or_init(|| RwLock::new(None))
+#[derive(Default)]
+struct ConfigurationDaemonClients {
+    by_project: BTreeMap<String, Arc<dyn ConfigurationDaemonClient>>,
+    fallback: Option<Arc<dyn ConfigurationDaemonClient>>,
 }
 
-/// Installs the daemon-owned mutation client. This is intentionally an
-/// explicit composition root operation; HTTP/CLI/MCP handlers never open a
-/// configuration store directly.
+fn configuration_daemon_client_slot() -> &'static RwLock<ConfigurationDaemonClients> {
+    static CLIENT: OnceLock<RwLock<ConfigurationDaemonClients>> = OnceLock::new();
+    CLIENT.get_or_init(|| RwLock::new(ConfigurationDaemonClients::default()))
+}
+
+/// Installs a fallback daemon-owned mutation client for compatibility callers
+/// that have no authoritative project route.
 pub fn install_configuration_daemon_client(client: Arc<dyn ConfigurationDaemonClient>) {
-    *configuration_daemon_client_slot()
+    configuration_daemon_client_slot()
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(client);
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .fallback = Some(client);
+}
+
+/// Installs one daemon-owned client for its exact project identity. CLI, MCP,
+/// HTTP, and dashboard callers select this mapping from the already-pinned
+/// target rather than opening a configuration store or re-resolving a path.
+pub fn install_configuration_daemon_client_for_project(
+    target: &RuntimeConfigurationTarget,
+    client: Arc<dyn ConfigurationDaemonClient>,
+) {
+    configuration_daemon_client_slot()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .by_project
+        .insert(target.project_id.as_str().to_owned(), client);
 }
 
 /// Publishes one daemon-resolved snapshot for runtime and hook consumers.
@@ -680,17 +863,149 @@ pub fn runtime_configuration_for_layout(
     Ok(configuration)
 }
 
-/// Ensures a process-local pinned snapshot for a resolved store layout.
+/// Retained store handle paired with the exact revision resolved at project
+/// open. Daemon composition consumes this bundle instead of opening a second
+/// configuration database or resolving a second snapshot.
+pub(crate) struct OpenedRuntimeConfiguration {
+    pub(crate) configuration: PinnedRuntimeConfiguration,
+    pub(crate) database: Arc<GlobalDb>,
+}
+
+/// Loads and publishes the durable current configuration for a resolved store
+/// layout.
 ///
-/// Prefer an already-published control-plane revision. When the process-local
-/// cache is empty (cold daemon open, CLI open before any publish), publish
-/// registry defaults with the synthetic bootstrap revision so open cannot fail
-/// closed solely because no pin exists yet.
-pub fn ensure_runtime_configuration_for_layout(
+/// A fresh project receives one migration-backed registry-default revision.
+/// Once any revision exists, open always reads that durable current revision;
+/// a corrupt or ambiguous history is never replaced with local defaults.
+pub(crate) async fn open_runtime_configuration_for_layout(
+    project_root: &Path,
+    layout: &crate::storage::StoreLayout,
+) -> Result<OpenedRuntimeConfiguration> {
+    let target = runtime_configuration_target_for_layout(project_root, layout)?;
+    let database = Arc::new(
+        GlobalDb::try_open_at(&layout.sessions_db_path)
+            .await?
+            .ok_or_else(|| {
+                config_error(format!(
+                    "configuration authority unavailable: could not open '{}'",
+                    layout.sessions_db_path.display()
+                ))
+            })?,
+    );
+    let store = GlobalDbConfigurationControlStore::new(database.as_ref());
+    let current = match store.current().await {
+        Ok(current) => current,
+        Err(error) => {
+            if !store
+                .is_uninitialized()
+                .await
+                .map_err(map_configuration_error)?
+            {
+                return Err(map_configuration_error(error));
+            }
+            let registry = registry::ConfigurationRegistry::core().map_err(|error| {
+                config_error(format!("configuration registry unavailable: {error}"))
+            })?;
+            let target_layer = ConfigurationLayerIdV1::Project {
+                project_id: target.project_id.clone(),
+            };
+            let initial_revision_id = ConfigurationRevisionId::new(
+                "configuration.initial.migration.v1",
+            )
+            .map_err(|error| {
+                config_error(format!("invalid initial configuration revision: {error}"))
+            })?;
+            let legacy_target = registry::legacy_decoder::LegacyConfigurationDecodeTargetV1 {
+                target_layer,
+                target_revision_id: initial_revision_id,
+            };
+            let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+            let legacy = read_legacy_configuration_inputs(
+                &layout.config_path,
+                &environment,
+                &legacy_target,
+            )?;
+            migrate_legacy_configuration_inputs(&registry, &legacy, &store, current_utc_micros())
+                .await
+                .map_err(|error| {
+                    config_error(format!(
+                        "configuration initial migration could not commit: {error}"
+                    ))
+                })?;
+            store.current().await.map_err(map_configuration_error)?
+        }
+    };
+    let configuration =
+        PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
+    install_pinned_runtime_configuration(configuration.clone())?;
+    Ok(OpenedRuntimeConfiguration {
+        configuration,
+        database,
+    })
+}
+
+pub async fn ensure_runtime_configuration_for_layout(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
 ) -> Result<PinnedRuntimeConfiguration> {
-    bootstrap_runtime_configuration(project_root, layout)
+    Ok(open_runtime_configuration_for_layout(project_root, layout)
+        .await?
+        .configuration)
+}
+
+/// Loads an already-persisted current configuration without creating a store,
+/// applying a migration, or publishing a fallback revision.
+pub(crate) async fn open_runtime_configuration_for_layout_read_only(
+    project_root: &Path,
+    layout: &crate::storage::StoreLayout,
+) -> Result<OpenedRuntimeConfiguration> {
+    let target = runtime_configuration_target_for_layout(project_root, layout)?;
+    let database = Arc::new(
+        GlobalDb::open_read_only_at(&layout.sessions_db_path)
+            .await
+            .ok_or_else(|| {
+                config_error(format!(
+                    "configuration authority unavailable: no durable store at '{}'",
+                    layout.sessions_db_path.display()
+                ))
+            })?,
+    );
+    let store = GlobalDbConfigurationControlStore::new(database.as_ref());
+    let current = store.current().await.map_err(map_configuration_error)?;
+    let configuration =
+        PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
+    install_pinned_runtime_configuration(configuration.clone())?;
+    Ok(OpenedRuntimeConfiguration {
+        configuration,
+        database,
+    })
+}
+
+pub async fn load_runtime_configuration_for_layout_read_only(
+    project_root: &Path,
+    layout: &crate::storage::StoreLayout,
+) -> Result<PinnedRuntimeConfiguration> {
+    Ok(
+        open_runtime_configuration_for_layout_read_only(project_root, layout)
+            .await?
+            .configuration,
+    )
+}
+
+fn current_utc_micros() -> UtcMicros {
+    UtcMicros(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| {
+                duration.as_micros().min(i64::MAX as u128) as i64
+            }),
+    )
+}
+
+fn map_configuration_error(
+    error: crate::application::configuration::ConfigurationError,
+) -> TraceDecayError {
+    config_error(format!("configuration authority unavailable: {error}"))
 }
 
 /// Returns a cached configuration without resolving a layout, opening a
@@ -771,15 +1086,22 @@ pub async fn mutate_pinned_runtime_configuration(
     else {
         return Ok(current.clone());
     };
-    let client = configuration_daemon_client_slot()
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-        .ok_or_else(|| {
-            config_error(
-                "configuration authority unavailable: daemon control-plane client is not installed",
-            )
-        })?;
+    let client = {
+        let clients = configuration_daemon_client_slot()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clients.fallback.clone().or_else(|| {
+            clients
+                .by_project
+                .get(current.target.project_id.as_str())
+                .cloned()
+        })
+    }
+    .ok_or_else(|| {
+        config_error(
+            "configuration authority unavailable: daemon control-plane client is not installed",
+        )
+    })?;
     commit_runtime_configuration_mutation(client.as_ref(), current, mutation).await
 }
 
@@ -860,6 +1182,7 @@ pub fn runtime_config_from_snapshot(
         track_call_sites: required_bool(snapshot, INDEX_TRACK_CALL_SITES_SETTING_KEY)?,
         git_ignore: required_bool(snapshot, INDEX_GIT_IGNORE_SETTING_KEY)?,
         diagnostics_prewarm: required_bool(snapshot, DIAGNOSTICS_PREWARM_SETTING_KEY)?,
+        semantic: semantic_config_from_snapshot(snapshot)?,
         sync: SyncConfig {
             auto_watch: required_bool(snapshot, SYNC_AUTO_WATCH_SETTING_KEY)?,
             watch_debounce_ms: required_unsigned(snapshot, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY)?,
@@ -897,6 +1220,32 @@ pub fn runtime_config_from_snapshot(
             timings: required_bool(snapshot, TELEMETRY_TIMINGS_SETTING_KEY)?,
         },
     })
+}
+
+fn semantic_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<SemanticConfig> {
+    let key = SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).map_err(|error| {
+        config_error(format!(
+            "invalid runtime setting key '{SEMANTIC_RUNTIME_SETTING_KEY}': {error}"
+        ))
+    })?;
+    let semantic = match snapshot.effective_values.get(&key) {
+        None => SemanticConfig::default(),
+        Some(ConfigurationValueV1::Text(value)) => {
+            serde_json::from_str(value).map_err(|error| {
+                config_error(format!(
+                    "resolved semantic runtime setting is invalid: {error}"
+                ))
+            })?
+        }
+        Some(value) => {
+            return Err(config_error(format!(
+                "resolved configuration setting '{SEMANTIC_RUNTIME_SETTING_KEY}' has wrong type: expected text, got {:?}",
+                value.kind()
+            )));
+        }
+    };
+    semantic.validate()?;
+    Ok(semantic)
 }
 
 fn required_setting<'a>(
@@ -1012,6 +1361,13 @@ fn direct_mutation_for_runtime_config_diff(
         DIAGNOSTICS_PREWARM_SETTING_KEY,
         ConfigurationValueV1::Boolean(before.diagnostics_prewarm),
         ConfigurationValueV1::Boolean(after.diagnostics_prewarm),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
+        SEMANTIC_RUNTIME_SETTING_KEY,
+        ConfigurationValueV1::Text(semantic_config_json(&before.semantic)?),
+        ConfigurationValueV1::Text(semantic_config_json(&after.semantic)?),
     )?;
     push_runtime_change(
         &mut mutations,
@@ -1136,6 +1492,12 @@ fn direct_mutation_for_runtime_config_diff(
     Ok((!mutations.is_empty()).then_some(
         crate::application::configuration::DirectConfigurationMutation::Batch { mutations },
     ))
+}
+
+fn semantic_config_json(config: &SemanticConfig) -> Result<String> {
+    config.validate()?;
+    serde_json::to_string(config)
+        .map_err(|error| config_error(format!("semantic runtime setting is invalid: {error}")))
 }
 
 fn push_runtime_change(

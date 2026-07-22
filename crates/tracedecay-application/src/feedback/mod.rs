@@ -8,21 +8,42 @@ mod adapters;
 mod catalog;
 mod github_ci_proximity;
 mod ports;
+mod read;
 mod service;
 
-pub use catalog::{feedback_surface_catalog_contribution, feedback_surface_handler_descriptors};
+pub use catalog::{
+    feedback_read_operations, feedback_surface_catalog_contribution,
+    feedback_surface_handler_descriptors, feedback_surface_operation,
+};
 
 pub use adapters::{GenerationBoundFeedbackDiagnosticsAdapter, GraphImpactFeedbackAdapter};
 pub use github_ci_proximity::{
-    GitHubReadCredentialScopeV1, GitHubReviewReadPort, GitHubReviewReadRequestV1,
+    CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+    CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, CiFailureLocalizationRequestV1,
+    GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
+    GitHubReviewReadPort, GitHubReviewReadPortOutcomeV1, GitHubReviewReadRequestV1,
+    GitHubReviewReadResponseV1, PROXIMITY_CAPABILITY_ID_V1, PROXIMITY_USE_CASE_ID_V1,
+    ProximityCandidatesPortOutcomeV1, ProximityDedupeOutcomeV1, ProximityDedupePort,
+    ProximityEvaluationRequestV1, ProximityPort,
 };
 pub use ports::{
     FeedbackCompletedPublicationV1, FeedbackCycleDedupePort, FeedbackCycleDedupePublicationState,
     FeedbackCycleDedupeState, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest,
     FeedbackImpactPort, FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackPortFuture, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
+    FeedbackPortFuture, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
+    FeedbackRuntimeStateV1,
+};
+pub use read::{
+    FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
+    FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_EXPAND_USE_CASE_ID_V1,
+    FEEDBACK_GET_CAPABILITY_ID_V1, FEEDBACK_GET_USE_CASE_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
+    FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackDiagnosticsReadRequestV1,
+    FeedbackDiagnosticsReadResultV1, FeedbackExpandRequestV1, FeedbackExpandResultV1,
+    FeedbackFindingReadV1, FeedbackGetRequestV1, FeedbackGetResultV1, FeedbackListRequestV1,
+    FeedbackListResultV1, FeedbackReadOperationsV1, FeedbackReadPort, FeedbackReadPortContext,
+    FeedbackReadPortFuture, FeedbackReadService,
 };
 pub use service::{
-    FeedbackBudgetUsage, FeedbackCycleControl, FeedbackCycleExecutionRequest,
-    FeedbackCycleExecutionResult, FeedbackCycleService,
+    FeedbackBudgetUsage, FeedbackCycleAdvisoryV1, FeedbackCycleControl,
+    FeedbackCycleExecutionRequest, FeedbackCycleExecutionResult, FeedbackCycleService,
 };

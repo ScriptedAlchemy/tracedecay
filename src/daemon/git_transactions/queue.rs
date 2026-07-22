@@ -4,6 +4,7 @@
 //! still detected through snapshot compare-and-swap and native index locks.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
@@ -13,19 +14,61 @@ use tracedecay_domain::RepositoryId;
 pub(crate) enum RepositoryMutationQueueError {
     #[error("repository mutation queue is unavailable")]
     Unavailable,
+    #[error("repository mutation queue is saturated")]
+    Saturated,
 }
 
-#[derive(Default)]
 pub(crate) struct RepositoryMutationQueue {
     gates: Mutex<BTreeMap<RepositoryId, Arc<Mutex<()>>>>,
+    pending: AtomicUsize,
+    capacity: usize,
+}
+
+const MAX_PENDING_REPOSITORY_MUTATIONS: usize = 64;
+
+impl Default for RepositoryMutationQueue {
+    fn default() -> Self {
+        Self {
+            gates: Mutex::new(BTreeMap::new()),
+            pending: AtomicUsize::new(0),
+            capacity: MAX_PENDING_REPOSITORY_MUTATIONS,
+        }
+    }
+}
+
+struct MutationAdmission<'a> {
+    pending: &'a AtomicUsize,
+}
+
+impl Drop for MutationAdmission<'_> {
+    fn drop(&mut self) {
+        self.pending.fetch_sub(1, Ordering::Release);
+    }
 }
 
 impl RepositoryMutationQueue {
+    #[cfg(test)]
+    pub(crate) fn with_capacity_for_test(capacity: usize) -> Self {
+        Self {
+            gates: Mutex::new(BTreeMap::new()),
+            pending: AtomicUsize::new(0),
+            capacity,
+        }
+    }
+
     pub(crate) fn with_repository<T>(
         &self,
         repository_id: &RepositoryId,
         operation: impl FnOnce() -> T,
     ) -> Result<T, RepositoryMutationQueueError> {
+        self.pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                (pending < self.capacity).then_some(pending + 1)
+            })
+            .map_err(|_| RepositoryMutationQueueError::Saturated)?;
+        let _admission = MutationAdmission {
+            pending: &self.pending,
+        };
         let gate = {
             let mut gates = self
                 .gates

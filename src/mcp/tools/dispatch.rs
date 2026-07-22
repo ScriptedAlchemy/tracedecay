@@ -4,12 +4,23 @@
 //! into the typed fields below before this module runs. No handler, query,
 //! store, or renderer is selected here.
 
-use crate::daemon_client::{BindingResolver, DispatchedInvocation, resolve_dispatch};
+use tracedecay_application::{CancellationSignal, Deadline, PageRequest, RequestId};
+use tracedecay_tool_catalog::BindingSurface;
+
+use crate::application_surface::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
+    ApplicationSurfaceOperation, ApplicationSurfaceRequest, execute_application_surface,
+    observe_surface_argument_rejection, resolve_application_surface_dispatch,
+    resolve_application_surface_dispatch_with_controls,
+};
+use crate::daemon_client::{
+    BindingResolver, DaemonInvocationClient, DispatchedInvocation, RequestedOutputFormat,
+    resolve_dispatch,
+};
 pub use crate::daemon_client::{
     DispatchError as McpDispatchError, DispatchInput as McpDispatchInput,
     InvocationControls as McpInvocationControls,
 };
-use tracedecay_tool_catalog::BindingSurface;
 
 /// Resolves the MCP binding and constructs the same canonical dispatch used by
 /// the CLI adapter.
@@ -18,4 +29,80 @@ pub fn resolve_mcp_dispatch<T>(
     input: McpDispatchInput<T>,
 ) -> Result<DispatchedInvocation<T>, McpDispatchError> {
     resolve_dispatch(resolver, BindingSurface::Mcp, input)
+}
+
+pub async fn resolve_mcp_application_surface(
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    request: ApplicationSurfaceRequest,
+    requested_format: RequestedOutputFormat,
+    client: Option<&DaemonInvocationClient>,
+) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
+    let dispatched = match resolve_mcp_application_surface_dispatch(
+        operation,
+        request_id.clone(),
+        request,
+        requested_format,
+    ) {
+        Ok(dispatched) => dispatched,
+        Err(error) => {
+            observe_surface_argument_rejection(client, BindingSurface::Mcp, operation, &request_id)
+                .await;
+            return Err(error);
+        }
+    };
+    execute_application_surface(operation, dispatched, client).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_mcp_application_surface_with_controls(
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    request: ApplicationSurfaceRequest,
+    requested_format: RequestedOutputFormat,
+    deadline: Deadline,
+    cancellation: CancellationSignal,
+    client: Option<&DaemonInvocationClient>,
+) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
+    let page = match PageRequest::first(10) {
+        Ok(page) => page,
+        Err(error) => {
+            observe_surface_argument_rejection(client, BindingSurface::Mcp, operation, &request_id)
+                .await;
+            return Err(error.into());
+        }
+    };
+    let dispatched = match resolve_application_surface_dispatch_with_controls(
+        BindingSurface::Mcp,
+        operation,
+        request_id.clone(),
+        request,
+        page,
+        Some(deadline),
+        cancellation,
+        requested_format,
+    ) {
+        Ok(dispatched) => dispatched,
+        Err(error) => {
+            observe_surface_argument_rejection(client, BindingSurface::Mcp, operation, &request_id)
+                .await;
+            return Err(error);
+        }
+    };
+    execute_application_surface(operation, dispatched, client).await
+}
+
+pub fn resolve_mcp_application_surface_dispatch(
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    request: ApplicationSurfaceRequest,
+    requested_format: RequestedOutputFormat,
+) -> Result<DispatchedInvocation<ApplicationSurfaceRequest>, ApplicationSurfaceAdapterError> {
+    resolve_application_surface_dispatch(
+        BindingSurface::Mcp,
+        operation,
+        request_id,
+        request,
+        requested_format,
+    )
 }

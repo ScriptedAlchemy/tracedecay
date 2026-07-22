@@ -5,38 +5,51 @@
 //! is parsed, lifecycle-gated, root-gated, bounded, and dispatched through a
 //! typed gateway/provider port.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::capabilities::{
-    CapabilityAvailability, CapabilityParseError, ClientCapabilities, GatewayCapabilities,
-    UpstreamCapabilities, negotiate_capabilities,
+    CapabilityAvailability, CapabilityParseError, ClientCapabilities, EffectiveCapabilities,
+    GatewayCapabilities, UpstreamCapabilities, negotiate_capabilities,
+};
+use super::context::{
+    ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
+    ContextProjectionChange, ContextProjectionEnvelope, ContextProjectionKind,
+    ContextProjectionOutcome, ContextProjectionPort, ContextProjectionRegistration,
+    ContextProjectionRequest, ContextSubscribeRequest, MAX_CONTEXT_CHANGES_PER_POLL,
+    MAX_CONTEXT_PROJECTION_BYTES, MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_PROJECTION_KINDS,
+    MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
+    TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD,
+    TRACEDECAY_SUBSCRIBE_METHOD,
 };
 use super::diagnostics::{
-    DiagnosticMerge, DiagnosticSeverity, DocumentDiagnosticReport, GatewayDiagnostic, LspPosition,
-    LspRange,
+    DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
+    GatewayDiagnostic, LspPosition, LspRange, MAX_DOCUMENT_DIAGNOSTICS,
 };
 use super::dispatch::{dispatch_incoming, parse_incoming};
 use super::gateway::{
-    AdmittedRoot, CallHierarchyItem, DaemonLspGateway, FeedbackCyclePort, FeedbackCycleResponse,
-    GatewayDocumentDiagnostics, GatewayMethod, LspLocation, MethodUnavailableReason,
-    SemanticProviderPort, TypeHierarchyItem,
+    AdmittedRoot, DaemonLspGateway, FeedbackCyclePort, FeedbackCycleResponse, GatewayMethod,
+    GatewayResponse, MethodUnavailableReason, SemanticProviderPort, SemanticRequest,
 };
 use super::overlay::{
     DebouncedDiagnosticKind, OverlayDiagnosticDebouncer, OverlayError, OverlayStore,
 };
 use super::provider::{
-    DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, UnavailableDiagnosticSnapshotProvider,
+    AnalyzerCancellationPort, DiagnosticRefreshAdmission, DiagnosticRefreshIdentity,
+    DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,
+    UnavailableDiagnosticSnapshotProvider,
 };
 use super::rpc::{
     RpcFailure, diagnostic_result_id, diagnostic_value, document_diagnostic_report_value,
-    document_position, document_uri, error_response, gateway_diagnostic_value,
-    incoming_calls_value, initialized_root_uri, outgoing_calls_value, overlay_failure,
-    parse_call_item, parse_overlay_change, parse_type_item, request_id, request_id_value,
-    required_i64, required_nonempty_string, required_string, response_value, success_response,
-    text_document, type_items_value,
+    document_position, document_uri, error_response, incoming_calls_value, initialized_root_uri,
+    outgoing_calls_value, overlay_failure, parse_call_item, parse_overlay_change, parse_type_item,
+    request_id, request_id_value, required_i64, required_nonempty_string, required_string,
+    response_value, semantic_response_value, success_response, text_document, type_items_value,
 };
 use super::session::{
     CancellationOutcome, CompletionDisposition, LifecycleError, LspRequestFailure, LspRequestId,
@@ -55,6 +68,10 @@ pub const DEFAULT_LSP_REQUEST_DEADLINE_MS: u64 = 5_000;
 pub const MAX_QUEUED_OUTBOUND_BYTES: usize = 1024 * 1024;
 pub const MAX_QUEUED_OUTBOUND_MESSAGES: usize = 64;
 const MIN_CLIENT_FRAME_OUTBOUND_RESERVE: usize = MAX_PUBLICATION_BYTES;
+pub(super) const TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD: &str = "tracedecay/nativeDiagnostics";
+const MAX_NATIVE_DIAGNOSTIC_URI_BYTES: usize = 4 * 1024;
+const MAX_NATIVE_DIAGNOSTIC_METADATA_BYTES: usize = 256;
+static NEXT_CONTEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProtocolDispatch {
@@ -81,12 +98,152 @@ struct QueuedFrame {
 struct PublishedDiagnostic {
     version: i64,
     generation: u64,
-    result_id: String,
+}
+
+#[derive(Clone)]
+struct PendingDiagnosticRefresh {
+    identity: DiagnosticRefreshIdentity,
+    overlay_version: i64,
+}
+
+#[derive(Clone)]
+struct PendingContextRequest {
+    response_id: Value,
+    operation_id: LspRequestId,
+    request: ContextProjectionRequest,
+}
+
+#[derive(Clone)]
+struct PendingContextExpansion {
+    response_id: Value,
+    operation_id: LspRequestId,
+}
+
+#[derive(Clone)]
+struct PendingSemanticRequest {
+    response_id: Value,
+    request: SemanticRequest,
+}
+
+#[derive(Clone)]
+struct NativeDiagnosticSnapshot {
+    version: i64,
+    diagnostics: Vec<GatewayDiagnostic>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeDiagnosticsNotification {
+    uri: String,
+    version: i64,
+    diagnostics: Vec<NativeDiagnostic>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeDiagnostic {
+    range: NativeRange,
+    severity: Option<u8>,
+    code: Option<Value>,
+    source: String,
+    message: String,
+    data: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeRange {
+    start: NativePosition,
+    end: NativePosition,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativePosition {
+    line: u32,
+    character: u32,
+}
+
+impl NativeDiagnosticsNotification {
+    fn into_snapshot(self) -> Option<(String, NativeDiagnosticSnapshot)> {
+        if !valid_native_string(&self.uri, MAX_NATIVE_DIAGNOSTIC_URI_BYTES)
+            || self.version < 0
+            || self.diagnostics.len() > MAX_DOCUMENT_DIAGNOSTICS
+        {
+            return None;
+        }
+        let uri = self.uri;
+        let diagnostics = self
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.into_gateway_diagnostic(&uri))
+            .collect::<Option<Vec<_>>>()?;
+        Some((
+            uri,
+            NativeDiagnosticSnapshot {
+                version: self.version,
+                diagnostics,
+            },
+        ))
+    }
+}
+
+impl NativeDiagnostic {
+    fn into_gateway_diagnostic(self, uri: &str) -> Option<GatewayDiagnostic> {
+        if !valid_native_string(&self.source, MAX_NATIVE_DIAGNOSTIC_METADATA_BYTES)
+            || !valid_native_string(
+                &self.message,
+                super::diagnostics::MAX_DIAGNOSTIC_MESSAGE_BYTES,
+            )
+            || !valid_native_diagnostic_data(self.data.as_ref())
+        {
+            return None;
+        }
+        let severity = match self.severity {
+            None => None,
+            Some(1) => Some(DiagnosticSeverity::Error),
+            Some(2) => Some(DiagnosticSeverity::Warning),
+            Some(3) => Some(DiagnosticSeverity::Information),
+            Some(4) => Some(DiagnosticSeverity::Hint),
+            Some(_) => return None,
+        };
+        let code = match self.code {
+            None | Some(Value::Null) => None,
+            Some(Value::String(code))
+                if valid_native_string(&code, MAX_NATIVE_DIAGNOSTIC_METADATA_BYTES) =>
+            {
+                Some(code)
+            }
+            Some(Value::Number(code)) => {
+                let code = code.to_string();
+                valid_native_string(&code, MAX_NATIVE_DIAGNOSTIC_METADATA_BYTES).then_some(code)
+            }
+            Some(_) => return None,
+        };
+        let range = LspRange {
+            start: LspPosition {
+                line: self.range.start.line,
+                character: self.range.start.character,
+            },
+            end: LspPosition {
+                line: self.range.end.line,
+                character: self.range.end.character,
+            },
+        };
+        (range.start <= range.end).then_some(GatewayDiagnostic {
+            uri: uri.to_owned(),
+            range,
+            severity,
+            code,
+            message: self.message,
+            source: DiagnosticSource::Upstream,
+        })
+    }
 }
 
 /// One authenticated daemon LSP session. It owns no durable state and is
 /// dropped alongside its registry entry after TTL expiry.
-pub struct DaemonLspProtocolSession<P, S, D = UnavailableDiagnosticSnapshotProvider>
+pub struct DaemonLspProtocolSession<P, S, D>
 where
     P: FeedbackCyclePort,
     S: SemanticProviderPort,
@@ -103,17 +260,27 @@ where
     outbound_in_flight: bool,
     queued_outbound_bytes: usize,
     published: BTreeMap<String, PublishedDiagnostic>,
+    native_upstream: BTreeMap<String, NativeDiagnosticSnapshot>,
+    cursor_native_mode: bool,
     request_deadline_ms: u64,
     next_server_request_id: u64,
     diagnostic_refresh_request: Option<LspRequestId>,
     diagnostic_refresh_needed: bool,
+    active_diagnostic_refreshes: BTreeMap<String, PendingDiagnosticRefresh>,
+    context: Option<Arc<dyn ContextProjectionPort + Send + Sync>>,
+    context_subscriptions: BTreeSet<ContextProjectionRegistration>,
+    context_generations: BTreeMap<(ContextProjectionKind, Option<String>), u64>,
+    pending_context_requests: BTreeMap<LspRequestId, PendingContextRequest>,
+    pending_context_expansions: BTreeMap<LspRequestId, PendingContextExpansion>,
+    pending_semantic_requests: BTreeMap<LspRequestId, PendingSemanticRequest>,
+    cancellation: Option<Arc<dyn AnalyzerCancellationPort + Send + Sync>>,
 }
 
 /// Concrete bridge-facing adapter for one typed daemon session actor. It
 /// parses each client payload through [`DaemonLspProtocolSession`] and exposes
 /// only queued LSP frames back to the bridge; it cannot become a raw daemon
 /// socket tunnel.
-pub struct DaemonLspProtocolTransport<P, S, D = UnavailableDiagnosticSnapshotProvider>
+pub struct DaemonLspProtocolTransport<P, S, D>
 where
     P: FeedbackCyclePort,
     S: SemanticProviderPort,
@@ -227,6 +394,31 @@ where
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
+    /// Creates a complete typed session from daemon-owned application ports.
+    /// This is the central invocation integration point: no semantic or
+    /// diagnostic provider is selected implicitly.
+    pub fn from_ports(
+        root: AdmittedRoot,
+        initial_capabilities: EffectiveCapabilities,
+        gateway_capabilities: GatewayCapabilities,
+        upstream_capabilities: UpstreamCapabilities,
+        feedback_cycle: P,
+        semantic_provider: S,
+        diagnostics: D,
+    ) -> Self {
+        Self::new(
+            DaemonLspGateway::new(
+                root,
+                initial_capabilities,
+                feedback_cycle,
+                semantic_provider,
+            ),
+            gateway_capabilities,
+            upstream_capabilities,
+            diagnostics,
+        )
+    }
+
     pub fn new(
         gateway: DaemonLspGateway<P, S>,
         gateway_capabilities: GatewayCapabilities,
@@ -245,11 +437,40 @@ where
             outbound_in_flight: false,
             queued_outbound_bytes: 0,
             published: BTreeMap::new(),
+            native_upstream: BTreeMap::new(),
+            cursor_native_mode: false,
             request_deadline_ms: DEFAULT_LSP_REQUEST_DEADLINE_MS,
             next_server_request_id: 1,
             diagnostic_refresh_request: None,
             diagnostic_refresh_needed: false,
+            active_diagnostic_refreshes: BTreeMap::new(),
+            context: None,
+            context_subscriptions: BTreeSet::new(),
+            context_generations: BTreeMap::new(),
+            pending_context_requests: BTreeMap::new(),
+            pending_context_expansions: BTreeMap::new(),
+            pending_semantic_requests: BTreeMap::new(),
+            cancellation: None,
         }
+    }
+
+    /// Mounts the daemon-owned analyzer cancellation adapter. Session
+    /// cancellation remains authoritative even when the provider reports that
+    /// its upstream work could not be interrupted.
+    pub fn with_cancellation_port<C>(mut self, cancellation: C) -> Self
+    where
+        C: AnalyzerCancellationPort + Send + Sync + 'static,
+    {
+        self.cancellation = Some(Arc::new(cancellation));
+        self
+    }
+
+    pub fn with_context_projection_port<C>(mut self, context: C) -> Self
+    where
+        C: ContextProjectionPort + Send + Sync + 'static,
+    {
+        self.context = Some(Arc::new(context));
+        self
     }
 
     pub fn root(&self) -> &AdmittedRoot {
@@ -269,7 +490,7 @@ where
     }
 
     pub fn cancel_request(&mut self, id: &LspRequestId) -> CancellationOutcome {
-        self.control.cancel_request(id)
+        self.cancel_request_and_upstream(id)
     }
 
     /// Preserves session-only state while a bridge reconnects. Publications
@@ -340,6 +561,10 @@ where
         };
         self.dispatch_value(value, now_ms);
         self.flush_debounced_diagnostics(now_ms);
+        self.poll_context_requests();
+        self.poll_context_expansions();
+        self.poll_semantic_requests();
+        self.flush_context_changes();
         ProtocolDispatch {
             queued_messages: self.outbound.len().saturating_sub(before),
             backpressured: backpressured_before
@@ -357,6 +582,10 @@ where
         let before = self.outbound.len();
         self.expire_requests(now_ms);
         self.flush_debounced_diagnostics(now_ms);
+        self.poll_context_requests();
+        self.poll_context_expansions();
+        self.poll_semantic_requests();
+        self.flush_context_changes();
         ProtocolDispatch {
             queued_messages: self.outbound.len().saturating_sub(before),
             backpressured: self.queued_outbound_bytes >= MAX_QUEUED_OUTBOUND_BYTES,
@@ -441,14 +670,35 @@ where
     }
 
     fn clear_volatile_state(&mut self) {
+        if let Some(cancellation) = &self.cancellation {
+            for request_id in self.pending_semantic_requests.keys() {
+                let _ = cancellation.cancel_upstream(self.gateway.root(), request_id);
+            }
+        }
+        if let Some(context) = &self.context {
+            for pending in self.pending_context_requests.values() {
+                let _ = context.cancel_request(self.gateway.root(), &pending.operation_id);
+            }
+            for pending in self.pending_context_expansions.values() {
+                let _ = context.cancel_request(self.gateway.root(), &pending.operation_id);
+            }
+        }
         self.overlays.clear();
         self.debounce.clear();
         self.outbound.clear();
         self.outbound_in_flight = false;
         self.queued_outbound_bytes = 0;
         self.published.clear();
+        self.native_upstream.clear();
+        self.cursor_native_mode = false;
         self.diagnostic_refresh_request = None;
         self.diagnostic_refresh_needed = false;
+        self.active_diagnostic_refreshes.clear();
+        self.context_subscriptions.clear();
+        self.context_generations.clear();
+        self.pending_context_requests.clear();
+        self.pending_context_expansions.clear();
+        self.pending_semantic_requests.clear();
     }
 
     fn dispatch_value(&mut self, value: Value, now_ms: u64) {
@@ -555,6 +805,13 @@ where
             ));
             return;
         }
+        let cursor_native_mode = match cursor_native_initialize_mode(params) {
+            Ok(cursor_native_mode) => cursor_native_mode,
+            Err(error) => {
+                self.enqueue_value(error_response(id, error));
+                return;
+            }
+        };
         let empty = Value::Object(Map::new());
         let client = match ClientCapabilities::from_initialize_capabilities(
             params.get("capabilities").unwrap_or(&empty),
@@ -574,12 +831,37 @@ where
                 ));
                 return;
             }
+            Err(CapabilityParseError::InvalidTraceDecayCapabilities) => {
+                self.enqueue_value(error_response(
+                    id,
+                    RpcFailure::invalid_params(
+                        "experimental.tracedecay projections must be bounded kind/revision pairs",
+                    ),
+                ));
+                return;
+            }
         };
-        let effective = negotiate_capabilities(
-            &client,
-            &self.gateway_capabilities,
-            &self.upstream_capabilities,
-        );
+        let mounted_context = self
+            .context
+            .as_ref()
+            .map(|context| {
+                context
+                    .registrations()
+                    .into_iter()
+                    .filter(|registration| {
+                        registration.kind.is_valid() && registration.revision > 0
+                    })
+                    .take(MAX_CONTEXT_PROJECTION_KINDS)
+                    .map(|registration| (registration.kind, registration.revision))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let mut gateway_capabilities = self.gateway_capabilities.clone();
+        gateway_capabilities
+            .context_projections
+            .retain(|kind, revision| mounted_context.get(kind) == Some(revision));
+        let effective =
+            negotiate_capabilities(&client, &gateway_capabilities, &self.upstream_capabilities);
         if let CapabilityAvailability::Unavailable(unavailable) =
             effective.initialization_availability()
         {
@@ -623,6 +905,7 @@ where
             ));
             return;
         }
+        self.cursor_native_mode = cursor_native_mode;
         self.gateway
             .bind_initialized_capabilities(effective.clone());
     }
@@ -631,10 +914,45 @@ where
         let Some(id) = params.get("id").and_then(request_id) else {
             return;
         };
-        let _ = self.control.cancel_request(&id);
+        let _ = self.cancel_request_and_upstream(&id);
     }
 
-    pub(super) fn handle_did_open(&mut self, params: &Value, now_ms: u64) -> Result<(), RpcFailure> {
+    pub(super) fn handle_native_diagnostics_notification(&mut self, params: &Value, now_ms: u64) {
+        if !self.cursor_native_mode || self.require_ready().is_err() {
+            return;
+        }
+        let Ok(notification) =
+            serde_json::from_value::<NativeDiagnosticsNotification>(params.clone())
+        else {
+            return;
+        };
+        let Some((uri, snapshot)) = notification.into_snapshot() else {
+            return;
+        };
+        if self.require_document_root(&uri).is_err() {
+            return;
+        }
+        let Some(document_version) = self.overlays.version(&uri) else {
+            return;
+        };
+        if document_version != snapshot.version {
+            return;
+        }
+        let version = snapshot.version;
+        self.native_upstream.insert(uri.clone(), snapshot);
+        if !self
+            .debounce
+            .schedule_immediate_refresh(uri.clone(), version, now_ms)
+        {
+            self.native_upstream.remove(&uri);
+        }
+    }
+
+    pub(super) fn handle_did_open(
+        &mut self,
+        params: &Value,
+        now_ms: u64,
+    ) -> Result<(), RpcFailure> {
         self.require_ready()?;
         let text_document = text_document(params)?;
         let uri = required_nonempty_string(text_document, "uri")?;
@@ -652,6 +970,13 @@ where
         // new incarnation.
         self.debounce.cancel(&uri);
         self.discard_document_publications(&uri);
+        if self
+            .native_upstream
+            .get(&uri)
+            .is_some_and(|native| native.version != snapshot.version)
+        {
+            self.native_upstream.remove(&uri);
+        }
         let _ = self.publish_diagnostics(&uri, snapshot.version, 0, Vec::new());
         self.control.supersede_document(&uri, snapshot.version);
         if !self
@@ -663,7 +988,11 @@ where
         Ok(())
     }
 
-    pub(super) fn handle_did_change(&mut self, params: &Value, now_ms: u64) -> Result<(), RpcFailure> {
+    pub(super) fn handle_did_change(
+        &mut self,
+        params: &Value,
+        now_ms: u64,
+    ) -> Result<(), RpcFailure> {
         self.require_ready()?;
         let text_document = text_document(params)?;
         let uri = required_nonempty_string(text_document, "uri")?;
@@ -686,6 +1015,7 @@ where
             .overlays
             .change(&uri, version, &changes)
             .map_err(|error| self.close_for_overlay_error(error))?;
+        self.native_upstream.remove(&uri);
         self.control.supersede_document(&uri, snapshot.version);
         if !self
             .debounce
@@ -696,11 +1026,16 @@ where
         Ok(())
     }
 
-    pub(super) fn handle_did_close(&mut self, params: &Value, now_ms: u64) -> Result<(), RpcFailure> {
+    pub(super) fn handle_did_close(
+        &mut self,
+        params: &Value,
+        now_ms: u64,
+    ) -> Result<(), RpcFailure> {
         self.require_ready()?;
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
         self.require_document_root(&uri)?;
         let closed = self.overlays.close(&uri).map_err(overlay_failure)?;
+        self.native_upstream.remove(&uri);
         self.control
             .supersede_document(&uri, closed.version.saturating_add(1));
         if !self.debounce.schedule_clear(uri, closed.version, now_ms) {
@@ -709,7 +1044,11 @@ where
         Ok(())
     }
 
-    pub(super) fn handle_did_save(&mut self, params: &Value, now_ms: u64) -> Result<(), RpcFailure> {
+    pub(super) fn handle_did_save(
+        &mut self,
+        params: &Value,
+        now_ms: u64,
+    ) -> Result<(), RpcFailure> {
         self.require_ready()?;
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
         self.require_document_root(&uri)?;
@@ -769,7 +1108,13 @@ where
         }
     }
 
-    pub(super) fn handle_call_request(&mut self, id: Value, params: &Value, now_ms: u64, incoming: bool) {
+    pub(super) fn handle_call_request(
+        &mut self,
+        id: Value,
+        params: &Value,
+        now_ms: u64,
+        incoming: bool,
+    ) {
         let item = params
             .get("item")
             .ok_or_else(|| RpcFailure::invalid_params("item is required"));
@@ -791,7 +1136,13 @@ where
         }
     }
 
-    pub(super) fn handle_type_request(&mut self, id: Value, params: &Value, now_ms: u64, supertypes: bool) {
+    pub(super) fn handle_type_request(
+        &mut self,
+        id: Value,
+        params: &Value,
+        now_ms: u64,
+        supertypes: bool,
+    ) {
         let item = params
             .get("item")
             .ok_or_else(|| RpcFailure::invalid_params("item is required"));
@@ -811,6 +1162,89 @@ where
                             type_items_value,
                         )
                     }
+                });
+            }
+            Err(error) => {
+                let _ = self.enqueue_value(error_response(id, error));
+            }
+        }
+    }
+
+    pub(super) fn handle_context_request(&mut self, id: Value, params: &Value, now_ms: u64) {
+        let request = serde_json::from_value::<ContextProjectionRequest>(params.clone())
+            .map_err(|_| RpcFailure::invalid_params("invalid tracedecay/context parameters"));
+        match request {
+            Ok(request) if request.kind.is_valid() => {
+                let Some(context_request_id) = request_id(&id) else {
+                    let _ = self.enqueue_value(error_response(
+                        Value::Null,
+                        RpcFailure::invalid_params(
+                            "tracedecay/context requires an integer or string request id",
+                        ),
+                    ));
+                    return;
+                };
+                if let Some(uri) = request.document_uri.as_deref()
+                    && let Err(error) = self.require_document_root(uri)
+                {
+                    let _ = self.enqueue_value(error_response(id, error));
+                    return;
+                }
+                let document = request
+                    .document_uri
+                    .as_ref()
+                    .map(|uri| (uri.clone(), self.overlays.version(uri).unwrap_or_default()));
+                self.start_context_request(id, context_request_id, document, request, now_ms);
+            }
+            Ok(_) => {
+                let _ = self.enqueue_value(error_response(
+                    id,
+                    RpcFailure::invalid_params("invalid TraceDecay projection kind"),
+                ));
+            }
+            Err(error) => {
+                let _ = self.enqueue_value(error_response(id, error));
+            }
+        }
+    }
+
+    pub(super) fn handle_context_expand_request(&mut self, id: Value, params: &Value, now_ms: u64) {
+        let request =
+            serde_json::from_value::<ContextExpansionRequest>(params.clone()).map_err(|_| {
+                RpcFailure::invalid_params("invalid tracedecay/context/expand parameters")
+            });
+        match request {
+            Ok(request) if valid_retrieval_handle(Some(&request.retrieval_handle)) => {
+                let Some(context_request_id) = request_id(&id) else {
+                    let _ = self.enqueue_value(error_response(
+                        Value::Null,
+                        RpcFailure::invalid_params(
+                            "tracedecay/context/expand requires an integer or string request id",
+                        ),
+                    ));
+                    return;
+                };
+                self.start_context_expansion(id, context_request_id, request, now_ms);
+            }
+            Ok(_) => {
+                let _ = self.enqueue_value(error_response(
+                    id,
+                    RpcFailure::invalid_params("invalid TraceDecay retrieval handle"),
+                ));
+            }
+            Err(error) => {
+                let _ = self.enqueue_value(error_response(id, error));
+            }
+        }
+    }
+
+    pub(super) fn handle_context_subscribe(&mut self, id: Value, params: &Value, now_ms: u64) {
+        let request = serde_json::from_value::<ContextSubscribeRequest>(params.clone())
+            .map_err(|_| RpcFailure::invalid_params("invalid tracedecay/subscribe parameters"));
+        match request {
+            Ok(request) => {
+                self.with_request(id, None, now_ms, move |session| {
+                    session.context_subscription_value(request)
                 });
             }
             Err(error) => {
@@ -888,7 +1322,624 @@ where
         }
     }
 
-    pub(super) fn pull_diagnostics(&mut self, uri: &str, params: &Value) -> Result<Value, RpcFailure> {
+    pub(super) fn start_semantic_request(
+        &mut self,
+        response_id: Value,
+        document: Option<(String, i64)>,
+        request: SemanticRequest,
+        now_ms: u64,
+    ) {
+        let Some(request_id) = request_id(&response_id) else {
+            let _ = self.enqueue_value(error_response(
+                Value::Null,
+                RpcFailure::invalid_params("semantic request id must be an integer or string"),
+            ));
+            return;
+        };
+        let deadline = now_ms.saturating_add(self.request_deadline_ms);
+        match self
+            .control
+            .admit_request_with_deadline(request_id.clone(), document, Some(deadline))
+        {
+            super::session::RequestAdmission::Accepted => {
+                match self.semantic_request_value(&request_id, &request) {
+                    Ok(None) => {
+                        self.pending_semantic_requests.insert(
+                            request_id,
+                            PendingSemanticRequest {
+                                response_id,
+                                request,
+                            },
+                        );
+                    }
+                    result => self.complete_semantic_request(request_id, response_id, result),
+                }
+            }
+            super::session::RequestAdmission::DuplicateId => {
+                let _ = self.enqueue_value(error_response(
+                    response_id,
+                    RpcFailure {
+                        code: -32600,
+                        message: "Invalid Request",
+                        data: json!({ "detail": "duplicate request id" }),
+                    },
+                ));
+            }
+            super::session::RequestAdmission::SessionUnavailable => {
+                let _ = self.enqueue_value(error_response(
+                    response_id,
+                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
+                        retrigger_request: true,
+                    }),
+                ));
+            }
+            super::session::RequestAdmission::Saturated { retrigger_request } => {
+                let _ = self.enqueue_value(error_response(
+                    response_id,
+                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
+                        retrigger_request,
+                    }),
+                ));
+            }
+        }
+    }
+
+    fn semantic_request_value(
+        &self,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+    ) -> Result<Option<Value>, RpcFailure> {
+        match self.gateway.semantic_request(request_id, request) {
+            GatewayResponse::Value(value) => Ok(Some(semantic_response_value(value))),
+            GatewayResponse::Partial { coverage, .. } => Err(RpcFailure {
+                code: -32802,
+                message: "Server cancelled request",
+                data: json!({ "retriggerRequest": true, "coverage": coverage }),
+            }),
+            GatewayResponse::Pending => Ok(None),
+            GatewayResponse::Unavailable(unavailable) => Err(RpcFailure::unavailable(
+                unavailable.method.as_lsp_method(),
+                unavailable.reason,
+            )),
+            GatewayResponse::RequestFailed(failure) => Err(RpcFailure::request_failure(failure)),
+        }
+    }
+
+    fn complete_semantic_request(
+        &mut self,
+        request_id: LspRequestId,
+        response_id: Value,
+        result: Result<Option<Value>, RpcFailure>,
+    ) {
+        let completion = self.control.complete_request(&request_id);
+        if let Some(failure) = completion.failure() {
+            let _ = self.enqueue_value(error_response(
+                response_id,
+                RpcFailure::request_failure(failure),
+            ));
+        } else if completion == CompletionDisposition::Publish {
+            match result {
+                Ok(Some(value)) => {
+                    let _ = self.enqueue_value(success_response(response_id, value));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = self.enqueue_value(error_response(response_id, error));
+                }
+            }
+        }
+    }
+
+    fn poll_semantic_requests(&mut self) {
+        let request_ids = self
+            .pending_semantic_requests
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            let Some(pending) = self.pending_semantic_requests.get(&request_id).cloned() else {
+                continue;
+            };
+            let result = self.semantic_request_value(&request_id, &pending.request);
+            if matches!(result, Ok(None)) {
+                continue;
+            }
+            self.pending_semantic_requests.remove(&request_id);
+            self.complete_semantic_request(request_id, pending.response_id, result);
+        }
+    }
+
+    fn start_context_request(
+        &mut self,
+        response_id: Value,
+        request_id: LspRequestId,
+        document: Option<(String, i64)>,
+        request: ContextProjectionRequest,
+        now_ms: u64,
+    ) {
+        let deadline = now_ms.saturating_add(self.request_deadline_ms);
+        match self
+            .control
+            .admit_request_with_deadline(request_id.clone(), document, Some(deadline))
+        {
+            super::session::RequestAdmission::Accepted => {
+                let operation_id = LspRequestId::String(format!(
+                    "lsp-context-operation-{}",
+                    NEXT_CONTEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed)
+                ));
+                match self.context_snapshot_value(&operation_id, &request) {
+                    Ok(None) => {
+                        self.pending_context_requests.insert(
+                            request_id,
+                            PendingContextRequest {
+                                response_id,
+                                operation_id,
+                                request,
+                            },
+                        );
+                    }
+                    result => self.complete_context_request(request_id, response_id, result),
+                }
+            }
+            super::session::RequestAdmission::DuplicateId => {
+                let _ = self.enqueue_value(error_response(
+                    response_id,
+                    RpcFailure {
+                        code: -32600,
+                        message: "Invalid Request",
+                        data: json!({ "detail": "duplicate request id" }),
+                    },
+                ));
+            }
+            super::session::RequestAdmission::SessionUnavailable => {
+                let _ = self.enqueue_value(error_response(
+                    response_id,
+                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
+                        retrigger_request: true,
+                    }),
+                ));
+            }
+            super::session::RequestAdmission::Saturated { retrigger_request } => {
+                let _ = self.enqueue_value(error_response(
+                    response_id,
+                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
+                        retrigger_request,
+                    }),
+                ));
+            }
+        }
+    }
+
+    fn start_context_expansion(
+        &mut self,
+        response_id: Value,
+        request_id: LspRequestId,
+        request: ContextExpansionRequest,
+        now_ms: u64,
+    ) {
+        let deadline = now_ms.saturating_add(self.request_deadline_ms);
+        match self
+            .control
+            .admit_request_with_deadline(request_id.clone(), None, Some(deadline))
+        {
+            super::session::RequestAdmission::Accepted => {
+                let operation_id = LspRequestId::String(format!(
+                    "lsp-context-expansion-{}",
+                    NEXT_CONTEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed)
+                ));
+                match self.context_expansion_value(&operation_id, &request) {
+                    Ok(None) => {
+                        self.pending_context_expansions.insert(
+                            request_id,
+                            PendingContextExpansion {
+                                response_id,
+                                operation_id,
+                            },
+                        );
+                    }
+                    result => self.complete_context_request(request_id, response_id, result),
+                }
+            }
+            super::session::RequestAdmission::DuplicateId => {
+                let _ = self.enqueue_value(error_response(
+                    response_id,
+                    RpcFailure {
+                        code: -32600,
+                        message: "Invalid Request",
+                        data: json!({ "detail": "duplicate request id" }),
+                    },
+                ));
+            }
+            super::session::RequestAdmission::SessionUnavailable => {
+                let _ = self.enqueue_value(error_response(
+                    response_id,
+                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
+                        retrigger_request: true,
+                    }),
+                ));
+            }
+            super::session::RequestAdmission::Saturated { retrigger_request } => {
+                let _ = self.enqueue_value(error_response(
+                    response_id,
+                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
+                        retrigger_request,
+                    }),
+                ));
+            }
+        }
+    }
+
+    fn complete_context_request(
+        &mut self,
+        request_id: LspRequestId,
+        response_id: Value,
+        result: Result<Option<Value>, RpcFailure>,
+    ) {
+        let completion = self.control.complete_request(&request_id);
+        if let Some(failure) = completion.failure() {
+            let _ = self.enqueue_value(error_response(
+                response_id,
+                RpcFailure::request_failure(failure),
+            ));
+        } else if completion == CompletionDisposition::Publish {
+            match result {
+                Ok(Some(value)) => {
+                    let _ = self.enqueue_value(success_response(response_id, value));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = self.enqueue_value(error_response(response_id, error));
+                }
+            }
+        }
+    }
+
+    fn context_snapshot_value(
+        &mut self,
+        request_id: &LspRequestId,
+        request: &ContextProjectionRequest,
+    ) -> Result<Option<Value>, RpcFailure> {
+        let Some(revision) = self
+            .gateway
+            .capabilities()
+            .context_projections
+            .get(&request.kind)
+            .copied()
+        else {
+            return Err(RpcFailure::unavailable(
+                TRACEDECAY_CONTEXT_METHOD,
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            ));
+        };
+        let Some(context) = self.context.as_ref() else {
+            return Err(RpcFailure::unavailable(
+                TRACEDECAY_CONTEXT_METHOD,
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            ));
+        };
+        let outcome = context.snapshot(self.gateway.root(), request_id, request);
+        self.context_projection_value(request, revision, outcome)
+    }
+
+    fn context_projection_value(
+        &mut self,
+        request: &ContextProjectionRequest,
+        revision: u32,
+        outcome: ContextProjectionOutcome,
+    ) -> Result<Option<Value>, RpcFailure> {
+        let envelope = match outcome {
+            ContextProjectionOutcome::Ready(envelope) => envelope,
+            ContextProjectionOutcome::Pending => return Ok(None),
+            ContextProjectionOutcome::Unsupported | ContextProjectionOutcome::Denied => {
+                return Err(RpcFailure::unavailable(
+                    TRACEDECAY_CONTEXT_METHOD,
+                    MethodUnavailableReason::CapabilityNotNegotiated,
+                ));
+            }
+            ContextProjectionOutcome::Deferred { reason } => {
+                return Err(refresh_pending_failure(
+                    None,
+                    None,
+                    Some(bounded_context_text(reason, MAX_CONTEXT_SUMMARY_BYTES)),
+                    None,
+                ));
+            }
+            ContextProjectionOutcome::Failed { reason } => {
+                return Err(RpcFailure {
+                    code: -32603,
+                    message: "Internal error",
+                    data: json!({
+                        "failureClass": bounded_context_text(reason, MAX_CONTEXT_SUMMARY_BYTES),
+                    }),
+                });
+            }
+        };
+        self.validate_context_envelope(request, revision, &envelope)?;
+        let key = (envelope.kind.clone(), envelope.document_uri.clone());
+        if self
+            .context_generations
+            .get(&key)
+            .is_some_and(|generation| *generation > envelope.generation)
+        {
+            return Err(refresh_pending_failure(
+                None,
+                None,
+                None,
+                Some("superseded-generation".to_owned()),
+            ));
+        }
+        let value = serde_json::to_value(&envelope).map_err(|_| RpcFailure {
+            code: -32603,
+            message: "Internal error",
+            data: Value::Null,
+        })?;
+        if serde_json::to_vec(&value)
+            .map_or(true, |payload| payload.len() > MAX_CONTEXT_PROJECTION_BYTES)
+        {
+            return Err(refresh_pending_failure(
+                None,
+                None,
+                Some("projection-payload-exceeded".to_owned()),
+                None,
+            ));
+        }
+        self.context_generations.insert(key, envelope.generation);
+        Ok(Some(value))
+    }
+
+    fn poll_context_requests(&mut self) {
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let request_ids = self
+            .pending_context_requests
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            let Some(operation_id) = self
+                .pending_context_requests
+                .get(&request_id)
+                .map(|pending| pending.operation_id.clone())
+            else {
+                continue;
+            };
+            let Some(outcome) = context.poll_snapshot(self.gateway.root(), &operation_id) else {
+                continue;
+            };
+            if outcome == ContextProjectionOutcome::Pending {
+                continue;
+            }
+            let Some(pending) = self.pending_context_requests.remove(&request_id) else {
+                continue;
+            };
+            let Some(revision) = self
+                .gateway
+                .capabilities()
+                .context_projections
+                .get(&pending.request.kind)
+                .copied()
+            else {
+                self.complete_context_request(
+                    request_id,
+                    pending.response_id,
+                    Err(RpcFailure::unavailable(
+                        TRACEDECAY_CONTEXT_METHOD,
+                        MethodUnavailableReason::CapabilityNotNegotiated,
+                    )),
+                );
+                continue;
+            };
+            let result = self.context_projection_value(&pending.request, revision, outcome);
+            self.complete_context_request(request_id, pending.response_id, result);
+        }
+    }
+
+    fn context_expansion_value(
+        &self,
+        request_id: &LspRequestId,
+        request: &ContextExpansionRequest,
+    ) -> Result<Option<Value>, RpcFailure> {
+        if !self.gateway.capabilities().supports_context_expansion {
+            return Err(RpcFailure::unavailable(
+                TRACEDECAY_CONTEXT_EXPAND_METHOD,
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            ));
+        }
+        let Some(context) = self.context.as_ref() else {
+            return Err(RpcFailure::unavailable(
+                TRACEDECAY_CONTEXT_EXPAND_METHOD,
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            ));
+        };
+        self.context_expansion_outcome_value(context.expand(
+            self.gateway.root(),
+            request_id,
+            request,
+        ))
+    }
+
+    fn context_expansion_outcome_value(
+        &self,
+        outcome: ContextExpansionOutcome,
+    ) -> Result<Option<Value>, RpcFailure> {
+        match outcome {
+            ContextExpansionOutcome::Ready(envelope) => {
+                self.validate_context_expansion(&envelope)?;
+                let value = serde_json::to_value(envelope).map_err(|_| RpcFailure {
+                    code: -32603,
+                    message: "Internal error",
+                    data: Value::Null,
+                })?;
+                if serde_json::to_vec(&value)
+                    .map_or(true, |payload| payload.len() > MAX_CONTEXT_PROJECTION_BYTES)
+                {
+                    return Err(refresh_pending_failure(
+                        None,
+                        None,
+                        Some("context-expansion-payload-exceeded".to_owned()),
+                        None,
+                    ));
+                }
+                Ok(Some(value))
+            }
+            ContextExpansionOutcome::Denied => Err(RpcFailure::unavailable(
+                TRACEDECAY_CONTEXT_EXPAND_METHOD,
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            )),
+            ContextExpansionOutcome::Pending => Ok(None),
+            ContextExpansionOutcome::Failed { reason } => Err(RpcFailure {
+                code: -32603,
+                message: "Internal error",
+                data: json!({
+                    "failureClass": bounded_context_text(reason, MAX_CONTEXT_SUMMARY_BYTES),
+                }),
+            }),
+        }
+    }
+
+    fn poll_context_expansions(&mut self) {
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let request_ids = self
+            .pending_context_expansions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            let Some(operation_id) = self
+                .pending_context_expansions
+                .get(&request_id)
+                .map(|pending| pending.operation_id.clone())
+            else {
+                continue;
+            };
+            let Some(outcome) = context.poll_expansion(self.gateway.root(), &operation_id) else {
+                continue;
+            };
+            if outcome == ContextExpansionOutcome::Pending {
+                continue;
+            }
+            let Some(pending) = self.pending_context_expansions.remove(&request_id) else {
+                continue;
+            };
+            let result = self.context_expansion_outcome_value(outcome);
+            self.complete_context_request(request_id, pending.response_id, result);
+        }
+    }
+
+    fn validate_context_expansion(
+        &self,
+        envelope: &ContextExpansionEnvelope,
+    ) -> Result<(), RpcFailure> {
+        let negotiated = self
+            .gateway
+            .capabilities()
+            .context_projections
+            .get(&envelope.kind)
+            == Some(&envelope.revision);
+        let valid_scope = envelope.root_uri == self.gateway.root().uri()
+            && envelope
+                .document_uri
+                .as_deref()
+                .is_none_or(|uri| self.gateway.root().contains_document(uri))
+            && !envelope.scope.scope_digest.is_empty()
+            && !envelope.scope.head_commit_id.is_empty()
+            && !envelope.scope.code_generation_id.is_empty();
+        let valid_payload = !envelope.stable_id.is_empty()
+            && envelope.stable_id.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
+            && envelope.expires_at > 0
+            && match envelope.coverage {
+                ContextCoverage::Complete => {
+                    envelope.evidence.is_some() && envelope.omission_reason.is_none()
+                }
+                ContextCoverage::Partial => envelope.omission_reason.is_some(),
+                ContextCoverage::Unavailable | ContextCoverage::Failed => false,
+            };
+        if negotiated && valid_scope && valid_payload {
+            Ok(())
+        } else {
+            Err(RpcFailure {
+                code: -32603,
+                message: "Internal error",
+                data: json!({ "failureClass": "invalid-context-expansion" }),
+            })
+        }
+    }
+
+    fn context_subscription_value(
+        &mut self,
+        request: ContextSubscribeRequest,
+    ) -> Result<Value, RpcFailure> {
+        if self.context.is_none() || request.projections.len() > MAX_CONTEXT_PROJECTION_KINDS {
+            return Err(RpcFailure::invalid_params(
+                "TraceDecay projection subscription is unavailable or too large",
+            ));
+        }
+        let subscriptions = request.projections.into_iter().collect::<BTreeSet<_>>();
+        if subscriptions.len() > MAX_CONTEXT_PROJECTION_KINDS
+            || subscriptions.iter().any(|registration| {
+                !registration.kind.is_valid()
+                    || self
+                        .gateway
+                        .capabilities()
+                        .context_projections
+                        .get(&registration.kind)
+                        != Some(&registration.revision)
+            })
+        {
+            return Err(RpcFailure::unavailable(
+                TRACEDECAY_SUBSCRIBE_METHOD,
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            ));
+        }
+        self.context_subscriptions = subscriptions;
+        Ok(json!({
+            "projections": self.context_subscriptions.iter().collect::<Vec<_>>(),
+        }))
+    }
+
+    fn validate_context_envelope(
+        &self,
+        request: &ContextProjectionRequest,
+        revision: u32,
+        envelope: &ContextProjectionEnvelope,
+    ) -> Result<(), RpcFailure> {
+        let valid_scope = envelope.root_uri == self.gateway.root().uri()
+            && envelope.document_uri == request.document_uri
+            && envelope
+                .document_uri
+                .as_deref()
+                .is_none_or(|uri| self.gateway.root().contains_document(uri));
+        let valid_items = envelope.items.len() <= MAX_CONTEXT_PROJECTION_ITEMS
+            && envelope.items.iter().all(|item| {
+                !item.stable_id.is_empty()
+                    && item.stable_id.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
+                    && item.summary.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && valid_retrieval_handle(item.retrieval_handle.as_deref())
+            });
+        if valid_scope
+            && envelope.kind == request.kind
+            && envelope.revision == revision
+            && valid_items
+            && valid_retrieval_handle(envelope.retrieval_handle.as_deref())
+        {
+            Ok(())
+        } else {
+            Err(RpcFailure {
+                code: -32603,
+                message: "Internal error",
+                data: json!({ "failureClass": "invalid-context-projection" }),
+            })
+        }
+    }
+
+    pub(super) fn pull_diagnostics(
+        &mut self,
+        uri: &str,
+        params: &Value,
+    ) -> Result<Value, RpcFailure> {
         self.require_document_root(uri)?;
         if !self.gateway.capabilities().supports_document_diagnostics {
             return Err(RpcFailure::unavailable(
@@ -896,49 +1947,66 @@ where
                 MethodUnavailableReason::CapabilityNotNegotiated,
             ));
         }
+        response_value(self.gateway.request_document_diagnostics(uri), |()| {
+            Value::Null
+        })?;
+        self.poll_diagnostic_refresh(uri);
         let overlay = self.overlays.snapshot(uri);
         let outcome =
             self.diagnostics
                 .document_diagnostics(self.gateway.root(), uri, overlay.as_ref());
-        let (diagnostics, coverage) = match outcome {
-            DiagnosticSnapshotOutcome::Complete(diagnostics) => (diagnostics, None),
+        let version = overlay.as_ref().map_or(0, |overlay| overlay.version);
+        let source_generation = diagnostic_source_generation(&outcome);
+        let _refresh_failure =
+            self.request_diagnostic_refresh(uri, version, overlay.as_ref(), source_generation);
+        let diagnostics = match outcome {
+            DiagnosticSnapshotOutcome::Ready { diagnostics, .. } => diagnostics,
+            DiagnosticSnapshotOutcome::Refreshing(refresh) => {
+                return Err(refresh_pending_failure(
+                    Some(refresh.operation_id),
+                    refresh.target_generation,
+                    None,
+                    None,
+                ));
+            }
             DiagnosticSnapshotOutcome::Partial {
-                diagnostics,
+                source_generation: _,
                 coverage,
-            } => (diagnostics, Some(coverage)),
-            DiagnosticSnapshotOutcome::Unavailable => {
-                return Err(RpcFailure::unavailable(
-                    GatewayMethod::TextDocumentDiagnostic.as_lsp_method(),
-                    MethodUnavailableReason::ProviderUnavailable,
+            } => {
+                return Err(refresh_pending_failure(None, None, Some(coverage), None));
+            }
+            DiagnosticSnapshotOutcome::Failed {
+                source_generation: _,
+                failure_class,
+            } => {
+                return Err(refresh_pending_failure(
+                    None,
+                    None,
+                    None,
+                    Some(failure_class),
                 ));
             }
         };
-        let version = overlay.as_ref().map_or(0, |overlay| overlay.version);
         let generation = diagnostics.generation;
-        let result_id = diagnostic_result_id(generation, version);
-        let response = self.gateway.document_diagnostics(
-            uri,
-            result_id.clone(),
-            diagnostics.upstream,
-            diagnostics.tracedecay,
-        );
-        let value = response_value(response, gateway_diagnostic_value)?;
-        if coverage.is_some() {
-            // A standard pull diagnostic report cannot represent partial
-            // coverage truthfully, so do not return its item list as clean.
-            return Err(RpcFailure {
-                code: -32802,
-                message: "Server cancelled request",
-                data: json!({ "retriggerRequest": true, "coverage": coverage }),
-            });
+        if self.published.get(uri).is_some_and(|published| {
+            published.version == version && published.generation > generation
+        }) {
+            return Err(refresh_pending_failure(
+                None,
+                None,
+                None,
+                Some("superseded-generation".to_owned()),
+            ));
         }
+        let result_id = diagnostic_result_id(generation, version);
+        let merged =
+            self.merge_document_diagnostics(uri, diagnostics.upstream, diagnostics.tracedecay);
+        let value = document_diagnostic_report_value(DocumentDiagnosticReport::full(
+            result_id.clone(),
+            self.visible_diagnostics(merged.items),
+        ));
         let previous = params.get("previousResultId").and_then(Value::as_str);
-        let still_current = self.published.get(uri).is_some_and(|published| {
-            published.version == version
-                && published.generation == generation
-                && published.result_id == result_id
-        });
-        if previous == Some(result_id.as_str()) && (still_current || overlay.is_none()) {
+        if previous == Some(result_id.as_str()) {
             return Ok(document_diagnostic_report_value(
                 DocumentDiagnosticReport::Unchanged { result_id },
             ));
@@ -949,7 +2017,6 @@ where
                 PublishedDiagnostic {
                     version,
                     generation,
-                    result_id,
                 },
             );
         }
@@ -960,6 +2027,7 @@ where
         if self.control.lifecycle() != SessionLifecycle::Ready {
             return;
         }
+        self.poll_diagnostic_refreshes();
         while self.has_outbound_capacity(MAX_PUBLICATION_BYTES) {
             let Some(scheduled) = self.debounce.take_next_due(now_ms) else {
                 break;
@@ -988,38 +2056,176 @@ where
                         &scheduled.uri,
                         overlay.as_ref(),
                     );
-                    let DiagnosticSnapshotOutcome::Complete(snapshot) = outcome else {
-                        // Partial/unavailable state is never published as a
-                        // plausible clean empty set. A later save/pull may
-                        // return a typed state through its owning adapter.
-                        continue;
-                    };
-                    let generation = snapshot.generation;
-                    let merged = DiagnosticMerge::for_document(
-                        &scheduled.uri,
-                        snapshot.upstream,
-                        snapshot.tracedecay,
-                    );
-                    if !self.publish_diagnostics(
+                    let source_generation = diagnostic_source_generation(&outcome);
+                    let _ = self.request_diagnostic_refresh(
                         &scheduled.uri,
                         scheduled.version,
-                        generation,
-                        merged.items,
-                    ) {
-                        continue;
-                    }
-                    self.published.insert(
-                        scheduled.uri.clone(),
-                        PublishedDiagnostic {
-                            version: scheduled.version,
-                            generation,
-                            result_id: diagnostic_result_id(generation, scheduled.version),
-                        },
+                        overlay.as_ref(),
+                        source_generation,
                     );
-                    self.queue_diagnostic_refresh();
+                    if let DiagnosticSnapshotOutcome::Ready { diagnostics, .. } = outcome {
+                        let _ = self.publish_complete_snapshot(
+                            &scheduled.uri,
+                            scheduled.version,
+                            diagnostics,
+                        );
+                    }
                 }
             }
         }
+    }
+
+    fn request_diagnostic_refresh(
+        &mut self,
+        uri: &str,
+        version: i64,
+        overlay: Option<&super::overlay::OverlaySnapshot>,
+        source_generation: Option<u64>,
+    ) -> Option<String> {
+        if self
+            .active_diagnostic_refreshes
+            .get(uri)
+            .is_some_and(|pending| pending.overlay_version == version)
+        {
+            return None;
+        }
+        match self.diagnostics.request_document_refresh(
+            self.gateway.root(),
+            uri,
+            overlay,
+            source_generation,
+        ) {
+            DiagnosticRefreshAdmission::Started(identity)
+            | DiagnosticRefreshAdmission::AlreadyRunning(identity) => {
+                if !valid_refresh_identity(&identity, source_generation) {
+                    return Some("invalid-refresh-identity".to_owned());
+                }
+                self.active_diagnostic_refreshes.insert(
+                    uri.to_owned(),
+                    PendingDiagnosticRefresh {
+                        identity,
+                        overlay_version: version,
+                    },
+                );
+                None
+            }
+            DiagnosticRefreshAdmission::Rejected { failure_class } => Some(failure_class),
+        }
+    }
+
+    fn poll_diagnostic_refreshes(&mut self) {
+        let documents: Vec<_> = self.active_diagnostic_refreshes.keys().cloned().collect();
+        for document in documents {
+            if !self.has_outbound_capacity(MAX_PUBLICATION_BYTES) {
+                break;
+            }
+            self.poll_diagnostic_refresh(&document);
+        }
+    }
+
+    fn poll_diagnostic_refresh(&mut self, uri: &str) {
+        let Some(pending) = self.active_diagnostic_refreshes.get(uri).cloned() else {
+            return;
+        };
+        let version = self.overlays.version(uri).unwrap_or_default();
+        if version != pending.overlay_version {
+            self.active_diagnostic_refreshes.remove(uri);
+            return;
+        }
+        let overlay = self.overlays.snapshot(uri);
+        match self
+            .diagnostics
+            .document_diagnostics(self.gateway.root(), uri, overlay.as_ref())
+        {
+            DiagnosticSnapshotOutcome::Ready {
+                diagnostics,
+                completed_operation_id,
+            } if completed_operation_id.as_deref()
+                == Some(pending.identity.operation_id.as_str()) =>
+            {
+                let generation = diagnostics.generation;
+                let target_matches = pending
+                    .identity
+                    .target_generation
+                    .is_none_or(|target| target == generation);
+                let source_not_superseded = pending
+                    .identity
+                    .source_generation
+                    .is_none_or(|source| generation >= source);
+                let publication_not_superseded = self.published.get(uri).is_none_or(|published| {
+                    published.version != version || published.generation <= generation
+                });
+                if target_matches && source_not_superseded && publication_not_superseded {
+                    if self.publish_complete_snapshot(uri, version, diagnostics) {
+                        self.active_diagnostic_refreshes.remove(uri);
+                    }
+                } else {
+                    self.active_diagnostic_refreshes.remove(uri);
+                }
+            }
+            DiagnosticSnapshotOutcome::Partial { .. }
+            | DiagnosticSnapshotOutcome::Failed { .. } => {
+                self.active_diagnostic_refreshes.remove(uri);
+                self.queue_diagnostic_refresh();
+            }
+            DiagnosticSnapshotOutcome::Ready { .. } | DiagnosticSnapshotOutcome::Refreshing(_) => {}
+        }
+    }
+
+    fn publish_complete_snapshot(
+        &mut self,
+        uri: &str,
+        version: i64,
+        snapshot: super::provider::GenerationDiagnostics,
+    ) -> bool {
+        let generation = snapshot.generation;
+        if self.published.get(uri).is_some_and(|published| {
+            published.version == version && published.generation > generation
+        }) {
+            return false;
+        }
+        let merged = self.merge_document_diagnostics(uri, snapshot.upstream, snapshot.tracedecay);
+        if self.gateway.capabilities().supports_publish_diagnostics
+            && !self.publish_diagnostics(
+                uri,
+                version,
+                generation,
+                self.visible_diagnostics(merged.items),
+            )
+        {
+            return false;
+        }
+        self.published.insert(
+            uri.to_owned(),
+            PublishedDiagnostic {
+                version,
+                generation,
+            },
+        );
+        self.queue_diagnostic_refresh();
+        true
+    }
+
+    fn merge_document_diagnostics(
+        &self,
+        uri: &str,
+        mut upstream: Vec<GatewayDiagnostic>,
+        tracedecay: Vec<GatewayDiagnostic>,
+    ) -> DiagnosticMerge {
+        if let Some(native) = self.native_upstream.get(uri) {
+            upstream.extend(native.diagnostics.iter().cloned());
+        }
+        DiagnosticMerge::for_document(uri, upstream, tracedecay)
+    }
+
+    fn visible_diagnostics(&self, diagnostics: Vec<GatewayDiagnostic>) -> Vec<GatewayDiagnostic> {
+        if !self.cursor_native_mode {
+            return diagnostics;
+        }
+        diagnostics
+            .into_iter()
+            .filter(|diagnostic| diagnostic.source == DiagnosticSource::TraceDecay)
+            .collect()
     }
 
     fn publish_diagnostics(
@@ -1080,8 +2286,78 @@ where
         }
     }
 
+    fn flush_context_changes(&mut self) {
+        if self.context_subscriptions.is_empty()
+            || !self.has_outbound_capacity(MAX_CONTEXT_PROJECTION_BYTES)
+        {
+            return;
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let changes = context.poll_changes(self.gateway.root(), &self.context_subscriptions);
+        for change in changes.into_iter().take(MAX_CONTEXT_CHANGES_PER_POLL) {
+            if !self.valid_context_change(&change) {
+                continue;
+            }
+            let key = (change.kind.clone(), change.document_uri.clone());
+            if self
+                .context_generations
+                .get(&key)
+                .is_some_and(|generation| *generation >= change.generation)
+            {
+                continue;
+            }
+            let Ok(params) = serde_json::to_value(&change) else {
+                continue;
+            };
+            let notification = json!({
+                "jsonrpc": "2.0",
+                "method": TRACEDECAY_CONTEXT_CHANGED_METHOD,
+                "params": params,
+            });
+            if serde_json::to_vec(&notification)
+                .map_or(true, |payload| payload.len() > MAX_CONTEXT_PROJECTION_BYTES)
+                || !self.enqueue_value(notification)
+            {
+                break;
+            }
+            self.context_generations.insert(key, change.generation);
+        }
+    }
+
+    fn valid_context_change(&self, change: &ContextProjectionChange) -> bool {
+        change.root_uri == self.gateway.root().uri()
+            && change
+                .document_uri
+                .as_deref()
+                .is_none_or(|uri| self.gateway.root().contains_document(uri))
+            && self
+                .context_subscriptions
+                .contains(&ContextProjectionRegistration {
+                    kind: change.kind.clone(),
+                    revision: change.revision,
+                })
+            && valid_retrieval_handle(change.retrieval_handle.as_deref())
+    }
+
     fn expire_requests(&mut self, now_ms: u64) {
         for id in self.control.expire_deadlines(now_ms) {
+            if self.pending_semantic_requests.remove(&id).is_some()
+                && let Some(cancellation) = &self.cancellation
+            {
+                let _ = cancellation.cancel_upstream(self.gateway.root(), &id);
+            }
+            if let Some(pending) = self.pending_context_requests.remove(&id)
+                && let Some(context) = &self.context
+            {
+                let _ = context.cancel_request(self.gateway.root(), &pending.operation_id);
+            }
+            if let Some(pending) = self.pending_context_expansions.remove(&id)
+                && let Some(context) = &self.context
+            {
+                let _ = context.cancel_request(self.gateway.root(), &pending.operation_id);
+            }
             let disposition = self.control.complete_request(&id);
             if let Some(failure) = disposition.failure() {
                 self.enqueue_value(error_response(
@@ -1090,6 +2366,36 @@ where
                 ));
             }
         }
+    }
+
+    fn cancel_request_and_upstream(&mut self, id: &LspRequestId) -> CancellationOutcome {
+        let outcome = self.control.cancel_request(id);
+        if outcome == CancellationOutcome::Accepted {
+            self.pending_semantic_requests.remove(id);
+            let context_operation = self
+                .pending_context_requests
+                .remove(id)
+                .map(|pending| pending.operation_id);
+            let expansion_operation = self
+                .pending_context_expansions
+                .remove(id)
+                .map(|pending| pending.operation_id);
+            if let Some(cancellation) = &self.cancellation {
+                let _ = cancellation.cancel_upstream(self.gateway.root(), id);
+            }
+            if let Some(context) = &self.context {
+                if let Some(context_id) = context_operation.as_ref() {
+                    let _ = context.cancel_request(self.gateway.root(), context_id);
+                }
+                if let Some(expansion_id) = expansion_operation.as_ref() {
+                    let _ = context.cancel_request(self.gateway.root(), expansion_id);
+                }
+                if context_operation.is_none() && expansion_operation.is_none() {
+                    let _ = context.cancel_request(self.gateway.root(), id);
+                }
+            }
+        }
+        outcome
     }
 
     pub(super) fn enqueue_value(&mut self, value: Value) -> bool {
@@ -1264,6 +2570,7 @@ where
     }
 
     fn discard_document_publications(&mut self, uri: &str) {
+        self.active_diagnostic_refreshes.remove(uri);
         let mut retained = VecDeque::with_capacity(self.outbound.len());
         let mut index = 0_usize;
         while let Some(frame) = self.outbound.pop_front() {
@@ -1333,11 +2640,133 @@ where
     }
 }
 
+fn diagnostic_source_generation(outcome: &DiagnosticSnapshotOutcome) -> Option<u64> {
+    match outcome {
+        DiagnosticSnapshotOutcome::Ready { diagnostics, .. } => Some(diagnostics.generation),
+        DiagnosticSnapshotOutcome::Refreshing(refresh) => refresh.source_generation,
+        DiagnosticSnapshotOutcome::Partial {
+            source_generation, ..
+        }
+        | DiagnosticSnapshotOutcome::Failed {
+            source_generation, ..
+        } => *source_generation,
+    }
+}
+
+fn valid_refresh_identity(
+    identity: &DiagnosticRefreshIdentity,
+    source_generation: Option<u64>,
+) -> bool {
+    !identity.operation_id.is_empty()
+        && identity.operation_id.len() <= MAX_DIAGNOSTIC_OPERATION_ID_BYTES
+        && identity.source_generation == source_generation
+        && match (identity.source_generation, identity.target_generation) {
+            (Some(source), Some(target)) => target >= source,
+            _ => true,
+        }
+}
+
+fn refresh_pending_failure(
+    operation_id: Option<String>,
+    target_generation: Option<u64>,
+    coverage: Option<String>,
+    failure_class: Option<String>,
+) -> RpcFailure {
+    RpcFailure {
+        code: -32802,
+        message: "Server cancelled request",
+        data: json!({
+            "retriggerRequest": true,
+            "operationId": operation_id,
+            "targetGeneration": target_generation,
+            "coverage": coverage,
+            "failureClass": failure_class,
+        }),
+    }
+}
+
+fn cursor_native_initialize_mode(params: &Value) -> Result<bool, RpcFailure> {
+    let Some(options) = params.get("initializationOptions") else {
+        return Ok(false);
+    };
+    if options.is_null() {
+        return Ok(false);
+    }
+    let options = options
+        .as_object()
+        .ok_or_else(|| RpcFailure::invalid_params("initializationOptions must be an object"))?;
+    let Some(tracedecay) = options.get("tracedecay") else {
+        return Ok(false);
+    };
+    let tracedecay = tracedecay.as_object().ok_or_else(|| {
+        RpcFailure::invalid_params("initializationOptions.tracedecay must be an object")
+    })?;
+    if tracedecay.get("mode").and_then(Value::as_str) != Some("cursor-native") {
+        return Ok(false);
+    }
+    (tracedecay.get("context").and_then(Value::as_bool) == Some(true))
+        .then_some(true)
+        .ok_or_else(|| {
+            RpcFailure::invalid_params(
+                "cursor-native initialization requires tracedecay context support",
+            )
+        })
+}
+
+fn valid_native_string(value: &str, maximum_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum_bytes
+}
+
+fn valid_native_diagnostic_data(data: Option<&Value>) -> bool {
+    let Some(data) = data else {
+        return true;
+    };
+    if data.is_null() {
+        return true;
+    }
+    let Some(object) = data.as_object() else {
+        return false;
+    };
+    object.len() <= 5
+        && object.iter().all(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "category" | "href" | "kind" | "ruleId" | "url"
+            ) && match value {
+                Value::Bool(_) | Value::Number(_) => true,
+                Value::String(value) => {
+                    valid_native_string(value, MAX_NATIVE_DIAGNOSTIC_METADATA_BYTES)
+                }
+                _ => false,
+            }
+        })
+}
+
+fn valid_retrieval_handle(handle: Option<&str>) -> bool {
+    handle.is_none_or(|handle| {
+        !handle.is_empty()
+            && handle.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
+            && handle.bytes().all(|byte| byte.is_ascii_graphic())
+    })
+}
+
+fn bounded_context_text(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::capabilities::SemanticCapability;
-    use super::super::diagnostics::{DiagnosticSource, LspPosition};
-    use super::super::gateway::{FeedbackCycleRequest, SemanticProviderOutcome};
+    use super::super::diagnostics::{DiagnosticSeverity, DiagnosticSource, LspPosition, LspRange};
+    use super::super::gateway::{FeedbackCycleRequest, LspLocation, SemanticProviderOutcome};
     use super::super::overlay::{MAX_OVERLAY_BYTES, OverlaySnapshot};
     use super::super::provider::GenerationDiagnostics;
     use super::*;
@@ -1389,27 +2818,30 @@ mod tests {
             overlay: Option<&OverlaySnapshot>,
         ) -> DiagnosticSnapshotOutcome {
             assert!(overlay.is_none() || overlay.is_some_and(|overlay| overlay.ephemeral));
-            DiagnosticSnapshotOutcome::Complete(GenerationDiagnostics {
-                generation: 9,
-                upstream: vec![GatewayDiagnostic {
-                    uri: uri.into(),
-                    range: LspRange {
-                        start: LspPosition {
-                            line: 0,
-                            character: 0,
+            DiagnosticSnapshotOutcome::Ready {
+                diagnostics: GenerationDiagnostics {
+                    generation: 9,
+                    upstream: vec![GatewayDiagnostic {
+                        uri: uri.into(),
+                        range: LspRange {
+                            start: LspPosition {
+                                line: 0,
+                                character: 0,
+                            },
+                            end: LspPosition {
+                                line: 0,
+                                character: 1,
+                            },
                         },
-                        end: LspPosition {
-                            line: 0,
-                            character: 1,
-                        },
-                    },
-                    severity: Some(DiagnosticSeverity::Warning),
-                    code: Some("warning".into()),
-                    message: "bounded diagnostic".into(),
-                    source: DiagnosticSource::Upstream,
-                }],
-                tracedecay: Vec::new(),
-            })
+                        severity: Some(DiagnosticSeverity::Warning),
+                        code: Some("warning".into()),
+                        message: "bounded diagnostic".into(),
+                        source: DiagnosticSource::Upstream,
+                    }],
+                    tracedecay: Vec::new(),
+                },
+                completed_operation_id: None,
+            }
         }
     }
 
@@ -1600,6 +3032,97 @@ mod tests {
             .find(|message: &Value| message["method"] == "textDocument/publishDiagnostics")
             .unwrap();
         assert_eq!(publication["params"]["version"], 1);
+    }
+
+    #[test]
+    fn cursor_native_diagnostics_are_merged_but_not_republished() {
+        let mut session = session();
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "rootUri": "file:///root",
+                "initializationOptions": {
+                    "tracedecay": {
+                        "mode": "cursor-native",
+                        "context": true
+                    }
+                },
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "textDocument": {
+                        "publishDiagnostics": {
+                            "versionSupport": true,
+                            "relatedInformation": true,
+                            "codeDescriptionSupport": true,
+                            "dataSupport": true
+                        },
+                        "diagnostic": {
+                            "relatedInformation": true,
+                            "codeDescriptionSupport": true,
+                            "dataSupport": true
+                        }
+                    },
+                    "workspace": {
+                        "diagnostic": { "refreshSupport": true }
+                    }
+                }
+            }
+        });
+        session.handle_payload(&serde_json::to_vec(&request).unwrap(), 0);
+        session.drain_outbound();
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+            1,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":7,"text":"fn a() {}"}}}"#,
+            10,
+        );
+        session.drain_outbound();
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"tracedecay/nativeDiagnostics","params":{"uri":"file:///root/a.rs","version":7,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"typescript","message":"native diagnostic","data":{"ruleId":"typescript"}}]}}"#,
+            11,
+        );
+        assert_eq!(
+            session
+                .native_upstream
+                .get("file:///root/a.rs")
+                .unwrap()
+                .diagnostics
+                .len(),
+            1
+        );
+        session.detach().unwrap();
+        session.reconnect().unwrap();
+        assert!(
+            session.native_upstream.contains_key("file:///root/a.rs"),
+            "reconnect preserves the current in-memory native diagnostic lane"
+        );
+        session.flush_due(61);
+
+        let messages = session.drain_outbound();
+        let publication: Value = messages
+            .iter()
+            .map(|message| serde_json::from_slice(message).unwrap())
+            .find(|message: &Value| message["method"] == "textDocument/publishDiagnostics")
+            .unwrap();
+        assert!(
+            publication["params"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "Cursor-native clients must not receive their own diagnostics back"
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":"file:///root/a.rs"}}}"#,
+            62,
+        );
+        assert!(
+            !session.native_upstream.contains_key("file:///root/a.rs"),
+            "closing a document clears its native diagnostic lane"
+        );
     }
 
     #[test]

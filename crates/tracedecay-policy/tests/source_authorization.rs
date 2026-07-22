@@ -1,8 +1,9 @@
 use serde_json::json;
 use tracedecay_domain::ManifestDigest;
 use tracedecay_policy::authorization::{
-    AuthorizationSnapshotStateV1, DisclosureClassV1, ExternalContentStatusV1, PolicyReasonCodeV1,
-    PublicSourceResultShapeV1, SinkKindV1, SourceAccessDecisionV1, SourceAuthorizationEvaluator,
+    AuthorizationCoverageV1, AuthorizationSnapshotStateV1, DisclosureClassV1,
+    ExternalContentStatusV1, PolicyIdentifierV1, PolicyReasonCodeV1, PublicSourceResultShapeV1,
+    SinkKindV1, SourceAccessDecisionV1, SourceAuthorizationEvaluator,
     SourceAuthorizationEvaluatorV1, SourceAuthorizationTruthTableV1, TypedOperationV1,
     issue_source_authorization_proof, public_source_result_shape,
 };
@@ -71,6 +72,72 @@ fn identical_inputs_produce_identical_canonical_decisions() {
         .input;
 
     assert_eq!(evaluator.evaluate(&input), evaluator.evaluate(&input));
+}
+
+#[test]
+fn definition_binding_and_owner_snapshots_remain_separate_authorities() {
+    let evaluator = SourceAuthorizationEvaluatorV1::default();
+    let mut input = truth_tables()
+        .into_iter()
+        .find(|row| row.name == "project_authorized_live")
+        .expect("allow fixture exists")
+        .input;
+
+    assert_eq!(
+        &input.definition.definition.source_id,
+        input.binding.binding.source_id()
+    );
+    assert_eq!(
+        input.binding.binding.owner(),
+        input.resolved_owner_scope.owner
+    );
+
+    input.definition.definition.source_id =
+        PolicyIdentifierV1::new("source.definition.other").unwrap();
+    let decision = evaluator.evaluate(&input);
+
+    assert_eq!(decision.access, SourceAccessDecisionV1::Unauthorized);
+    assert_eq!(
+        decision.ordered_reason_codes,
+        [
+            PolicyReasonCodeV1::InputComplete,
+            PolicyReasonCodeV1::SourceDefinitionBindingMismatch,
+        ]
+    );
+}
+
+#[test]
+fn partial_snapshot_coverage_never_claims_authoritative_deletion() {
+    let evaluator = SourceAuthorizationEvaluatorV1::default();
+    let mut input = truth_tables()
+        .into_iter()
+        .find(|row| row.name == "project_authorized_live")
+        .expect("allow fixture exists")
+        .input;
+    input.content_status = ExternalContentStatusV1::Partial;
+    input.requested_coverage = AuthorizationCoverageV1::Partial;
+
+    let decision = evaluator.evaluate(&input);
+
+    assert_eq!(decision.access, SourceAccessDecisionV1::Authorized);
+    assert_eq!(
+        decision.authorization_coverage,
+        AuthorizationCoverageV1::Partial
+    );
+    assert_eq!(
+        public_source_result_shape(&decision, true),
+        PublicSourceResultShapeV1::Partial
+    );
+    assert!(
+        decision
+            .ordered_reason_codes
+            .contains(&PolicyReasonCodeV1::ContentPartial)
+    );
+    assert!(
+        !decision
+            .ordered_reason_codes
+            .contains(&PolicyReasonCodeV1::ContentAuthoritativeDeleted)
+    );
 }
 
 #[test]

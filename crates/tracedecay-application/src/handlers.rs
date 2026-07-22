@@ -1,11 +1,19 @@
 use std::collections::BTreeMap;
 
+use tracedecay_domain::{CapabilityId as DomainCapabilityId, UtcMicros};
+use tracedecay_policy::routing::{
+    CapabilityRoutingRequestV1, ScopeMatchV1, TruthFreshnessRequirementV1, TruthSourceStateV1,
+};
 use tracedecay_tool_catalog::{
     ApplicationHandlerDescriptorV1 as CatalogHandlerDescriptor, CapabilityId,
     CatalogContributionV1, SchemaRef, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
+use crate::policy::{
+    PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
+    PolicyEvidenceHorizonV1,
+};
 use crate::result::ResultContractRef;
 
 /// Closed application operation identity. It is validation metadata only and
@@ -47,6 +55,50 @@ impl ApplicationOperation {
 
     pub const fn resource_addressed(&self) -> bool {
         self.resource_addressed
+    }
+
+    /// Evaluates this exact callable catalog/application operation through the
+    /// retained capability-routing evaluator.
+    pub fn evaluate_policy_route(
+        &self,
+        composition: &PolicyEvaluatorCompositionV1,
+        consumer: PolicyConsumerV1,
+        context: &PolicyEvaluationContextV1,
+        truth_source_state: TruthSourceStateV1,
+        required_freshness: TruthFreshnessRequirementV1,
+        evidence_horizon: Option<PolicyEvidenceHorizonV1>,
+        evaluated_at: UtcMicros,
+    ) -> Result<
+        PolicyEvaluationV1<tracedecay_policy::routing::CapabilityRoutingDecisionV1>,
+        ApplicationContractError,
+    > {
+        if !context
+            .request()
+            .allows(&self.capability_id, &self.use_case_id)
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "application policy route authority",
+            });
+        }
+        let candidate = composition.candidate(
+            self.capability_id.as_str(),
+            ScopeMatchV1::Match,
+            truth_source_state,
+            0,
+        )?;
+        let capability_id = DomainCapabilityId::new(self.capability_id.as_str().to_owned())?;
+        let request = CapabilityRoutingRequestV1 {
+            declared_capability_order: vec![capability_id.clone()],
+            candidates: vec![candidate.clone()],
+            authorized_capabilities: [capability_id].into_iter().collect(),
+            required_effect_class: candidate.effect_class,
+            required_freshness,
+            policy_revision: context.policy_revision(),
+            policy_digest: context.policy_digest().clone(),
+            configuration_digest: context.configuration().effective_behavior_digest.clone(),
+            evaluated_at,
+        };
+        composition.route(consumer, context, &request, evidence_horizon)
     }
 }
 
@@ -213,8 +265,10 @@ fn validate_descriptor_mapping(
 pub fn application_handler_descriptors()
 -> Result<ApplicationHandlerDescriptors, ApplicationContractError> {
     let mut descriptors = vec![crate::retrieval::catalog::symbol_search_handler_descriptor()?];
+    descriptors.extend(crate::retrieval::catalog::primitive_read_handler_descriptors()?);
     descriptors.extend(crate::git::git_index_handler_descriptors()?);
     descriptors.extend(crate::git::git_surface_handler_descriptors()?);
+    descriptors.extend(crate::configuration::configuration_surface_handler_descriptors()?);
     descriptors.extend(crate::feedback::feedback_surface_handler_descriptors()?);
     ApplicationHandlerDescriptors::new(descriptors)
 }

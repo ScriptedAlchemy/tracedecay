@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
@@ -275,6 +277,68 @@ impl CancellationContext {
     }
 }
 
+const ACTIVE_CANCELLATION_SIGNAL: i64 = i64::MIN;
+
+/// One live transport cancellation identity shared by adapter clones.
+///
+/// Serialization uses [`Self::context`] at the daemon boundary; the live
+/// signal itself remains process-local so disconnect and protocol-cancel
+/// observers update the same token rather than manufacturing replacement
+/// contexts.
+#[derive(Clone, Debug)]
+pub struct CancellationSignal {
+    token_id: CancellationTokenId,
+    requested_at: Arc<AtomicI64>,
+}
+
+impl CancellationSignal {
+    pub fn active(token_id: impl Into<String>) -> Result<Self, ApplicationContractError> {
+        Ok(Self {
+            token_id: CancellationTokenId::new(token_id)?,
+            requested_at: Arc::new(AtomicI64::new(ACTIVE_CANCELLATION_SIGNAL)),
+        })
+    }
+
+    pub fn cancel(&self, requested_at: UtcMicros) -> bool {
+        if self
+            .requested_at
+            .compare_exchange(
+                ACTIVE_CANCELLATION_SIGNAL,
+                requested_at.0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        true
+    }
+
+    pub fn context(&self) -> CancellationContext {
+        let requested_at = self.requested_at.load(Ordering::Acquire);
+        CancellationContext {
+            token_id: self.token_id.clone(),
+            state: if requested_at == ACTIVE_CANCELLATION_SIGNAL {
+                CancellationState::Active
+            } else {
+                CancellationState::Cancelled {
+                    requested_at: UtcMicros(requested_at),
+                }
+            },
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.requested_at.load(Ordering::Acquire) != ACTIVE_CANCELLATION_SIGNAL
+    }
+
+    pub fn cancelled_at(&self) -> Option<UtcMicros> {
+        let requested_at = self.requested_at.load(Ordering::Acquire);
+        (requested_at != ACTIVE_CANCELLATION_SIGNAL).then_some(UtcMicros(requested_at))
+    }
+}
+
 /// Admission state observed at a caller-supplied time. No wall clock is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestAdmission {
@@ -377,5 +441,26 @@ impl RequestContext {
         self.grant.scope == self.scope
             && self.grant.allowed_capabilities.contains(capability_id)
             && self.grant.allowed_use_cases.contains(use_case_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CancellationSignal, CancellationState};
+    use tracedecay_domain::UtcMicros;
+
+    #[test]
+    fn cancellation_signal_clones_share_one_runtime_token() {
+        let signal = CancellationSignal::active("cancel.transport.fixture").unwrap();
+        let waiter = signal.clone();
+
+        signal.cancel(UtcMicros(41));
+        assert_eq!(waiter.cancelled_at(), Some(UtcMicros(41)));
+        assert!(matches!(
+            waiter.context().state,
+            CancellationState::Cancelled {
+                requested_at: UtcMicros(41)
+            }
+        ));
     }
 }

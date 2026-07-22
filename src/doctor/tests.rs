@@ -968,6 +968,113 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
     );
 }
 
+fn semantic_generation(byte: char) -> tracedecay_domain::VectorGenerationIdV1 {
+    tracedecay_domain::VectorGenerationIdV1::new(
+        tracedecay_domain::ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
+            .unwrap(),
+    )
+}
+
+fn semantic_status(
+    state: crate::application::semantic_runtime::SemanticRuntimeStateV1,
+) -> serde_json::Value {
+    use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
+
+    let current = crate::application::configuration::ConfigurationCurrentStateV1 {
+        revision_id: ConfigurationRevisionId::try_from("configuration.revision.doctor".to_owned())
+            .unwrap(),
+        snapshot: ConfigurationSnapshotV1::new(Default::default(), Default::default()).unwrap(),
+    };
+    let pin =
+        crate::application::semantic_runtime::SemanticConfigurationPinV1::from_current(&current)
+            .unwrap();
+    serde_json::to_value(
+        crate::application::semantic_runtime::SemanticRuntimeStatusV1::new(Some(pin), state),
+    )
+    .unwrap()
+}
+
+#[test]
+fn daemon_runtime_parser_preserves_semantic_status() {
+    for state in [
+        crate::application::semantic_runtime::SemanticRuntimeStateV1::Indexing {
+            target_generation: semantic_generation('a'),
+            completed_units: 1,
+            total_units: 2,
+        },
+        crate::application::semantic_runtime::SemanticRuntimeStateV1::Degraded {
+            active_generation: Some(semantic_generation('a')),
+            reason: crate::application::semantic_runtime::SemanticFallbackReasonV1::RuntimeFailure,
+        },
+    ] {
+        let semantic = semantic_status(state);
+        let payload = serde_json::json!({
+            "database": {
+                "quick_check_ok": true,
+                "authority_audit_ok": true
+            },
+            "semantic_runtime": semantic
+        });
+        let result = serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string(&payload).unwrap()
+            }]
+        });
+
+        let parsed = super::daemon_runtime_status(&result).unwrap();
+        assert_eq!(
+            parsed.get("semantic_runtime"),
+            payload.get("semantic_runtime")
+        );
+    }
+}
+
+#[test]
+fn semantic_indexing_is_healthy_non_blocking_fallback() {
+    let status = semantic_status(
+        crate::application::semantic_runtime::SemanticRuntimeStateV1::Indexing {
+            target_generation: semantic_generation('a'),
+            completed_units: 3,
+            total_units: 10,
+        },
+    );
+    let mut counters = DoctorCounters::new();
+    super::check_semantic_runtime_health(
+        &mut counters,
+        Some(&serde_json::json!({ "semantic_runtime": status })),
+    );
+
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 0);
+}
+
+#[test]
+fn semantic_degradation_warns_without_failing_baseline_search() {
+    let status = semantic_status(
+        crate::application::semantic_runtime::SemanticRuntimeStateV1::Degraded {
+            active_generation: Some(semantic_generation('a')),
+            reason: crate::application::semantic_runtime::SemanticFallbackReasonV1::RuntimeFailure,
+        },
+    );
+    let mut counters = DoctorCounters::new();
+    super::check_semantic_runtime_health(
+        &mut counters,
+        Some(&serde_json::json!({ "semantic_runtime": status })),
+    );
+
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 1);
+}
+
+#[test]
+fn semantic_status_missing_from_daemon_keeps_offline_baseline_healthy() {
+    let mut counters = DoctorCounters::new();
+    super::check_semantic_runtime_health(&mut counters, Some(&serde_json::json!({})));
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 0);
+}
+
 #[test]
 fn daemon_runtime_request_enables_authority_audit() {
     assert_eq!(

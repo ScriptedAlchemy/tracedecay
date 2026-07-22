@@ -13,6 +13,9 @@ pub mod read_cache;
 /// Mode dispatchers (`full`, `lines`, `map`, `signatures`) for `tracedecay_read`.
 pub mod read_modes;
 
+/// Shared source-read path, rendering, context, and cache authority.
+pub(crate) mod source_read;
+
 pub use builder::{ContextBuilder, extract_symbols_from_query};
 pub(crate) use formatter::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,

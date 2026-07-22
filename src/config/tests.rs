@@ -262,6 +262,64 @@ fn sync_config_defaults_round_trip() {
 }
 
 #[test]
+fn semantic_config_defaults_to_offline_healthy_baseline() {
+    let config = TraceDecayConfig::default();
+    assert_eq!(config.semantic, super::SemanticConfig::default());
+    assert!(config.semantic.active_profile.is_none());
+    assert!(config.semantic.rollback_profile.is_none());
+    assert!(config.semantic.validate().is_ok());
+
+    let json = serde_json::to_string(&config).unwrap();
+    let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.semantic, config.semantic);
+}
+
+#[test]
+fn semantic_config_accepts_only_explicit_local_installed_profiles() {
+    let local = super::SemanticProfileSelection {
+        profile_id: "code-embedding.v1".to_owned(),
+        artifact_digest: "a".repeat(64),
+        artifact_path: std::path::PathBuf::from("/var/lib/tracedecay/models/code-embedding"),
+    };
+    let mut semantic = super::SemanticConfig {
+        active_profile: Some(local.clone()),
+        rollback_profile: Some(super::SemanticProfileSelection {
+            profile_id: "code-embedding.previous".to_owned(),
+            artifact_digest: "b".repeat(64),
+            artifact_path: std::path::PathBuf::from(
+                "/var/lib/tracedecay/models/code-embedding-previous",
+            ),
+        }),
+        ..super::SemanticConfig::default()
+    };
+    assert!(semantic.validate().is_ok());
+
+    semantic.active_profile.as_mut().unwrap().artifact_path =
+        std::path::PathBuf::from("https://models.example/code-embedding");
+    assert!(
+        semantic.validate().is_err(),
+        "runtime configuration must not admit network or ambient-cache discovery"
+    );
+    semantic.active_profile = Some(local.clone());
+    semantic.rollback_profile = Some(local);
+    assert!(
+        semantic.validate().is_err(),
+        "active and rollback selections must remain distinct"
+    );
+}
+
+#[test]
+fn semantic_resource_ceilings_reject_zero_or_incoherent_limits() {
+    let mut semantic = super::SemanticConfig::default();
+    semantic.resources.max_threads = 0;
+    assert!(semantic.validate().is_err());
+
+    semantic = super::SemanticConfig::default();
+    semantic.resources.max_model_bytes = semantic.resources.max_resident_bytes + 1;
+    assert!(semantic.validate().is_err());
+}
+
+#[test]
 fn telemetry_timing_defaults_on_and_round_trips() {
     let config = TraceDecayConfig::default();
     assert!(config.telemetry.timings);
@@ -1317,8 +1375,8 @@ mod runtime_configuration_cutover {
         RuntimeConfigurationFuture, RuntimeConfigurationTarget, TraceDecayConfig,
         cached_runtime_configuration, cached_sync_config, cached_telemetry_config,
         commit_runtime_configuration_mutation, direct_mutation_for_runtime_config_diff,
-        install_pinned_runtime_configuration, mutate_pinned_runtime_configuration,
-        ensure_runtime_configuration_for_layout, runtime_configuration_for_layout,
+        ensure_runtime_configuration_for_layout, install_pinned_runtime_configuration,
+        mutate_pinned_runtime_configuration, runtime_configuration_for_layout,
     };
 
     fn project_id(value: &str) -> ProjectId {
@@ -1455,6 +1513,35 @@ mod runtime_configuration_cutover {
             .is_err(),
             "root_dir is migration metadata and cannot enter the control plane"
         );
+    }
+
+    #[test]
+    fn semantic_runtime_selection_changes_atomically_as_one_typed_setting() {
+        let project_id = project_id("project.semantic-runtime");
+        let before = TraceDecayConfig::default();
+        let mut after = before.clone();
+        after.semantic.active_profile = Some(crate::config::SemanticProfileSelection {
+            profile_id: "code-embedding.v1".to_owned(),
+            artifact_digest: "a".repeat(64),
+            artifact_path: std::path::PathBuf::from("/var/lib/tracedecay/models/code-embedding"),
+        });
+
+        let mutation = direct_mutation_for_runtime_config_diff(&project_id, &before, &after)
+            .expect("semantic runtime configuration is valid")
+            .expect("semantic selection change requires a mutation");
+        let DirectConfigurationMutation::Batch { mutations } = mutation else {
+            panic!("semantic selection must use the typed batch boundary");
+        };
+        assert_eq!(mutations.len(), 1);
+        let DirectConfigurationMutation::Set { key, value, .. } = &mutations[0] else {
+            panic!("semantic selection must be one atomic set");
+        };
+        assert_eq!(key.as_str(), crate::config::SEMANTIC_RUNTIME_SETTING_KEY);
+        let ConfigurationValueV1::Text(encoded) = value else {
+            panic!("semantic selection must use the canonical text value");
+        };
+        let decoded: crate::config::SemanticConfig = serde_json::from_str(encoded).unwrap();
+        assert_eq!(decoded, after.semantic);
     }
 
     #[tokio::test]
@@ -1687,8 +1774,9 @@ mod runtime_configuration_cutover {
         assert_ne!(first.config.root_dir, second.config.root_dir);
     }
 
-    #[test]
-    fn ensure_runtime_configuration_bootstraps_when_cache_is_empty() {
+    #[tokio::test]
+    async fn ensure_runtime_configuration_persists_initial_resolution_when_cache_is_empty() {
+        let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
         crate::storage::write_enrollment_marker(
             root.path(),
@@ -1708,11 +1796,27 @@ mod runtime_configuration_cutover {
         );
 
         let pinned = ensure_runtime_configuration_for_layout(root.path(), &layout)
-            .expect("cold open publishes bootstrap defaults");
+            .await
+            .expect("cold open persists and publishes a resolved revision");
         assert_eq!(
             pinned.target.project_id.as_str(),
             "proj_ensure_runtime_bootstrap"
         );
+        assert_ne!(
+            pinned.revision_id.as_str(),
+            "configuration.bootstrap.default.v1",
+            "the synthetic bootstrap revision is not a durable runtime authority"
+        );
+        assert!(
+            layout.sessions_db_path.is_file(),
+            "initial resolution must be committed to the retained project store"
+        );
+
+        let reopened = ensure_runtime_configuration_for_layout(root.path(), &layout)
+            .await
+            .expect("reopen loads the durable current revision");
+        assert_eq!(reopened.revision_id, pinned.revision_id);
+        assert_eq!(reopened.snapshot, pinned.snapshot);
         assert!(
             runtime_configuration_for_layout(root.path(), &layout).is_ok(),
             "after ensure, fail-closed lookup must see the published pin"

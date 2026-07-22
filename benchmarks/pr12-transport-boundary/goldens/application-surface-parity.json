@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "operations": {
+    "git_preview": {
+      "request_schema": "schema.application.git.preview.request",
+      "result_schema": "schema.application.git.preview.result",
+      "bindings": {
+        "cli": "binding.cli.git_preview.v1",
+        "mcp": "binding.mcp.git_preview.v1",
+        "http": "binding.http.git_preview.v1"
+      }
+    },
+    "git_apply": {
+      "request_schema": "schema.application.git.apply.request",
+      "result_schema": "schema.application.git.apply.result",
+      "bindings": {
+        "cli": "binding.cli.git_apply.v1",
+        "mcp": "binding.mcp.git_apply.v1",
+        "http": "binding.http.git_apply.v1"
+      }
+    },
+    "feedback_diagnostics": {
+      "request_handle": "rh_missing-pr12-parity",
+      "request_schema": "schema.application.feedback.diagnostics.request",
+      "result_schema": "schema.application.feedback.diagnostics.result",
+      "bindings": {
+        "cli": "binding.cli.feedback_diagnostics.v1",
+        "mcp": "binding.mcp.feedback_diagnostics.v1",
+        "http": "binding.http.feedback_diagnostics.v1"
+      }
+    },
+    "feedback_get": {
+      "request_handle": "rh_missing-pr12-parity",
+      "request_schema": "schema.application.feedback.get.request",
+      "result_schema": "schema.application.feedback.get.result",
+      "bindings": {
+        "cli": "binding.cli.feedback_get.v1",
+        "mcp": "binding.mcp.feedback_get.v1",
+        "http": "binding.http.feedback_get.v1"
+      }
+    },
+    "feedback_expand": {
+      "request_handle": "rh_missing-pr12-parity",
+      "request_schema": "schema.application.feedback.expand.request",
+      "result_schema": "schema.application.feedback.expand.result",
+      "bindings": {
+        "cli": "binding.cli.feedback_expand.v1",
+        "mcp": "binding.mcp.feedback_expand.v1",
+        "http": "binding.http.feedback_expand.v1"
+      }
+    },
+    "feedback_list": {
+      "request_handle": "rh_missing-pr12-parity",
+      "request_schema": "schema.application.feedback.list.request",
+      "result_schema": "schema.application.feedback.list.result",
+      "bindings": {
+        "cli": "binding.cli.feedback_list.v1",
+        "mcp": "binding.mcp.feedback_list.v1",
+        "http": "binding.http.feedback_list.v1"
+      }
+    },
+    "feedback_impact": {
+      "request": {
+        "node_id": "node.pr12.fixture"
+      },
+      "request_schema": "schema.application.feedback.impact.request",
+      "result_schema": "schema.application.feedback.impact.result",
+      "bindings": {
+        "cli": "binding.cli.feedback_impact.v1",
+        "mcp": "binding.mcp.feedback_impact.v1",
+        "http": "binding.http.feedback_impact.v1"
+      }
+    },
+    "affected_tests": {
+      "request": {
+        "files": ["src/lib.rs"]
+      },
+      "request_schema": "schema.application.feedback.affected-tests.request",
+      "result_schema": "schema.application.feedback.affected-tests.result",
+      "bindings": {
+        "cli": "binding.cli.affected_tests.v1",
+        "mcp": "binding.mcp.affected_tests.v1",
+        "http": "binding.http.affected_tests.v1"
+      }
+    },
+    "test_results": {
+      "request": {},
+      "request_schema": "schema.application.feedback.test-results.request",
+      "result_schema": "schema.application.feedback.test-results.result",
+      "bindings": {
+        "cli": "binding.cli.test_results.v1",
+        "mcp": "binding.mcp.test_results.v1",
+        "http": "binding.http.test_results.v1"
+      }
+    }
+  },
+  "http_sse": {
+    "http_binding": "binding.http.feedback_list.v1",
+    "result_schema": "schema.application.feedback.list.result",
+    "sequence": 7,
+    "item": {
+      "finding_id": "feedback-finding.pr12.fixture",
+      "summary": "Canonical feedback evidence remains transport-neutral"
+    }
+  },
+  "authorization_concealment": {
+    "problem_kind": "not_found_or_not_authorized",
+    "binding_identity": "omitted",
+    "unknown_handle_behavior": "same_as_unauthorized"
+  }
+}

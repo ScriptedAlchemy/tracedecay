@@ -1,5 +1,10 @@
 use super::*;
-use serde_json::json;
+use serde_json::{Value, json};
+use tracedecay_application::{
+    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
+    ResultContractRef, SafeDiagnostic,
+};
+use tracedecay_tool_catalog::{BindingId, SchemaId};
 
 fn defs() -> Vec<ToolDefinition> {
     get_tool_definitions()
@@ -683,5 +688,54 @@ fn reject_tool_result_truncation_detects_content_envelope() {
             "tracedecay_search"
         )
         .is_ok()
+    );
+}
+
+#[test]
+fn canonical_problem_markdown_matches_the_golden_contract() {
+    let result: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
+        ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 3).unwrap(),
+        RequestId::new("request.cli.golden").unwrap(),
+        ApplicationProblem::unavailable(
+            SafeDiagnostic::new(
+                "daemon_unavailable",
+                "The owning TraceDecay daemon is unavailable",
+            )
+            .unwrap(),
+        ),
+    ));
+    let view = crate::cli::output::view::CanonicalHumanView::from_application_result(
+        "feedback_list",
+        &BindingId::new("binding.cli.feedback-list.v1").unwrap(),
+        &result,
+    )
+    .unwrap();
+    let rendered = crate::cli::output::markdown::render(view);
+
+    assert_eq!(
+        rendered.as_str(),
+        concat!(
+            "## feedback\\_list\n",
+            "\n- Operation: `feedback_list`",
+            "\n- Binding: `binding.cli.feedback-list.v1`",
+            "\n- Status: `problem`",
+            "\n- Contract: `schema.test.result@3`",
+            "\n- Problem: `daemon_unavailable`",
+            "\n- Problem kind: `unavailable`",
+            "\n- Problem revision: `1`",
+            "\n- Owning layer: `application`",
+            "\n- Terminality: `pre_admission`",
+            "\n- Request: `request.cli.golden`",
+            "\n- Trace: `request.cli.golden`",
+            "\n- Message: The owning TraceDecay daemon is unavailable",
+            "\n- Retryable: `true`",
+            "\n- Retry: `after_delay`",
+            "\n- Retry scope: `same_request`",
+            "\n- Retry after: `none`",
+            "\n- Cancellation stage: `none`",
+            "\n- Details: none",
+            "\n- Legal actions: `retry`",
+            "\n- Coverage: `not_available`",
+        )
     );
 }

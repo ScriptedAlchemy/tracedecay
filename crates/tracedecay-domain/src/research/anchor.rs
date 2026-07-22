@@ -10,6 +10,7 @@ use super::canonical::canonical_sha256;
 use super::coverage::{CoverageReportV1, RetentionClass};
 use super::error::DomainError;
 use super::evidence::{EvidenceClass, SanitizationReceiptRefV1};
+use super::git_topology::{GitTopologyAnchorTargetV1, GitTopologyGenerationRefV1};
 use super::id::{
     BlobId, CommitId, ProjectionGenerationId, RepositoryCaptureId, RepositoryId, RetrievalAnchorId,
     TreeId,
@@ -23,6 +24,7 @@ use super::time::{TimeInterval, UtcMicros};
 use super::watermark::VectorWatermark;
 
 const RETRIEVAL_ANCHOR_V2_ID_DOMAIN: &str = "tracedecay.retrieval-anchor.v2";
+const RETRIEVAL_ANCHOR_V3_ID_DOMAIN: &str = "tracedecay.retrieval-anchor.v3";
 const MAX_ANCHOR_ALIASES: usize = 64;
 const MAX_ANCHOR_SOURCE_OBSERVATIONS: usize = 256;
 const MAX_ANCHOR_SOURCE_ANCHORS: usize = 256;
@@ -121,10 +123,12 @@ pub enum RetrievalAnchorTargetV2 {
         capture_id: RepositoryCaptureId,
         receipt: SanitizationReceiptRefV1,
     },
+    GitTopology(GitTopologyAnchorTargetV1),
 }
 
 /// Canonical target type for authoritative retrieval anchors.
-pub type RetrievalAnchorTarget = RetrievalAnchorTargetV2;
+pub type RetrievalAnchorTargetV3 = RetrievalAnchorTargetV2;
+pub type RetrievalAnchorTarget = RetrievalAnchorTargetV3;
 
 impl RetrievalAnchorTargetV2 {
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -164,6 +168,7 @@ impl RetrievalAnchorTargetV2 {
                 capture_id.validate()?;
                 receipt.validate()
             }
+            Self::GitTopology(target) => target.validate(),
         }
     }
 
@@ -174,6 +179,7 @@ impl RetrievalAnchorTargetV2 {
                 | Self::ExactRepositoryTree { .. }
                 | Self::ExactRepositoryBlob { .. }
                 | Self::RepositoryCapture { .. }
+                | Self::GitTopology(_)
         )
     }
 }
@@ -210,6 +216,7 @@ impl<'de> Deserialize<'de> for RetrievalAnchorTargetV2 {
                 capture_id: RepositoryCaptureId,
                 receipt: SanitizationReceiptRefV1,
             },
+            GitTopology(GitTopologyAnchorTargetV1),
         }
 
         let target = match Wire::deserialize(deserializer)? {
@@ -245,6 +252,7 @@ impl<'de> Deserialize<'de> for RetrievalAnchorTargetV2 {
                 capture_id,
                 receipt,
             },
+            Wire::GitTopology(target) => Self::GitTopology(target),
         };
         target.validate().map_err(serde::de::Error::custom)?;
         Ok(target)
@@ -264,9 +272,12 @@ impl<'de> Deserialize<'de> for RetrievalAnchorTargetV2 {
 pub enum AnchorSourceGenerationV2 {
     Observation(ObservationSourceGenerationV1),
     RepositoryCapture(RepositoryCaptureId),
+    GitTopology(GitTopologyGenerationRefV1),
     Unavailable,
     Unknown,
 }
+
+pub type AnchorSourceGenerationV3 = AnchorSourceGenerationV2;
 
 impl AnchorSourceGenerationV2 {
     fn validate_for_target(&self, target: &RetrievalAnchorTargetV2) -> Result<(), DomainError> {
@@ -282,6 +293,9 @@ impl AnchorSourceGenerationV2 {
                 | RetrievalAnchorTargetV2::ExactRepositoryTree { .. }
                 | RetrievalAnchorTargetV2::ExactRepositoryBlob { .. },
             ) => true,
+            (Self::GitTopology(source), RetrievalAnchorTargetV2::GitTopology(target)) => {
+                source == &target.generation()
+            }
             (_, RetrievalAnchorTargetV2::Entity(_)) => true,
             _ => false,
         };
@@ -292,6 +306,9 @@ impl AnchorSourceGenerationV2 {
         }
         if let Self::RepositoryCapture(capture_id) = self {
             capture_id.validate()?;
+        }
+        if let Self::GitTopology(generation) = self {
+            generation.validate()?;
         }
         Ok(())
     }
@@ -395,6 +412,8 @@ pub struct RetrievalAnchorRecordV2Parts {
     pub durability: AnchorDurabilityClass,
 }
 
+pub type RetrievalAnchorRecordV3Parts = RetrievalAnchorRecordV2Parts;
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalAnchorRecordV2 {
@@ -417,11 +436,13 @@ pub struct RetrievalAnchorRecordV2 {
     durability: AnchorDurabilityClass,
 }
 
+pub type RetrievalAnchorRecordV3 = RetrievalAnchorRecordV2;
+
 /// Canonical authoritative retrieval-anchor record.
 ///
 /// `RetrievalAnchorRecordV1` remains only as the compatibility representation
 /// for existing research-manifest callers.
-pub type RetrievalAnchorRecord = RetrievalAnchorRecordV2;
+pub type RetrievalAnchorRecord = RetrievalAnchorRecordV3;
 
 impl RetrievalAnchorRecordV2 {
     pub fn new(mut parts: RetrievalAnchorRecordV2Parts) -> Result<Self, DomainError> {
@@ -535,6 +556,16 @@ impl RetrievalAnchorRecordV2 {
                 field: "repository anchor owner",
             });
         }
+        if let (
+            RetrievalAnchorTargetV2::GitTopology(target),
+            ObservationScopeV1::Project { project_id },
+        ) = (&self.target, &self.owner)
+            && target.project_id() != project_id
+        {
+            return Err(DomainError::UnknownReference {
+                field: "git topology anchor project owner",
+            });
+        }
         if let Some(occurred_at) = &self.occurred_at {
             occurred_at.validate()?;
         }
@@ -557,6 +588,19 @@ impl RetrievalAnchorRecordV2 {
             });
         }
         ensure_unique_lineage(&self.source_anchors)?;
+        if let RetrievalAnchorTargetV2::GitTopology(target) = &self.target {
+            for expected in target.ordered_sources() {
+                if !self
+                    .source_anchors
+                    .iter()
+                    .any(|source| source.anchor_id() == &expected.anchor_id)
+                {
+                    return Err(DomainError::UnknownReference {
+                        field: "git topology ordered source lineage",
+                    });
+                }
+            }
+        }
         for source in &self.source_anchors {
             source.validate()?;
             if source.owner() != &self.owner {
@@ -588,6 +632,14 @@ pub fn derive_exact_observation_anchor_id(
         owner,
         &RetrievalAnchorTargetV2::ExactObservation(observation_id.clone()),
     )
+}
+
+/// Derive the canonical V3 identity for one immutable Git-topology target.
+pub fn derive_git_topology_anchor_id(
+    owner: &ObservationScopeV1,
+    target: &GitTopologyAnchorTargetV1,
+) -> Result<RetrievalAnchorId, DomainError> {
+    derive_anchor_id(owner, &RetrievalAnchorTargetV2::GitTopology(target.clone()))
 }
 
 impl<'de> Deserialize<'de> for RetrievalAnchorRecordV2 {
@@ -658,12 +710,22 @@ fn derive_anchor_id(
 
     validate_owner(owner)?;
     target.validate()?;
+    let domain = if matches!(target, RetrievalAnchorTargetV2::GitTopology(_)) {
+        RETRIEVAL_ANCHOR_V3_ID_DOMAIN
+    } else {
+        RETRIEVAL_ANCHOR_V2_ID_DOMAIN
+    };
     let digest = canonical_sha256(&Identity {
-        domain: RETRIEVAL_ANCHOR_V2_ID_DOMAIN,
+        domain,
         owner,
         target,
     })?;
-    RetrievalAnchorId::new(format!("retrieval.v2.{}", digest.as_str()))
+    let version = if matches!(target, RetrievalAnchorTargetV2::GitTopology(_)) {
+        "v3"
+    } else {
+        "v2"
+    };
+    RetrievalAnchorId::new(format!("retrieval.{version}.{}", digest.as_str()))
 }
 
 fn validate_owner(owner: &ObservationScopeV1) -> Result<(), DomainError> {

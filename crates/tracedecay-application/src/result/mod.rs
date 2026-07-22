@@ -5,8 +5,9 @@ mod receipt;
 mod stream;
 
 pub use envelope::{
-    ApplicationEnvelope, ApplicationOutcome, ApplicationProblemEnvelope, ApplicationResult,
-    ResultContractRef,
+    APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationOutcome,
+    ApplicationProblemEnvelope, ApplicationProblemRecord, ApplicationResult, MAX_PROBLEM_DETAILS,
+    MAX_RETRY_AFTER_MILLIS, ResultContractRef,
 };
 pub use evidence::{
     AuthorityReceipt, BudgetClass, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
@@ -16,7 +17,8 @@ pub use evidence::{
     RetrieverContributionState, ScoreId, TemporalState,
 };
 pub use problem::{
-    ApplicationProblem, ApplicationProblemKind, LegalAction, RetryDirective, SafeDiagnostic,
+    ApplicationProblem, ApplicationProblemKind, LegalAction, ProblemOwningLayer,
+    ProblemTerminality, RetryDirective, RetryScope, SafeDiagnostic,
 };
 pub use receipt::{
     CancellationObservation, CancellationStage, EffectId, EffectReceipt, EffectResult,

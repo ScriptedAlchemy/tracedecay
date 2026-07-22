@@ -4,7 +4,7 @@
 //! composition must enqueue that envelope through the existing authoritative
 //! observation/analytics path; it must not write the analytics table directly.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,12 +12,279 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracedecay_application::feedback::FeedbackObservationPort;
 use tracedecay_domain::feedback::{
-    FeedbackCycleObservationV1, FeedbackEvaluationInputV1, FeedbackSavedEvaluationV1,
+    FeedbackCycleObservationV1, FeedbackEvaluationInputV1, FeedbackObservationKindV1,
+    FeedbackSavedEvaluationV1,
 };
-use tracedecay_domain::{ManifestDigest, canonical_sha256};
+use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
 const OBSERVATION_ENVELOPE_DOMAIN: &str = "tracedecay.feedback.observation.plan26.v1";
+const SOURCE_EVENT_ENVELOPE_DOMAIN: &str = "tracedecay.feedback.source-event.plan26.v1";
 const SAVED_EVALUATION_DOMAIN: &str = "tracedecay.feedback.saved-evaluation.plan26.v1";
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26FeedbackOperationV1 {
+    FeedbackCycle,
+    FeedbackDiagnostics,
+    FeedbackGet,
+    FeedbackExpand,
+    FeedbackList,
+    PrimitiveImpact,
+    PrimitiveAffectedTests,
+    PrimitiveTestResults,
+    LspSession,
+    GitHubReview,
+    CiLocalization,
+    Proximity,
+    HostDelivery,
+    HookFeedback,
+    ScoutFeedback,
+    SseStream,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26FeedbackOutcomeV1 {
+    Accepted,
+    Admitted,
+    Rejected,
+    AtCapacity,
+    Completed,
+    Unavailable,
+    Denied,
+    Cancelled,
+    TimedOut,
+    Failed,
+    Duplicate,
+    Stale,
+    Partial,
+    RateLimited,
+    RolledBack,
+    Disconnected,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26DeliveryRouteV1 {
+    Cli,
+    Mcp,
+    Http,
+    Lsp,
+    HookV2,
+    HookLegacy,
+    Scout,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26GitHubLifecycleV1 {
+    Current,
+    Outdated,
+    Resolved,
+    Edited,
+    Deleted,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26CiProviderV1 {
+    GitHubActions,
+    RetainedObservation,
+    ExactCodeEvidence,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26CoverageV1 {
+    Known,
+    Partial,
+    Stale,
+    Unknown,
+    Sampled,
+    Capped,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26ProximityTransitionV1 {
+    Emitted,
+    Suppressed,
+    Expired,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26ProximityRiskV1 {
+    None,
+    BelowThreshold,
+    AtOrAboveThreshold,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26AnchorOperationV1 {
+    Anchor,
+    HandleExpansion,
+    EvidenceExpansion,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26HookScoutPhaseV1 {
+    Admission,
+    Delivery,
+    FeedbackTerminal,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26SseLifecycleV1 {
+    Opened,
+    EventDelivered,
+    Gap,
+    Expired,
+    Completed,
+    Cancelled,
+    TimedOut,
+    Failed,
+    Partial,
+    Disconnected,
+}
+
+/// Closed PR11-PR13 source-event family. All values are bounded enums,
+/// digests, counts, or durations; provider payloads never enter this type.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Plan26FeedbackSourceEventV1 {
+    ArgumentRejected {
+        operation: Plan26FeedbackOperationV1,
+        outcome: Plan26FeedbackOutcomeV1,
+    },
+    Dispatch {
+        operation: Plan26FeedbackOperationV1,
+        outcome: Plan26FeedbackOutcomeV1,
+        capacity: u32,
+        admitted: u32,
+    },
+    Delivery {
+        operation: Plan26FeedbackOperationV1,
+        route: Plan26DeliveryRouteV1,
+        outcome: Plan26FeedbackOutcomeV1,
+        item_count: u32,
+        duration_micros: Option<u64>,
+    },
+    Truncation {
+        operation: Plan26FeedbackOperationV1,
+        returned_count: u32,
+        omitted_count: u32,
+    },
+    AnchorExpansion {
+        operation: Plan26AnchorOperationV1,
+        outcome: Plan26FeedbackOutcomeV1,
+        returned_count: u32,
+        duration_micros: Option<u64>,
+    },
+    GitHubLifecycle {
+        lifecycle: Plan26GitHubLifecycleV1,
+        item_count: u32,
+    },
+    GitHubIngress {
+        outcome: Plan26FeedbackOutcomeV1,
+        item_count: u32,
+        duration_micros: Option<u64>,
+    },
+    GitHubRateLimit {
+        duration_micros: Option<u64>,
+    },
+    GitHubStale {
+        item_count: u32,
+    },
+    CiLocalization {
+        outcome: Plan26FeedbackOutcomeV1,
+        provider: Plan26CiProviderV1,
+        exact_evidence: bool,
+        coverage: Plan26CoverageV1,
+        localized_count: u32,
+        candidate_count: u32,
+        duration_micros: Option<u64>,
+    },
+    Proximity {
+        transition: Plan26ProximityTransitionV1,
+        risk: Plan26ProximityRiskV1,
+        configuration_revision: ManifestDigest,
+        candidate_count: u32,
+        affected_count: u32,
+    },
+    HostDelivery {
+        route: Plan26DeliveryRouteV1,
+        outcome: Plan26FeedbackOutcomeV1,
+        rollback: bool,
+        item_count: u32,
+        duration_micros: Option<u64>,
+    },
+    HookScout {
+        route: Plan26DeliveryRouteV1,
+        phase: Plan26HookScoutPhaseV1,
+        outcome: Plan26FeedbackOutcomeV1,
+        item_count: u32,
+        duration_micros: Option<u64>,
+    },
+    Cancellation {
+        operation: Plan26FeedbackOperationV1,
+        outcome: Plan26FeedbackOutcomeV1,
+    },
+    SseLifecycle {
+        lifecycle: Plan26SseLifecycleV1,
+        sequence: Option<u64>,
+        item_count: u32,
+        duration_micros: Option<u64>,
+    },
+}
+
+impl Plan26FeedbackSourceEventV1 {
+    pub const fn event_kind(&self) -> &'static str {
+        match self {
+            Self::ArgumentRejected { .. } => "feedback.argument.rejected.v1",
+            Self::Dispatch { .. } => "feedback.dispatch.observed.v1",
+            Self::Delivery { .. } => "feedback.delivery.observed.v1",
+            Self::Truncation { .. } => "feedback.truncation.observed.v1",
+            Self::AnchorExpansion { .. } => "feedback.expansion.observed.v1",
+            Self::GitHubLifecycle { .. } => "feedback.github.lifecycle.observed.v1",
+            Self::GitHubIngress { .. } => "feedback.github.ingress.observed.v1",
+            Self::GitHubRateLimit { .. } => "feedback.github.rate_limit.observed.v1",
+            Self::GitHubStale { .. } => "feedback.github.stale.observed.v1",
+            Self::CiLocalization { .. } => "feedback.ci.localization.observed.v1",
+            Self::Proximity { .. } => "feedback.proximity.observed.v1",
+            Self::HostDelivery { .. } => "feedback.host_delivery.observed.v1",
+            Self::HookScout { .. } => "feedback.hook_scout.observed.v1",
+            Self::Cancellation { .. } => "feedback.cancellation.observed.v1",
+            Self::SseLifecycle { .. } => "feedback.sse.lifecycle.observed.v1",
+        }
+    }
+
+    pub fn validate(&self) -> Option<()> {
+        match self {
+            Self::Proximity {
+                configuration_revision,
+                affected_count,
+                candidate_count,
+                ..
+            } => {
+                configuration_revision.validate().ok()?;
+                (affected_count <= candidate_count).then_some(())
+            }
+            Self::Dispatch {
+                admitted, capacity, ..
+            } => (admitted <= capacity).then_some(()),
+            Self::CiLocalization {
+                localized_count,
+                candidate_count,
+                ..
+            } => (localized_count <= candidate_count).then_some(()),
+            _ => Some(()),
+        }
+    }
+}
 
 /// Privacy-safe Plan-26 source event. It contains no source, path, diagnostic
 /// message, overlay content, or transport-local delivery identity.
@@ -29,26 +296,47 @@ pub struct FeedbackObservationEnvelopeV1 {
     pub privacy_class: String,
     pub idempotency_key: ManifestDigest,
     pub saved_evaluation_digest: ManifestDigest,
-    pub observation: FeedbackCycleObservationV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<FeedbackCycleObservationV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event: Option<Plan26FeedbackSourceEventV1>,
+    pub observed_at: UtcMicros,
 }
 
 impl FeedbackObservationEnvelopeV1 {
     pub fn validate(&self) -> Option<()> {
         if self.schema_version != 1
-            || self.producer != "feedback_cycle"
             || self.privacy_class != "operational_no_content"
             || self.idempotency_key.validate().is_err()
             || self.saved_evaluation_digest.validate().is_err()
-            || self.observation.validate().is_err()
         {
             return None;
         }
-        let expected_key = canonical_sha256(&(
-            OBSERVATION_ENVELOPE_DOMAIN,
-            &self.saved_evaluation_digest,
-            &self.observation,
-        ))
-        .ok()?;
+        let expected_key = match (&self.observation, &self.source_event) {
+            (Some(observation), None)
+                if self.producer == "feedback_cycle"
+                    && observation.observed_at == self.observed_at =>
+            {
+                observation.validate().ok()?;
+                canonical_sha256(&(
+                    OBSERVATION_ENVELOPE_DOMAIN,
+                    &self.saved_evaluation_digest,
+                    observation,
+                ))
+                .ok()?
+            }
+            (None, Some(source_event)) if self.producer == "feedback_source" => {
+                source_event.validate()?;
+                canonical_sha256(&(
+                    SOURCE_EVENT_ENVELOPE_DOMAIN,
+                    &self.saved_evaluation_digest,
+                    self.observed_at,
+                    source_event,
+                ))
+                .ok()?
+            }
+            _ => return None,
+        };
         (expected_key == self.idempotency_key).then_some(())
     }
 
@@ -56,6 +344,63 @@ impl FeedbackObservationEnvelopeV1 {
     /// replay before an envelope reaches the durable observability authority.
     pub fn replay_identity(&self) -> Option<&str> {
         self.validate().map(|()| self.idempotency_key.as_str())
+    }
+
+    pub fn event_kind(&self) -> Option<&'static str> {
+        self.validate()?;
+        match (&self.observation, &self.source_event) {
+            (Some(observation), None) => Some(match observation.kind {
+                FeedbackObservationKindV1::Trigger => "feedback.cycle.triggered.v1",
+                FeedbackObservationKindV1::EvaluationStage => "feedback.cycle.stage.observed.v1",
+                FeedbackObservationKindV1::Terminal => "feedback.cycle.terminal.v1",
+                FeedbackObservationKindV1::DedupeSuppressed => {
+                    "feedback.cycle.dedupe_suppressed.v1"
+                }
+                FeedbackObservationKindV1::Latency => "feedback.cycle.latency.observed.v1",
+            }),
+            (None, Some(source_event)) => Some(source_event.event_kind()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackObservationReadModelV1 {
+    pub schema_version: u16,
+    pub total_count: u64,
+    pub first_observed_at: Option<UtcMicros>,
+    pub last_observed_at: Option<UtcMicros>,
+    pub event_counts: BTreeMap<String, u64>,
+}
+
+impl FeedbackObservationReadModelV1 {
+    pub fn project(observations: &[FeedbackObservationEnvelopeV1]) -> Option<Self> {
+        let mut event_counts = BTreeMap::<String, u64>::new();
+        let mut first_observed_at = None;
+        let mut last_observed_at = None;
+        for observation in observations {
+            let kind = observation.event_kind()?;
+            let count = event_counts.entry(kind.to_owned()).or_default();
+            *count = count.saturating_add(1);
+            first_observed_at = Some(
+                first_observed_at.map_or(observation.observed_at, |first: UtcMicros| {
+                    first.min(observation.observed_at)
+                }),
+            );
+            last_observed_at = Some(
+                last_observed_at.map_or(observation.observed_at, |last: UtcMicros| {
+                    last.max(observation.observed_at)
+                }),
+            );
+        }
+        Some(Self {
+            schema_version: 1,
+            total_count: observations.len().try_into().unwrap_or(u64::MAX),
+            first_observed_at,
+            last_observed_at,
+            event_counts,
+        })
     }
 }
 
@@ -95,10 +440,71 @@ fn observation_envelope(
         privacy_class: "operational_no_content".to_owned(),
         idempotency_key,
         saved_evaluation_digest,
-        observation,
+        observed_at: observation.observed_at,
+        observation: Some(observation),
+        source_event: None,
     };
     envelope.validate()?;
     Some(envelope)
+}
+
+/// Maps a content-free owner event onto the same saved-content envelope and
+/// idempotency boundary used by generic feedback-cycle observations.
+pub fn plan26_feedback_source_event_envelope(
+    input: &FeedbackEvaluationInputV1,
+    source_event: Plan26FeedbackSourceEventV1,
+) -> Option<FeedbackObservationEnvelopeV1> {
+    let saved = input.saved().ok()?;
+    source_event.validate()?;
+    let saved_evaluation_digest = canonical_sha256(&(SAVED_EVALUATION_DOMAIN, saved)).ok()?;
+    plan26_feedback_source_event_envelope_for_subject(
+        saved_evaluation_digest,
+        input.observed_at,
+        source_event,
+    )
+}
+
+pub fn plan26_feedback_source_event_envelope_for_subject(
+    subject_digest: ManifestDigest,
+    observed_at: UtcMicros,
+    source_event: Plan26FeedbackSourceEventV1,
+) -> Option<FeedbackObservationEnvelopeV1> {
+    subject_digest.validate().ok()?;
+    source_event.validate()?;
+    let idempotency_key = canonical_sha256(&(
+        SOURCE_EVENT_ENVELOPE_DOMAIN,
+        &subject_digest,
+        observed_at,
+        &source_event,
+    ))
+    .ok()?;
+    let envelope = FeedbackObservationEnvelopeV1 {
+        schema_version: 1,
+        producer: "feedback_source".to_owned(),
+        privacy_class: "operational_no_content".to_owned(),
+        idempotency_key,
+        saved_evaluation_digest: subject_digest,
+        observation: None,
+        source_event: Some(source_event),
+        observed_at,
+    };
+    envelope.validate()?;
+    Some(envelope)
+}
+
+pub trait Plan26FeedbackObservationEmitterV1 {
+    fn observe_source_event(
+        &self,
+        input: &FeedbackEvaluationInputV1,
+        source_event: Plan26FeedbackSourceEventV1,
+    );
+
+    fn observe_source_event_for_subject(
+        &self,
+        subject_digest: ManifestDigest,
+        observed_at: UtcMicros,
+        source_event: Plan26FeedbackSourceEventV1,
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,6 +743,36 @@ where
     }
 }
 
+impl<S> Plan26FeedbackObservationEmitterV1 for Plan26FeedbackObservationAdapter<S>
+where
+    S: Plan26FeedbackObservationQueue,
+{
+    fn observe_source_event(
+        &self,
+        input: &FeedbackEvaluationInputV1,
+        source_event: Plan26FeedbackSourceEventV1,
+    ) {
+        if let Some(envelope) = plan26_feedback_source_event_envelope(input, source_event) {
+            let _ = self.sink.enqueue_feedback_observation(envelope);
+        }
+    }
+
+    fn observe_source_event_for_subject(
+        &self,
+        subject_digest: ManifestDigest,
+        observed_at: UtcMicros,
+        source_event: Plan26FeedbackSourceEventV1,
+    ) {
+        if let Some(envelope) = plan26_feedback_source_event_envelope_for_subject(
+            subject_digest,
+            observed_at,
+            source_event,
+        ) {
+            let _ = self.sink.enqueue_feedback_observation(envelope);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -554,6 +990,136 @@ mod tests {
         let overlay = overlay_input();
         adapter.observe(&overlay, overlay_trigger(&overlay));
         assert_eq!(recorded.borrow().as_slice(), &[first]);
+    }
+
+    #[test]
+    fn source_events_are_content_free_replay_stable_and_share_the_queue() {
+        let input = saved_input();
+        let event = Plan26FeedbackSourceEventV1::CiLocalization {
+            outcome: Plan26FeedbackOutcomeV1::Partial,
+            provider: Plan26CiProviderV1::GitHubActions,
+            exact_evidence: true,
+            coverage: Plan26CoverageV1::Partial,
+            localized_count: 2,
+            candidate_count: 3,
+            duration_micros: Some(42),
+        };
+        let first = plan26_feedback_source_event_envelope(&input, event.clone()).unwrap();
+        let replay = plan26_feedback_source_event_envelope(&input, event).unwrap();
+        assert_eq!(first, replay);
+        assert_eq!(first.producer, "feedback_source");
+        assert!(first.observation.is_none());
+        assert_eq!(
+            first
+                .source_event
+                .as_ref()
+                .map(Plan26FeedbackSourceEventV1::event_kind),
+            Some("feedback.ci.localization.observed.v1")
+        );
+        let encoded = serde_json::to_string(&first).unwrap();
+        assert!(!encoded.contains("file.feedback.observation"));
+        assert!(!encoded.contains("symbol.feedback.observation"));
+
+        let queue = BoundedPlan26FeedbackObservationQueue::new(1);
+        assert_eq!(
+            queue.enqueue_feedback_observation(first.clone()),
+            FeedbackObservationSinkOutcome::Enqueued
+        );
+        assert_eq!(
+            queue.replay_feedback_observation(replay),
+            FeedbackObservationSinkOutcome::Duplicate
+        );
+    }
+
+    #[test]
+    fn github_lifecycle_ingress_rate_limit_and_stale_are_distinct_events() {
+        let input = saved_input();
+        let events = [
+            Plan26FeedbackSourceEventV1::GitHubLifecycle {
+                lifecycle: Plan26GitHubLifecycleV1::Outdated,
+                item_count: 1,
+            },
+            Plan26FeedbackSourceEventV1::GitHubIngress {
+                outcome: Plan26FeedbackOutcomeV1::Partial,
+                item_count: 1,
+                duration_micros: None,
+            },
+            Plan26FeedbackSourceEventV1::GitHubRateLimit {
+                duration_micros: Some(1_000),
+            },
+            Plan26FeedbackSourceEventV1::GitHubStale { item_count: 1 },
+        ];
+        let kinds = events
+            .into_iter()
+            .map(|event| {
+                plan26_feedback_source_event_envelope(&input, event)
+                    .unwrap()
+                    .source_event
+                    .unwrap()
+                    .event_kind()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(kinds.len(), 4);
+    }
+
+    #[test]
+    fn read_model_preserves_denominators_and_event_families() {
+        let input = saved_input();
+        let observations = vec![
+            feedback_observation_envelope(
+                &input,
+                FeedbackCycleObservationV1::trigger(&input).unwrap(),
+            )
+            .unwrap(),
+            plan26_feedback_source_event_envelope(
+                &input,
+                Plan26FeedbackSourceEventV1::Delivery {
+                    operation: Plan26FeedbackOperationV1::FeedbackList,
+                    route: Plan26DeliveryRouteV1::Mcp,
+                    outcome: Plan26FeedbackOutcomeV1::Completed,
+                    item_count: 2,
+                    duration_micros: Some(10),
+                },
+            )
+            .unwrap(),
+            plan26_feedback_source_event_envelope(
+                &input,
+                Plan26FeedbackSourceEventV1::Delivery {
+                    operation: Plan26FeedbackOperationV1::FeedbackList,
+                    route: Plan26DeliveryRouteV1::Http,
+                    outcome: Plan26FeedbackOutcomeV1::Completed,
+                    item_count: 2,
+                    duration_micros: Some(12),
+                },
+            )
+            .unwrap(),
+            plan26_feedback_source_event_envelope(
+                &input,
+                Plan26FeedbackSourceEventV1::SseLifecycle {
+                    lifecycle: Plan26SseLifecycleV1::Gap,
+                    sequence: Some(7),
+                    item_count: 0,
+                    duration_micros: None,
+                },
+            )
+            .unwrap(),
+        ];
+        let model = FeedbackObservationReadModelV1::project(&observations).unwrap();
+        assert_eq!(model.total_count, 4);
+        assert_eq!(
+            model.event_counts.get("feedback.cycle.triggered.v1"),
+            Some(&1)
+        );
+        assert_eq!(
+            model.event_counts.get("feedback.delivery.observed.v1"),
+            Some(&2)
+        );
+        assert_eq!(
+            model.event_counts.get("feedback.sse.lifecycle.observed.v1"),
+            Some(&1)
+        );
+        assert_eq!(model.first_observed_at, Some(input.observed_at));
+        assert_eq!(model.last_observed_at, Some(input.observed_at));
     }
 
     #[test]

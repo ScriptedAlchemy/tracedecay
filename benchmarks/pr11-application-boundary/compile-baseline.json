@@ -1,7 +1,13 @@
 {
-  "package": "tracedecay-application",
-  "command": "cargo check -p tracedecay-application",
-  "elapsed_ms": 22938,
-  "recorded_at": "2026-07-21T08:32:20Z",
-  "notes": "PR11 application-boundary compile baseline; dependency tree must remain free of transport/store/model-runtime edges."
+  "schema_version": 1,
+  "workload_id": "pr11-application-boundary-compile-v1",
+  "packages": ["tracedecay-application"],
+  "command": ["cargo", "check", "-p", "tracedecay-application"],
+  "measurement": {
+    "status": "measured",
+    "elapsed_ms": 22938,
+    "recorded_at": "2026-07-21T08:32:20Z",
+    "note": "Historical local measurement; it is not a CI budget or a substitute for the all-feature acceptance gate."
+  },
+  "assertion": "The application boundary remains free of transport, store, and model-runtime authority edges."
 }

@@ -4,7 +4,15 @@ use tracedecay_tool_catalog::{SchemaId, SchemaRef};
 use crate::context::{RequestId, ResolvedScope};
 use crate::error::ApplicationContractError;
 
-use super::{ApplicationProblem, EffectResult, EvidencePacket, PreviewResult};
+use super::{
+    ApplicationProblem, ApplicationProblemKind, CancellationStage, EffectResult, EvidenceCoverage,
+    EvidencePacket, LegalAction, PreviewResult, ProblemOwningLayer, ProblemTerminality,
+    RetryDirective, RetryScope, SafeDiagnostic,
+};
+
+pub const APPLICATION_PROBLEM_REVISION: u32 = 1;
+pub const MAX_PROBLEM_DETAILS: usize = 8;
+pub const MAX_RETRY_AFTER_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 
 /// Versioned schema identity for an application result contract.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -108,6 +116,91 @@ impl<T> ApplicationEnvelope<T> {
     }
 }
 
+/// Stable application problem record shared verbatim by every adapter.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationProblemRecord {
+    pub revision: u32,
+    pub kind: ApplicationProblemKind,
+    pub code: String,
+    pub message: String,
+    pub diagnostic: Option<SafeDiagnostic>,
+    pub owning_layer: ProblemOwningLayer,
+    pub terminality: ProblemTerminality,
+    pub retryable: bool,
+    pub retry: RetryDirective,
+    pub retry_scope: Option<RetryScope>,
+    pub retry_after_millis: Option<u64>,
+    pub cancellation_stage: Option<CancellationStage>,
+    pub request_id: RequestId,
+    pub trace_id: RequestId,
+    pub details: Vec<SafeDiagnostic>,
+    pub legal_actions: Vec<LegalAction>,
+    pub coverage: Option<EvidenceCoverage>,
+    #[serde(skip)]
+    source: ApplicationProblem,
+}
+
+impl ApplicationProblemRecord {
+    fn new(request_id: RequestId, source: ApplicationProblem) -> Self {
+        let retry = source.retry();
+        let kind = source.kind();
+        let retry_scope = match retry {
+            RetryDirective::Never => None,
+            RetryDirective::SameRequest | RetryDirective::AfterDelay => {
+                Some(RetryScope::SameRequest)
+            }
+            RetryDirective::AfterRevalidate => Some(RetryScope::FreshRequest),
+            RetryDirective::AfterReconcile => Some(RetryScope::SameOperation),
+        };
+        let diagnostic = source.diagnostic().cloned();
+        let code = diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.code.clone())
+            .unwrap_or_else(|| source.canonical_code().to_owned());
+        Self {
+            revision: APPLICATION_PROBLEM_REVISION,
+            kind,
+            code,
+            message: source.safe_message().to_owned(),
+            diagnostic,
+            owning_layer: ProblemOwningLayer::Application,
+            terminality: ProblemTerminality::PreAdmission,
+            retryable: retry != RetryDirective::Never,
+            retry,
+            retry_scope,
+            retry_after_millis: None,
+            cancellation_stage: matches!(
+                kind,
+                ApplicationProblemKind::Cancelled | ApplicationProblemKind::TimedOut
+            )
+            .then_some(CancellationStage::BeforeAdmission),
+            trace_id: request_id.clone(),
+            request_id,
+            details: Vec::new(),
+            legal_actions: source.legal_actions().to_vec(),
+            coverage: None,
+            source,
+        }
+    }
+
+    pub fn kind(&self) -> ApplicationProblemKind {
+        self.kind
+    }
+
+    pub fn is_pre_admission(&self) -> bool {
+        self.terminality == ProblemTerminality::PreAdmission
+    }
+
+    pub fn source(&self) -> &ApplicationProblem {
+        &self.source
+    }
+
+    pub fn into_source(self) -> ApplicationProblem {
+        self.source
+    }
+}
+
 /// Stable pre-admission failure envelope. Admitted terminal failures stay in
 /// their evidence, preview, or effect receipt instead.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -115,7 +208,7 @@ impl<T> ApplicationEnvelope<T> {
 pub struct ApplicationProblemEnvelope {
     pub contract: ResultContractRef,
     pub request_id: RequestId,
-    pub problem: ApplicationProblem,
+    pub problem: ApplicationProblemRecord,
 }
 
 impl ApplicationProblemEnvelope {
@@ -124,11 +217,62 @@ impl ApplicationProblemEnvelope {
         request_id: RequestId,
         problem: ApplicationProblem,
     ) -> Self {
+        let record = ApplicationProblemRecord::new(request_id.clone(), problem);
         Self {
             contract,
             request_id,
-            problem,
+            problem: record,
         }
+    }
+
+    pub fn with_owning_layer(mut self, owning_layer: ProblemOwningLayer) -> Self {
+        self.problem.owning_layer = owning_layer;
+        self
+    }
+
+    pub fn with_trace_id(mut self, trace_id: RequestId) -> Self {
+        self.problem.trace_id = trace_id;
+        self
+    }
+
+    pub fn with_retry_after_millis(
+        mut self,
+        retry_after_millis: Option<u64>,
+    ) -> Result<Self, ApplicationContractError> {
+        if retry_after_millis.is_some_and(|delay| delay > MAX_RETRY_AFTER_MILLIS)
+            || (retry_after_millis.is_some() && !self.problem.retryable)
+        {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "problem retry delay",
+            });
+        }
+        self.problem.retry_after_millis = retry_after_millis;
+        Ok(self)
+    }
+
+    pub fn with_details(
+        mut self,
+        details: Vec<SafeDiagnostic>,
+    ) -> Result<Self, ApplicationContractError> {
+        if details.len() > MAX_PROBLEM_DETAILS {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "problem details",
+            });
+        }
+        for detail in &details {
+            detail.validate()?;
+        }
+        self.problem.details = details;
+        Ok(self)
+    }
+
+    pub fn with_coverage(
+        mut self,
+        coverage: EvidenceCoverage,
+    ) -> Result<Self, ApplicationContractError> {
+        coverage.validate()?;
+        self.problem.coverage = Some(coverage);
+        Ok(self)
     }
 }
 

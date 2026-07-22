@@ -33,17 +33,27 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 
+use tracedecay::application_surface::{
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation,
+    parse_application_surface_request,
+};
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_within};
+use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, render_tool_cli_help,
     short_tool_name,
 };
+use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+use tracedecay_domain::UtcMicros;
+
+use crate::cli::dispatch::resolve_cli_application_surface;
 
 mod args;
 use args::{ParsedInvocation, canonical_tool_name, nearest_tool_name, parse_invocation};
@@ -75,6 +85,7 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
 const DEFAULT_TOOL_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_TOOL_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 const TOOL_DEADLINE_ENV: &str = "TRACEDECAY_TOOL_DEADLINE_MS";
+static NEXT_APPLICATION_SURFACE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn tool_deadline_range_error() -> TraceDecayError {
     TraceDecayError::Config {
@@ -193,6 +204,16 @@ pub(crate) async fn run(
     let deadline = Instant::now()
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
+    if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name) {
+        return dispatch_cli_application_surface(
+            operation,
+            tool_args,
+            explicit_project.map(PathBuf::from),
+            raw_json,
+            deadline,
+        )
+        .await;
+    }
     dispatch_daemon_tool(
         DaemonToolDispatch::project_scoped(explicit_project, &def.name),
         &def.name,
@@ -201,6 +222,85 @@ pub(crate) async fn run(
         deadline,
     )
     .await
+}
+
+async fn dispatch_cli_application_surface(
+    operation: ApplicationSurfaceOperation,
+    tool_args: Value,
+    project: Option<PathBuf>,
+    raw_json: bool,
+    deadline: Instant,
+) -> Result<()> {
+    let request = parse_application_surface_request(operation, tool_args).map_err(|error| {
+        TraceDecayError::Config {
+            message: error.to_string(),
+        }
+    })?;
+    let sequence = NEXT_APPLICATION_SURFACE_REQUEST.fetch_add(1, Ordering::Relaxed);
+    let request_id = RequestId::new(format!(
+        "request.cli.{}.{}",
+        tracedecay::tracedecay::current_timestamp(),
+        sequence
+    ))
+    .map_err(|_| TraceDecayError::Config {
+        message: "could not allocate an application surface request id".to_owned(),
+    })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX);
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let deadline = Deadline::new(UtcMicros(
+        now.saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
+    ))
+    .map_err(|error| TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
+    let cancellation =
+        CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str())).map_err(
+            |error| TraceDecayError::Config {
+                message: error.to_string(),
+            },
+        )?;
+    let handshake = DaemonHandshake::for_current_client(project, None, false, false)?;
+    let client = DaemonInvocationClient::for_current(handshake)?;
+    let result = resolve_cli_application_surface(
+        operation,
+        request_id,
+        request,
+        if raw_json {
+            RequestedOutputFormat::Json
+        } else {
+            RequestedOutputFormat::Markdown
+        },
+        deadline,
+        cancellation,
+        Some(&client),
+    )
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
+    print_cli_application_surface(result, raw_json)
+}
+
+fn print_cli_application_surface(
+    result: ApplicationSurfaceInvocationResult,
+    raw_json: bool,
+) -> Result<()> {
+    if raw_json {
+        print!("{}", crate::cli::output::json::json_line(&result.result)?);
+        return Ok(());
+    }
+
+    let view = crate::cli::output::view::CanonicalHumanView::from_application_result(
+        result.operation.as_str(),
+        &result.binding_id,
+        &result.result,
+    )?;
+    let rendered = crate::cli::output::markdown::render(view);
+    println!("{}", rendered.as_str());
+    Ok(())
 }
 
 struct DaemonToolDispatch {
@@ -366,7 +466,9 @@ fn first_line(s: &str) -> String {
 /// `edit`, `memory`). Tools that don't match any prefix fall under `other`.
 fn group_for(def: &ToolDefinition) -> &'static str {
     let n = def.name.as_str();
-    if n.starts_with("tracedecay_branch_")
+    if ApplicationSurfaceOperation::from_tool_name(n).is_some() {
+        "application"
+    } else if n.starts_with("tracedecay_branch_")
         || n == "tracedecay_commit_context"
         || n == "tracedecay_pr_context"
         || n == "tracedecay_changelog"

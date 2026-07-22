@@ -32,7 +32,7 @@ use tracedecay_store::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use super::queue::RepositoryMutationQueue;
+use super::queue::{RepositoryMutationQueue, RepositoryMutationQueueError};
 use super::recovery::{GitIndexRecoveryError, GitIndexRecoveryExecutor};
 use super::service::{
     CurrentGitIndexPolicyStateV1, GitIndexNativeExecutor, GitIndexPolicyRecheckPort,
@@ -75,6 +75,24 @@ fn same_repository_mutations_never_enter_the_native_section_together() {
     }
 
     assert_eq!(peak.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn repository_mutation_capacity_fails_closed_before_waiting() {
+    let queue = RepositoryMutationQueue::with_capacity_for_test(1);
+    let repository = RepositoryId::new("repository.capacity").expect("repository id");
+    let nested = queue
+        .with_repository(&repository, || queue.with_repository(&repository, || ()))
+        .expect("outer mutation admitted");
+
+    assert!(matches!(
+        nested,
+        Err(RepositoryMutationQueueError::Saturated)
+    ));
+    assert!(
+        queue.with_repository(&repository, || ()).is_ok(),
+        "capacity is released when an operation exits"
+    );
 }
 
 fn id<T>(value: &str) -> T

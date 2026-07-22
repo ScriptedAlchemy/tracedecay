@@ -40,6 +40,71 @@ const ALIASES_SCHEMA: &str = "
     );
 ";
 
+const AUTHORITY_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS retrieval_anchor_dispositions (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        disposition_id TEXT NOT NULL UNIQUE CHECK(length(disposition_id) > 0),
+        anchor_id TEXT NOT NULL,
+        owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
+        state TEXT NOT NULL
+            CHECK(state IN ('active', 'superseded', 'deleted', 'unavailable')),
+        superseded_by TEXT,
+        reason_class TEXT NOT NULL CHECK(reason_class IN (
+            'user_request', 'retention', 'redaction', 'quarantine',
+            'correction', 'legal_hold', 'source_unavailable'
+        )),
+        effective_at INTEGER NOT NULL,
+        record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+        FOREIGN KEY(anchor_id, owner_json)
+            REFERENCES retrieval_anchors(anchor_id, owner_json),
+        FOREIGN KEY(superseded_by, owner_json)
+            REFERENCES retrieval_anchors(anchor_id, owner_json),
+        CHECK(
+            (state = 'superseded' AND superseded_by IS NOT NULL)
+            OR (state <> 'superseded' AND superseded_by IS NULL)
+        )
+    );
+    CREATE INDEX IF NOT EXISTS idx_retrieval_anchor_dispositions_current
+        ON retrieval_anchor_dispositions(anchor_id, owner_json, sequence DESC);
+
+    CREATE TABLE IF NOT EXISTS retrieval_anchor_reverse_lineage (
+        source_anchor_id TEXT NOT NULL,
+        owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
+        derivative_kind TEXT NOT NULL
+            CHECK(derivative_kind IN ('span', 'contribution', 'finding')),
+        derivative_id TEXT NOT NULL CHECK(length(derivative_id) > 0),
+        direct_evidence INTEGER NOT NULL CHECK(direct_evidence IN (0, 1)),
+        PRIMARY KEY(
+            source_anchor_id, owner_json, derivative_kind, derivative_id
+        ),
+        FOREIGN KEY(source_anchor_id, owner_json)
+            REFERENCES retrieval_anchors(anchor_id, owner_json)
+    );
+    CREATE INDEX IF NOT EXISTS idx_retrieval_anchor_reverse_derivative
+        ON retrieval_anchor_reverse_lineage(
+            owner_json, derivative_kind, derivative_id, direct_evidence
+        );
+
+    CREATE TABLE IF NOT EXISTS retrieval_anchor_derivative_tombstones (
+        source_anchor_id TEXT NOT NULL,
+        owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
+        derivative_kind TEXT NOT NULL
+            CHECK(derivative_kind IN ('span', 'contribution', 'finding')),
+        derivative_id TEXT NOT NULL CHECK(length(derivative_id) > 0),
+        disposition_id TEXT NOT NULL,
+        effective_at INTEGER NOT NULL,
+        PRIMARY KEY(
+            source_anchor_id, owner_json, derivative_kind, derivative_id,
+            disposition_id
+        ),
+        FOREIGN KEY(
+            source_anchor_id, owner_json, derivative_kind, derivative_id
+        ) REFERENCES retrieval_anchor_reverse_lineage(
+            source_anchor_id, owner_json, derivative_kind, derivative_id
+        )
+    );
+";
+
 const IMMUTABILITY_TRIGGERS: &str = "
     CREATE TRIGGER IF NOT EXISTS retrieval_anchors_immutable_update
     BEFORE UPDATE ON retrieval_anchors BEGIN
@@ -56,6 +121,30 @@ const IMMUTABILITY_TRIGGERS: &str = "
     CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_delete
     BEFORE DELETE ON retrieval_anchor_aliases BEGIN
         SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS retrieval_anchor_dispositions_immutable_update
+    BEFORE UPDATE ON retrieval_anchor_dispositions BEGIN
+        SELECT RAISE(ABORT, 'retrieval anchor dispositions are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS retrieval_anchor_dispositions_immutable_delete
+    BEFORE DELETE ON retrieval_anchor_dispositions BEGIN
+        SELECT RAISE(ABORT, 'retrieval anchor dispositions are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS retrieval_anchor_reverse_lineage_immutable_update
+    BEFORE UPDATE ON retrieval_anchor_reverse_lineage BEGIN
+        SELECT RAISE(ABORT, 'retrieval anchor reverse lineage is immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS retrieval_anchor_reverse_lineage_immutable_delete
+    BEFORE DELETE ON retrieval_anchor_reverse_lineage BEGIN
+        SELECT RAISE(ABORT, 'retrieval anchor reverse lineage is immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS retrieval_anchor_derivative_tombstones_immutable_update
+    BEFORE UPDATE ON retrieval_anchor_derivative_tombstones BEGIN
+        SELECT RAISE(ABORT, 'retrieval anchor derivative tombstones are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS retrieval_anchor_derivative_tombstones_immutable_delete
+    BEFORE DELETE ON retrieval_anchor_derivative_tombstones BEGIN
+        SELECT RAISE(ABORT, 'retrieval anchor derivative tombstones are immutable');
     END;
 ";
 
@@ -342,6 +431,9 @@ pub(crate) async fn install_retrieval_anchor_schema(
         .map_err(|error| database_error(operation, error))?;
     validate_anchor_table_columns(conn, operation).await?;
     upgrade_aliases_if_needed(conn, operation).await?;
+    conn.execute_batch(AUTHORITY_SCHEMA)
+        .await
+        .map_err(|error| database_error(operation, error))?;
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS retrieval_anchors_no_update;
          DROP TRIGGER IF EXISTS retrieval_anchors_no_delete;

@@ -6,6 +6,8 @@ use tracedecay_application::{
     GitIndexTransactionPort, GitIndexTransactionPortError, OperationBudgetUsage, OperationReceipt,
     OperationTermination, ReconciliationState,
 };
+#[cfg(test)]
+use tracedecay_domain::GitIndexIdempotencyKey;
 use tracedecay_domain::{
     GitIndexJournalPhaseV1, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
     GitIndexTransactionId, GitIndexTransactionJournalV1, GitIndexTransactionOperationV1,
@@ -110,6 +112,48 @@ impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A> {
             authorization,
             queue: RepositoryMutationQueue::default(),
         }
+    }
+}
+
+#[cfg(test)]
+impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A>
+where
+    S: GitIndexTransactionStore,
+{
+    pub(crate) fn quarantine_preview_for_test(
+        &self,
+        preview: &GitIndexPreviewV1,
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> Result<(), GitIndexTransactionPortError> {
+        let transaction_id = GitIndexTransactionId::new(format!(
+            "git-index-transaction.test-quarantine.{}",
+            preview.preview_id.as_str()
+        ))
+        .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        self.store
+            .begin_or_replay(GitIndexTransactionBeginRequestV1 {
+                idempotency_key: GitIndexIdempotencyKey::new(format!(
+                    "git-index-idempotency.test-quarantine.{}",
+                    preview.preview_id.as_str()
+                ))
+                .map_err(|_| GitIndexTransactionPortError::StalePreview)?,
+                input_digest: canonical_sha256(&(
+                    "tracedecay.test.git-index-quarantine.v1",
+                    &preview.preview_digest,
+                ))
+                .map_err(|_| GitIndexTransactionPortError::StalePreview)?,
+                preview: preview.clone(),
+                journal: GitIndexTransactionJournalV1::prepared(
+                    transaction_id.clone(),
+                    preview,
+                    observed_at,
+                )
+                .map_err(|_| GitIndexTransactionPortError::StalePreview)?,
+            })
+            .map_err(map_store_error)?;
+        self.store
+            .quarantine_repository(&preview.repository_snapshot.repository_id, &transaction_id)
+            .map_err(map_store_error)
     }
 }
 
@@ -705,7 +749,7 @@ fn map_journal_error(error: GitIndexJournalError) -> GitIndexTransactionPortErro
 #[allow(clippy::needless_pass_by_value)]
 fn map_queue_error(error: RepositoryMutationQueueError) -> GitIndexTransactionPortError {
     match error {
-        RepositoryMutationQueueError::Unavailable => {
+        RepositoryMutationQueueError::Unavailable | RepositoryMutationQueueError::Saturated => {
             GitIndexTransactionPortError::DaemonUnavailable
         }
     }

@@ -17,10 +17,11 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 104;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 110;
 
 mod admin;
 mod analysis;
+mod application;
 mod ast_grep;
 mod edit;
 mod git;
@@ -34,6 +35,7 @@ mod testing;
 
 use admin::*;
 use analysis::*;
+use application::*;
 use edit::*;
 use git::*;
 use graph::*;
@@ -359,15 +361,34 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_node(),
         def_status(),
         def_active_project(),
-        def_storage_status(),
         def_project_list(),
         def_project_search(),
         def_project_context(),
         def_files(),
+        def_git_preview(),
+        def_git_apply(),
+        def_feedback_diagnostics(),
+        def_feedback_get(),
+        def_feedback_expand(),
+        def_feedback_list(),
+        def_feedback_impact(),
+        def_affected_tests(),
+        def_test_results(),
+        def_session_lookup(),
+        def_qualified_name_read(),
+        def_call_chain_read(),
+        def_file_dependents_read(),
+        def_source_lines_read(),
+        def_source_body_read(),
+        def_source_outline_read(),
+        def_module_api_read(),
+        def_file_metadata_read(),
+        def_health_read(),
+        def_storage_status_read(),
+        def_diagnostics_read(),
         def_affected(),
         def_dead_code(),
         def_diff_context(),
-        def_module_api(),
         def_circular(),
         def_hotspots(),
         def_similar(),
@@ -447,8 +468,6 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_signature_search(),
         def_constructors(),
         def_field_sites(),
-        def_call_chain(),
-        def_file_dependents(),
         def_replace_symbol(),
         def_insert_at_symbol(),
         def_move_symbol(),
@@ -530,8 +549,6 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_rename_preview",
     "tracedecay_implementations",
     "tracedecay_callers_for",
-    "tracedecay_call_chain",
-    "tracedecay_file_dependents",
     "tracedecay_find_exact_symbol",
     "tracedecay_by_qualified_name",
     "tracedecay_signature",
@@ -559,9 +576,30 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_pr_context",
     "tracedecay_branch_search",
     "tracedecay_branch_diff",
+    // application surfaces
+    "tracedecay_git_preview",
+    "tracedecay_git_apply",
+    "tracedecay_feedback_diagnostics",
+    "tracedecay_feedback_get",
+    "tracedecay_feedback_expand",
+    "tracedecay_feedback_list",
+    "tracedecay_feedback_impact",
+    "tracedecay_affected_tests",
+    "tracedecay_test_results",
+    "tracedecay_session_lookup",
+    "tracedecay_qualified_name",
+    "tracedecay_call_chain",
+    "tracedecay_file_dependents",
+    "tracedecay_source_lines",
+    "tracedecay_source_body",
+    "tracedecay_source_outline",
+    "tracedecay_module_api",
+    "tracedecay_file_metadata",
+    "tracedecay_health_read",
+    "tracedecay_storage_status",
+    "tracedecay_diagnostics_read",
     // analysis
     "tracedecay_dead_code",
-    "tracedecay_module_api",
     "tracedecay_circular",
     "tracedecay_hotspots",
     "tracedecay_unused_imports",
@@ -625,7 +663,6 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     // git & info
     "tracedecay_branch_list",
     "tracedecay_active_project",
-    "tracedecay_storage_status",
     // misc
     "tracedecay_dashboard",
     "tracedecay_retrieve",

@@ -114,6 +114,17 @@ impl ContentLengthCodec {
     pub fn is_empty(&self) -> bool {
         self.input.is_empty()
     }
+
+    /// Completes the byte stream. EOF is valid only between frames; buffered
+    /// header or body bytes are a framing failure rather than a clean bridge
+    /// shutdown.
+    pub fn finish(&self) -> Result<(), ContentLengthCodecError> {
+        if self.input.is_empty() {
+            Ok(())
+        } else {
+            Err(ContentLengthCodecError::UnexpectedEof)
+        }
+    }
 }
 
 fn find_header_end(input: &[u8]) -> Option<usize> {

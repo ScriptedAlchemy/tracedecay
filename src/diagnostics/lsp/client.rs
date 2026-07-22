@@ -5,12 +5,27 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lsp_types::request::{
+    CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
+    DocumentSymbolRequest, GotoDeclaration, GotoDeclarationParams, GotoDefinition,
+    GotoImplementation, GotoImplementationParams, GotoTypeDefinition, GotoTypeDefinitionParams,
+    HoverRequest, References, Request as LspRequest, SignatureHelpRequest, TypeHierarchyPrepare,
+    TypeHierarchySubtypes, TypeHierarchySupertypes, WorkspaceSymbolRequest,
+};
+use lsp_types::{
+    CallHierarchyIncomingCallsParams, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
+    Diagnostic as StandardDiagnostic, DiagnosticSeverity as StandardDiagnosticSeverity,
+    DocumentSymbolParams, GotoDefinitionParams, HoverParams, NumberOrString,
+    PublishDiagnosticsParams, ReferenceParams, SignatureHelpParams, TypeHierarchyPrepareParams,
+    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, WorkspaceSymbolParams,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::application::context::CancellationToken;
 use crate::diagnostics::lsp::broker::{CodeDiagnostic, DiagnosticSeverity};
 use crate::errors::{Result, TraceDecayError};
 
@@ -61,6 +76,77 @@ pub struct LspDocument {
     pub text: String,
 }
 
+/// Standard LSP semantic/navigation requests retained by the analyzer client.
+///
+/// Each variant carries the `lsp-types` request DTO for its standard method;
+/// this boundary never invents an analyzer-specific wire shape.
+#[derive(Clone, Debug)]
+pub enum LspSemanticRequest {
+    Declaration(GotoDeclarationParams),
+    Definition(GotoDefinitionParams),
+    TypeDefinition(GotoTypeDefinitionParams),
+    Implementation(GotoImplementationParams),
+    References(ReferenceParams),
+    Hover(HoverParams),
+    DocumentSymbols(DocumentSymbolParams),
+    WorkspaceSymbols(WorkspaceSymbolParams),
+    PrepareCallHierarchy(CallHierarchyPrepareParams),
+    IncomingCalls(CallHierarchyIncomingCallsParams),
+    OutgoingCalls(CallHierarchyOutgoingCallsParams),
+    SignatureHelp(SignatureHelpParams),
+    PrepareTypeHierarchy(TypeHierarchyPrepareParams),
+    TypeHierarchySupertypes(TypeHierarchySupertypesParams),
+    TypeHierarchySubtypes(TypeHierarchySubtypesParams),
+}
+
+impl LspSemanticRequest {
+    pub fn method(&self) -> &'static str {
+        match self {
+            Self::Declaration(_) => GotoDeclaration::METHOD,
+            Self::Definition(_) => GotoDefinition::METHOD,
+            Self::TypeDefinition(_) => GotoTypeDefinition::METHOD,
+            Self::Implementation(_) => GotoImplementation::METHOD,
+            Self::References(_) => References::METHOD,
+            Self::Hover(_) => HoverRequest::METHOD,
+            Self::DocumentSymbols(_) => DocumentSymbolRequest::METHOD,
+            Self::WorkspaceSymbols(_) => WorkspaceSymbolRequest::METHOD,
+            Self::PrepareCallHierarchy(_) => CallHierarchyPrepare::METHOD,
+            Self::IncomingCalls(_) => CallHierarchyIncomingCalls::METHOD,
+            Self::OutgoingCalls(_) => CallHierarchyOutgoingCalls::METHOD,
+            Self::SignatureHelp(_) => SignatureHelpRequest::METHOD,
+            Self::PrepareTypeHierarchy(_) => TypeHierarchyPrepare::METHOD,
+            Self::TypeHierarchySupertypes(_) => TypeHierarchySupertypes::METHOD,
+            Self::TypeHierarchySubtypes(_) => TypeHierarchySubtypes::METHOD,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LspSemanticRequestError {
+    Cancelled,
+    TimedOut,
+    Remote { code: Option<i64>, message: String },
+    Transport { class: String },
+    InvalidResponse { class: String },
+}
+
+impl LspSemanticRequestError {
+    pub fn class(&self) -> String {
+        match self {
+            Self::Cancelled => "cancelled".to_owned(),
+            Self::TimedOut => "timeout".to_owned(),
+            Self::Remote { code, message } => match code {
+                Some(code) => format!("remote-{code}-{}", bounded_lsp_class(message)),
+                None => format!("remote-{}", bounded_lsp_class(message)),
+            },
+            Self::Transport { class } => format!("transport-{}", bounded_lsp_class(class)),
+            Self::InvalidResponse { class } => {
+                format!("invalid-response-{}", bounded_lsp_class(class))
+            }
+        }
+    }
+}
+
 pub async fn collect_document_diagnostics(
     command: &str,
     args: &[String],
@@ -90,6 +176,7 @@ pub async fn collect_document_diagnostics_with_timeouts(
 pub struct StdioLspClient {
     command: String,
     document_versions: BTreeMap<String, i32>,
+    next_request_id: u64,
     stdin: tokio::process::ChildStdin,
     reader: BufReader<tokio::process::ChildStdout>,
     child: tokio::process::Child,
@@ -139,8 +226,27 @@ impl StdioLspClient {
                     "rootUri": file_uri(project_root),
                     "capabilities": {
                         "textDocument": {
-                            "publishDiagnostics": {}
-                        }
+                            "publishDiagnostics": {},
+                            "declaration": { "linkSupport": true },
+                            "definition": { "linkSupport": true },
+                            "typeDefinition": { "linkSupport": true },
+                            "implementation": { "linkSupport": true },
+                            "references": {},
+                            "hover": {
+                                "contentFormat": ["markdown", "plaintext"]
+                            },
+                            "documentSymbol": {
+                                "hierarchicalDocumentSymbolSupport": true
+                            },
+                            "callHierarchy": {},
+                            "signatureHelp": {
+                                "contextSupport": true
+                            },
+                            "typeHierarchy": {}
+                        },
+                        "workspace": {
+                            "symbol": {}
+                        },
                     },
                     "workspaceFolders": [{
                         "uri": file_uri(project_root),
@@ -197,11 +303,322 @@ impl StdioLspClient {
         Ok(Self {
             command: command.to_string(),
             document_versions: BTreeMap::new(),
+            next_request_id: 2,
             stdin,
             reader,
             child,
             stderr_task,
         })
+    }
+
+    /// Sends one standard semantic request and returns its standard JSON
+    /// result after matching the JSON-RPC correlation id. Notifications and
+    /// stale responses from a cancelled request are deliberately ignored.
+    pub async fn semantic_request(
+        &mut self,
+        request: LspSemanticRequest,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        match request {
+            LspSemanticRequest::Declaration(params) => {
+                self.declaration(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::Definition(params) => {
+                self.definition(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::TypeDefinition(params) => {
+                self.type_definition(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::Implementation(params) => {
+                self.implementation(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::References(params) => {
+                self.references(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::Hover(params) => self.hover(params, cancellation, timeouts).await,
+            LspSemanticRequest::DocumentSymbols(params) => {
+                self.document_symbols(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::WorkspaceSymbols(params) => {
+                self.workspace_symbols(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::PrepareCallHierarchy(params) => {
+                self.prepare_call_hierarchy(params, cancellation, timeouts)
+                    .await
+            }
+            LspSemanticRequest::IncomingCalls(params) => {
+                self.incoming_calls(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::OutgoingCalls(params) => {
+                self.outgoing_calls(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::SignatureHelp(params) => {
+                self.signature_help(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::PrepareTypeHierarchy(params) => {
+                self.prepare_type_hierarchy(params, cancellation, timeouts)
+                    .await
+            }
+            LspSemanticRequest::TypeHierarchySupertypes(params) => {
+                self.type_hierarchy_supertypes(params, cancellation, timeouts)
+                    .await
+            }
+            LspSemanticRequest::TypeHierarchySubtypes(params) => {
+                self.type_hierarchy_subtypes(params, cancellation, timeouts)
+                    .await
+            }
+        }
+    }
+
+    pub async fn declaration(
+        &mut self,
+        params: GotoDeclarationParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<GotoDeclaration>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn definition(
+        &mut self,
+        params: GotoDefinitionParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<GotoDefinition>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn type_definition(
+        &mut self,
+        params: GotoTypeDefinitionParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<GotoTypeDefinition>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn implementation(
+        &mut self,
+        params: GotoImplementationParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<GotoImplementation>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn references(
+        &mut self,
+        params: ReferenceParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<References>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn hover(
+        &mut self,
+        params: HoverParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<HoverRequest>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn document_symbols(
+        &mut self,
+        params: DocumentSymbolParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<DocumentSymbolRequest>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn workspace_symbols(
+        &mut self,
+        params: WorkspaceSymbolParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<WorkspaceSymbolRequest>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn prepare_call_hierarchy(
+        &mut self,
+        params: CallHierarchyPrepareParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<CallHierarchyPrepare>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn incoming_calls(
+        &mut self,
+        params: CallHierarchyIncomingCallsParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<CallHierarchyIncomingCalls>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn outgoing_calls(
+        &mut self,
+        params: CallHierarchyOutgoingCallsParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<CallHierarchyOutgoingCalls>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn signature_help(
+        &mut self,
+        params: SignatureHelpParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<SignatureHelpRequest>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn prepare_type_hierarchy(
+        &mut self,
+        params: TypeHierarchyPrepareParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<TypeHierarchyPrepare>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn type_hierarchy_supertypes(
+        &mut self,
+        params: TypeHierarchySupertypesParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<TypeHierarchySupertypes>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn type_hierarchy_subtypes(
+        &mut self,
+        params: TypeHierarchySubtypesParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<TypeHierarchySubtypes>(params, cancellation, timeouts)
+            .await
+    }
+
+    async fn request_json<R>(
+        &mut self,
+        params: R::Params,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError>
+    where
+        R: LspRequest,
+    {
+        let response = self.request::<R>(params, cancellation, timeouts).await?;
+        serde_json::to_value(response).map_err(|error| LspSemanticRequestError::InvalidResponse {
+            class: error.to_string(),
+        })
+    }
+
+    async fn request<R>(
+        &mut self,
+        params: R::Params,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<R::Result, LspSemanticRequestError>
+    where
+        R: LspRequest,
+    {
+        if cancellation.is_cancelled() {
+            return Err(LspSemanticRequestError::Cancelled);
+        }
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.checked_add(1).unwrap_or(2);
+        let params = serde_json::to_value(params).map_err(|error| {
+            LspSemanticRequestError::InvalidResponse {
+                class: error.to_string(),
+            }
+        })?;
+        write_message_with_timeout(
+            &mut self.stdin,
+            json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": R::METHOD,
+                "params": params,
+            }),
+            timeouts.message_io,
+        )
+        .await
+        .map_err(semantic_transport_error)?;
+
+        let deadline = tokio::time::Instant::now() + timeouts.refresh;
+        loop {
+            let message = tokio::select! {
+                _ = cancellation.cancelled() => {
+                    let _ = self.cancel_request(request_id, timeouts).await;
+                    return Err(LspSemanticRequestError::Cancelled);
+                }
+                message = read_message_until(&mut self.reader, deadline, timeouts) => {
+                    match message {
+                        Ok(message) => message,
+                        Err(_error) if tokio::time::Instant::now() >= deadline => {
+                            let _ = self.cancel_request(request_id, timeouts).await;
+                            return Err(LspSemanticRequestError::TimedOut);
+                        }
+                        Err(error) => return Err(semantic_transport_error(error)),
+                    }
+                }
+            };
+            let Some(message) = message else {
+                let _ = self.cancel_request(request_id, timeouts).await;
+                return Err(LspSemanticRequestError::TimedOut);
+            };
+            if message.id != Some(json!(request_id)) {
+                continue;
+            }
+            if let Some(error) = message.error {
+                return Err(LspSemanticRequestError::Remote {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+            let result = message.result.unwrap_or(Value::Null);
+            return serde_json::from_value(result).map_err(|error| {
+                LspSemanticRequestError::InvalidResponse {
+                    class: error.to_string(),
+                }
+            });
+        }
+    }
+
+    async fn cancel_request(
+        &mut self,
+        request_id: u64,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<()> {
+        write_message_with_timeout(
+            &mut self.stdin,
+            cancel_request_message(request_id),
+            timeouts.message_io,
+        )
+        .await
     }
 
     pub async fn collect_document_diagnostics(
@@ -277,15 +694,15 @@ impl StdioLspClient {
             let Ok(published) = serde_json::from_value::<PublishDiagnosticsParams>(params) else {
                 continue;
             };
-            let Some(document) = uri_to_document.get(&published.uri) else {
+            let Some(document) = uri_to_document.get(published.uri.as_str()) else {
                 continue;
             };
             diagnostics_by_uri.insert(
-                published.uri,
+                published.uri.as_str().to_owned(),
                 published
                     .diagnostics
                     .into_iter()
-                    .map(|diagnostic| diagnostic.into_code_diagnostic(document, &self.command))
+                    .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
                     .collect(),
             );
         }
@@ -402,6 +819,35 @@ fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> TraceDecayError {
             timeouts.refresh.as_millis()
         ),
     }
+}
+
+fn semantic_transport_error(error: TraceDecayError) -> LspSemanticRequestError {
+    LspSemanticRequestError::Transport {
+        class: error.to_string(),
+    }
+}
+
+fn cancel_request_message(request_id: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "$/cancelRequest",
+        "params": { "id": request_id },
+    })
+}
+
+fn bounded_lsp_class(value: &str) -> String {
+    let mut class = String::with_capacity(value.len().min(96));
+    for character in value.chars() {
+        if class.len() >= 96 {
+            break;
+        }
+        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+            class.push(character.to_ascii_lowercase());
+        } else if !class.ends_with('-') {
+            class.push('-');
+        }
+    }
+    class.trim_matches('-').to_owned()
 }
 
 async fn read_message(
@@ -602,50 +1048,44 @@ struct JsonRpcMessage {
     method: Option<String>,
     #[serde(default)]
     params: Option<Value>,
+    #[serde(default)]
+    result: Option<Value>,
+    #[serde(default)]
+    error: Option<JsonRpcError>,
 }
 
 #[derive(Debug, Deserialize)]
-struct PublishDiagnosticsParams {
-    uri: String,
-    diagnostics: Vec<LspDiagnostic>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LspDiagnostic {
-    range: LspRange,
-    #[serde(default)]
-    severity: Option<u8>,
-    #[serde(default)]
-    code: Option<Value>,
-    #[serde(default)]
-    source: Option<String>,
+struct JsonRpcError {
+    code: Option<i64>,
     message: String,
 }
 
-impl LspDiagnostic {
-    fn into_code_diagnostic(self, document: &LspDocument, command: &str) -> CodeDiagnostic {
-        CodeDiagnostic {
-            language: document.language.clone(),
-            source: self.source.unwrap_or_else(|| command.to_string()),
-            file: document.relative_path.clone(),
-            line_start: self.range.start.line + 1,
-            line_end: self.range.end.line + 1,
-            character_start: Some(self.range.start.character),
-            character_end: Some(self.range.end.character),
-            severity: match self.severity {
-                Some(1) => DiagnosticSeverity::Error,
-                Some(2) => DiagnosticSeverity::Warning,
-                Some(4) => DiagnosticSeverity::Hint,
-                _ => DiagnosticSeverity::Information,
-            },
-            code: self.code.and_then(code_to_string),
-            message: self.message,
-            // The LSP client has no code-graph handle; the enclosing symbol is
-            // resolved later via `DiagnosticBroker::resolve_enclosing_nodes`,
-            // which has access to the indexed nodes for the file.
-            enclosing_node: None,
-            updated_at: now_unix(),
-        }
+fn code_diagnostic(
+    diagnostic: StandardDiagnostic,
+    document: &LspDocument,
+    command: &str,
+) -> CodeDiagnostic {
+    CodeDiagnostic {
+        language: document.language.clone(),
+        source: diagnostic.source.unwrap_or_else(|| command.to_string()),
+        file: document.relative_path.clone(),
+        line_start: diagnostic.range.start.line + 1,
+        line_end: diagnostic.range.end.line + 1,
+        character_start: Some(diagnostic.range.start.character),
+        character_end: Some(diagnostic.range.end.character),
+        severity: match diagnostic.severity {
+            Some(StandardDiagnosticSeverity::ERROR) => DiagnosticSeverity::Error,
+            Some(StandardDiagnosticSeverity::WARNING) => DiagnosticSeverity::Warning,
+            Some(StandardDiagnosticSeverity::HINT) => DiagnosticSeverity::Hint,
+            _ => DiagnosticSeverity::Information,
+        },
+        code: diagnostic.code.map(code_to_string),
+        message: diagnostic.message,
+        // The LSP client has no code-graph handle; the enclosing symbol is
+        // resolved later via `DiagnosticBroker::resolve_enclosing_nodes`,
+        // which has access to the indexed nodes for the file.
+        enclosing_node: None,
+        updated_at: now_unix(),
     }
 }
 
@@ -655,29 +1095,18 @@ fn now_unix() -> i64 {
         .map_or(0, |duration| duration.as_secs() as i64)
 }
 
-fn code_to_string(value: Value) -> Option<String> {
+fn code_to_string(value: NumberOrString) -> String {
     match value {
-        Value::String(value) => Some(value),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
+        NumberOrString::String(value) => value,
+        NumberOrString::Number(value) => value.to_string(),
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct LspRange {
-    start: LspPosition,
-    end: LspPosition,
-}
-
-#[derive(Debug, Deserialize)]
-struct LspPosition {
-    line: u32,
-    character: u32,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::file_uri_from_path_text;
+    use serde_json::json;
+
+    use super::{cancel_request_message, file_uri_from_path_text};
 
     #[test]
     fn file_uri_encodes_lsp_paths() {
@@ -692,6 +1121,18 @@ mod tests {
         assert_eq!(
             file_uri_from_path_text("/tmp/100% real.rs"),
             "file:///tmp/100%25%20real.rs"
+        );
+    }
+
+    #[test]
+    fn cancellation_uses_the_standard_json_rpc_notification() {
+        assert_eq!(
+            cancel_request_message(42),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "$/cancelRequest",
+                "params": { "id": 42 },
+            })
         );
     }
 }

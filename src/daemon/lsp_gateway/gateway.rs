@@ -1,15 +1,17 @@
-//! Single-root daemon LSP gateway request skeleton.
+//! Single-root daemon LSP gateway request boundary.
 //!
 //! The gateway has one already-admitted root and delegates post-edit work to
 //! the feedback-cycle application boundary. It intentionally does not open a
 //! store, supervise an analyzer, resolve workspace folders, or implement any
 //! host-specific transport.
 
+use std::sync::Arc;
+
 use super::capabilities::{CapabilityAvailability, EffectiveCapabilities, SemanticCapability};
 use super::diagnostics::{
     DiagnosticMerge, DocumentDiagnosticReport, GatewayDiagnostic, LspPosition, LspRange,
 };
-use super::session::LspRequestFailure;
+use super::session::{LspRequestFailure, LspRequestId};
 
 /// A single root that was authoritatively admitted before the LSP session was
 /// created. The gateway never chooses a root from CWD or client folder order.
@@ -69,6 +71,15 @@ pub enum FeedbackCycleResponse {
 /// must not create a second gateway-local finding store.
 pub trait FeedbackCyclePort {
     fn request_feedback_cycle(&self, request: FeedbackCycleRequest) -> FeedbackCycleResponse;
+}
+
+impl<T> FeedbackCyclePort for Arc<T>
+where
+    T: FeedbackCyclePort + ?Sized,
+{
+    fn request_feedback_cycle(&self, request: FeedbackCycleRequest) -> FeedbackCycleResponse {
+        (**self).request_feedback_cycle(request)
+    }
 }
 
 /// Methods represented by this bounded LSP gateway surface.
@@ -152,11 +163,12 @@ impl MethodUnavailable {
     pub const JSON_RPC_METHOD_NOT_FOUND: i64 = -32601;
 }
 
-/// The protocol dispatch outcome used by request handlers in this scaffold.
+/// The protocol dispatch outcome used by request handlers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GatewayResponse<T> {
     Value(T),
     Partial { value: T, coverage: String },
+    Pending,
     Unavailable(MethodUnavailable),
     RequestFailed(LspRequestFailure),
 }
@@ -167,21 +179,21 @@ impl<T> GatewayResponse<T> {
     }
 }
 
-/// LSP `Location` payload shape used by empty navigation responses.
+/// LSP `Location` payload shape used by navigation responses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LspLocation {
     pub uri: String,
     pub range: LspRange,
 }
 
-/// LSP `Hover` payload shape used by an unavailable-or-null hover response.
+/// LSP `Hover` payload shape used by semantic providers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Hover {
     pub contents: String,
     pub range: Option<LspRange>,
 }
 
-/// LSP `DocumentSymbol` payload shape used by empty document-symbol responses.
+/// LSP `DocumentSymbol` payload shape used by semantic providers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentSymbol {
     pub name: String,
@@ -192,8 +204,7 @@ pub struct DocumentSymbol {
     pub children: Vec<DocumentSymbol>,
 }
 
-/// LSP `SymbolInformation` payload shape used by empty workspace-symbol
-/// responses.
+/// LSP `SymbolInformation` payload shape used by semantic providers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceSymbol {
     pub name: String,
@@ -253,12 +264,242 @@ pub struct TypeHierarchyItem {
 pub enum SemanticProviderOutcome<T> {
     Complete(T),
     Partial { value: T, coverage: String },
+    Pending,
     Unavailable,
+}
+
+impl<T> SemanticProviderOutcome<T> {
+    fn map<U>(self, project: impl FnOnce(T) -> U) -> SemanticProviderOutcome<U> {
+        match self {
+            Self::Complete(value) => SemanticProviderOutcome::Complete(project(value)),
+            Self::Partial { value, coverage } => SemanticProviderOutcome::Partial {
+                value: project(value),
+                coverage,
+            },
+            Self::Pending => SemanticProviderOutcome::Pending,
+            Self::Unavailable => SemanticProviderOutcome::Unavailable,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SemanticRequest {
+    Declaration {
+        document_uri: String,
+        position: LspPosition,
+    },
+    Definition {
+        document_uri: String,
+        position: LspPosition,
+    },
+    TypeDefinition {
+        document_uri: String,
+        position: LspPosition,
+    },
+    Implementation {
+        document_uri: String,
+        position: LspPosition,
+    },
+    References {
+        document_uri: String,
+        position: LspPosition,
+    },
+    Hover {
+        document_uri: String,
+        position: LspPosition,
+    },
+    DocumentSymbols {
+        document_uri: String,
+    },
+    WorkspaceSymbols {
+        query: String,
+    },
+    PrepareCallHierarchy {
+        document_uri: String,
+        position: LspPosition,
+    },
+    IncomingCalls {
+        item: CallHierarchyItem,
+    },
+    OutgoingCalls {
+        item: CallHierarchyItem,
+    },
+    SignatureHelp {
+        document_uri: String,
+        position: LspPosition,
+    },
+    PrepareTypeHierarchy {
+        document_uri: String,
+        position: LspPosition,
+    },
+    TypeHierarchySupertypes {
+        item: TypeHierarchyItem,
+    },
+    TypeHierarchySubtypes {
+        item: TypeHierarchyItem,
+    },
+}
+
+impl SemanticRequest {
+    pub fn method(&self) -> GatewayMethod {
+        match self {
+            Self::Declaration { .. } => GatewayMethod::TextDocumentDeclaration,
+            Self::Definition { .. } => GatewayMethod::TextDocumentDefinition,
+            Self::TypeDefinition { .. } => GatewayMethod::TextDocumentTypeDefinition,
+            Self::Implementation { .. } => GatewayMethod::TextDocumentImplementation,
+            Self::References { .. } => GatewayMethod::TextDocumentReferences,
+            Self::Hover { .. } => GatewayMethod::TextDocumentHover,
+            Self::DocumentSymbols { .. } => GatewayMethod::TextDocumentDocumentSymbol,
+            Self::WorkspaceSymbols { .. } => GatewayMethod::WorkspaceSymbol,
+            Self::PrepareCallHierarchy { .. } => GatewayMethod::TextDocumentPrepareCallHierarchy,
+            Self::IncomingCalls { .. } => GatewayMethod::CallHierarchyIncomingCalls,
+            Self::OutgoingCalls { .. } => GatewayMethod::CallHierarchyOutgoingCalls,
+            Self::SignatureHelp { .. } => GatewayMethod::TextDocumentSignatureHelp,
+            Self::PrepareTypeHierarchy { .. } => GatewayMethod::TextDocumentPrepareTypeHierarchy,
+            Self::TypeHierarchySupertypes { .. } => GatewayMethod::TypeHierarchySupertypes,
+            Self::TypeHierarchySubtypes { .. } => GatewayMethod::TypeHierarchySubtypes,
+        }
+    }
+
+    fn capability(&self) -> SemanticCapability {
+        match self {
+            Self::Declaration { .. } => SemanticCapability::Declaration,
+            Self::Definition { .. } => SemanticCapability::Definition,
+            Self::TypeDefinition { .. } => SemanticCapability::TypeDefinition,
+            Self::Implementation { .. } => SemanticCapability::Implementation,
+            Self::References { .. } => SemanticCapability::References,
+            Self::Hover { .. } => SemanticCapability::Hover,
+            Self::DocumentSymbols { .. } => SemanticCapability::DocumentSymbol,
+            Self::WorkspaceSymbols { .. } => SemanticCapability::WorkspaceSymbol,
+            Self::PrepareCallHierarchy { .. }
+            | Self::IncomingCalls { .. }
+            | Self::OutgoingCalls { .. } => SemanticCapability::CallHierarchy,
+            Self::SignatureHelp { .. } => SemanticCapability::SignatureHelp,
+            Self::PrepareTypeHierarchy { .. }
+            | Self::TypeHierarchySupertypes { .. }
+            | Self::TypeHierarchySubtypes { .. } => SemanticCapability::TypeHierarchy,
+        }
+    }
+
+    fn document_uri(&self) -> Option<&str> {
+        match self {
+            Self::Declaration { document_uri, .. }
+            | Self::Definition { document_uri, .. }
+            | Self::TypeDefinition { document_uri, .. }
+            | Self::Implementation { document_uri, .. }
+            | Self::References { document_uri, .. }
+            | Self::Hover { document_uri, .. }
+            | Self::DocumentSymbols { document_uri }
+            | Self::PrepareCallHierarchy { document_uri, .. }
+            | Self::SignatureHelp { document_uri, .. }
+            | Self::PrepareTypeHierarchy { document_uri, .. } => Some(document_uri),
+            Self::IncomingCalls { item } | Self::OutgoingCalls { item } => Some(&item.uri),
+            Self::TypeHierarchySupertypes { item } | Self::TypeHierarchySubtypes { item } => {
+                Some(&item.uri)
+            }
+            Self::WorkspaceSymbols { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SemanticResponse {
+    Locations(Vec<LspLocation>),
+    Hover(Option<Hover>),
+    DocumentSymbols(Vec<DocumentSymbol>),
+    WorkspaceSymbols(Vec<WorkspaceSymbol>),
+    CallHierarchyItems(Vec<CallHierarchyItem>),
+    IncomingCalls(Vec<IncomingCall>),
+    OutgoingCalls(Vec<OutgoingCall>),
+    SignatureHelp(Option<SignatureHelp>),
+    TypeHierarchyItems(Vec<TypeHierarchyItem>),
 }
 
 /// Typed daemon adapter for admitted upstream/graph semantic operations.
 /// Defaults are unavailable rather than fabricated empty answers.
 pub trait SemanticProviderPort {
+    fn request(
+        &self,
+        root: &AdmittedRoot,
+        _request_id: &LspRequestId,
+        request: &SemanticRequest,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        match request {
+            SemanticRequest::Declaration {
+                document_uri,
+                position,
+            } => self
+                .declaration(root, document_uri, *position)
+                .map(SemanticResponse::Locations),
+            SemanticRequest::Definition {
+                document_uri,
+                position,
+            } => self
+                .definition(root, document_uri, *position)
+                .map(SemanticResponse::Locations),
+            SemanticRequest::TypeDefinition {
+                document_uri,
+                position,
+            } => self
+                .type_definition(root, document_uri, *position)
+                .map(SemanticResponse::Locations),
+            SemanticRequest::Implementation {
+                document_uri,
+                position,
+            } => self
+                .implementation(root, document_uri, *position)
+                .map(SemanticResponse::Locations),
+            SemanticRequest::References {
+                document_uri,
+                position,
+            } => self
+                .references(root, document_uri, *position)
+                .map(SemanticResponse::Locations),
+            SemanticRequest::Hover {
+                document_uri,
+                position,
+            } => self
+                .hover(root, document_uri, *position)
+                .map(SemanticResponse::Hover),
+            SemanticRequest::DocumentSymbols { document_uri } => self
+                .document_symbols(root, document_uri)
+                .map(SemanticResponse::DocumentSymbols),
+            SemanticRequest::WorkspaceSymbols { query } => self
+                .workspace_symbols(root, query)
+                .map(SemanticResponse::WorkspaceSymbols),
+            SemanticRequest::PrepareCallHierarchy {
+                document_uri,
+                position,
+            } => self
+                .prepare_call_hierarchy(root, document_uri, *position)
+                .map(SemanticResponse::CallHierarchyItems),
+            SemanticRequest::IncomingCalls { item } => self
+                .incoming_calls(root, item)
+                .map(SemanticResponse::IncomingCalls),
+            SemanticRequest::OutgoingCalls { item } => self
+                .outgoing_calls(root, item)
+                .map(SemanticResponse::OutgoingCalls),
+            SemanticRequest::SignatureHelp {
+                document_uri,
+                position,
+            } => self
+                .signature_help(root, document_uri, *position)
+                .map(SemanticResponse::SignatureHelp),
+            SemanticRequest::PrepareTypeHierarchy {
+                document_uri,
+                position,
+            } => self
+                .prepare_type_hierarchy(root, document_uri, *position)
+                .map(SemanticResponse::TypeHierarchyItems),
+            SemanticRequest::TypeHierarchySupertypes { item } => self
+                .type_hierarchy_supertypes(root, item)
+                .map(SemanticResponse::TypeHierarchyItems),
+            SemanticRequest::TypeHierarchySubtypes { item } => self
+                .type_hierarchy_subtypes(root, item)
+                .map(SemanticResponse::TypeHierarchyItems),
+        }
+    }
+
     fn declaration(
         &self,
         _root: &AdmittedRoot,
@@ -389,6 +630,148 @@ pub trait SemanticProviderPort {
     }
 }
 
+impl<T> SemanticProviderPort for Arc<T>
+where
+    T: SemanticProviderPort + ?Sized,
+{
+    fn request(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        (**self).request(root, request_id, request)
+    }
+    fn declaration(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> SemanticProviderOutcome<Vec<LspLocation>> {
+        (**self).declaration(root, document_uri, position)
+    }
+
+    fn definition(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> SemanticProviderOutcome<Vec<LspLocation>> {
+        (**self).definition(root, document_uri, position)
+    }
+
+    fn type_definition(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> SemanticProviderOutcome<Vec<LspLocation>> {
+        (**self).type_definition(root, document_uri, position)
+    }
+
+    fn implementation(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> SemanticProviderOutcome<Vec<LspLocation>> {
+        (**self).implementation(root, document_uri, position)
+    }
+
+    fn references(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> SemanticProviderOutcome<Vec<LspLocation>> {
+        (**self).references(root, document_uri, position)
+    }
+
+    fn hover(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> SemanticProviderOutcome<Option<Hover>> {
+        (**self).hover(root, document_uri, position)
+    }
+
+    fn document_symbols(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+    ) -> SemanticProviderOutcome<Vec<DocumentSymbol>> {
+        (**self).document_symbols(root, document_uri)
+    }
+
+    fn workspace_symbols(
+        &self,
+        root: &AdmittedRoot,
+        query: &str,
+    ) -> SemanticProviderOutcome<Vec<WorkspaceSymbol>> {
+        (**self).workspace_symbols(root, query)
+    }
+
+    fn prepare_call_hierarchy(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> SemanticProviderOutcome<Vec<CallHierarchyItem>> {
+        (**self).prepare_call_hierarchy(root, document_uri, position)
+    }
+
+    fn incoming_calls(
+        &self,
+        root: &AdmittedRoot,
+        item: &CallHierarchyItem,
+    ) -> SemanticProviderOutcome<Vec<IncomingCall>> {
+        (**self).incoming_calls(root, item)
+    }
+
+    fn outgoing_calls(
+        &self,
+        root: &AdmittedRoot,
+        item: &CallHierarchyItem,
+    ) -> SemanticProviderOutcome<Vec<OutgoingCall>> {
+        (**self).outgoing_calls(root, item)
+    }
+
+    fn signature_help(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> SemanticProviderOutcome<Option<SignatureHelp>> {
+        (**self).signature_help(root, document_uri, position)
+    }
+
+    fn prepare_type_hierarchy(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> SemanticProviderOutcome<Vec<TypeHierarchyItem>> {
+        (**self).prepare_type_hierarchy(root, document_uri, position)
+    }
+
+    fn type_hierarchy_supertypes(
+        &self,
+        root: &AdmittedRoot,
+        item: &TypeHierarchyItem,
+    ) -> SemanticProviderOutcome<Vec<TypeHierarchyItem>> {
+        (**self).type_hierarchy_supertypes(root, item)
+    }
+
+    fn type_hierarchy_subtypes(
+        &self,
+        root: &AdmittedRoot,
+        item: &TypeHierarchyItem,
+    ) -> SemanticProviderOutcome<Vec<TypeHierarchyItem>> {
+        (**self).type_hierarchy_subtypes(root, item)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UnavailableSemanticProvider;
 
@@ -401,25 +784,16 @@ pub struct GatewayDocumentDiagnostics {
 }
 
 /// A daemon-owned, single-root LSP session.
-pub struct DaemonLspGateway<P, S = UnavailableSemanticProvider> {
+///
+/// Both application ports are explicit constructor inputs. A retained daemon
+/// must not accidentally mount a whole-session unavailable semantic runtime;
+/// individual provider methods may still return
+/// [`SemanticProviderOutcome::Unavailable`] truthfully.
+pub struct DaemonLspGateway<P, S> {
     root: AdmittedRoot,
     capabilities: EffectiveCapabilities,
     feedback_cycle: P,
     semantic_provider: S,
-}
-
-impl<P> DaemonLspGateway<P, UnavailableSemanticProvider>
-where
-    P: FeedbackCyclePort,
-{
-    pub fn new(root: AdmittedRoot, capabilities: EffectiveCapabilities, feedback_cycle: P) -> Self {
-        Self {
-            root,
-            capabilities,
-            feedback_cycle,
-            semantic_provider: UnavailableSemanticProvider,
-        }
-    }
 }
 
 impl<P, S> DaemonLspGateway<P, S>
@@ -427,7 +801,7 @@ where
     P: FeedbackCyclePort,
     S: SemanticProviderPort,
 {
-    pub fn with_semantic_provider(
+    pub fn new(
         root: AdmittedRoot,
         capabilities: EffectiveCapabilities,
         feedback_cycle: P,
@@ -439,6 +813,17 @@ where
             feedback_cycle,
             semantic_provider,
         }
+    }
+
+    /// Compatibility alias for callers that already made the semantic port
+    /// explicit. New daemon integration should prefer [`Self::new`].
+    pub fn with_semantic_provider(
+        root: AdmittedRoot,
+        capabilities: EffectiveCapabilities,
+        feedback_cycle: P,
+        semantic_provider: S,
+    ) -> Self {
+        Self::new(root, capabilities, feedback_cycle, semantic_provider)
     }
 
     pub fn root(&self) -> &AdmittedRoot {
@@ -472,9 +857,41 @@ where
         self.trigger_feedback_cycle(document_uri, DiagnosticTrigger::DocumentSave)
     }
 
-    /// Handles `textDocument/diagnostic` through the same feedback-cycle port
-    /// as save, then projects a generation-bound, bounded merge.
-    pub fn document_diagnostics(
+    /// Admits `textDocument/diagnostic` through the same feedback-cycle port
+    /// as save. The protocol actor then reads only the canonical diagnostic
+    /// projection; queued feedback work never creates actor-local findings.
+    pub fn request_document_diagnostics(&self, document_uri: &str) -> GatewayResponse<()> {
+        if !self.capabilities.supports_document_diagnostics {
+            return GatewayResponse::unavailable(
+                GatewayMethod::TextDocumentDiagnostic,
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            );
+        }
+        if !self.root.contains_document(document_uri) {
+            return GatewayResponse::unavailable(
+                GatewayMethod::TextDocumentDiagnostic,
+                MethodUnavailableReason::OutsideAdmittedRoot,
+            );
+        }
+        match self.trigger_feedback_cycle(
+            document_uri.to_owned(),
+            DiagnosticTrigger::ExplicitDocumentDiagnostics,
+        ) {
+            FeedbackCycleResponse::Accepted | FeedbackCycleResponse::Deferred { .. } => {
+                GatewayResponse::Value(())
+            }
+            FeedbackCycleResponse::Rejected { .. } => {
+                GatewayResponse::RequestFailed(LspRequestFailure::ServerCancelled {
+                    retrigger_request: true,
+                })
+            }
+        }
+    }
+
+    /// Projects an already-read canonical snapshot into a generation-bound,
+    /// bounded document report. This function never schedules feedback work,
+    /// which keeps the request-before-read ordering explicit at the actor.
+    pub fn project_document_diagnostics(
         &self,
         document_uri: &str,
         result_id: impl Into<String>,
@@ -493,17 +910,6 @@ where
                 MethodUnavailableReason::OutsideAdmittedRoot,
             );
         }
-        if !matches!(
-            self.trigger_feedback_cycle(
-                document_uri.to_owned(),
-                DiagnosticTrigger::ExplicitDocumentDiagnostics,
-            ),
-            FeedbackCycleResponse::Accepted
-        ) {
-            return GatewayResponse::RequestFailed(LspRequestFailure::ServerCancelled {
-                retrigger_request: true,
-            });
-        }
         let result_id = result_id.into();
         if result_id.is_empty() {
             return GatewayResponse::RequestFailed(LspRequestFailure::ServerCancelled {
@@ -519,6 +925,27 @@ where
             report: DocumentDiagnosticReport::full(result_id, items),
             omitted_count,
         })
+    }
+
+    /// Convenience composition for non-protocol callers. The daemon protocol
+    /// actor uses [`Self::request_document_diagnostics`] followed by a
+    /// canonical snapshot read and [`Self::project_document_diagnostics`].
+    pub fn document_diagnostics(
+        &self,
+        document_uri: &str,
+        result_id: impl Into<String>,
+        upstream: Vec<GatewayDiagnostic>,
+        tracedecay: Vec<GatewayDiagnostic>,
+    ) -> GatewayResponse<GatewayDocumentDiagnostics> {
+        match self.request_document_diagnostics(document_uri) {
+            GatewayResponse::Value(()) => {
+                self.project_document_diagnostics(document_uri, result_id, upstream, tracedecay)
+            }
+            GatewayResponse::Unavailable(unavailable) => GatewayResponse::Unavailable(unavailable),
+            GatewayResponse::RequestFailed(failure) => GatewayResponse::RequestFailed(failure),
+            GatewayResponse::Partial { .. } => unreachable!("feedback admission is never partial"),
+            GatewayResponse::Pending => unreachable!("feedback admission is never pending"),
+        }
     }
 
     pub fn declaration(
@@ -698,6 +1125,19 @@ where
         )
     }
 
+    pub fn semantic_request(
+        &self,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+    ) -> GatewayResponse<SemanticResponse> {
+        self.route_semantic(
+            request.method(),
+            request.capability(),
+            request.document_uri(),
+            |provider| provider.request(&self.root, request_id, request),
+        )
+    }
+
     pub fn prepare_rename(&self) -> GatewayResponse<()> {
         Self::explicitly_unavailable(GatewayMethod::TextDocumentPrepareRename)
     }
@@ -767,6 +1207,7 @@ where
             SemanticProviderOutcome::Partial { value, coverage } => {
                 GatewayResponse::Partial { value, coverage }
             }
+            SemanticProviderOutcome::Pending => GatewayResponse::Pending,
             SemanticProviderOutcome::Unavailable => {
                 GatewayResponse::unavailable(method, MethodUnavailableReason::ProviderUnavailable)
             }
@@ -853,6 +1294,7 @@ mod tests {
             AdmittedRoot::new("file:///root"),
             capabilities(),
             Feedback::default(),
+            Semantics,
         );
         assert_eq!(
             gateway.document_saved("file:///root/a.rs"),
@@ -885,6 +1327,7 @@ mod tests {
             AdmittedRoot::new("file:///root"),
             capabilities(),
             Feedback::default(),
+            UnavailableSemanticProvider,
         );
         assert!(matches!(
             unavailable.definition(
@@ -900,7 +1343,7 @@ mod tests {
             })
         ));
 
-        let available = DaemonLspGateway::with_semantic_provider(
+        let available = DaemonLspGateway::new(
             AdmittedRoot::new("file:///root"),
             capabilities(),
             Feedback::default(),
@@ -924,6 +1367,7 @@ mod tests {
             AdmittedRoot::new("file:///root"),
             capabilities(),
             Feedback::default(),
+            Semantics,
         );
         assert!(matches!(
             gateway.definition(

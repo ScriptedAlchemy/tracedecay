@@ -1291,6 +1291,13 @@ fn cycle_runs_diagnostics_impact_and_tests_once_with_anchored_new_findings() {
         result.cycle.impact.as_ref().unwrap().affected_tests[0].as_str(),
         "symbol.test.feedback.fixture"
     );
+    assert_eq!(
+        result
+            .publication
+            .as_ref()
+            .map(|publication| &publication.result.result_id),
+        Some(&result.cycle.result_id)
+    );
     let observations = observations.0.borrow();
     assert_eq!(
         observations
@@ -1633,6 +1640,7 @@ fn duplicate_noop_is_decided_after_authoritative_evidence_is_read() {
     );
     assert!(result.cycle.provider_states.is_empty());
     assert!(result.cycle.findings.is_empty());
+    assert!(result.publication.is_none());
     assert!(
         observations
             .0
@@ -1677,6 +1685,10 @@ fn serialized_completed_publication_converges_concurrent_record_races() {
         1
     );
     assert_eq!(first.dedupe_key, second.dedupe_key);
+    assert_eq!(
+        usize::from(first.publication.is_some()) + usize::from(second.publication.is_some()),
+        1
+    );
     assert!(
         matches!(first.cycle.termination, FeedbackCycleTerminationV1::Clean)
             && matches!(

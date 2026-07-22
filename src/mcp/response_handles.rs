@@ -290,14 +290,14 @@ pub fn store_response_handle(
             telemetry
                 .last_store_failure_at
                 .store(now, Ordering::Relaxed);
-            eprintln!(
-                "[tracedecay] response-handle event=store_failed handle={} payload_bytes={} error_class={} caller={}#{} error={}",
-                clipped_handle_for_log(&handle),
-                content.len(),
-                error_class(error),
-                caller.file(),
-                caller.line(),
-                error
+            tracing::warn!(
+                handle = %clipped_handle_for_log(&handle),
+                payload_bytes = content.len(),
+                error_class = error_class(error),
+                caller_file = caller.file(),
+                caller_line = caller.line(),
+                %error,
+                "response handle store failed"
             );
         }
     }
@@ -336,13 +336,13 @@ pub fn retrieve_response_handle(
         }) => {
             telemetry.retrieve_expired.fetch_add(1, Ordering::Relaxed);
             telemetry.last_expired_at.store(now, Ordering::Relaxed);
-            eprintln!(
-                "[tracedecay] response-handle event=retrieve_expired handle={} expires_at={} removed={} caller={}#{}",
-                clipped_handle_for_log(handle),
+            tracing::debug!(
+                handle = %clipped_handle_for_log(handle),
                 expires_at,
                 removed,
-                caller.file(),
-                caller.line()
+                caller_file = caller.file(),
+                caller_line = caller.line(),
+                "response handle expired"
             );
             Ok(ResponseHandleLookup::Expired {
                 created_at,
@@ -354,13 +354,13 @@ pub fn retrieve_response_handle(
             telemetry
                 .last_retrieve_failure_at
                 .store(now, Ordering::Relaxed);
-            eprintln!(
-                "[tracedecay] response-handle event=retrieve_failed handle={} error_class={} caller={}#{} error={}",
-                clipped_handle_for_log(handle),
-                error_class(&error),
-                caller.file(),
-                caller.line(),
-                error
+            tracing::warn!(
+                handle = %clipped_handle_for_log(handle),
+                error_class = error_class(&error),
+                caller_file = caller.file(),
+                caller_line = caller.line(),
+                %error,
+                "response handle retrieval failed"
             );
             Err(error)
         }
@@ -407,23 +407,23 @@ pub fn cleanup_expired_response_handles(project_root: &Path, now: i64) -> Result
                 .fetch_add(*removed as u64, Ordering::Relaxed);
             telemetry.last_cleanup_at.store(now, Ordering::Relaxed);
             if *removed > 0 {
-                eprintln!(
-                    "[tracedecay] response-handle event=cleanup_expired removed={} caller={}#{}",
+                tracing::debug!(
                     removed,
-                    caller.file(),
-                    caller.line()
+                    caller_file = caller.file(),
+                    caller_line = caller.line(),
+                    "expired response handles removed"
                 );
             }
         }
         Err(error) => {
             telemetry.cleanup_failures.fetch_add(1, Ordering::Relaxed);
             telemetry.last_cleanup_at.store(now, Ordering::Relaxed);
-            eprintln!(
-                "[tracedecay] response-handle event=cleanup_failed error_class={} caller={}#{} error={}",
-                error_class(error),
-                caller.file(),
-                caller.line(),
-                error
+            tracing::warn!(
+                error_class = error_class(error),
+                caller_file = caller.file(),
+                caller_line = caller.line(),
+                %error,
+                "response handle cleanup failed"
             );
         }
     }
@@ -555,14 +555,14 @@ pub fn observe_response_truncation(
             .irreversible_truncation_total
             .fetch_add(1, Ordering::Relaxed);
     }
-    eprintln!(
-        "[tracedecay] response-handle event=truncated reversible={} handle_status={} original_bytes={} emitted_bytes={} caller={}#{}",
+    tracing::trace!(
         reversible,
         handle_status,
         original_bytes,
         emitted_bytes,
-        caller.file(),
-        caller.line()
+        caller_file = caller.file(),
+        caller_line = caller.line(),
+        "response truncated"
     );
 }
 

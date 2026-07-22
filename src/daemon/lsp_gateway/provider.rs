@@ -5,11 +5,13 @@
 //! supplied by that owner and routes typed provider results without inventing
 //! a clean answer when an upstream analyzer is unavailable.
 
+use std::sync::Arc;
+
 use super::diagnostics::{GatewayDiagnostic, LspPosition};
 use super::gateway::{
     AdmittedRoot, CallHierarchyItem, DocumentSymbol, Hover, IncomingCall, LspLocation,
-    OutgoingCall, SemanticProviderOutcome, SemanticProviderPort, SignatureHelp, TypeHierarchyItem,
-    WorkspaceSymbol,
+    OutgoingCall, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
+    SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
 };
 use super::overlay::OverlaySnapshot;
 use super::session::LspRequestId;
@@ -17,6 +19,7 @@ use super::session::LspRequestId;
 /// Restart exhaustion is a stable health state, not an invitation for a
 /// bridge or client to start its own analyzer.
 pub const MAX_ANALYZER_RESTARTS: u8 = 3;
+pub const MAX_DIAGNOSTIC_OPERATION_ID_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AnalyzerState {
@@ -112,7 +115,16 @@ impl AnalyzerSupervisor {
 /// The session actor always suppresses a cancelled downstream response even if
 /// this port cannot interrupt the upstream request.
 pub trait AnalyzerCancellationPort {
-    fn cancel_upstream(&self, request_id: &LspRequestId) -> bool;
+    fn cancel_upstream(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool;
+}
+
+impl<T> AnalyzerCancellationPort for Arc<T>
+where
+    T: AnalyzerCancellationPort + ?Sized,
+{
+    fn cancel_upstream(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
+        (**self).cancel_upstream(root, request_id)
+    }
 }
 
 /// A generation-bound diagnostic read supplied by the daemon's canonical
@@ -126,17 +138,42 @@ pub struct GenerationDiagnostics {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticRefreshIdentity {
+    pub operation_id: String,
+    pub source_generation: Option<u64>,
+    pub target_generation: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiagnosticRefreshAdmission {
+    Started(DiagnosticRefreshIdentity),
+    AlreadyRunning(DiagnosticRefreshIdentity),
+    Rejected { failure_class: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DiagnosticSnapshotOutcome {
-    Complete(GenerationDiagnostics),
-    Partial {
+    Ready {
         diagnostics: GenerationDiagnostics,
+        completed_operation_id: Option<String>,
+    },
+    Refreshing(DiagnosticRefreshIdentity),
+    Partial {
+        source_generation: Option<u64>,
         coverage: String,
     },
-    Unavailable,
+    Failed {
+        source_generation: Option<u64>,
+        failure_class: String,
+    },
 }
 
 /// Port implemented by a daemon/application adapter. It is a read projection;
-/// no diagnostic record is owned or persisted by the gateway.
+/// no diagnostic record is owned or persisted by the gateway. Refresh methods
+/// are non-blocking: the provider starts canonical upstream/compiler work and
+/// later reports `Ready` with the matching completed operation identity.
+/// Unsaved overlays are ephemeral inputs and must never be persisted by the
+/// adapter.
 pub trait DiagnosticSnapshotPort {
     fn document_diagnostics(
         &self,
@@ -144,6 +181,42 @@ pub trait DiagnosticSnapshotPort {
         document_uri: &str,
         overlay: Option<&OverlaySnapshot>,
     ) -> DiagnosticSnapshotOutcome;
+
+    fn request_document_refresh(
+        &self,
+        _root: &AdmittedRoot,
+        _document_uri: &str,
+        _overlay: Option<&OverlaySnapshot>,
+        _source_generation: Option<u64>,
+    ) -> DiagnosticRefreshAdmission {
+        DiagnosticRefreshAdmission::Rejected {
+            failure_class: "refresh-unsupported".to_owned(),
+        }
+    }
+}
+
+impl<T> DiagnosticSnapshotPort for Arc<T>
+where
+    T: DiagnosticSnapshotPort + ?Sized,
+{
+    fn document_diagnostics(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        overlay: Option<&OverlaySnapshot>,
+    ) -> DiagnosticSnapshotOutcome {
+        (**self).document_diagnostics(root, document_uri, overlay)
+    }
+
+    fn request_document_refresh(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        overlay: Option<&OverlaySnapshot>,
+        source_generation: Option<u64>,
+    ) -> DiagnosticRefreshAdmission {
+        (**self).request_document_refresh(root, document_uri, overlay, source_generation)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -156,7 +229,22 @@ impl DiagnosticSnapshotPort for UnavailableDiagnosticSnapshotProvider {
         _document_uri: &str,
         _overlay: Option<&OverlaySnapshot>,
     ) -> DiagnosticSnapshotOutcome {
-        DiagnosticSnapshotOutcome::Unavailable
+        DiagnosticSnapshotOutcome::Failed {
+            source_generation: None,
+            failure_class: "provider-unavailable".to_owned(),
+        }
+    }
+
+    fn request_document_refresh(
+        &self,
+        _root: &AdmittedRoot,
+        _document_uri: &str,
+        _overlay: Option<&OverlaySnapshot>,
+        _source_generation: Option<u64>,
+    ) -> DiagnosticRefreshAdmission {
+        DiagnosticRefreshAdmission::Rejected {
+            failure_class: "provider-unavailable".to_owned(),
+        }
     }
 }
 
@@ -203,6 +291,18 @@ where
     U: SemanticProviderPort,
     G: SemanticProviderPort,
 {
+    fn request(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        self.route(
+            |provider| provider.request(root, request_id, request),
+            |provider| provider.request(root, request_id, request),
+        )
+    }
+
     fn declaration(
         &self,
         root: &AdmittedRoot,

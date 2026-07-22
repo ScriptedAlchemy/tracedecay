@@ -1,8 +1,8 @@
 use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
-    Commands, DaemonAction, LspAction, MemoryAction, MigrateAction, PostUpdateMode, SessionsAction,
-    SessionsRefreshAction,
+    Commands, DaemonAction, FeedbackRollbackAction, LspAction, MemoryAction, MigrateAction,
+    PostUpdateMode, SessionsAction, SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
@@ -247,7 +247,13 @@ fn update_plugins_alias_dispatches_to_update_plugin_command() {
     let cli = Cli::try_parse_from(["tracedecay", "update-plugins"])
         .expect("update-plugin alias should parse");
 
-    assert!(matches!(cli.command, Some(Commands::UpdatePlugin)));
+    assert!(matches!(
+        cli.command,
+        Some(Commands::UpdatePlugin {
+            local: false,
+            agent: None
+        })
+    ));
 }
 
 #[test]
@@ -273,8 +279,93 @@ fn update_upgrade_and_update_plugin_parse_to_distinct_commands() {
     ));
     assert!(matches!(
         update_plugin.command,
-        Some(Commands::UpdatePlugin)
+        Some(Commands::UpdatePlugin {
+            local: false,
+            agent: None
+        })
     ));
+}
+
+#[test]
+fn project_local_lifecycle_commands_require_and_preserve_agent_scope() {
+    let reinstall =
+        Cli::try_parse_from(["tracedecay", "reinstall", "--local", "--agent", "opencode"]).unwrap();
+    assert!(matches!(
+        reinstall.command,
+        Some(Commands::Reinstall {
+            local: true,
+            agent: Some(ref agent)
+        }) if agent == "opencode"
+    ));
+    let update =
+        Cli::try_parse_from(["tracedecay", "update-plugin", "--local", "--agent", "kimi"]).unwrap();
+    assert!(matches!(
+        update.command,
+        Some(Commands::UpdatePlugin {
+            local: true,
+            agent: Some(ref agent)
+        }) if agent == "kimi"
+    ));
+    let uninstall =
+        Cli::try_parse_from(["tracedecay", "uninstall", "--local", "--agent", "roo-code"]).unwrap();
+    assert!(matches!(
+        uninstall.command,
+        Some(Commands::Uninstall {
+            local: true,
+            agent: Some(ref agent)
+        }) if agent == "roo-code"
+    ));
+    assert!(Cli::try_parse_from(["tracedecay", "reinstall", "--local"]).is_err());
+}
+
+#[test]
+fn feedback_rollback_commands_parse_confirmation_and_state_paths() {
+    let dry_run = Cli::try_parse_from([
+        "tracedecay",
+        "feedback-rollback",
+        "dry-run",
+        "--agent",
+        "kimi",
+    ])
+    .unwrap();
+    assert!(matches!(
+        dry_run.command,
+        Some(Commands::FeedbackRollback {
+            action: FeedbackRollbackAction::DryRun { ref agent }
+        }) if agent == "kimi"
+    ));
+    let apply = Cli::try_parse_from([
+        "tracedecay",
+        "feedback-rollback",
+        "apply",
+        "--agent",
+        "opencode",
+        "--state",
+        ".tracedecay/feedback-opencode.json",
+        "--yes",
+    ])
+    .unwrap();
+    assert!(matches!(
+        apply.command,
+        Some(Commands::FeedbackRollback {
+            action: FeedbackRollbackAction::Apply {
+                ref agent,
+                ref state,
+                yes: true
+            }
+        }) if agent == "opencode" && state == ".tracedecay/feedback-opencode.json"
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "tracedecay",
+            "feedback-rollback",
+            "restore",
+            "--state",
+            "state.json"
+        ])
+        .is_ok(),
+        "confirmation is enforced by the handler so dry parsing remains inspectable"
+    );
 }
 
 #[test]
@@ -451,6 +542,30 @@ fn lsp_servers_command_parses_json_flag() {
             action: LspAction::Servers { json: true }
         })
     ));
+}
+
+#[test]
+fn lsp_bridge_requires_explicit_stdio_and_project() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "lsp",
+        "bridge",
+        "--stdio",
+        "--project",
+        "/workspace/project",
+    ])
+    .expect("lsp bridge should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Lsp {
+            action: LspAction::Bridge {
+                stdio: true,
+                project,
+            }
+        }) if project == "/workspace/project"
+    ));
+    assert!(Cli::try_parse_from(["tracedecay", "lsp", "bridge", "--stdio"]).is_err());
 }
 
 #[test]

@@ -10,8 +10,111 @@ use tracedecay_application::diagnostics::{
     DiagnosticProviderState, GenerationDiagnosticHistoryPort, GenerationDiagnosticHistoryRequest,
     ProviderSourceIdentity,
 };
-use tracedecay_domain::GenerationDiagnosticV1;
-use tracedecay_store::DiagnosticStore;
+use tracedecay_domain::{CodeGenerationId, GenerationDiagnosticV1, RetrievalAnchorId};
+use tracedecay_store::{
+    DiagnosticPublicationReceiptV1, DiagnosticStore, DiagnosticStoreResult,
+    SanitizedCleanDiagnosticSnapshotV1,
+};
+
+use crate::db::Database;
+use crate::diagnostics_store::DiagnosticsStore;
+
+/// Owned adapter that lets long-lived feedback runtimes reuse the canonical
+/// diagnostics store without retaining a borrowed database connection.
+#[derive(Clone)]
+pub(super) struct DatabaseDiagnosticStore {
+    database: Database,
+}
+
+impl DatabaseDiagnosticStore {
+    pub(super) fn new(database: Database) -> Self {
+        Self { database }
+    }
+}
+
+impl DiagnosticStore for DatabaseDiagnosticStore {
+    async fn publish_clean_diagnostics(
+        &self,
+        snapshot: SanitizedCleanDiagnosticSnapshotV1,
+    ) -> DiagnosticStoreResult<DiagnosticPublicationReceiptV1> {
+        DiagnosticsStore::new(self.database.conn())
+            .publish_clean_diagnostics(snapshot)
+            .await
+    }
+
+    async fn current_diagnostic_generation(
+        &self,
+    ) -> DiagnosticStoreResult<Option<CodeGenerationId>> {
+        DiagnosticsStore::new(self.database.conn())
+            .current_diagnostic_generation()
+            .await
+    }
+
+    async fn diagnostics_for_generation(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        DiagnosticsStore::new(self.database.conn())
+            .diagnostics_for_generation(generation)
+            .await
+    }
+
+    async fn current_diagnostics(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        DiagnosticsStore::new(self.database.conn())
+            .current_diagnostics(generation)
+            .await
+    }
+
+    async fn current_diagnostics_for_file(
+        &self,
+        generation: &CodeGenerationId,
+        file_occurrence_id: &tracedecay_domain::FileOccurrenceId,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        DiagnosticsStore::new(self.database.conn())
+            .current_diagnostics_for_file(generation, file_occurrence_id)
+            .await
+    }
+
+    async fn stale_diagnostics(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        DiagnosticsStore::new(self.database.conn())
+            .stale_diagnostics(generation)
+            .await
+    }
+
+    async fn diagnostic_by_anchor(
+        &self,
+        anchor: &RetrievalAnchorId,
+    ) -> DiagnosticStoreResult<Option<GenerationDiagnosticV1>> {
+        DiagnosticsStore::new(self.database.conn())
+            .diagnostic_by_anchor(anchor)
+            .await
+    }
+
+    async fn diagnostic_supersession_chain(
+        &self,
+        anchor: &RetrievalAnchorId,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        DiagnosticsStore::new(self.database.conn())
+            .diagnostic_supersession_chain(anchor)
+            .await
+    }
+
+    async fn supersede_diagnostic_generation(
+        &self,
+        prior_generation: &CodeGenerationId,
+        successor_generation: &CodeGenerationId,
+    ) -> DiagnosticStoreResult<u64> {
+        DiagnosticsStore::new(self.database.conn())
+            .supersede_diagnostic_generation(prior_generation, successor_generation)
+            .await
+    }
+}
 
 /// Concrete adapter over the existing diagnostic-store read port. It is kept
 /// independent of daemon composition so a daemon can bind its own admitted

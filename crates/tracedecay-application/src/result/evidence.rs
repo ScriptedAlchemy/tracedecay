@@ -13,7 +13,7 @@ use crate::error::ApplicationContractError;
 use super::{CancellationObservation, OperationBudgetUsage, OperationReceipt, ResultContractRef};
 
 macro_rules! evidence_id {
-    ($($name:ident => $field:literal),+ $(,)?) => {$(
+    ($($name:ident => ($field:literal, $maximum_bytes:expr)),+ $(,)?) => {$(
         #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(transparent)]
         pub struct $name(String);
@@ -23,7 +23,7 @@ macro_rules! evidence_id {
                 let value = value.into();
                 if value.is_empty()
                     || value.trim() != value
-                    || value.len() > 512
+                    || value.len() > $maximum_bytes
                     || value.chars().any(char::is_control)
                 {
                     return Err(ApplicationContractError::InvalidIdentifier { field: $field });
@@ -62,9 +62,12 @@ macro_rules! evidence_id {
 }
 
 evidence_id!(
-    EvidenceIdentity => "evidence identity",
-    ScoreId => "score id",
-    OpaqueCursor => "opaque cursor",
+    EvidenceIdentity => ("evidence identity", 512),
+    ScoreId => ("score id", 512),
+    // Existing authenticated query cursors bind typed scope, access, key,
+    // participant, and watermark identity. Keep the application envelope
+    // bounded without forcing a second compact cursor scheme.
+    OpaqueCursor => ("opaque cursor", 4_096),
 );
 
 /// Application-level freshness. Missing or partial truth never becomes current.

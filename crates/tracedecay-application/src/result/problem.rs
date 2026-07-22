@@ -13,6 +13,33 @@ pub enum RetryDirective {
     AfterReconcile,
 }
 
+/// Request identity boundary within which a retry remains valid.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryScope {
+    SameRequest,
+    SameOperation,
+    FreshRequest,
+}
+
+/// Layer that owns resolving the problem rather than merely presenting it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemOwningLayer {
+    Adapter,
+    Application,
+    Runtime,
+    Port,
+}
+
+/// Whether the problem occurred before admission or is an admitted terminal.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemTerminality {
+    PreAdmission,
+    AdmittedTerminal,
+}
+
 /// Bounded action an adapter may offer without inferring executable authority.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -181,5 +208,74 @@ impl ApplicationProblem {
 
     pub const fn is_pre_admission(&self) -> bool {
         matches!(self, Self::Cancelled { .. } | Self::TimedOut { .. })
+    }
+
+    pub const fn retry(&self) -> RetryDirective {
+        match self {
+            Self::InvalidRequest { retry, .. }
+            | Self::NotFoundOrNotAuthorized { retry, .. }
+            | Self::Conflict { retry, .. }
+            | Self::Stale { retry, .. }
+            | Self::Unsupported { retry, .. }
+            | Self::Unavailable { retry, .. }
+            | Self::Saturated { retry, .. }
+            | Self::Cancelled { retry, .. }
+            | Self::TimedOut { retry, .. } => *retry,
+        }
+    }
+
+    pub fn legal_actions(&self) -> &[LegalAction] {
+        match self {
+            Self::InvalidRequest { legal_actions, .. }
+            | Self::NotFoundOrNotAuthorized { legal_actions, .. }
+            | Self::Conflict { legal_actions, .. }
+            | Self::Stale { legal_actions, .. }
+            | Self::Unsupported { legal_actions, .. }
+            | Self::Unavailable { legal_actions, .. }
+            | Self::Saturated { legal_actions, .. }
+            | Self::Cancelled { legal_actions, .. }
+            | Self::TimedOut { legal_actions, .. } => legal_actions,
+        }
+    }
+
+    pub fn diagnostic(&self) -> Option<&SafeDiagnostic> {
+        match self {
+            Self::InvalidRequest { diagnostic, .. }
+            | Self::Conflict { diagnostic, .. }
+            | Self::Stale { diagnostic, .. }
+            | Self::Unsupported { diagnostic, .. }
+            | Self::Unavailable { diagnostic, .. }
+            | Self::Saturated { diagnostic, .. } => Some(diagnostic),
+            Self::NotFoundOrNotAuthorized { .. }
+            | Self::Cancelled { .. }
+            | Self::TimedOut { .. } => None,
+        }
+    }
+
+    pub const fn canonical_code(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest { .. } => "invalid_request",
+            Self::NotFoundOrNotAuthorized { .. } => "not_found_or_not_authorized",
+            Self::Conflict { .. } => "conflict",
+            Self::Stale { .. } => "stale",
+            Self::Unsupported { .. } => "unsupported",
+            Self::Unavailable { .. } => "unavailable",
+            Self::Saturated { .. } => "saturated",
+            Self::Cancelled { .. } => "cancelled",
+            Self::TimedOut { .. } => "timed_out",
+        }
+    }
+
+    pub fn safe_message(&self) -> &str {
+        self.diagnostic()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .unwrap_or_else(|| match self {
+                Self::NotFoundOrNotAuthorized { .. } => {
+                    "The requested resource was not found or is not authorized"
+                }
+                Self::Cancelled { .. } => "The request was cancelled before admission",
+                Self::TimedOut { .. } => "The request timed out before admission",
+                _ => unreachable!("diagnostic-bearing problem handled above"),
+            })
     }
 }

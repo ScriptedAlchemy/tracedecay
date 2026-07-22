@@ -9,15 +9,16 @@ use tracedecay_tool_catalog::{
     CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
     CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
     DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, PrivacyClass, ProtocolRevisionRange, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
-    ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
-    SurfaceOperationName, TerminalState, TerminalStateContract, UnavailabilityReason, UseCaseId,
+    LifecycleClass, PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract,
+    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1,
+    SurfaceBindingV1, SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
+use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 
 struct SurfaceSpec {
     capability: &'static str,
@@ -64,7 +65,7 @@ const SURFACES: [BindingSurface; 3] = [
     BindingSurface::Http,
 ];
 
-/// Inert catalog contribution for public Git preview/apply bindings only.
+/// Catalog contribution for public Git preview/apply bindings only.
 pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError>
 {
     let mut capabilities = Vec::with_capacity(SURFACE_SPECS.len());
@@ -168,11 +169,9 @@ fn capability(
             ReceiptContract::Operation
         },
         terminal_states: TerminalStateContract::new(terminal_states(spec.effect))?,
-        availability: AvailabilityContract::Unavailable {
-            reason: UnavailabilityReason::NotImplemented,
-        },
+        availability: AvailabilityContract::Available,
         binding_ids,
-        profile_eligibility: Vec::new(),
+        profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
         required_features: Vec::new(),
     })?)
 }

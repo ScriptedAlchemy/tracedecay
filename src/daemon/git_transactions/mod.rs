@@ -1,10 +1,7 @@
 //! Daemon-serialized PR11 Git index transaction runtime.
 //!
-//! PR11 intentionally has no PR12 transport binding yet, so production entry
-//! points remain internally unreferenced while their real-repository and
-//! recovery contracts are exercised in this module's tests.
-
-#![allow(dead_code)]
+//! PR12 mounts the public preview/apply facade through the retained service;
+//! internal stage/unstage/commit operations remain unreachable by transports.
 
 mod journal;
 mod native;
@@ -25,8 +22,13 @@ use tracedecay_policy::GitEffectClassifier;
 use tracedecay_store::GitIndexTransactionStore;
 
 pub(crate) use journal::{DurableGitIndexJournal, GitIndexJournalError};
+#[cfg(test)]
+pub(crate) use native::capture_exact_snapshot_for_test;
 pub(crate) use native::{DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor};
-pub(crate) use owner::DaemonGitIndexTransactionServiceRegistry;
+pub(crate) use owner::{
+    DaemonGitIndexTransactionServiceRegistry, DaemonGitInvocationOwner,
+    DaemonProjectGitIndexTransactionService, daemon_git_policy_evidence,
+};
 pub(crate) use queue::{RepositoryMutationQueue, RepositoryMutationQueueError};
 pub(crate) use recovery::{
     GitIndexRecoveryCoordinator, GitIndexRecoveryError, GitIndexRecoveryExecutor,
@@ -64,6 +66,20 @@ where
         let port = DaemonGitIndexTransactionPort::new(store, native, classifier, authorization);
         port.recover_startup(observed_at)?;
         Ok(Self { port })
+    }
+}
+
+#[cfg(test)]
+impl<S, N, C, A> DaemonGitIndexTransactionService<S, N, C, A>
+where
+    S: GitIndexTransactionStore,
+{
+    pub(crate) fn quarantine_preview_for_test(
+        &self,
+        preview: &tracedecay_domain::GitIndexPreviewV1,
+        observed_at: UtcMicros,
+    ) -> Result<(), GitIndexTransactionPortError> {
+        self.port.quarantine_preview_for_test(preview, observed_at)
     }
 }
 

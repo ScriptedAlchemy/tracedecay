@@ -12,6 +12,7 @@ pub(crate) use hook_runtime::{
 mod admin_project;
 pub mod analysis;
 mod analytics;
+mod application_surface;
 pub mod ast_grep_search;
 pub mod dashboard;
 mod dependency_hints;
@@ -50,6 +51,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
+use crate::application_surface::{APPLICATION_SURFACE_OPERATIONS, ApplicationSurfaceOperation};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
@@ -416,6 +418,10 @@ pub struct ToolCallRegistryOptions<'a> {
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    pub application_invocation_client: Option<&'a crate::daemon_client::DaemonInvocationClient>,
+    pub application_request_id: Option<tracedecay_application::RequestId>,
+    pub application_deadline: Option<tracedecay_application::Deadline>,
+    pub application_cancellation: Option<tracedecay_application::CancellationSignal>,
     pub session_authorities: SessionAuthorities<'a>,
 }
 
@@ -430,6 +436,10 @@ impl Default for ToolCallRegistryOptions<'_> {
             automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
             diagnostics_cache: None,
             diagnostics_lsp: None,
+            application_invocation_client: None,
+            application_request_id: None,
+            application_deadline: None,
+            application_cancellation: None,
             session_authorities: SessionAuthorities::default(),
         }
     }
@@ -537,6 +547,9 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         active_project_session_db,
         options.session_authorities.project_retrieval,
     );
+    if let Some(result) = dispatch_application_surface_tools(tool_name, cg, &args, &options).await {
+        return result;
+    }
     if let Some(result) = dispatch_graph_tools(tool_name, cg, &args, selected_scope_prefix).await {
         return result;
     }
@@ -628,8 +641,6 @@ async fn dispatch_graph_tools(
             graph::handle_implementations(cg, args.clone(), selected_scope_prefix).await
         }
         "tracedecay_callers_for" => graph::handle_callers_for(cg, args.clone()).await,
-        "tracedecay_call_chain" => graph::handle_call_chain(cg, args.clone()).await,
-        "tracedecay_file_dependents" => graph::handle_file_dependents(cg, args.clone()).await,
         "tracedecay_find_exact_symbol" => {
             graph::handle_find_exact_symbol(cg, args.clone(), selected_scope_prefix).await
         }
@@ -672,9 +683,6 @@ async fn dispatch_info_tools(
             server_stats,
             scope_prefix,
         )),
-        "tracedecay_storage_status" => {
-            info::handle_storage_status(cg, args.clone(), scope_prefix).await
-        }
         "tracedecay_project_list" => {
             info::handle_project_list(
                 cg,
@@ -765,6 +773,28 @@ async fn dispatch_admin_tools(
     Some(result)
 }
 
+/// Dispatch catalog-owned application surfaces.
+async fn dispatch_application_surface_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<Result<ToolResult>> {
+    let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
+    Some(
+        application_surface::handle_application_surface(
+            cg,
+            operation,
+            args,
+            options.application_invocation_client,
+            options.application_request_id.clone(),
+            options.application_deadline.clone(),
+            options.application_cancellation.clone(),
+        )
+        .await,
+    )
+}
+
 /// Dispatch static-analysis report tools (`tracedecay_dead_code`,
 /// `tracedecay_complexity`, `tracedecay_diagnostics`, ...).
 async fn dispatch_analysis_tools(
@@ -776,9 +806,6 @@ async fn dispatch_analysis_tools(
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_dead_code" => analysis::handle_dead_code(cg, args.clone(), scope_prefix).await,
-        "tracedecay_module_api" => {
-            analysis::handle_module_api(cg, args.clone(), scope_prefix).await
-        }
         "tracedecay_circular" => analysis::handle_circular(cg, args.clone()).await,
         "tracedecay_hotspots" => analysis::handle_hotspots(cg, args.clone(), scope_prefix).await,
         "tracedecay_unused_imports" => {
@@ -1127,9 +1154,9 @@ mod tests {
     }
 
     // MCP registry maintenance guardrail:
-    // when adding a tool, update all three surfaces together: its
-    // `def_*` entry in definitions.rs, the `get_tool_definitions()` registry,
-    // and the `handle_tool_call` match arm below. These lockstep tests
+    // when adding a tool, update all three surfaces together: its `def_*`
+    // entry in definitions.rs, the `get_tool_definitions()` registry, and
+    // the application operation catalog. These lockstep tests
     // intentionally fail with the missing tool name when any surface drifts.
     #[test]
     fn tool_definitions_and_dispatch_handlers_stay_in_lockstep() {
@@ -1152,6 +1179,11 @@ mod tests {
         ] {
             handler_names.extend(dispatch_tool_names_from_source(dispatch_fn));
         }
+        handler_names.extend(
+            APPLICATION_SURFACE_OPERATIONS
+                .into_iter()
+                .map(|operation| format!("tracedecay_{}", operation.as_str())),
+        );
         for internal in INTERNAL_DAEMON_TOOL_NAMES {
             handler_names.remove(*internal);
         }

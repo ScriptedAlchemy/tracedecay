@@ -7,8 +7,8 @@ use super::diagnostics::{
 };
 use super::gateway::{
     CallHierarchyItem, DocumentSymbol, GatewayDocumentDiagnostics, GatewayResponse, Hover,
-    IncomingCall, LspLocation, MethodUnavailableReason, OutgoingCall, SignatureHelp,
-    TypeHierarchyItem, WorkspaceSymbol,
+    IncomingCall, LspLocation, MethodUnavailableReason, OutgoingCall, SemanticResponse,
+    SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
 };
 use super::overlay::{OverlayChange, OverlayError};
 use super::session::{LspRequestFailure, LspRequestId};
@@ -71,11 +71,33 @@ pub(super) fn response_value<T>(
             message: "Server cancelled request",
             data: json!({ "retriggerRequest": true, "coverage": coverage }),
         }),
+        GatewayResponse::Pending => Err(RpcFailure {
+            code: -32802,
+            message: "Server cancelled request",
+            data: json!({
+                "retriggerRequest": true,
+                "coverage": "semantic-pending-not-polled",
+            }),
+        }),
         GatewayResponse::Unavailable(unavailable) => Err(RpcFailure::unavailable(
             unavailable.method.as_lsp_method(),
             unavailable.reason,
         )),
         GatewayResponse::RequestFailed(failure) => Err(RpcFailure::request_failure(failure)),
+    }
+}
+
+pub(super) fn semantic_response_value(response: SemanticResponse) -> Value {
+    match response {
+        SemanticResponse::Locations(value) => locations_value(value),
+        SemanticResponse::Hover(value) => hover_value(value),
+        SemanticResponse::DocumentSymbols(value) => document_symbols_value(value),
+        SemanticResponse::WorkspaceSymbols(value) => workspace_symbols_value(value),
+        SemanticResponse::CallHierarchyItems(value) => call_items_value(value),
+        SemanticResponse::IncomingCalls(value) => incoming_calls_value(value),
+        SemanticResponse::OutgoingCalls(value) => outgoing_calls_value(value),
+        SemanticResponse::SignatureHelp(value) => signature_help_value(value),
+        SemanticResponse::TypeHierarchyItems(value) => type_items_value(value),
     }
 }
 
@@ -349,7 +371,10 @@ pub(super) fn text_document(params: &Value) -> Result<&Map<String, Value>, RpcFa
         .ok_or_else(|| RpcFailure::invalid_params("textDocument is required"))
 }
 
-pub(super) fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, RpcFailure> {
+pub(super) fn required_string(
+    object: &Map<String, Value>,
+    key: &str,
+) -> Result<String, RpcFailure> {
     object
         .get(key)
         .and_then(Value::as_str)
