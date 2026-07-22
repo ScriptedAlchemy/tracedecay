@@ -55,6 +55,11 @@ pub struct FastEmbedModelCatalogV1 {
     pub models: Vec<CatalogedFastEmbedModelV1>,
 }
 
+/// Production catalog used by settings validation and daemon acquisition.
+pub fn production_fastembed_catalog() -> FastEmbedModelCatalogV1 {
+    FastEmbedModelCatalogV1::production()
+}
+
 impl FastEmbedModelCatalogV1 {
     pub fn production() -> Self {
         Self {

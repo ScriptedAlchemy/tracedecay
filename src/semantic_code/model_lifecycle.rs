@@ -231,17 +231,24 @@ fn fetch_member_with_hf_hub(
 ) -> Result<(), ModelLifecycleErrorV1> {
     #[cfg(feature = "semantic-fastembed")]
     {
-        use fastembed::pull_from_hf;
+        use hf_hub::api::sync::ApiBuilder;
+        use hf_hub::{Repo, RepoType};
 
         let cache_dir = destination
             .parent()
             .ok_or(ModelLifecycleErrorV1::DownloadFailed)?
             .join(".hf-cache");
         fs::create_dir_all(&cache_dir).map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
-        let repo = pull_from_hf(model.model_code.clone(), cache_dir, false)
+        let api = ApiBuilder::new()
+            .with_cache_dir(cache_dir)
+            .with_progress(false)
+            .build()
             .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
-        // Pin the immutable revision from the catalog when the hub API allows
-        // revision-qualified paths; otherwise verify against catalog digests.
+        let repo = api.repo(Repo::with_revision(
+            model.model_code.clone(),
+            RepoType::Model,
+            model.source.revision.clone(),
+        ));
         let fetched = repo
             .get(upstream_path)
             .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
@@ -894,6 +901,7 @@ fn install_path_of(state: &SemanticModelLifecycleStateV1) -> Option<&Path> {
     match state {
         SemanticModelLifecycleStateV1::Installed { install_path, .. }
         | SemanticModelLifecycleStateV1::Loading { install_path, .. }
+        | SemanticModelLifecycleStateV1::Indexing { install_path, .. }
         | SemanticModelLifecycleStateV1::Ready { install_path, .. } => Some(install_path),
         _ => None,
     }

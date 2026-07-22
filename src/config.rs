@@ -169,12 +169,20 @@ impl SemanticResourceCeilings {
 
 /// Pinned semantic runtime selection.
 ///
-/// `None` means the optional semantic lane is unavailable while exact,
-/// lexical, and graph retrieval remain healthy. A rollback profile is retained
-/// explicitly and can never be inferred by scanning the artifact store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// A catalog model id (default `JinaEmbeddingsV2BaseCode`) selects the
+/// FastEmbed package TraceDecay will acquire in the background. `None`
+/// disables the optional semantic lane while exact, lexical, and graph
+/// retrieval remain healthy. Installed local profiles remain explicit and are
+/// never inferred by scanning an ambient model cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticConfig {
+    /// Cataloged FastEmbed model id, or `None` to disable semantics.
+    #[serde(default = "default_selected_fastembed_model")]
+    pub selected_model: Option<String>,
+    /// When true, first daemon startup / selection queues background download.
+    #[serde(default = "default_true")]
+    pub auto_download: bool,
     #[serde(default)]
     pub active_profile: Option<SemanticProfileSelection>,
     #[serde(default)]
@@ -183,9 +191,44 @@ pub struct SemanticConfig {
     pub resources: SemanticResourceCeilings,
 }
 
+fn default_selected_fastembed_model() -> Option<String> {
+    Some(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID.to_owned())
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for SemanticConfig {
+    fn default() -> Self {
+        Self {
+            selected_model: default_selected_fastembed_model(),
+            auto_download: true,
+            active_profile: None,
+            rollback_profile: None,
+            resources: SemanticResourceCeilings::default(),
+        }
+    }
+}
+
 impl SemanticConfig {
     pub fn validate(&self) -> Result<()> {
         self.resources.validate()?;
+        if let Some(model_id) = self.selected_model.as_ref() {
+            if model_id.trim().is_empty() || model_id.len() > 128 {
+                return Err(config_error(
+                    "semantic selected_model must be a non-empty catalog id at most 128 bytes",
+                ));
+            }
+            if crate::semantic_code::production_fastembed_catalog()
+                .get(model_id)
+                .is_none()
+            {
+                return Err(config_error(format!(
+                    "semantic selected_model '{model_id}' is not a cataloged FastEmbed model"
+                )));
+            }
+        }
         if let Some(active) = self.active_profile.as_ref() {
             active.validate()?;
         }

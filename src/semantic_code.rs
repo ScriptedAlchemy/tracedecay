@@ -33,11 +33,23 @@ mod artifact_store;
 mod evaluation;
 mod fastembed_adapter;
 mod manifest;
+mod model_catalog;
+mod model_lifecycle;
 pub(crate) mod projector;
 mod runtime_query;
 mod runtime_service;
 mod session_pool;
 mod trust_roots;
+
+pub(crate) use model_catalog::{
+    DEFAULT_FASTEMBED_MODEL_ID, FastEmbedModelCatalogV1, catalog_package_digest,
+    production_fastembed_catalog,
+};
+pub(crate) use model_lifecycle::{
+    HfHubModelMemberSourceV1, ModelLifecycleErrorV1, ModelMemberSourceV1,
+    SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
+    SemanticModelRemediationV1, default_lifecycle_root,
+};
 
 pub(crate) use runtime_service::{
     PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1,

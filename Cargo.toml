@@ -193,11 +193,14 @@ lang-lean = ["dep:tracedecay-large-treesitters"]
 test-transport = []
 
 # PR10 FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
-# model-hub and image defaults disabled; models still load only from locally
-# verified artifact bytes in `src/semantic_code/fastembed_adapter.rs`.
+# image defaults disabled. Runtime inference still loads only from locally
+# verified artifact bytes; daemon-owned acquisition uses hf-hub against the
+# immutable catalog pins, never query-time ambient cache discovery.
 semantic-fastembed = [
     "dep:fastembed",
+    "dep:hf-hub",
     "fastembed/ort-download-binaries-rustls-tls",
+    "fastembed/hf-hub-rustls-tls",
 ]
 
 [lib]
@@ -266,8 +269,10 @@ open = "5.3"
 tiktoken-rs = { version = "0.12", optional = true }
 # Library-first FastEmbed: disable hub/image defaults so the adapter can only
 # construct from local verified artifact bytes (no model-hub / cache discovery).
-# The `semantic-fastembed` feature adds the bundled ORT runtime separately.
+# The `semantic-fastembed` feature adds the bundled ORT runtime and hf-hub
+# acquisition separately.
 fastembed = { version = "5", optional = true, default-features = false }
+hf-hub = { version = "0.5", optional = true, default-features = false, features = ["ureq", "rustls-tls"] }
 # Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
 # We deliberately use the raw watcher (not notify-debouncer-full) and debounce
 # ourselves so a monorepo's git-ref churn coalesces into a single sync.

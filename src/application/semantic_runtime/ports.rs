@@ -368,6 +368,16 @@ pub enum SemanticFallbackReasonV1 {
     RuntimeFailure,
     RollbackInProgress,
     InvalidRuntimeStatus,
+    /// Selected catalog model has not been downloaded yet.
+    SelectedNotDownloaded,
+    /// Daemon-owned model acquisition is in progress.
+    Downloading,
+    /// Downloaded bytes are being verified against catalog pins.
+    Verifying,
+    /// Model is installed but not yet loaded into the runtime.
+    Loading,
+    /// Model acquisition or load failed; exact/lexical/graph remain available.
+    ModelFailed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -376,11 +386,40 @@ pub enum SemanticRuntimeStateV1 {
     Unavailable {
         reason: SemanticFallbackReasonV1,
     },
+    /// Catalog model selected but local install bytes are absent.
+    SelectedNotDownloaded {
+        model_id: String,
+        artifact_digest: String,
+    },
+    /// Background download of catalog members is in progress.
+    Downloading {
+        model_id: String,
+        artifact_digest: String,
+        bytes_received: u64,
+        bytes_total: u64,
+    },
+    /// Downloaded members are being length/SHA-256 verified.
+    Verifying {
+        model_id: String,
+        artifact_digest: String,
+    },
+    /// Verified package is installed locally but not yet loaded.
+    Installed {
+        model_id: String,
+        artifact_digest: String,
+    },
+    /// Installed model is loading into the embedding runtime.
+    Loading {
+        model_id: String,
+        artifact_digest: String,
+    },
     Indexing {
         target_generation: VectorGenerationIdV1,
         completed_units: u64,
         total_units: u64,
     },
+    /// Atomically current semantic generation (Doctor/status: Ready).
+    #[serde(rename = "ready")]
     Current {
         receipt: SemanticActivationReceiptV1,
     },
@@ -392,6 +431,12 @@ pub enum SemanticRuntimeStateV1 {
         from_generation: VectorGenerationIdV1,
         target_generation: VectorGenerationIdV1,
     },
+    Failed {
+        model_id: String,
+        artifact_digest: String,
+        detail: String,
+        retryable: bool,
+    },
 }
 
 impl SemanticRuntimeStateV1 {
@@ -401,6 +446,39 @@ impl SemanticRuntimeStateV1 {
     ) -> Result<(), SemanticRuntimeContractErrorV1> {
         match self {
             Self::Unavailable { .. } => Ok(()),
+            Self::SelectedNotDownloaded {
+                model_id,
+                artifact_digest,
+            }
+            | Self::Verifying {
+                model_id,
+                artifact_digest,
+            }
+            | Self::Installed {
+                model_id,
+                artifact_digest,
+            }
+            | Self::Loading {
+                model_id,
+                artifact_digest,
+            } => {
+                validate_model_identity(model_id, artifact_digest)?;
+                require_configuration(configuration)?;
+                Ok(())
+            }
+            Self::Downloading {
+                model_id,
+                artifact_digest,
+                bytes_received,
+                bytes_total,
+            } => {
+                validate_model_identity(model_id, artifact_digest)?;
+                if *bytes_total == 0 || bytes_received > bytes_total {
+                    return Err(SemanticRuntimeContractErrorV1::InvalidProgress);
+                }
+                require_configuration(configuration)?;
+                Ok(())
+            }
             Self::Indexing {
                 target_generation,
                 completed_units,
@@ -436,6 +514,19 @@ impl SemanticRuntimeStateV1 {
                 validate_generation(target_generation)?;
                 if from_generation == target_generation {
                     return Err(SemanticRuntimeContractErrorV1::InvalidRollback);
+                }
+                require_configuration(configuration)?;
+                Ok(())
+            }
+            Self::Failed {
+                model_id,
+                artifact_digest,
+                detail,
+                ..
+            } => {
+                validate_model_identity(model_id, artifact_digest)?;
+                if detail.trim().is_empty() {
+                    return Err(SemanticRuntimeContractErrorV1::InvalidRuntimeStatus);
                 }
                 require_configuration(configuration)?;
                 Ok(())
@@ -493,11 +584,30 @@ impl SemanticRuntimeStatusV1 {
             | SemanticRuntimeStateV1::Degraded { reason, .. } => {
                 SemanticRuntimeRouteV1::LexicalFallback { reason: *reason }
             }
+            SemanticRuntimeStateV1::SelectedNotDownloaded { .. } => {
+                SemanticRuntimeRouteV1::LexicalFallback {
+                    reason: SemanticFallbackReasonV1::SelectedNotDownloaded,
+                }
+            }
+            SemanticRuntimeStateV1::Downloading { .. } => SemanticRuntimeRouteV1::LexicalFallback {
+                reason: SemanticFallbackReasonV1::Downloading,
+            },
+            SemanticRuntimeStateV1::Verifying { .. } => SemanticRuntimeRouteV1::LexicalFallback {
+                reason: SemanticFallbackReasonV1::Verifying,
+            },
+            SemanticRuntimeStateV1::Installed { .. } | SemanticRuntimeStateV1::Loading { .. } => {
+                SemanticRuntimeRouteV1::LexicalFallback {
+                    reason: SemanticFallbackReasonV1::Loading,
+                }
+            }
             SemanticRuntimeStateV1::Indexing { .. } => SemanticRuntimeRouteV1::LexicalFallback {
                 reason: SemanticFallbackReasonV1::Indexing,
             },
             SemanticRuntimeStateV1::Rollback { .. } => SemanticRuntimeRouteV1::LexicalFallback {
                 reason: SemanticFallbackReasonV1::RollbackInProgress,
+            },
+            SemanticRuntimeStateV1::Failed { .. } => SemanticRuntimeRouteV1::LexicalFallback {
+                reason: SemanticFallbackReasonV1::ModelFailed,
             },
         }
     }
@@ -527,6 +637,10 @@ pub enum SemanticRuntimeContractErrorV1 {
     InvalidRollback,
     #[error("semantic receipt identity mismatch")]
     ReceiptIdentityMismatch,
+    #[error("invalid semantic runtime status")]
+    InvalidRuntimeStatus,
+    #[error("invalid semantic model identity")]
+    InvalidModelIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -587,6 +701,23 @@ fn validate_generation(
     generation
         .validate()
         .map_err(|_| SemanticRuntimeContractErrorV1::InvalidGeneration)
+}
+
+fn validate_model_identity(
+    model_id: &str,
+    artifact_digest: &str,
+) -> Result<(), SemanticRuntimeContractErrorV1> {
+    if model_id.trim().is_empty() || model_id.len() > 128 {
+        return Err(SemanticRuntimeContractErrorV1::InvalidModelIdentity);
+    }
+    if artifact_digest.len() != 64
+        || !artifact_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SemanticRuntimeContractErrorV1::InvalidModelIdentity);
+    }
+    Ok(())
 }
 
 fn validate_optional_generation(
