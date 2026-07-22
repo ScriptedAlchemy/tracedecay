@@ -2,14 +2,15 @@
   "schema_version": 1,
   "workload_id": "storage-runtime-s0-baseline-v1",
   "evidence_eligible": true,
-  "description": "Phase S0 frozen baseline definition for the SQLite storage runtime plan. Freezes the last released schema/binary identity and defines current, 10x, open-loop overload, crash, recovery, FTS, backup/restore, and A/A noise-floor workloads across the supported store families. Product command templates remain null unless a checked-in command can cover the complete phase against an explicitly supplied isolated fixture copy. The runner fails closed on pending steps unless --allow-pending is passed. This file defines the contract; it is not yet evidence.",
+  "description": "Phase S0 frozen baseline definition for the SQLite storage runtime plan. Freezes distinct product/evidence binary identities plus the released schema identity and defines current, 10x, open-loop overload, crash, recovery, FTS, backup/restore, and A/A noise-floor workloads across the supported store families. Product command templates remain null unless a checked-in command can cover the complete phase against an explicitly supplied isolated fixture copy. The runner fails closed on pending steps unless --allow-pending is passed. This file defines the contract; it is not yet evidence.",
   "store_families": ["graph", "profile", "project", "session"],
-  "binary": null,
+  "product_binary": null,
+  "evidence_binary": null,
   "frozen_identity": {
-    "artifact": "frozen-identity-v2.json",
+    "artifact": "frozen-identity-v3.json",
     "required_for_evidence": true,
-    "capture": "python3 run_storage_baseline.py freeze --binary <released-tracedecay> --schema-manifest <released-schema-file> --workload workload-s0.json --corpus <isolated-store-corpus> --config <released-runtime-config> --output frozen-identity-v2.json",
-    "notes": "The schema manifest/config are operator-supplied released artifacts. The freeze binds binary, schema, workload, corpus, and config hashes; it never derives identity from a live profile."
+    "capture": "python3 run_storage_baseline.py freeze --product-binary <released-tracedecay> --evidence-binary <storage-runtime-evidence> --product-commit-sha <released-product-commit> --schema-manifest <released-schema-file> --workload workload-s0.json --corpus <isolated-store-corpus> --config <released-runtime-config> --output frozen-identity-v3.json",
+    "notes": "The schema manifest/config are operator-supplied released artifacts. The freeze separately binds product and evidence binaries plus schema, workload, corpus, and config hashes; it never derives identity from a live profile."
   },
   "environment": {
     "version_commands": {
@@ -88,7 +89,7 @@
       "name": "crash",
       "kind": "crash",
       "families": ["graph", "profile", "project", "session"],
-      "pending_reason": "requires a checked-in long-running product writer that accepts an explicit isolated store path and emits a documented ready file before SIGKILL; no such CLI/test-binary interface exists",
+      "pending_reason": "the fixed storage-runtime-crash-recovery-repair-v1 product adapter command now drives an isolated ready-signalled crash through MaintenanceCoordinator and real S5/S6 recovery APIs, but qualifying copied fixtures have not yet been executed for this S0 phase",
       "setup": {"argv": null},
       "work": {"argv": null},
       "wait_for_file": null,
@@ -101,7 +102,7 @@
       "kind": "recovery",
       "families": ["graph", "profile", "project", "session"],
       "depends_on": "crash",
-      "pending_reason": "requires the crash writer above plus a checked-in explicit-path reopen/integrity command for each store family; status/search commands do not establish recovery correctness",
+      "pending_reason": "the fixed storage-runtime-crash-recovery-repair-v1 adapter command now exercises SqliteDoctorHealthLane, SqliteCorruptionProbe, SqliteRepairDriver, and FilesystemQuarantineStore, but qualifying corrupt/recoverable copied fixtures have not yet produced accepted typed evidence",
       "recover": {"argv": null},
       "evidence": [
         {"name": "store_state", "capture": "sqlite_logical", "path": null, "tables": []}
@@ -126,7 +127,7 @@
       "name": "backup_restore",
       "kind": "backup_restore",
       "families": ["graph", "profile", "project", "session"],
-      "pending_reason": "requires checked-in product backup, manifest-verification, and restore commands that accept explicit source/staging/destination paths for every store family; config recovery backups are not store backups",
+      "pending_reason": "the fixed storage-runtime-backup-restore-v1 product adapter command now exercises BackupRoot, FilesystemBackupStore, SqliteOnlineBackupDriver, RestorePublicationAuthority, and BackupRestoreOrchestrator, but a qualifying copied fixture has not yet produced accepted typed backup/restore evidence",
       "setup": {"argv": null},
       "steps": [
         {"name": "backup", "argv": null},
@@ -160,7 +161,7 @@
     }
   },
   "limitations": [
-    "all workload product command templates remain pending; product_adapter.py has real graph/session FTS command construction but no checked-in qualifying database fixture",
+    "all S0 workload command templates remain pending; S11 now exposes fixed S6 maintenance/Doctor/repair/backup/restore evidence gates, but qualifying copied fixtures still must be executed and accepted",
     "A/A noise floors are per-machine and must be re-baselined per platform",
     "network filesystems are out of scope per the plan's fail-closed policy"
   ]

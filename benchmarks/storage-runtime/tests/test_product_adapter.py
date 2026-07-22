@@ -21,6 +21,8 @@ class ProductAdapterTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.binary = self.root / "tracedecay"
         self.binary.write_bytes(b"binary")
+        self.evidence_binary = self.root / "storage-runtime-evidence"
+        self.evidence_binary.write_bytes(b"evidence-binary")
         self.fixture = self.root / "fixture"
         (self.fixture / "project").mkdir(parents=True)
         (self.fixture / "profile").mkdir()
@@ -274,6 +276,136 @@ class ProductAdapterTests(unittest.TestCase):
         run.return_value = mock.Mock(returncode=0, stdout="not json", stderr="")
         with self.assertRaises(adapter.AdapterError):
             adapter.run_fts(self.binary, self.fixture, self.sandbox, "graph")
+
+    def test_s11_gate_commands_are_fixed_and_bind_concrete_s6_apis(self):
+        output = self.sandbox / "gate-output"
+        output.mkdir()
+        commands = adapter.s11_gate_commands(
+            self.evidence_binary,
+            self.fixture,
+            output,
+            fixture_sha256="a" * 64,
+            product_commit_sha="b" * 40,
+            product_binary_sha256="c" * 64,
+            evidence_binary_sha256="d" * 64,
+        )
+        self.assertEqual(
+            [item["gate_id"] for item in commands],
+            [
+                "storage-runtime-maintenance-doctor-v1",
+                "storage-runtime-crash-recovery-repair-v1",
+                "storage-runtime-backup-restore-v1",
+            ],
+        )
+        for item in commands:
+            self.assertEqual(
+                item["argv"][:2],
+                [
+                    str(self.evidence_binary),
+                    "--gate",
+                ],
+            )
+            self.assertEqual(item["argv"][2], item["gate_id"])
+            self.assertIn("--fixture-sha256", item["argv"])
+            self.assertIn("a" * 64, item["argv"])
+            self.assertIn("--product-commit-sha", item["argv"])
+            self.assertIn("b" * 40, item["argv"])
+            self.assertIn("c" * 64, item["argv"])
+            self.assertIn("d" * 64, item["argv"])
+            self.assertNotIn(str(self.binary), item["argv"])
+            self.assertNotIn("cargo", item["argv"])
+            self.assertNotIn("sh", item["argv"])
+        self.assertEqual(
+            commands[0]["api_bindings"],
+            [
+                "MaintenanceCoordinator",
+                "SqliteMaintenanceDriver",
+                "SqliteDoctorHealthLane",
+            ],
+        )
+        self.assertEqual(
+            commands[1]["api_bindings"],
+            [
+                "MaintenanceCoordinator",
+                "SqliteDoctorHealthLane",
+                "SqliteCorruptionProbe",
+                "SqliteRepairDriver",
+                "FilesystemQuarantineStore",
+            ],
+        )
+        self.assertEqual(
+            commands[2]["api_bindings"],
+            [
+                "BackupRoot",
+                "FilesystemBackupStore",
+                "SqliteOnlineBackupDriver",
+                "RestorePublicationAuthority",
+                "BackupRestoreOrchestrator",
+            ],
+        )
+
+    def test_s11_typed_gate_evidence_rejects_missing_api_binding(self):
+        document = adapter.pending_gate_evidence(
+            "storage-runtime-maintenance-doctor-v1",
+            "adapter command has not executed",
+        )
+        self.assertIsNone(document["product_binary_sha256"])
+        self.assertIsNone(document["evidence_binary_sha256"])
+        document["api_bindings"].pop()
+        with self.assertRaisesRegex(adapter.AdapterError, "typed evidence"):
+            adapter.validate_s11_gate_evidence(
+                "storage-runtime-maintenance-doctor-v1", document
+            )
+
+    def test_s11_refuses_product_binary_as_evidence_binary(self):
+        identity = adapter.runner.binary_identity(self.binary)["sha256"]
+        with self.assertRaisesRegex(adapter.AdapterError, "distinct artifacts"):
+            adapter.run_s11(
+                self.binary,
+                self.binary,
+                self.fixture,
+                self.sandbox,
+                fixture_sha256=adapter.runner.fingerprint_tree(
+                    self.fixture, "test fixture"
+                )["aggregate_sha256"],
+                product_commit_sha="b" * 40,
+                product_binary_sha256=identity,
+                evidence_binary_sha256=identity,
+            )
+
+    @mock.patch.object(adapter, "execute_fixed_argv", new_callable=mock.AsyncMock)
+    def test_s11_suite_never_promotes_unexecuted_gate(self, execute):
+        execute.return_value = {
+            "exit_code": 2,
+            "timed_out": False,
+            "process_tree_clean": True,
+            "stdout": b"",
+            "stderr": b"",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        }
+        result = adapter.run_s11(
+            self.binary,
+            self.evidence_binary,
+            self.fixture,
+            self.sandbox,
+            fixture_sha256=adapter.runner.fingerprint_tree(
+                self.fixture, "test fixture"
+            )["aggregate_sha256"],
+            product_commit_sha="b" * 40,
+            product_binary_sha256=adapter.runner.binary_identity(self.binary)[
+                "sha256"
+            ],
+            evidence_binary_sha256=adapter.runner.binary_identity(
+                self.evidence_binary
+            )["sha256"],
+        )
+        self.assertEqual(result["status"], "not_evidence")
+        self.assertEqual(result["evidence_status"]["state"], "not_evidence")
+        self.assertEqual(
+            [gate["status"] for gate in result["gates"]],
+            ["not_run", "not_run", "not_run"],
+        )
 
 
 if __name__ == "__main__":

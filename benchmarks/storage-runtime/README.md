@@ -1,8 +1,9 @@
 # SQLite storage runtime — Phase S0 frozen evidence / baseline harness
 
 This directory is the Phase S0 delivery barrier for the SQLite storage runtime
-plan (`sqlite_storage_runtime_a482f404.plan.md`). It freezes the last released
-schema/binary identity and defines the current, 10x, open-loop overload, crash,
+plan (`sqlite_storage_runtime_a482f404.plan.md`). It freezes distinct released
+product/evidence binary identities plus schema identity and defines the current,
+10x, open-loop overload, crash,
 recovery, FTS, backup/restore, and A/A noise-floor workloads across the
 supported store families (`graph`, `profile`, `project`, `session`), with a
 reproducible, non-destructive, portable runner.
@@ -19,7 +20,23 @@ below.
 
 ## Layout
 
-- `run_storage_baseline.py` — the runner. Python 3.10+, standard library only.
+- `run_storage_baseline.py` — small CLI and compatibility facade. Python 3.10+.
+- `requirements.txt` — maintained runtime/test libraries: `jsonschema` for
+  strict plan/result/receipt and product-adapter schemas, `psutil` for
+  process-tree timeout cleanup and CPU/RSS/I/O observations, and `pytest` for
+  the benchmark harness.
+- `runner_contract.py` / `workload_model.py` — artifact constants, errors,
+  latency/count models, and fail-closed workload schema validation.
+- `safe_paths.py` / `profile_safety.py` — recursive path validation, safe
+  copying/publication, live-profile isolation, child environments, and local
+  filesystem checks.
+- `process_execution.py` — placeholder containment, subprocess execution,
+  process-tree cleanup, redacted streams, and environment identity capture.
+- `run_context.py` / `phase_execution.py` — isolated per-run state and the
+  closed/open-loop, crash/recovery, backup/restore, and A/A phase engines.
+- `evidence_validation.py` / `freeze_identity.py` / `runner_commands.py` —
+  logical evidence, artifact validation, frozen identity binding, and command
+  orchestration.
 - `product_adapter.py` — stdlib-only, fail-closed construction of the real
   `tracedecay tool --project <explicit-copy> search|message_search --args <json>`
   FTS probes. It accepts only an explicit binary, fixture, sandbox, and family;
@@ -33,12 +50,24 @@ below.
   stdlib python one-liners against the synthetic fixture below.
 - `fixtures/dry-run-input/` — synthetic, runner-owned fixture. It contains no
   TraceDecay store files, no product schema, and no protocol fields.
-- `tests/test_run_storage_baseline.py` — stdlib `unittest` suite covering
-  recursive filesystem safety, identity binding, result lifecycle, output
-  atomicity, process trees, platform/network guards, and redaction.
+- `tests/test_safety_and_processes.py`, `tests/test_models_and_evidence.py`,
+  `tests/test_freeze_and_validation.py`, and `tests/test_runner_end_to_end.py`
+  — behavior-focused stdlib `unittest` suites covering recursive filesystem
+  safety, identity binding, result lifecycle, output atomicity, process trees,
+  platform/network guards, redaction, and dry-run orchestration.
 - `tests/test_product_adapter.py` — exact argv/environment construction and
   fail-closed adapter tests; product execution is mocked and never dogfoods a
   profile. Standalone adapter results are explicitly marked `not_evidence`.
+- `soak/scheduler.py`, `soak/executor.py`, `soak/schemas.py`,
+  `soak/trends.py`, and `soak/evidence.py` — deterministic frozen plans,
+  code-allowlisted execution via `asyncio.create_subprocess_exec`, strict
+  schemas, campaign-duration/cadence trend gates, and fail-closed promotion.
+  Plan JSON contains workload and gate IDs only; it cannot supply argv.
+
+Hyperfine and pytest-benchmark are intentionally not used: they measure
+short-lived command timing but do not own the long-lived copied store or its
+provenance. Locust and k6 are also excluded because their network/load model
+does not preserve this local fixture identity and process boundary.
 
 ## Product command audit
 
@@ -53,7 +82,20 @@ implicit profile discovery. A qualifying isolated input copy must contain
   "schema_version": 1,
   "project_root": "project",
   "profile_root": "profile",
-  "fts_queries": {"graph": "fixture-owned query", "session": "fixture-owned query"}
+  "fts_queries": {"graph": "fixture-owned query", "session": "fixture-owned query"},
+  "s11": {
+    "database": "profile/storage-evidence.sqlite3",
+    "binding": {
+      "shard_id": {
+        "brain_id": "brain.storage-evidence",
+        "profile_id": "profile.storage-evidence",
+        "scope": {"kind": "project", "project_id": "project.storage-evidence"}
+      },
+      "incarnation": 1,
+      "authority_epoch": 1
+    },
+    "evidence_tables": ["evidence_rows"]
+  }
 }
 ```
 
@@ -64,12 +106,31 @@ synthetic runner fixtures, but no released graph/session database fixture
 satisfying this manifest. Therefore the FTS workload template remains pending
 even though its adapter command construction is real and tested.
 
-The CLI has no standalone explicit-store interfaces for the frozen four-family
-write/read mix, offered-rate writes with documented saturation, a ready-signaled
-crashable writer, four-family reopen verification, or store
-backup/verify/restore. Those phases remain pending with executable
-prerequisites in `workload-s0.json`; unrelated config-file recovery backups are
-not treated as store backup coverage.
+S6 now supplies the concrete maintenance, Doctor, corruption/repair,
+quarantine, online-backup, restore-publication, and backup/restore orchestration
+APIs. S11 binds them to three fixed typed-evidence gate IDs:
+
+- `storage-runtime-maintenance-doctor-v1` requires
+  `MaintenanceCoordinator`, `SqliteMaintenanceDriver`, and
+  `SqliteDoctorHealthLane`.
+- `storage-runtime-crash-recovery-repair-v1` additionally requires
+  `SqliteCorruptionProbe`, `SqliteRepairDriver`, and
+  `FilesystemQuarantineStore`.
+- `storage-runtime-backup-restore-v1` requires `BackupRoot`,
+  `FilesystemBackupStore`, `SqliteOnlineBackupDriver`,
+  `RestorePublicationAuthority`, and `BackupRestoreOrchestrator`.
+
+The allowlisted `storage-runtime-s11-product-gates-v1` workload calls only the
+product-facing `storage-runtime-evidence --gate <fixed-id>` binary target from
+`tracedecay-rusqlite-runtime`; the root package does not link the runtime before
+cutover. The runner passes its exact product commit and copied-fixture SHA-256,
+plus the separately frozen product/evidence binary SHA-256 identities. The
+adapter invokes only the evidence binary for these gates; it never treats the
+released TraceDecay CLI as that executable. The evidence binary recomputes the
+fixture fingerprint before executing real S5/S6 capabilities. Output must
+satisfy strict per-gate JSON schemas and bind the copied fixture, product
+commit, tested product binary, emitting evidence binary, and logical SQLite
+evidence.
 
 ## Safety contract (fail closed)
 
@@ -116,12 +177,17 @@ The runner never discovers or touches the live TraceDecay profile implicitly:
   stdout/stderr and FTS probe text are represented only by redacted size/line
   metadata and hashes. The hostname is redacted unless `--record-hostname` is
   passed.
-- `product_adapter.py` applies the same boundary before its real FTS command:
+- `product_adapter.py` applies the same boundary before its FTS and fixed S11
+  product-gate commands:
   it refuses fixture/sandbox overlap and live/default/custom profile roots,
   recursively `lstat`s the source fixture (including hardlink and replacement
-  checks), then invokes the CLI only against a fresh copied fixture and a
-  runner-owned CWD/HOME/config/cache/temp environment. Its private JSON output
-  is published with the runner's create-new/no-follow atomic writer.
+  checks), then invokes the released product CLI only for product probes and
+  the distinct `storage-runtime-evidence` binary only for fixed S11 gates,
+  always against a fresh copied fixture and a
+  runner-owned CWD/HOME/config/cache/temp environment. S11 accepts only the
+  three code-owned gate IDs above, validates exact API-binding lists and typed
+  outcomes, and publishes private JSON with the runner's
+  create-new/no-follow atomic writer.
 
 The JSON result is redacted, but the mode-0700 output tree intentionally holds
 private working copies of the supplied stores. Treat the whole output directory
@@ -140,21 +206,27 @@ python3 run_storage_baseline.py self-test
 Unit tests:
 
 ```console
-python3 -m unittest discover -s tests -v
+python3 -m pytest -q tests
 ```
 
+Install the benchmark-local dependencies using the environment's Python
+package manager and `requirements.txt`.
+
 Freeze the last released identity. It reads only explicit safe artifacts and
-binds the tested binary, schema, workload, corpus, and runtime configuration;
+separately binds the tested product binary, evidence adapter binary, schema,
+workload, corpus, and runtime configuration;
 it never derives identity from a live profile:
 
 ```console
 python3 run_storage_baseline.py freeze \
-  --binary /path/to/released/tracedecay \
+  --product-binary /path/to/released/tracedecay \
+  --evidence-binary /path/to/storage-runtime-evidence \
+  --product-commit-sha <released-product-commit> \
   --schema-manifest /path/to/released-schema-export \
   --workload workload-s0.json \
   --corpus /path/to/isolated-store-corpus \
   --config /path/to/released-runtime-config \
-  --output frozen-identity-v2.json
+  --output frozen-identity-v3.json
 ```
 
 Dry-run the full workload machinery against the synthetic fixture:
@@ -175,8 +247,9 @@ python3 run_storage_baseline.py run \
   --workload workload-s0.json \
   --input  /path/to/explicit-store-copy \
   --output /path/to/fresh/output-dir \
-  --frozen-identity frozen-identity-v2.json \
-  --binary /path/to/released/tracedecay \
+  --frozen-identity frozen-identity-v3.json \
+  --product-binary /path/to/released/tracedecay \
+  --evidence-binary /path/to/storage-runtime-evidence \
   --schema-manifest /path/to/released-schema-export \
   --config /path/to/released-runtime-config
 ```
@@ -188,11 +261,50 @@ absolute-path leak scan):
 python3 run_storage_baseline.py validate --result <output>/storage-runtime-baseline-result.json
 ```
 
+Create and execute a frozen soak plan. `soak-run` resolves the plan's fixed
+`storage-runtime-s11-product-gates-v1` ID through a code allowlist; arbitrary
+executables, shell strings, package installers, and network commands are not
+accepted from JSON:
+
+```console
+python3 run_storage_baseline.py soak-plan \
+  --seed 7 --duration-seconds 3600 \
+  --current-rate 1 --ten-x-rate 10 --overload-rate 100 \
+  --crash-count 10 --restore-rehearsals 3 \
+  --workload-id storage-runtime-s11-product-gates-v1 \
+  --output soak-plan.json
+
+python3 run_storage_baseline.py soak-run \
+  --plan soak-plan.json \
+  --product-binary /path/to/released/tracedecay \
+  --evidence-binary /path/to/storage-runtime-evidence \
+  --fixture /path/to/explicit-fixture-copy \
+  --frozen-identity frozen-identity-v3.json \
+  --family graph \
+  --output /path/to/fresh/soak-output
+```
+
+Both execution and evaluation default to acceptance mode and exit nonzero when
+the artifact cannot qualify as evidence. `--mode lint` validates and writes
+artifacts while allowing a zero exit for planning/review workflows. Until the
+evidence binary implements all three fixed adapter commands and qualifying
+copied fixtures are supplied, missing or failed gates remain
+`not_run`/`not_evidence` and acceptance exits nonzero:
+
+```console
+python3 run_storage_baseline.py soak-evaluate \
+  --baseline /abs/linux.json --baseline /abs/windows.json \
+  --baseline /abs/macos.json --plan soak-plan.json \
+  --result /abs/storage-runtime-soak-result.json \
+  --output soak-assessment.json --mode acceptance
+```
+
 ## Workload schema v1
 
 Top level: `schema_version` (1), `workload_id`, `evidence_eligible`,
 `store_families`, `phases`,
-plus optional `binary`, `frozen_identity`, `environment.version_commands`,
+plus optional `product_binary`, `evidence_binary`, `frozen_identity`,
+`environment.version_commands`,
 `safety.env` / `safety.env_path_keys`, `defaults`, `metrics`, `platforms`, and
 `limitations`. Identifier-like values are safe identifiers; protected child
 root environment variables are runner-owned, not workload-configurable.
@@ -227,7 +339,8 @@ Phases (`name`, `kind`, explicit `families`):
   per-machine and must be re-baselined per platform.
 
 Command templates are argv arrays with `__INPUT__`, `__OUTPUT__`,
-`__RUN_DIR__`, `__FAMILY__`, `__BINARY__`, `__PYTHON__`, `__REPETITION__`
+`__RUN_DIR__`, `__FAMILY__`, `__PRODUCT_BINARY__`, `__EVIDENCE_BINARY__`,
+`__PYTHON__`, `__REPETITION__`
 token substitution. `__OUTPUT__` is a per-run isolated output root, not the
 top-level artifact directory. Path-bearing placeholders are containment checked.
 Evidence captures are `sqlite_logical` (integrity/schema/table-count/optional
@@ -264,10 +377,11 @@ bound, validation-clean run with supported process-tree verification can be
   copied-fixture product-adapter boundary: verified by `self-test` and the
   unittest suite on the development host (Linux, CPython 3.12).
 - Still requiring execution before S0 checkpoint acceptance:
-  - wiring the released binary's explicit commands into `workload-s0.json`
-    (all product steps are pending by design),
-   - capturing `frozen-identity-v2.json` from the released binary/schema,
-     workload/corpus/config tuple,
+  - supplying qualifying copied fixtures for healthy maintenance, a
+    ready-signalled crash plus diagnosed repair/quarantine and healthy reopen,
+    and online backup/verified restore with a newer canonical publication,
+   - capturing `frozen-identity-v3.json` from the distinct product/evidence
+     binaries plus schema/workload/corpus/config tuple,
   - the actual current/10x/overload/crash/recovery/FTS/backup baselines and
     A/A noise floors on **Linux, Windows, and macOS** (noise floors are
     per-machine; margins must be recorded per platform),

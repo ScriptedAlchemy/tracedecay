@@ -4,7 +4,8 @@
   "evidence_eligible": false,
   "description": "Self-contained dry-run for the S0 baseline runner. Every step is a stdlib python3 one-liner operating on a synthetic runner-owned fixture; it carries no TraceDecay product protocol fields and needs no daemon, no store, and no tracedecay binary.",
   "store_families": ["sample"],
-  "binary": null,
+  "product_binary": null,
+  "evidence_binary": null,
   "frozen_identity": {
     "required_for_evidence": false
   },

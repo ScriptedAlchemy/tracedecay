@@ -4,6 +4,7 @@ members = [
     "crates/tracedecay-domain",
     "crates/tracedecay-policy",
     "crates/tracedecay-rusqlite-parity",
+    "crates/tracedecay-rusqlite-runtime",
     "crates/tracedecay-sqlite-parity-protocol",
     "crates/tracedecay-store",
     "crates/tracedecay-tool-catalog",
@@ -139,6 +140,13 @@ required-features = ["rusqlite-parity-helper"]
 test = false
 bench = false
 
+# Process-isolated storage runtime parity suite. Requires the root helper
+# shim so CARGO_BIN_EXE_tracedecay-rusqlite-parity names a built binary.
+[[test]]
+name = "storage_runtime_suite"
+path = "tests/storage_runtime_suite/main.rs"
+required-features = ["rusqlite-parity-helper"]
+
 [dependencies]
 axum = "0.8"
 tower = "0.5"
@@ -154,7 +162,11 @@ ast-grep-core = "0.44"
 tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0" }
 tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
-tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", version = "0.1.0", optional = true }
+tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", version = "0.1.0", optional = true, default-features = false }
+# Disable the runtime's bundled amalgamation at the root edge so rusqlite and
+# transitional libsql do not both statically define sqlite3_* symbols.
+tracedecay-rusqlite-runtime = { path = "crates/tracedecay-rusqlite-runtime", version = "0.1.0", default-features = false }
+rusqlite = { version = "0.40.1", default-features = false }
 tracedecay-sqlite-parity-protocol = { path = "crates/tracedecay-sqlite-parity-protocol", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }
