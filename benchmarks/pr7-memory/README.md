@@ -28,9 +28,12 @@ not recreate the removed measurement scaffold (`src/store/memory_benchmark.rs`).
 ## Owner evidence rule
 
 `current_acceptance` is set **only** when every predeclared gate is
-`executed_passed` **and** the worktree is a clean logical snapshot
-(`git status --porcelain` empty). Otherwise the index keeps
-`current_acceptance: null` and records exact pending/failed blockers.
+`executed_passed` against one stable content-addressed source snapshot. The
+snapshot hashes every tracked and untracked input while excluding only the
+receipt, evidence index, and gate logs written by the runner. A dirty checkout
+is therefore identified exactly instead of being rejected merely for being
+dirty. If any input changes while gates run, the index keeps
+`current_acceptance: null` and records `source_snapshot_changed`.
 
 ```bash
 python3 benchmarks/pr7-memory/issue_receipt.py \

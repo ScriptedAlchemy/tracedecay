@@ -63,6 +63,75 @@ def worktree_dirty(repository: Path) -> bool:
     return bool(completed.stdout.strip())
 
 
+def content_addressed_snapshot(
+    repository: Path,
+    excluded_paths: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    completed = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    exclusions = {
+        Path(path).as_posix().rstrip("/")
+        for path in excluded_paths
+        if path
+    }
+    entries: list[dict[str, str]] = []
+    for raw_path in completed.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        relative = raw_path.decode("utf-8", errors="strict")
+        if any(
+            relative == excluded or relative.startswith(f"{excluded}/")
+            for excluded in exclusions
+        ):
+            continue
+        path = repository / relative
+        if path.is_symlink():
+            digest = sha256_text(os.readlink(path))
+        elif path.is_file():
+            digest = sha256_file(path)
+        else:
+            continue
+        entries.append({"path": relative, "sha256": digest})
+    entries.sort(key=lambda entry: entry["path"])
+    return {
+        "digest": sha256_bytes(
+            json.dumps(entries, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ),
+        "file_count": len(entries),
+    }
+
+
+def gate_blockers(gates: dict[str, Any]) -> list[dict[str, str]]:
+    blockers: list[dict[str, str]] = []
+    for gate_id, gate_receipt in gates.items():
+        state = gate_receipt.get("state")
+        if state == "executed_passed":
+            continue
+        blockers.append(
+            {
+                "code": f"gate_{state}",
+                "detail": f"{gate_id}: {gate_receipt.get('reason', state)}",
+            }
+        )
+    return blockers
+
+
+def acceptance_eligible(
+    gates: dict[str, Any],
+    *,
+    source_snapshot_stable: bool = True,
+) -> bool:
+    return (
+        bool(gates)
+        and source_snapshot_stable
+        and all(gate.get("state") == "executed_passed" for gate in gates.values())
+    )
+
+
 def toolchain_metadata() -> dict[str, str]:
     rustc = subprocess.run(["rustc", "-V"], check=True, capture_output=True, text=True)
     cargo = subprocess.run(["cargo", "-V"], check=True, capture_output=True, text=True)
@@ -215,8 +284,18 @@ def main() -> int:
     commit = git_rev_parse(repository, "HEAD")
     tree = git_rev_parse(repository, "HEAD^{tree}")
     dirty = worktree_dirty(repository)
-    clean_logical_snapshot = not dirty
     toolchain = toolchain_metadata()
+    log_dir = args.log_dir if args.log_dir.is_absolute() else repository / args.log_dir
+    evidence_index_path = (
+        args.evidence_index
+        if args.evidence_index.is_absolute()
+        else repository / args.evidence_index
+    )
+    mutable_paths = tuple(
+        str(path.relative_to(repository))
+        for path in (out_path, log_dir, evidence_index_path)
+    )
+    source_snapshot_before = content_addressed_snapshot(repository, mutable_paths)
 
     receipt_root: dict[str, Any] = {
         "schema_version": 1,
@@ -226,7 +305,7 @@ def main() -> int:
         "slice": "pr7-memory-fact-provenance",
         "source_repository_commit": commit,
         "source_repository_tree": tree,
-        "clean_logical_snapshot": clean_logical_snapshot,
+        "source_snapshot": source_snapshot_before,
         "worktree_dirty": dirty,
         "toolchain": toolchain,
         "toolchain_sha256": sha256_text(json.dumps(toolchain, separators=(",", ":"), sort_keys=True)),
@@ -252,7 +331,6 @@ def main() -> int:
             "recorded_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         }
 
-    log_dir = args.log_dir if args.log_dir.is_absolute() else repository / args.log_dir
     failures = 0
     for gate_id in selected:
         command = gates_spec[gate_id]
@@ -276,40 +354,30 @@ def main() -> int:
         if gate_receipt["state"] != "executed_passed":
             failures += 1
 
-    blockers: list[dict[str, str]] = []
-    if dirty:
+    source_snapshot_after = content_addressed_snapshot(repository, mutable_paths)
+    source_snapshot_stable = source_snapshot_before == source_snapshot_after
+    blockers = gate_blockers(receipt_root["gates"])
+    if not source_snapshot_stable:
         blockers.append(
             {
-                "code": "dirty_worktree",
-                "detail": "clean_logical_snapshot requires an empty git status porcelain set",
-            }
-        )
-    for gate_id, gate_receipt in receipt_root["gates"].items():
-        state = gate_receipt.get("state")
-        if state == "executed_passed":
-            continue
-        blockers.append(
-            {
-                "code": f"gate_{state}",
-                "detail": f"{gate_id}: {gate_receipt.get('reason', state)}",
+                "code": "source_snapshot_changed",
+                "detail": "tracked or untracked source inputs changed while gates executed",
             }
         )
     receipt_root["blockers"] = blockers
+    receipt_root["source_snapshot_stable"] = source_snapshot_stable
+    if not source_snapshot_stable:
+        receipt_root["source_snapshot_after"] = source_snapshot_after
 
-    all_gates_passed = failures == 0 and all(
-        gate.get("state") == "executed_passed" for gate in receipt_root["gates"].values()
+    promote = failures == 0 and acceptance_eligible(
+        receipt_root["gates"],
+        source_snapshot_stable=source_snapshot_stable,
     )
-    promote = all_gates_passed and clean_logical_snapshot
     receipt_root["current_acceptance_eligible"] = promote
 
     receipt_digest = write_canonical_json(out_path, receipt_root)
     print(f"wrote {out_path} digest={receipt_digest}", flush=True)
 
-    evidence_index_path = (
-        args.evidence_index
-        if args.evidence_index.is_absolute()
-        else repository / args.evidence_index
-    )
     index = load_json(evidence_index_path) if evidence_index_path.is_file() else {
         "schema_version": 1,
         "current_acceptance": None,
@@ -321,7 +389,9 @@ def main() -> int:
     index["owner_receipt_sha256"] = receipt_digest
     index["source_repository_commit"] = commit
     index["source_repository_tree"] = tree
-    index["clean_logical_snapshot"] = clean_logical_snapshot
+    index["source_snapshot"] = source_snapshot_before
+    index["source_snapshot_stable"] = source_snapshot_stable
+    index.pop("clean_logical_snapshot", None)
     index["blockers"] = blockers
     if promote:
         index["current_acceptance"] = str(out_path.relative_to(repository))
