@@ -325,13 +325,13 @@ fn currently_watch_limited(repo: &Path) -> bool {
 /// degraded for an unconfirmed reason — is treated as a real regression and
 /// panics, exactly as the unconditional wait did before.
 async fn ensure_watching_or_skip(watcher: &GitWatcher, repo: &Path) -> Option<Arc<WatchState>> {
-    watcher.ensure_watching(repo).await;
-    let state = ready_registered_state(watcher, repo).await;
-
     enum Ready {
         Debounce,
         Degraded,
     }
+    watcher.ensure_watching(repo).await;
+    let state = ready_registered_state(watcher, repo).await;
+
     let outcome = tokio::time::timeout(TEST_READY_TIMEOUT, async {
         tokio::select! {
             () = state.entered_debounce.notified() => Ready::Debounce,
