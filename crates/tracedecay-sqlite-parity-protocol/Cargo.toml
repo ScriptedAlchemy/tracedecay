@@ -2,8 +2,9 @@
 name = "tracedecay-sqlite-parity-protocol"
 version = "0.1.0"
 edition.workspace = true
-publish = false
 description = "Driver-free wire DTOs for TraceDecay SQLite parity probes"
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 hex = "0.4"

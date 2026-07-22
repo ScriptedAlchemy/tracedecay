@@ -5,9 +5,8 @@ use tracedecay_domain::UtcMicros;
 
 use crate::{
     ConfigurationCommitV1, FactWriteBatch, GitIndexTransactionRecordV1, ObservationWrite,
-    OutboxAcknowledgementReceiptV1, SanitizedCleanDiagnosticSnapshotV1,
-    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1,
-    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    SanitizedCleanDiagnosticSnapshotV1, SessionSummaryPublicationRequestV1,
+    SessionTemporalProjectionBatchV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 use super::identity::validate_canonical_id;
@@ -805,8 +804,8 @@ pub enum RepositoryWritePayloadV1 {
     SessionSummary(Box<SessionSummaryPublicationRequestV1>),
     GitIndexTransaction(Box<GitIndexTransactionRecordV1>),
     EnqueueOutbox(Box<TransactionalOutboxEntryV1>),
-    ApplyInbox(Box<TransactionalInboxReceiptV1>),
-    AcknowledgeOutbox(Box<OutboxAcknowledgementReceiptV1>),
+    ApplyInbox(Box<TransactionalOutboxEntryV1>),
+    AcknowledgeOutbox(Box<TransactionalInboxReceiptV1>),
 }
 
 impl RepositoryWritePayloadV1 {
@@ -874,8 +873,8 @@ impl RepositoryWritePayloadV1 {
                 }
             }),
             Self::EnqueueOutbox(entry) => entry.validate(),
-            Self::ApplyInbox(receipt) => receipt.validate(),
-            Self::AcknowledgeOutbox(receipt) => receipt.validate(),
+            Self::ApplyInbox(entry) => entry.validate(),
+            Self::AcknowledgeOutbox(inbox) => inbox.validate(),
             Self::Fact(_)
             | Self::Observation(_)
             | Self::Diagnostics(_)

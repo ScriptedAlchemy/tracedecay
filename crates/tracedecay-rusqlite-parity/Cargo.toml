@@ -2,12 +2,19 @@
 name = "tracedecay-rusqlite-parity"
 version = "0.1.0"
 edition.workspace = true
-publish = false
 description = "Process-isolated read-only upstream SQLite parity probe for TraceDecay"
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[features]
+default = ["bundled-sqlite"]
+# Standalone probe builds keep a private amalgamation. Root all-feature builds
+# disable this so rusqlite does not collide with transitional libsql symbols.
+bundled-sqlite = ["rusqlite/bundled"]
 
 [dependencies]
 hex = "0.4"
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.40.1", default-features = false }
 serde_json = "1"
 sha2 = "0.11"
 tracedecay-sqlite-parity-protocol = { path = "../tracedecay-sqlite-parity-protocol", version = "0.1.0" }

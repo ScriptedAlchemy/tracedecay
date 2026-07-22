@@ -263,6 +263,7 @@ pub enum RuntimeReadOperationV1 {
     FrozenCoverage,
     MaintenanceTelemetry,
     ReaderHealthLease { lease_id: ReaderHealthLeaseIdV1 },
+    TemporalHealth,
     GraphStats,
     GraphNode { node_id: String },
     GraphSearch { query: String, limit: u32 },
@@ -425,6 +426,11 @@ impl RuntimeReadRequestV1 {
                 field: "frozen coverage consistency",
             });
         }
+        if self.operation == RuntimeReadOperationV1::TemporalHealth
+            && self.priority != OperationPriorityV1::Health
+        {
+            return Err(StorageRuntimeContractErrorV1::ReaderHealthLaneRequired);
+        }
         Ok(())
     }
 }
@@ -455,6 +461,7 @@ pub enum RuntimeReadResultV1 {
     FrozenCoverage { coverage: FrozenWatermarkCoverageV1 },
     MaintenanceTelemetry { telemetry: MaintenanceTelemetryV1 },
     ReaderHealthLease { lease: Option<ReaderHealthLeaseV1> },
+    TemporalHealth { healthy: bool },
     GraphStats { stats: GraphStatsV1 },
     GraphNode { node: Option<GraphNodeV1> },
     GraphSearch { results: Vec<GraphSearchResultV1> },
@@ -701,6 +708,7 @@ fn validate_read_value(
             Ok(())
         }
         (RuntimeReadOperationV1::GraphStats, RuntimeReadResultV1::GraphStats { .. })
+        | (RuntimeReadOperationV1::TemporalHealth, RuntimeReadResultV1::TemporalHealth { .. })
         | (RuntimeReadOperationV1::GraphQuickCheck, RuntimeReadResultV1::GraphQuickCheck { .. }) => {
             Ok(())
         }
