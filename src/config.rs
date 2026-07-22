@@ -859,6 +859,31 @@ pub fn install_configuration_daemon_client_for_project(
         .insert(target.project_id.as_str().to_owned(), client);
 }
 
+/// Removes one project's daemon client if (and only if) the installed client
+/// is the exact instance being released. The `Arc::ptr_eq` guard keeps a
+/// dropping runtime from clobbering a newer client installed by a live
+/// handle for the same project (e.g. the daemon's close-and-reopen
+/// handshake). Without this release, any non-daemon process that opened a
+/// project retained the store `Arc` — and its exclusive sessions.db writer
+/// lease — in this process-global slot for its entire lifetime, starving the
+/// managed daemon of the single-writer lock.
+pub fn uninstall_configuration_daemon_client_for_project(
+    target: &RuntimeConfigurationTarget,
+    client: &Arc<dyn ConfigurationDaemonClient>,
+) {
+    let mut clients = configuration_daemon_client_slot()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let project_id = target.project_id.as_str();
+    if clients
+        .by_project
+        .get(project_id)
+        .is_some_and(|existing| Arc::ptr_eq(existing, client))
+    {
+        clients.by_project.remove(project_id);
+    }
+}
+
 /// Publishes one daemon-resolved snapshot for runtime and hook consumers.
 pub fn install_pinned_runtime_configuration(
     configuration: PinnedRuntimeConfiguration,

@@ -885,13 +885,17 @@ mod tests {
     }
 
     async fn insert_anchor(database: &Database, anchor_id: &str) {
+        // Seed through the writer broker: plain conn() is sealed
+        // query_only, and the owner must use the canonical internally
+        // tagged FactOwnerV1 encoding or disposition FKs reject it.
+        let owner = super::owner_json(&FactOwnerV1::Profile).expect("owner json");
         database
-            .conn()
-            .execute(
+            .execute_write(
+                "seed retrieval anchor fixture",
                 "INSERT INTO retrieval_anchors (
                     anchor_id, anchor_json, owner_json, projection_generation
                  ) VALUES (?1, '{\"target\":\"fixture\"}', ?2, 'generation-1')",
-                params![anchor_id, r#""profile""#],
+                params![anchor_id, owner],
             )
             .await
             .expect("insert anchor");

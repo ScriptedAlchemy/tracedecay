@@ -90,6 +90,25 @@ impl ProjectConfigurationRuntime {
     pub(crate) fn client(&self) -> Arc<ProductionConfigurationDaemonClient> {
         Arc::clone(&self.client)
     }
+
+    pub(crate) fn dyn_client(&self) -> Arc<dyn crate::config::ConfigurationDaemonClient> {
+        Arc::clone(&self.client) as Arc<dyn crate::config::ConfigurationDaemonClient>
+    }
+}
+
+// Release this runtime's process-global daemon-client registration when the
+// last handle drops. The runtime retains the opened store `Arc`, and leaving
+// it registered kept the exclusive sessions.db writer lease alive for the
+// whole process lifetime, blocking the managed daemon (the single legitimate
+// writer). The uninstall is `Arc::ptr_eq`-guarded, so a newer client
+// installed by a live handle for the same project is never removed.
+impl Drop for ProjectConfigurationRuntime {
+    fn drop(&mut self) {
+        crate::config::uninstall_configuration_daemon_client_for_project(
+            &self.configuration.target,
+            &self.dyn_client(),
+        );
+    }
 }
 
 fn register_semantic_runtime_configuration(
