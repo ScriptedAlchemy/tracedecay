@@ -58,7 +58,6 @@ const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
 mod authority;
 mod branch_add;
 mod branch_admin;
-#[cfg(unix)]
 mod code_index_scheduler;
 mod core_admission;
 mod core_client;
@@ -481,10 +480,25 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
 /// The Unix and portable brokers share this state so an authenticated LSP
 /// session remains daemon-owned across client connections until it is detached
 /// or expires.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct DaemonInvocationState {
     lsp_session_registry: Arc<tokio::sync::Mutex<lsp_gateway::LspSessionRegistry>>,
     service: DaemonInvocationService,
+    code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+}
+
+impl Default for DaemonInvocationState {
+    fn default() -> Self {
+        Self {
+            lsp_session_registry: Arc::new(tokio::sync::Mutex::new(
+                lsp_gateway::LspSessionRegistry::default(),
+            )),
+            service: DaemonInvocationService::default(),
+            code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1::new(
+                MAX_CACHED_PROJECT_SERVERS,
+            ),
+        }
+    }
 }
 
 impl DaemonInvocationState {
@@ -508,7 +522,22 @@ impl DaemonInvocationState {
         DaemonLspOwnerRegistrar::new(&self.service)
     }
 
+    async fn mount_code_index(
+        &self,
+        project_root: &Path,
+        store_root: PathBuf,
+    ) -> Result<()> {
+        self.code_index_schedulers
+            .mount_worktree(project_root, store_root)
+            .await
+            .map(|_| ())
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("code-index scheduler could not be mounted: {error}"),
+            })
+    }
+
     async fn shutdown(&self) {
+        self.code_index_schedulers.shutdown().await;
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         self.service.expire_all().await;
     }
@@ -1525,6 +1554,7 @@ impl DaemonEngine {
         ensure_context_scout_owner_before_advertising(&cg)?;
         cg.register_project_store_in_global_registry().await;
         let key = ProjectServerKey::from_open_project(&cg, handshake)?;
+        let code_index_store_root = cg.store_layout().data_root.join("code-index-v1");
         let semantic_resources = cg
             .configuration_runtime()
             .configuration()
@@ -1650,6 +1680,9 @@ impl DaemonEngine {
         if !inserted {
             route_registered.store(false, Ordering::Release);
         } else {
+            self.invocation
+                .mount_code_index(&canonical_project_path, code_index_store_root)
+                .await?;
             match self
                 .invocation
                 .semantic_runtime_registrar()
@@ -2418,6 +2451,7 @@ async fn portable_project_server(
     ensure_context_scout_owner_before_advertising(&cg)?;
     cg.register_project_store_in_global_registry().await;
     let key = ProjectServerKey::from_open_project(&cg, handshake)?;
+    let code_index_store_root = cg.store_layout().data_root.join("code-index-v1");
     let semantic_resources = cg
         .configuration_runtime()
         .configuration()
@@ -2527,6 +2561,9 @@ async fn portable_project_server(
     if !inserted {
         route_registered.store(false, Ordering::Release);
     } else {
+        invocation
+            .mount_code_index(canonical_project_path, code_index_store_root)
+            .await?;
         match invocation
             .semantic_runtime_registrar()
             .register(canonical_project_path.to_path_buf(), semantic_runtime)

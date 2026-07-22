@@ -164,6 +164,32 @@ def acquire_member(
         )
 
 
+def seed_stage_from_cache(
+    stage: pathlib.Path,
+    cache: pathlib.Path | None,
+    members: dict[str, object],
+) -> None:
+    """Copy digest-valid members from a local cache before upstream curl.
+
+    The cache is only a setup accelerator. Every member is still length- and
+    digest-checked by acquire_member before the destination is published.
+    """
+    if cache is None:
+        return
+    if cache.is_symlink() or not cache.is_dir():
+        fail(f"fixture cache must be a regular directory: {cache}")
+    for role, expected_name in MEMBERS.items():
+        member = members[role]
+        assert isinstance(member, dict)
+        cached = cache / expected_name
+        target = stage / expected_name
+        if not member_is_valid(cached, int(member["length"]), str(member["sha256"])):
+            continue
+        if target.exists() or target.is_symlink():
+            target.unlink()
+        shutil.copyfile(cached, target)
+
+
 def prepare(source: pathlib.Path, destination: pathlib.Path) -> None:
     document = read_manifest(source)
     if destination.exists() or destination.is_symlink():
@@ -180,6 +206,9 @@ def prepare(source: pathlib.Path, destination: pathlib.Path) -> None:
     assert isinstance(source_metadata, dict)
     upstream = str(source_metadata["upstream"])
     revision = str(source_metadata["revision"])
+    cache_raw = os.environ.get("TRACEDECAY_DISTRIBUTION_FASTEMBED_CACHE", "").strip()
+    cache = pathlib.Path(cache_raw) if cache_raw else None
+    seed_stage_from_cache(stage, cache, members)
     for role in MEMBERS:
         member = members[role]
         assert isinstance(member, dict)
