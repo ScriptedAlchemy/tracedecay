@@ -38,7 +38,7 @@ provider, or changes the graph.
 
 1. The application assembles an authorized immutable snapshot containing the
    selected work version, exact evidence references and coverage, eligible
-   provider capabilities, configuration, privacy limits, budgets, prior
+   provider capabilities, configuration, content-location limits, budgets, prior
    outcomes, and any human override.
 2. Policy returns an explained recommendation, deterministic fallback, or
    abstention. The result records the evaluator and input revisions, ranked
@@ -64,7 +64,7 @@ registry, scoring service, or configuration source.
 - Every decision has exactly one disposition: `allow`, `deny`, `abstain`,
   `not_applicable`, or `indeterminate`. Natural-language explanation renders
   the recorded trace and adds no authority.
-- Recommendations keep correctness, safety, privacy, latency, cost, autonomy,
+- Recommendations keep correctness, sensitive-data handling, latency, cost, autonomy,
   and evidence quality as separate dimensions. An ordinal or heuristic score
   never renders as a probability. Calibrated values name their cohort,
   horizon, support, error, and drift validity.
@@ -72,7 +72,7 @@ registry, scoring service, or configuration source.
   uncertainty, selects the declared deterministic baseline, or abstains. It
   never triggers an adapter-local fallback or hidden model choice.
 - Exploration, when enabled, is bounded by explicit allowlists, coverage and
-  sample floors, privacy and budget ceilings, maximum share, rollback
+  sample floors, content-location and budget ceilings, maximum share, rollback
   thresholds, and circuit breakers. The selected propensity and reason are
   recorded.
 - Workers cannot choose their grade, denominator, comparison cohort, route
@@ -87,35 +87,18 @@ registry, scoring service, or configuration source.
 ## Authorization and effect safety
 
 The existing authorization kernel remains authoritative. Effective authority
-is the narrow intersection of the caller grant, source grant, resolved typed
-owner scope, sink policy, requested operation, and mandatory privacy
-constraints. Every hydration, continuation, publication, model-context
-delivery, host delivery, export, telemetry write, and effect requires a fresh
-application sink recheck. Missing, stale, revoked, ambiguous, or widened
-authority fails closed without disclosing hidden identity, counts, timing, or
-existence.
+uses the exact resolved `ProjectId` or projectless `UserProfileId`; CWD, paths,
+labels, collections, provider accounts, branches, and native object IDs never
+substitute for identity or widen scope. Missing, revoked, ambiguous, or widened
+authority fails without exposing hidden resources.
 
-Source definition, owner binding, mutable policy metadata, source/requester
-grants, and resolved typed owner scope remain separate inputs. Definitions do
-not carry owner or sink authority, policy metadata cannot become identity, and
-ProjectId and projectless UserProfileId never match through CWD, path, label,
-collection, provider account, branch, or native object ID. Content state and
-access state remain orthogonal: exclusion, denial, partial authorization,
-temporary unavailability, or stale proof never masquerades as authoritative
-deletion.
-
-Every provider fetch, source continuation, canonical admission, shard
-selection, statistics read, graph expansion, hydration, projection, model/host
-delivery, export, and telemetry sink requires a fresh admission proof pinned
-to current grant, binding, owner, policy, privacy, configuration, and sink
-revisions. Narrowing is monotonic; local-only privacy is non-waivable; derived
-evidence inherits the most restrictive contributing constraint.
-
-Policy may classify a proposed Git effect, but it cannot produce or authorize a
-generic Git command. Application and the native Git owner must revalidate an
-immutable preview and CAS guards before any explicitly requested effect. Merge,
-rebase, force update, history rewrite, branch deletion, and semantic conflict
-resolution are never implicit fallbacks.
+Network/provider calls require the applicable grant before the call, and
+hydration or continuation checks the same exact owner scope before returning
+content. Policy may classify a proposed Git effect, but it cannot produce or
+authorize a generic Git command. Application and the native Git owner require
+the operation's confirmed immutable preview and CAS guards before mutation;
+merge, rebase, force update, history rewrite, branch deletion, and semantic
+conflict resolution are never implicit fallbacks.
 
 ## Implementation slices
 
@@ -124,7 +107,7 @@ resolution are never implicit fallbacks.
    production application path in the same slice.
 2. Use the decision directly during explicit provider admission, including the
    selected route, all exclusions, the declared fallback, and the pinned
-   configuration/privacy/budget revisions.
+   configuration/budget revisions.
 3. Feed committed attempt, review, and outcome evidence back through the same
    evaluator to produce a non-auto-applied replan with legal next actions.
 4. Exercise all retained hint, retrieval, analyzer, correlation,
@@ -152,7 +135,7 @@ recorded route and outcome, and receive a justified replan that changes
 nothing until separately accepted.
 
 Focused failures cover stale evidence or graph versions, revoked or narrowed
-authority, privacy suppression, missing provider capability, invalid
+authority, scope denial, missing provider capability, invalid
 calibration, deterministic fallback, human override, cancellation, unknown
 outcome, self-grading attempts, and idempotent replay. The aggregate gate also
 proves that policy performs no I/O or runtime/graph/Git effect and that no

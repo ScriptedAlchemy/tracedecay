@@ -68,7 +68,7 @@ Wire compatibility remains normative on this production path:
   payload, string, collection, and nesting limits. Structs use
   `deny_unknown_fields` where the V1 contract specifies closed fields, and
   wire enums are exhaustively matched; neither silently ignores a value that
-  could change identity, ordering, privacy, effect, or terminal meaning.
+  could change identity, ordering, effect, or terminal meaning.
 - Every envelope carries an explicit schema revision. An older decoder rejects
   every newer revision before interpreting its payload. Unsupported or
   unknown versions are quarantined with bounded content-free reason and digest
@@ -120,9 +120,9 @@ manufacture Git authority. Unknown events remain explicit and harmless.
 - Keep one checksummed, append-only, quota- and age-bounded transport spool.
   It stores validated event bytes only, is not queryable product state, never
   overwrites unacknowledged records, and replays fairly across sessions.
-- Reauthorize every replay against current scope, privacy, capability, and
-  epoch. Permanent rejection receives a tombstone receipt; transient pressure
-  leaves the record pending.
+- Reauthorize every replay against the current project/user binding,
+  capability, and epoch. Permanent rejection receives a tombstone receipt;
+  transient pressure leaves the record pending.
 
 Retain the accepted operational bounds: one event is at most 16 KiB; one replay
 batch is at most 64 records/256 KiB; the spool is bounded to 4,096 records or
@@ -199,9 +199,9 @@ state; it never contains the result of work started by that hook.
 - A daemon outage leaves the host responsive; eligible events replay later,
   while unbound, oversized, expired, or full-spool cases rely on authoritative
   host/Git catch-up and never create another writer.
-- Privacy canaries prove prompts, commands, source, paths, tool arguments or
-  output, test logs, credentials, reasoning, and hidden peer identity never
-  enter event, spool, telemetry, or error bytes.
+- Hook event, spool, telemetry, and error bytes contain no prompts, commands,
+  source, paths, tool arguments/output, test logs, credentials, or hidden peer
+  identity.
 - Content-free telemetry preserves hook wall time, daemon round-trip, bytes,
   queue/spool state, replay, timeout, capability, and disposition so latency
   and reliability remain observable without payload capture.
@@ -228,7 +228,7 @@ state; it never contains the result of work started by that hook.
 
 ## Safety constraints retained
 
-- Hooks are bounded, replay-safe, privacy-safe, and never durable product
+- Hooks are bounded, replay-safe, content-free, and never durable product
   authorities.
 - Unsaved or dirty source content is never placed in the replay spool or any
   durable feedback record.

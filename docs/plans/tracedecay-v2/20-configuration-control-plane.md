@@ -14,7 +14,7 @@ create a workflow-specific registry or provider-local configuration source.
 ## PR17 user outcome
 
 Before admitting work, a user can see the effective provider, model, sandbox,
-privacy, budget, fallback, concurrency, and optional worktree/Git restrictions
+local/remote content eligibility, budget, fallback, concurrency, and optional worktree/Git restrictions
 that will govern it. The admitted run pins that complete snapshot. Later
 configuration changes affect future admissions only; they never silently
 reroute or reinterpret an active attempt.
@@ -24,7 +24,7 @@ reroute or reinterpret an active attempt.
 1. Work creation and evidence retrieval use the current authorized effective
    configuration and record its revision and behavior digest.
 2. Proposal evaluation receives one complete snapshot containing task-shape
-   bounds, route allowlists, budget/privacy ceilings, review requirements,
+   bounds, route allowlists, budget and content-location limits, review requirements,
    deterministic fallback, and any optional topology restrictions.
 3. Explicit provider admission resolves the configured executable reference
    and allowed provider/backend/model/protocol capabilities against Plan 27
@@ -70,14 +70,14 @@ reroute or reinterpret an active attempt.
   only by invoking an explicit authorized control-plane operation.
 - Analyzer configuration remains the canonical source for enablement,
   executable reference, arguments, initialization options, settings,
-  environment allowlist, privacy class, resource limits, restart policy, and
+  environment allowlist, local/remote content eligibility, resource limits, restart policy, and
   per-language selection. Its revision/digest remains part of semantic-provider
   result identity and cache admission; host registration receives only the
   non-sensitive enabled-language projection.
 - Plan 37 proximity configuration retains the threshold, score scale and input
   profile, eligible cohort, freshness decay, warning expiry, and
   suppression/deduplication windows. Configuration cannot disable or delay the
-  immediate tier or widen authorization/privacy scope.
+  immediate tier or widen authorization scope.
 - Dashboard renderer selection, Scout/feedback quiet mode and delivery bounds,
   and typed workflow phase/boundary timing policy remain registered settings.
   Renderer choice cannot alter graph/query semantics, quiet mode cannot
@@ -117,7 +117,7 @@ One complete work-execution snapshot covers:
   outcome/calibration, and SDK-facing operation that consumes configuration.
 
 The snapshot must be complete and internally valid. Missing or invalid
-fallback, executable, provider, model, privacy, approval, cancellation, or
+  fallback, executable, provider, model, approval, cancellation, or
 topology settings fail closed; an adapter, host bundle, discovery probe, or
 surface cannot supply a local default.
 
@@ -137,7 +137,7 @@ surface cannot supply a local default.
 - Requested and actual provider/backend/executable/protocol/model/reasoning
   identity and the exact fallback decision remain visible in history.
 - Human override can select only a snapshot-eligible route and cannot widen
-  authority, privacy, budget, deadline, or egress.
+  authority, budget, deadline, or egress.
 
 ## Topology and Git policy
 
@@ -159,7 +159,7 @@ movement, and semantic conflict resolution are unrepresentable. Retention
 marks eligibility only; cleanup still requires fresh scope, holder, dirty-data,
 commit, PR, receipt, and effect reconciliation.
 
-## Mutation and privacy safety
+## Protected mutation and rollback
 
 Protected dry-run changes no effective behavior. Apply re-resolves authority,
 scope, roots, refs, provider evidence, and every frozen digest before one
@@ -210,10 +210,11 @@ for an explained proposal, pin it before a real provider step, preserve it
 through progress, cancellation/restart, and terminal outcome, and use the
 recorded revision when presenting a non-auto-applied replan.
 
-Focused failures cover CAS races, invalid atomic mutation, secret canaries,
+Focused failures cover CAS races, invalid atomic mutation, credential
+write/read/log handling,
 desired/observed drift, absent or unsupported executables, provider/model
 version drift, invalid fallback, adapter-local default attempts, mid-attempt
-rereads, narrowed authority/privacy, protected-change expiry, topology/ref
+rereads, narrowed authority, protected-change expiry, topology/ref
 drift, unsafe Git modes, forward rollback, and crash recovery. Cross-surface
 tests compare the same effective value, provenance, safe error, and receipt;
 one aggregate PR17 journey replaces standalone setting and fixture-corpus

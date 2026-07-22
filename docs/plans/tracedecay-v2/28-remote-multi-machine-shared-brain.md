@@ -5,7 +5,7 @@
 Status: active product plan.
 
 PR16 delivers the remote shared Brain as one production journey. It builds on
-the existing daemon-owned store, capture, query, privacy, API, settings, and
+the existing daemon-owned store, capture, query, API, settings, and
 health surfaces; it does not ship distributed-authority scaffolding that is
 unusable until a later PR.
 
@@ -15,13 +15,13 @@ An enrolled machine can keep capturing permitted observations while
 disconnected, replay them safely when authority returns, query the shared
 Brain with honest local/remote coverage, create a verified backup, restore it
 through isolated staging, and fail over to a standby without admitting two
-writers or losing deletion and privacy state.
+writers or losing deletion state.
 
 ## End-to-end production journey
 
 1. **Enroll and capture offline.** An authenticated node is enrolled into one
    typed Brain/node identity with explicit shard placement/revision,
-   capabilities, privacy policy, transport profile, and revocable credentials.
+   capabilities, transport profile, and revocable credentials.
    Enrollment records repository/worktree/ref/snapshot identity through the
    same verified Git relationship model as PR15; hostname, path, or directory
    name cannot correlate projects. Local hooks send bounded events to the
@@ -31,8 +31,8 @@ writers or losing deletion and privacy state.
 2. **Reconnect and replay through the fence.** The node discovers the current
    authenticated authority and replays pending frames with deterministic event
    identity, enrollment revision, node and repository/worktree identity,
-   ordering evidence, schema/kind, sanitizer/privacy revision, payload
-   digest/length, integrity chain/segment root, capture evidence, replay
+   ordering evidence, schema/kind, sanitizer revision, payload length, capture
+   evidence, replay
    attempt, and causal/sequence context. Frames visibly progress through
    captured, pending, admitted,
    duplicate, rejected or quarantined, acknowledged, and garbage-collection
@@ -43,8 +43,8 @@ writers or losing deletion and privacy state.
 3. **Query the shared Brain.** The node queries only through authenticated
    TraceDecay application APIs. The response combines authoritative remote
    results with any verified read replica/cache whose authenticated manifest
-   binds Brain, shard, generation, schema, privacy policy, watermark, authority
-   epoch, and artifact digest. It declares cache age/lag, pending local
+   binds Brain, shard, generation, schema, watermark, and authority epoch. It
+   declares cache age/lag, pending local
    observations, unavailable shards, and partial/stale/unknown coverage.
    Integrity, authenticity, freshness, completeness, authorization, and
    coverage remain separate claims. A stale or unverifiable cache may serve an
@@ -56,12 +56,11 @@ writers or losing deletion and privacy state.
 4. **Back up and stage restore.** The current authority creates a consistent,
    authenticated backup manifest over the required database families,
    payloads, generations, repository identities, checkpoints, source
-   epoch/frontier, artifact inventory/root, per-artifact digests and
-   byte/count totals, key revisions, lineage, creation/verification/
-   expiry/refresh evidence, and typed stale/partial coverage. Restore writes
+   frontier, artifact inventory, byte/count totals, lineage, and typed
+   stale/partial coverage. Restore writes
    only to a non-serving isolated staging location, verifies destination bytes,
    generations and reference closure, and reapplies current tombstones,
-   deletion, quarantine, retention, authorization, and privacy-policy state
+   deletion, quarantine, retention, authorization, and project-scope state
    before it can be published. A pre-publication failure rolls back staging
    without exposing a partial generation.
 5. **Fence and fail over.** Promotion acquires a higher epoch with an
@@ -77,7 +76,7 @@ spool state, replay receipts, query coverage, backup verification, staged
 restore, and failover/rejoin state. Human and structured output use the same
 finding and remediation identities.
 
-## Authority, privacy, and replay constraints
+## Authority, authentication, and replay constraints
 
 - Each mutable shard has exactly one daemon writer identified by Brain, shard,
   generation, placement revision, and monotonically increasing fence epoch.
@@ -97,22 +96,19 @@ finding and remediation identities.
   and health. They never receive authority database paths, bytes, credentials,
   URLs, or a client-side SQL/network-filesystem fallback.
 - Verified read replicas/caches retain provenance, generation, watermark, lag,
-  privacy policy, and epoch. Possessing a cache handle or manifest never
-  bypasses current authorization, retention, deletion, or privacy recheck.
+  and epoch. Possessing a cache handle or manifest never bypasses current
+  authorization, project scope, retention, or deletion.
 - The remote offline-capture spool is distinct from PR6's daemon
   host-admission spool. Hooks never own durable sanitization or spool writes.
   Unsaved LSP documents, document versions, overlays, dirty-overlay
   diagnostics, raw JSON-RPC frames, analyzer state, and session-only agent
   proximity never enter the spool, read cache, replica, trace, backup,
   failover payload, or remote analyzer request.
-- Remote eligibility never weakens local privacy. Dirty document content stays
-  node-local by default. A remote analyzer requires a separate capability,
-  policy grant, and privacy disclosure. Local-only and remotely eligible scope
-  classifications remain explicit through capture, replay, query, cache,
-  backup, restore, and failover.
+- Dirty document content stays node-local. A remote analyzer requires an
+  authenticated configured endpoint and explicit user enablement.
 - Durable saved-content feedback, GitHub-ingested read-only
   thread/comment/reply evidence, and CI-localization evidence publish only
-  through the owning fenced shard and retain watermarks, tombstones, privacy,
+  through the owning fenced shard and retain watermarks, tombstones,
   retention, and authority epoch across restart, backup, restore, promotion,
   and failover. No GitHub write path exists.
 - Replay states remain visible as captured, pending, admitted, duplicate,
@@ -121,7 +117,7 @@ finding and remediation identities.
   revocation, and rejected replay are truthful recoverable states; they never
   create an empty local authority database.
 - Before replay or restore admission, current deletion, tombstone,
-  quarantine, retention, authorization, and privacy rules are re-evaluated.
+  quarantine, retention, authorization, and exact project scope are evaluated.
   Older captured or backed-up content cannot resurrect deleted data, bypass a
   newer policy, or republish stale GitHub/CI/feedback evidence.
 - Repository correlation uses verified Git identity plus explicit
@@ -155,7 +151,7 @@ finding and remediation identities.
 3. **Serve remote query with verified coverage.** Route normal query,
    diagnostics publication, and exact loads through authenticated application
    APIs. Accept cache/replica material only when its authenticated manifest
-   matches Brain, shard, generation, schema, privacy policy, watermark, and
+   matches Brain, shard, generation, schema, watermark, and
    authority epoch, and merge it without overstating freshness.
 4. **Complete backup, staged restore, and failover.** Produce backups from the
    fenced authority, verify and policy-replay them in non-serving staging, then
@@ -167,7 +163,7 @@ finding and remediation identities.
    identity, retention/deletion, diagnostics, and health contracts remain
    supported through the remote application model. Versioned enrollment,
    spool, cache/replica, backup and restore readers migrate or reject old data
-   explicitly; they never silently reinterpret authority, privacy, identity,
+   explicitly; they never silently reinterpret authority, identity,
    epoch, watermark, or deletion lineage. PR18 adds SDK bindings without
    replacing these PR16 APIs.
 
@@ -196,20 +192,20 @@ replays duplicates idempotently to exactly one canonical effect and receipt,
 queries the result through authoritative and verified cached/replica paths with
 pending/local/remote coverage, publishes clean LSP diagnostics while overlays
 remain node-local, creates a verified expiring/refreshable backup, restores it
-in isolated staging under newer deletion and privacy state, promotes the
+in isolated staging under newer deletion state, promotes the
 standby under a higher installed fence, and proves the old authority cannot
 commit or publish before or after rejoin.
 
 Focused failure cases cover spool overflow/corruption, lost acknowledgement,
-sequence gaps, replay crash/restart, node revocation, privacy-policy change,
+sequence gaps, replay crash/restart, node revocation,
 delayed old-writer packets, startup/promotion races, partition and process
-death, sink fence failure, wrong Brain/shard/generation/epoch/schema/policy/
-digest/watermark cache manifests, interrupted backup/restore publication,
+death, sink fence failure, wrong Brain/shard/generation/epoch/schema/watermark
+cache manifests, interrupted backup/restore publication,
 newer tombstone/quarantine state, insufficient standby frontier, rollback, and
 unavailable shards. Every surface must show the same partial, stale, unknown,
 unavailable, or recovery-required truth. Compatibility checks prove supported
 older local/API/stored-data inputs migrate or fail explicitly without authority
-or privacy drift. Negative checks prove unsaved overlays and analyzer state
+or project-scope drift. Negative checks prove unsaved overlays and analyzer state
 never become durable remote records and no client or offline path opens
 authority storage. The relevant all-feature aggregate gate is the final PR16
 gate; PR16 adds no benchmark harness or placeholder baseline.
@@ -220,5 +216,5 @@ gate; PR16 adds no benchmark harness or placeholder baseline.
   last-write-wins conflict resolution, automatic partition promotion, or a
   mandatory hosted control plane.
 - SDK bindings, which ship with PR18.
-- Any weakening of local privacy, any hidden replication or coverage
-  degradation, or any Git/GitHub mutation.
+- Unsanitized capture, durable/remote dirty overlays, hidden replication or
+  coverage degradation, or any Git/GitHub mutation.

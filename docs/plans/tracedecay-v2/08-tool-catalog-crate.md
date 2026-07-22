@@ -14,14 +14,16 @@
 
 ## Outcome
 
-Every public surface resolves stable capability IDs to the same application use cases, scope rules, effects, privacy requirements, availability, and output semantics without duplicating business logic.
+Every public surface resolves stable capability IDs to the same application
+use cases, scope rules, effects, availability, and output semantics without
+duplicating business logic.
 
 ## Owns
 
 - Stable CapabilityId, UseCaseId, and BindingId values.
 - Small immutable definitions for capability identity, user-facing description,
-  input/output schema references, effect class, scope requirements, privacy
-  class, availability, deprecation, surface binding, protocol revision range,
+  input/output schema references, effect class, scope requirements,
+  availability, deprecation, surface binding, protocol revision range,
   required negotiated features, result-schema revision, lifecycle class
   (`stateless | connection_stateful | session_stateful | resumable`),
   streaming support, cancellation semantics, and deprecation window.
@@ -56,7 +58,7 @@ Every public surface resolves stable capability IDs to the same application use 
 - An arbitrary JSON-RPC proxy capability.
 - Task/work graph semantics, readiness, model scoring, workflow execution, or
   generated agent orchestration logic. The catalog does declare the shipped
-  Plan 24/32 application capabilities and their effect/scope/privacy metadata.
+  Plan 24/32 application capabilities and their effect/scope metadata.
 
 ## Required behavior
 
@@ -75,7 +77,9 @@ Every public surface resolves stable capability IDs to the same application use 
   source operation; product settings use the typed configuration authority.
   Similar presentation does not merge their authorization or effects.
 - **PR11 — contributions:** register catalog records beside their owning application feature, then assemble one immutable snapshot at composition. No central file duplicates every request/response definition.
-- **PR11 — validation:** reject duplicate IDs/bindings, missing handlers, incompatible schema references, invalid scope/effect/privacy combinations, profile overflow, and dependency cycles.
+- **PR11 — validation:** reject duplicate IDs/bindings, missing handlers,
+  incompatible schema references, invalid scope/effect combinations, profile
+  overflow, and dependency cycles.
 - **PR11 — agent-facing contracts:** treat names, descriptions, and examples as
   versioned routing contract fields. Validate same-profile discriminability
   with positive, negative, ambiguous, and insufficient-capability fixtures;
@@ -107,11 +111,11 @@ Every public surface resolves stable capability IDs to the same application use 
   entry, `workspace/applyEdit`, or opaque server commands. No separate
   `lsp_*` capability is cataloged for them, and no binding may apply an edit
   on their behalf. `textDocument/codeAction` is cataloged only when its owning
-  typed candidate-consumption operation, policy classification, canonical
+  typed candidate-consumption operation, effect classification, canonical
   preview/`EditTransaction` route, and direct acceptance behavior ship
   together.
 - **PR12 — LSP extensions:** require every vendor extension to have an explicit
-  typed catalog entry, bounded schema, policy classification, and tested
+  typed catalog entry, bounded schema, effect classification, and tested
   handler. Ship the versioned TraceDecay context extension only through
   standard LSP/JSON-RPC framing and explicit experimental capability
   negotiation. Its compact envelope carries exact authorized scope, content/
@@ -190,7 +194,6 @@ pub struct CapabilityManifestV1 {
     pub scope: ScopeRequirement,
     pub authority: AuthorityRequirement,
     pub denied_disclosure: DeniedDisclosurePolicy,
-    pub privacy: PrivacyClass,
     pub lifecycle: LifecycleClass,
     pub streaming: StreamingContract,
     pub cancellation: CancellationContract,
@@ -291,7 +294,7 @@ PR11 creates these Plan-08-owned files:
 - `crates/tracedecay-tool-catalog/src/id.rs` — `CapabilityId`, `UseCaseId`,
   `BindingId`, `RetrieverId`, `ProfileId`, and stable serialization;
 - `crates/tracedecay-tool-catalog/src/manifest.rs` — capability, effect,
-  authority, privacy, lifecycle, streaming, idempotency, revalidation,
+  authority, lifecycle, streaming, idempotency, revalidation,
   cancellation, deadline, reconciliation, terminal-state, and receipt records;
 - `crates/tracedecay-tool-catalog/src/retrieval.rs` — retrieval-family and
   primitive-manifest records with explicit packet-component references and no
@@ -404,7 +407,8 @@ runs `cargo test --test mcp_suite`.
 ## Acceptance
 
 - PR11 unit tests cover stable ID serialization, immutable snapshots, duplicate/conflict rejection, profile ceilings, explicit absence, deprecation, availability, and deterministic lookup.
-- PR11 integration tests prove every catalog entry resolves to one real application handler with matching scope, effect, privacy, and schema contracts.
+- PR11 integration tests prove every catalog entry resolves to one real
+  application handler with matching scope, effect, and schema contracts.
 - Policy tests cover routing among available entries, missing capability, denied scope, stale availability, and no silent substitution.
 - PR12 parity tests invoke representative read, write, administrative, streaming, and long-running use cases through CLI, MCP, HTTP, and LSP adapters and compare typed results before rendering.
 - PR12 feedback parity tests call the canonical diagnostics/impact readers

@@ -49,7 +49,7 @@ PR6 delivered:
 - atomic projection with staged bounded rebuild, provider-native identity and
   relation preservation, typed hook telemetry, and executable native host
   fixtures;
-- an executable multi-provider benchmark harness and clean attested acceptance
+- an executable multi-provider benchmark harness and clean acceptance
   evidence recorded by commit `05da230e`.
 
 PR7 delivered the canonical project/profile memory and fact path, evidence and
@@ -60,7 +60,7 @@ Session/LCM temporal-retrieval slice.
 The removed planning/evidence machinery is not unfinished product work and must
 not be rebuilt.
 
-## Delivery rules and essential guards
+## Delivery rules and practical safety baseline
 
 Every remaining PR must leave a supported user journey working through a real
 entry point, the daemon/application kernel, durable state or computation, and a
@@ -69,21 +69,27 @@ them. Compatibility names delegate to the production kernel, and replaced paths
 are deleted after the stated recovery boundary. Direct behavior and focused
 failure/recovery tests plus the relevant aggregate gate are the evidence.
 
-The following guards apply once, here, and to every journey below:
+The plan set has one minimal baseline. Numbered plans attach these checks to
+the product operation that can actually fail; they do not create separate
+privacy/security matrices, proof packets, attestations, recheck rituals, or
+acceptance gates:
 
-- Authorization, project/profile scope, privacy, redaction, retention, and
-  secret handling fail closed at input and output sinks.
-- Exactly one fenced daemon owns durable mutation for each shard. Transactions,
-  idempotent replay, crash recovery, deletion lineage, and authenticated remote
-  authority remain observable and testable.
-- Migration and cutover are explicit and bounded. Published APIs and stored data
-  remain compatible until their documented irreversible cutover.
-- Git mutation is explicit, policy-approved, previewed, and user-directed.
-  TraceDecay never rewrites published history, resolves semantic conflicts, or
-  performs autonomous branch/ref mutation.
-- Missing providers, authority, scope, privacy state, or recovery proof produce
-  truthful `Unavailable`, `Partial`, or degraded results; no fallback invents
-  evidence or writable authority.
+- Logs, telemetry, errors, and checked-in fixtures contain no credentials,
+  prompts, private source, provider payloads, or equivalent sensitive content.
+  Capture sanitizes before persistence.
+- Every read, write, continuation, and expansion uses the exact authorized
+  `ProjectId` or `UserProfileId`; paths, labels, CWD, and collection membership
+  never substitute for identity or widen scope.
+- Actual remote or network boundaries authenticate the caller and authority.
+  PR16 additionally fences every mutable shard to one current daemon writer.
+- Destructive Git, host-registration, and protected-configuration operations
+  require an explicit preview/confirmation, stale-state compare-and-swap, a
+  durable result, and rollback or forward recovery appropriate to the real
+  commit boundary.
+
+Migration, compatibility, recovery, and truthful partial/unavailable behavior
+remain direct product requirements. Git never rewrites published history,
+resolves semantic conflicts, or performs autonomous branch/ref mutation.
 
 ## Retained semantic ownership
 
@@ -91,10 +97,9 @@ These ownership rules prevent duplicate product behavior; they are not separate
 delivery phases:
 
 - Plan 01 owns external-source definition/binding identity; Plan 20 owns
-  configuration and `SourcePolicyMetadataSnapshotV1` source-policy metadata
-  including mandatory local privacy; Plan 06 evaluates authorization; Plans
-  03/27 capture and sanitize; and Plan 09 rechecks sinks and orchestrates
-  effects. Definitions and connectors never own privacy decisions or sinks.
+  configuration; Plan 06 evaluates authorization; Plans 03/27 sanitize capture;
+  and Plan 09 orchestrates effects. Definitions and connectors never become
+  alternate identity or persistence authorities.
 - Plan 05 owns shared query execution. Plan 23 owns temporal session/LCM truth
   and session-derived evidence spans; Plan 13 owns cross-domain
   `EvidenceSpanRecordV1` anchors. Plan 15 owns locked retrieval/quantifier
@@ -179,7 +184,7 @@ changing their transport.
 including Kimi Code `PostToolUse`/`Stop` and OpenCode `file.edited`,
 `tool.execute.after`, `session.idle`/`session.status`, and LSP event paths;
 refresh real checked-in CI/review provider fixtures; verify exact evidence and
-proximity tiers; and prove bounded backpressure, restart, privacy, OpenCode
+proximity tiers; and prove bounded backpressure, restart, OpenCode
 custom-LSP duplicate-analyzer avoidance, and truthful provider-unavailable
 behavior,
 including an explicit Cline-family route or evidence-backed typed unavailable
@@ -272,7 +277,7 @@ sync, query shared state, back up and restore it, and fail over without creating
 multiple mutable authorities.
 
 **End-to-end production path.** An enrolled node records sanitized offline
-capture, authenticates an epoch-bound manifest on reconnect, and sends
+capture, authenticates to the current fenced authority on reconnect, and sends
 duplicate-tolerant batches to the fenced shard authority. The sink admits each
 effect once, publishes receipts and verified cache/replica state, serves remote
 queries and node-local LSP overlays, and supports staged backup, restore, and
@@ -280,7 +285,7 @@ failover under a higher fence.
 
 **Implementation and deletion.**
 
-- Preserve deletion/privacy replay, Git correlation, analyzer policy, gap
+- Preserve deletion replay, Git correlation, analyzer policy, gap
   evidence, and recovery state across backup, restore, and authority transfer.
 - Enforce the current fence at every durable mutation and publication sink;
   replicas and caches never turn admission into authority.
@@ -288,13 +293,14 @@ failover under a higher fence.
   wall-clock, multi-primary, or replicated-SQLite convergence never owns
   canonical mutation.
 - Delete provisional remote writers, unfenced publication, and caches that
-  cannot prove generation, epoch, and authorization.
+  cannot identify their generation and current authority.
 
 **Direct acceptance.** Capture offline, reconnect with duplicates and gaps,
 observe exactly-once admitted effects, query from another enrolled node, then
 back up, restore, and fail over while stale epochs are rejected. Verify
-partition/restart recovery, revoked enrollment, tampered manifests, deletion/
-privacy replay, unavailable authority, and aggregate remote durability gates.
+partition/restart recovery, revoked enrollment, authenticated manifests,
+deletion replay, unavailable authority, and the aggregate remote durability
+gate.
 
 **Not in this PR.** Multi-primary mutation and automatic conflict convergence
 are not product paths. Executable work orchestration belongs to PR17.
@@ -348,7 +354,8 @@ exact evidence, review decomposition/sizing/model proposals, admit steps against
 real supported provider adapters, inspect progress/effects/artifacts/outcomes,
 exercise cancellation/retry and independent review, and accept or reject a
 replan. Cover no-Git and Git-backed placements, provider unavailable/fallback,
-lease loss, restart/replay, privacy, and aggregate task/runtime gates.
+lease loss, restart/replay, exact project scope, and aggregate task/runtime
+gates.
 
 **Not in this PR.** Public SDK commitments belong to PR18. Suggestions never
 silently choose a model, mutate the graph, or execute an unadmitted step.
@@ -417,7 +424,7 @@ window, superseded V1 and migration-only paths are deleted.
 
 **Direct acceptance.** Migrate representative released data, interrupt and
 resume every phase, compare direct product journeys, cut over atomically,
-restore from the archive into a new V2 fence, and prove deletion, privacy,
+restore from the archive into a new V2 fence, and prove deletion,
 compatibility, and rollback-window behavior before deleting the old path. Run
 the aggregate migration/recovery/deletion gates.
 
@@ -444,7 +451,7 @@ practical gain.
 - Compare a frozen real workload with A/A noise floors, paired effect sizes and
   intervals, practical margins, worst-stratum/resource/tail results, open-loop
   overload accounting, and Linux/Windows crash/restart correctness.
-- Preserve exact/lexical fallbacks, authorization, privacy, receipts,
+- Preserve exact/lexical fallbacks, project/user isolation, receipts,
   determinism, coverage, and recomputation equivalence.
 - Developer-build improvements may change portable manifests, profiles,
   features, build settings, and build scripts only when the same workload
@@ -455,7 +462,7 @@ practical gain.
 
 **Direct acceptance.** Re-run representative shipped journeys before and after
 each retained change, reproduce the gain and equivalent result, then pass the
-stable aggregate Linux, Windows, migration, recovery, privacy, performance, and
+stable aggregate Linux, Windows, migration, recovery, performance, and
 deletion gates. No universal score, public benchmark rank, or paper threshold
 substitutes for product evidence.
 

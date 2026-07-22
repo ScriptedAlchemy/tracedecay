@@ -21,7 +21,7 @@ Every operational and product metric states what was measured, over which popula
 
 ## Delivery-first product journeys
 
-The event, projection, descriptor, privacy, retention, label, and measurement
+The event, projection, descriptor, retention, label, and measurement
 contracts below remain binding. They ship as instrumentation and read models on
 real product paths, not as schema-only, fixture-only, projector-only, or
 promotion-gate milestones.
@@ -33,7 +33,7 @@ Costs, Settings, and the one Doctor application kernel; the user drills from a
 finding to safe evidence, confirms an owner remediation, follows its receipt,
 and sees post-operation health, usage, latency, resource, token, cost, drop,
 coverage, and unavailable state reconcile at pinned watermarks. Every
-retrieval, adoption, automation, performance, attestation, privacy, retention,
+retrieval, adoption, automation, performance, retention,
 rejected-argument, LSP, feedback-cycle, and provider measurement specified
 below remains attached to its owning production action and visible through the
 appropriate PR14 view.
@@ -49,8 +49,8 @@ Observatory, and Costs render those same values; and Plan 24 may propose a
 versioned graph change that still requires explicit user disposition.
 
 The detailed semantics below are the coverage audit for those journeys. No
-metric, label, dimension, cohort, compatibility surface, privacy rule,
-retention rule, or unavailable state is reduced or deferred by this framing.
+product metric, label, dimension, cohort, compatibility surface, retention
+behavior, or unavailable state is reduced or deferred by this framing.
 
 ## Owns
 
@@ -58,7 +58,7 @@ retention rule, or unavailable state is reduced or deferred by this framing.
 - Metric descriptors, units, populations, horizons, coverage, and aggregation semantics.
 - Versioned quantifier descriptors, cohort definitions, coverage/uncertainty
   semantics, temporal baselines/deltas, calibration/drift observations,
-  privacy-safe outcome linkage, and optional decision-policy evidence. A
+  outcome linkage, and optional decision-policy evidence. A
   universal code-health/quality/reward score is explicitly not an SLO or
   product-success denominator.
 - Denominator-safe projections and Observatory/Costs read models.
@@ -69,11 +69,11 @@ retention rule, or unavailable state is reduced or deferred by this framing.
   profiles, independent-review grades, first-pass and parent-normalized
   outcomes, calibration error, censoring, selection/override/exploration
   exposure, and drift/change-point evidence.
-- Privacy-safe execution-topology observations and bounded read models for
+- Bounded execution-topology observations and read models for
   requested/accepted/admitted/active/useful concurrency, duplicate work and
   duplicate effects, conflict-prediction precision/recall, ready-to-integrated
   latency, observed native-merge success, stale-stack age, blocked time,
-  runtime/test/CI reruns, operational/privacy leaks, and runtime/delivery
+  runtime/test/CI reruns, operational leaks, and runtime/delivery
   fanout.
 - The canonical versioned independent-review and task-outcome label vocabulary,
   evidence requirements, transition-validity inputs, and measurement schema
@@ -104,14 +104,14 @@ retention rule, or unavailable state is reduced or deferred by this framing.
 ### Canonical events
 
 - Emit versioned events through the same authoritative event/store path as other V2 observations.
-- Emit privacy-safe [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)
+- Emit bounded [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)
   events for sessions; methods, outcomes, and latency; queueing and
   cancellation; analyzer startup, restart, and indexing/degraded state; cache
   reuse and overlay freshness; diagnostic add and clear; provider conflicts;
   host delivery path; partial coverage and drops; and bridge reconnect.
 - LSP telemetry contains no paths, source, symbols, or diagnostic messages.
 - [Plan 36](36-git-aware-change-context-and-index-transactions.md) telemetry may
-  identify the operation kind and privacy-safe outcome only. Patch content,
+  identify the operation kind and outcome only. Patch content,
   paths, commit messages, author identity, and conflict content never enter
   canonical events, aggregates, exports, or drill-down anchors.
 - [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
@@ -144,11 +144,12 @@ retention rule, or unavailable state is reduced or deferred by this framing.
   exists; `resolved` is the observed read-only lifecycle value. All metrics remain
   denominator-safe. Telemetry contains no source, path, diagnostic message,
   comment body, CI log content, or private session content.
-- Identify scope, capability, operation, result, event and observation time, duration or quantity, unit, producer revision, trace, and privacy classification.
+- Identify scope, capability, operation, result, event and observation time,
+  duration or quantity, unit, producer revision, and trace.
 - Use stable idempotency keys so retries and replay cannot double count.
 - Record terminal outcomes separately from attempts and preserve cancellation, rejection, timeout, partial success, and unknown outcomes.
 - Keep instrumentation bounded and non-blocking while making dropped or delayed telemetry measurable.
-- PR17 emits privacy-safe Plan 24/32 observations for task-shape and
+- PR17 emits bounded Plan 24/32 observations for task-shape and
   decomposition grade and estimate ranges; proposal/decision identity;
   requested/actual model route and exact model/version/effort/tool/host
   capability; first-pass scope completion and accepted correctness;
@@ -157,7 +158,7 @@ retention rule, or unavailable state is reduced or deferred by this framing.
   queue/execution latency; tokens/cost/resources; autonomy; human
   intervention/override; cancellation; censoring/unknown horizon; and audit
   coverage. Records pin work/acceptance/decomposition, estimator, cohort,
-  policy/config/catalog/privacy, evidence horizon, and valid/observation-time
+  policy/config/catalog, evidence horizon, and valid/observation-time
   revisions. Self-reported completion is a separate evidence class and never
   substitutes for independent acceptance, tests, review, or outcome.
 - PR17 auxiliary-provider observations include requested and actual
@@ -215,8 +216,8 @@ read models. The exact event payloads in
   (`work.delivery_fanout.observed.v1`).
 
 Every event uses `ObservabilityEnvelopeV1`, carries event/observation time and
-valid-time interval where applicable, pins schema/producer/config/policy/
-privacy revisions, coverage, watermark, idempotency identity, and an opaque
+valid-time interval where applicable, pins schema/producer/config/policy
+revisions, coverage, watermark, idempotency identity, and an opaque
 authorized local join reference, and distinguishes attempt from terminal
 outcome. Events contain no task title or TaskId, actor/user/session, project or
 repository identity, path, worktree locator, branch/ref, commit/object ID,
@@ -235,7 +236,7 @@ Plan 32 `ProgressFrontier` during the interval and are not linked by an
 adjudicated duplicate-work relation. Heartbeats, queued work, card presence,
 provider child processes, and transport fanout never count as useful
 concurrency.
-It separately records privacy-safe classes for execution placement
+It separately records bounded classes for execution placement
 (`None | InPlace | LinkedWorktree | IsolatedClone`), branch topology
 (`NoBranches | Unbranched | IndependentBranches | LocalStack`), review
 topology (`NoReview | IndependentReview | StandardPullRequests |
@@ -304,9 +305,8 @@ redelivery, or the same attempt ID never count as a rerun.
 
 `WorkExecutionLeakObservedV1` records only independently proved
 `LeaseAfterTerminal | AttemptWithoutLiveOwner | EffectUnknownPastDeadline |
-MissingWorktreeBinding | UnboundedDelivery | PrivacyCanary | None | Unknown`,
-the detection horizon, recovery state, coverage, and safe owner class.
-`PrivacyCanary` is a hard adverse outcome and carries no canary bytes.
+MissingWorktreeBinding | UnboundedDelivery | None | Unknown`, the detection
+horizon, recovery state, coverage, and safe owner class.
 `WorkDeliveryFanoutObservedV1` records one canonical event class, eligible
 surface count, attempted/delivered/deduplicated/dropped/unknown counts, and
 surface family `Hook | MCP | LSP | Dashboard | CLI | Other`; it never records
@@ -347,9 +347,7 @@ descriptor names and semantics:
 - `work_reruns_total{source=runtime|test|ci,cause}` and
   `work_rerun_rate{source}` use eligible original attempts/runs as the
   denominator and never count transport replay;
-- `work_execution_leaks_total{kind,outcome}` and
-  `work_execution_privacy_canary_leaks_total` retain unknown coverage; the
-  latter promotion threshold is exactly zero; and
+- `work_execution_leaks_total{kind,outcome}` retains unknown coverage; and
 - `work_delivery_fanout_total{surface,outcome}` and
   `work_delivery_duplicate_ratio{surface}` count delivery and dedupe without
   treating multi-surface delivery as duplicate product work.
@@ -376,8 +374,7 @@ major/minor version, and coverage class. The existing maximum of eight
 dimensions, 4,096 local cells per daily bucket, 256 returned cells, and
 minimum-five local-cell suppression applies. Shared aggregation remains
 limited to the existing share allowlist; topology, conflict, blocker, rerun,
-leak, and integration dimensions are local-only until a separate privacy
-review adds a cataloged coarse dimension. No metric groups, filters, sorts, or
+leak, and integration dimensions remain local-only. No metric groups, filters, sorts, or
 exports by person, agent, TaskId, initiative, project, repository, worktree,
 branch, ref, commit, model version, or exact route.
 
@@ -408,18 +405,8 @@ Exact implementation and test ownership is:
   `crates/tracedecay-store/tests/observability_execution_topology_projection.rs`,
   `tests/observability_suite/execution_topology.rs`,
   `tests/dashboard_api_test/execution_topology.rs`, and
-  `dashboard/test/observatory-execution-topology.vitest.tsx` are the binding
-  contract, rebuild, privacy, parity, and DOM suites.
-- `tests/fixtures/observability/execution-topology/events-v1.jsonl` is the
-  canonical serialized event corpus;
-  `tests/fixtures/observability/execution-topology/expected-rollups-v1.json`
-  contains exact numerator/denominator/coverage/bucket outputs; and
-  `tests/fixtures/observability/execution-topology/privacy-canaries-v1.json`
-  contains synthetic forbidden-field and canary cases. The corpus imports
-  every fixture ID from Plan 14's `execution-topology-matrix.json`,
-  `execution-topology-events.ndjson`, and
-  `integration-operation-matrix.json`; missing or zero imported cases fails
-  the suite.
+  `dashboard/test/observatory-execution-topology.vitest.tsx` cover binding,
+  rebuild, payload safety, parity, and rendering.
 
 This contract ships through the PR17 executable Work loop: the domain event
 types, canonical serialization, exhaustive enum handling, prohibited-field
@@ -432,8 +419,8 @@ CLI/MCP/HTTP/Observatory/Costs return the same descriptors, values,
 denominators, coverage, and unavailable reasons; and the aggregate product
 test exercises concurrency, duplicate work/effects, conflict outcomes,
 integration, stale stacks, blocked intervals, reruns, leaks, fanout,
-replay/drop, privacy canaries, cardinality, and cross-transport parity on the
-same production path. Any duplicate committed effect, privacy canary leak,
+replay/drop, cardinality, and cross-transport parity on the same production
+path. Any duplicate committed effect, prohibited payload in telemetry,
 identity-bearing metric label, formula drift, or cross-transport mismatch
 blocks acceptance.
 
@@ -444,7 +431,6 @@ The canonical domain contract lives in
 `crates/tracedecay-domain/src/observability/retrieval.rs`,
 `crates/tracedecay-domain/src/observability/adoption.rs`,
 `crates/tracedecay-domain/src/observability/performance.rs`,
-`crates/tracedecay-domain/src/observability/attestation.rs`, and
 `crates/tracedecay-domain/src/observability/execution_topology.rs`.
 `crates/tracedecay-store/src/observation/telemetry.rs` persists the common
 envelope, `crates/tracedecay-store/src/observation/telemetry_projection.rs`
@@ -453,7 +439,7 @@ builds shared denominator-safe read models,
 builds the bounded execution-topology read model, and
 `crates/tracedecay-store/src/observation/telemetry_retention.rs` applies the
 retention policy.
-`src/application/observability/{mod,record,query,privacy,execution_topology}.rs`
+`src/application/observability/{mod,record,query,execution_topology}.rs`
 is the only application write/query boundary. Product owners instrument their
 own paths and emit these types; they do not add another counter store.
 
@@ -461,16 +447,14 @@ own paths and emit these types; they do not add another counter store.
 `schema_revision`, `idempotency_key`, opaque local `trace_id`, authorized
 `scope_ref`, capability and operation enums, event and observation time,
 duration or quantity and unit, terminal result, producer/configuration/policy/
-privacy revisions, watermark, `CoverageStateV1`, sampling probability,
+revisions, watermark, `CoverageStateV1`, sampling probability,
 retention class, and emitted/delayed/dropped counts. `CoverageStateV1` is
 exactly `Known | Partial | Stale | Unknown | Sampled | Capped`. Attempts and
 terminal events have different idempotency identities.
 
 `PerformanceMeasurementDescriptorV1`, `BenchmarkRunAggregateV1`,
 `PairedEffectEstimateV1`, and `PerformanceDispositionV1` are defined in
-`performance.rs`; `BenchmarkBaselineAttestationV1`,
-`BenchmarkComparisonAttestationV1`, and their
-`BenchmarkAttestationV1` enum are defined in `attestation.rs`.
+`performance.rs`.
 
 The minimum cross-cutting V1 event payloads added by this plan are:
 
@@ -500,9 +484,8 @@ The minimum cross-cutting V1 event payloads added by this plan are:
   budget exhaustion, queue/backpressure, progress timeout, cancellation,
   effect, retry/recovery, requested/actual route, recursive-dispatch
   rejection, and fan-out observations;
-- `BenchmarkRunAttemptedV1`, `BenchmarkRunTerminalV1`,
-  `BenchmarkAttestationRecordedV1`, `BenchmarkBaselineAcceptedV1`,
-  `BenchmarkBaselineRevokedV1`, and `BenchmarkAttestationSupersededV1`; and
+- `BenchmarkRunAttemptedV1`, `BenchmarkRunTerminalV1`, and
+  `BenchmarkComparisonRecordedV1`; and
 - `TelemetryDropObservedV1` (`telemetry.drop.observed.v1`).
 
 Plans 35–37 and every other owning slice define their additional exhaustive
@@ -626,83 +609,36 @@ interval, coverage, and disposition. Exact flat-vector scan remains the ANN
 oracle. Fixtures live in
 `tests/observability_suite/{retrieval,context_outcomes,ablation}.rs`.
 
-### Privacy-safe adoption and retention
+### Adoption analytics and retention
 
-`AnalyticsModeV1` is `Off | LocalOnly | AggregateShare`; `LocalOnly` is the
-default and `AggregateShare` requires explicit opt-in. `Off` prevents optional
-adoption event serialization, projection, and egress. Mandatory operational
-and audit receipts, Plan 24 outcome evidence, and Plan 32 run/effect history
-remain under their owning entity lifetime and deletion contracts; they cannot
-be disabled without breaking product authority, are excluded from adoption
-read models in `Off`, and are never exported by adoption analytics.
-`LocalOnly` permits authorized local drill-down and has no network exporter.
-`AggregateShare` emits weekly aggregate contribution
-packets without anchors or stable installation, actor, user, project,
-repository, session, trace, task, or operation identity.
+`AnalyticsModeV1` remains `Off | LocalOnly | AggregateShare`; `LocalOnly` is
+the default and `AggregateShare` requires explicit opt-in. `Off` stops optional
+adoption collection, `LocalOnly` has no network exporter, and opt-out stops
+egress before its configuration operation succeeds. Ordinary bounded retention
+and deletion apply to optional analytics; owning product receipts and run
+history retain their existing lifecycles and are never exported as adoption
+analytics.
 
-The adoption funnel is `Eligible -> Enabled -> Available -> Invoked ->
-Terminal -> IndependentlyUseful -> RepeatUseful`. Every stage reports both its
-previous-stage and original-eligible denominator, exclusions, unknown and
-censored counts, watermark, horizon, coverage, and interval. Repeat useful use
-means another independently useful outcome in a later seven-day window;
-28-day retained useful use is a separate projection. Display, click, raw
-invocation, process completion, self-report, cards closed, tests run, token
-volume, and subjective trust are never product-success outcomes. Search uses
-Plan 15 relevance/correct-abstention labels; task adoption uses Plan 24 work
-identity and the canonical outcome labels below.
+Optional local detail expires after 30 days, local rollups after 395 days, and
+share staging within 24 hours after opt-out; backup copies expire within 30
+days. Local cells below five eligible units are suppressed. Rates require 20
+eligible units and 90% coverage; route/model comparisons require 30 eligible
+outcomes, 90% coverage, at most 10% censoring, and no unresolved cohort shift.
+Shared cells require 100 contribution windows, at most four dimensions, and
+one contribution per installation/capability/outcome/day.
 
-Retention classes are `OptionalLocalDetail30d`, `PrivateBenchmarkRaw30d`,
-`LocalRollup395d`, `ShareStaging24h`, `OwningEntityLifetime`, and
-`PromotedBenchmarkAggregate`. Opt-out stops egress synchronously before its
-configuration receipt returns and purges share staging in the same daemon
-transaction; local deletion tombstones or crypto-shreds optional adoption
-observations and rollups within 24 hours. Backup copies expire within 30 days.
-Sanitized benchmark aggregates survive only when the user explicitly promotes
-them; private raw benchmark evidence expires after 30 days unless a shorter
-project retention applies. Already unlinkable shared
-aggregates cannot be retracted, and that limitation is disclosed before
-opt-in.
+The adoption funnel remains `Eligible -> Enabled -> Available -> Invoked ->
+Terminal -> IndependentlyUseful -> RepeatUseful` with explicit denominators,
+unknown/censored counts, watermarks, horizons, coverage, and intervals.
+Display, click, invocation, process completion, self-report, cards closed,
+tests run, token volume, and subjective trust do not become success outcomes.
 
-`crates/tracedecay-store/src/observation/telemetry_retention.rs` owns one
-hourly daemon sweep with a persisted per-authority watermark, idempotent
-tombstone/crypto-shred receipt, bounded batch and retry, and restart resume.
-Opt-out destroys the optional-detail and share-staging encryption keys in its
-configuration transaction, so daemon downtime cannot restore access; the
-sweep physically removes unreadable rows within 24 hours of cumulative daemon
-availability. A missed physical deadline or failed backup-expiry receipt is a
-Plan 14 Doctor finding and keeps aggregate sharing disabled.
-
-Local views collapse cells below five eligible units. A rate requires at least
-20 eligible units and 90% observed coverage. Exact route/model comparisons
-require at least 30 eligible outcomes, 90% outcome coverage, no more than 10%
-censoring, and no unresolved cohort/version shift. Shared cells require at
-least 100 contribution-windows, permit at most four dimensions, and cap each
-installation at one contribution per capability/outcome/day. Shared
-dimensions are only cataloged capability (maximum 64), surface, host family,
-major/minor product version, OS family, outcome class, coverage class, and
-eight fixed latency buckets. Unknown remains `unknown`; overflow becomes
-`other`. Active-user and active-project denominators are local-only because
-shared packets contain no stable identity.
-
-No event, local aggregate, export, or drill-down contains query text, prompts,
-source, snippets, symbols, paths, diagnostic or error messages, review bodies,
-private session content, hidden reasoning, patches, commit messages, authors,
-conflicts, argv/stdin values, stdout/stderr, environment values, secrets,
-hostnames, CI logs, raw provider payloads, free-form labels, or reversible
-digests of them. Events permit at most 16 retriever/source rows and 32
-`SpanStageV1` rows; overflow aggregates into an `other` cell and sets coverage
-to `Capped`. A descriptor/horizon retains at most eight local grouping
-dimensions, 4,096 local cells per daily bucket, and 1,024 catalog identities
-per projection epoch; overflow aggregates into `other` while exact details
-remain only in authorized owning history. Queries return at most 256 cells.
-Exact provider/model/executable versions are catalog IDs and remain authorized
-local dimensions.
-
-Privacy/configuration and retention operations are implemented in
-`src/application/observability/privacy.rs`. The shared aggregate serializer is
-`src/application/observability/adoption_share.rs`. Secret-canary, mode,
-suppression, purge, backup-expiry, and no-egress fixtures live in
-`tests/observability_suite/{privacy,adoption,retention,aggregate_share}.rs`.
+Events, aggregates, exports, fixtures, and drill-downs contain no credentials,
+prompts, private source, provider output, query text, paths, patches, logs,
+argv/stdin, environment values, or free-form payload labels. Shared output is
+aggregate-only and contains no stable user, project, repository, session, task,
+trace, or operation identity. Cardinality and result limits remain bounded;
+overflow is reported as capped coverage rather than silently dropped.
 
 ### Resource accounting and benchmark evidence
 
@@ -731,67 +667,21 @@ and terminal/effect-reconciliation outcome. A heartbeat never advances the
 frontier. Plans 26 and 33 may evaluate timeout precision and resource impact
 but cannot create another deadline, reset rule, timer, or escalation policy.
 
-`BenchmarkAttestationV1` is an enum. `BenchmarkBaselineAttestationV1` contains
-one subject commit/tree/content identity, suite, supported baseline decision,
-population/unit/horizon, workload/corpus/environment/oracle/harness/clock/
-schema/configuration/threshold digests, protocol, raw lineage, coverage,
-correctness gates, and evidence grade. Baseline acceptance is not an embedded
-boolean; it is the separate CAS transition event below.
-`BenchmarkComparisonAttestationV1` adds an independently accepted baseline
-attestation reference, candidate identity, paired outcomes and ablations, and
-`promote | reject | insufficient_evidence`.
-Baseline lifecycle is `Recorded -> Accepted -> Superseded | Revoked`.
-Acceptance, supersession, and revocation require expected attestation revision,
-actor, reason, and compare-and-swap receipt. A comparison pins the exact
-accepted baseline revision and prior accepted rollback profile. Revocation
-before a comparison decision invalidates that comparison; later revocation
-preserves the historical decision but blocks new promotion and rollout.
-`BenchmarkAttestationSupersededV1` names the replacement baseline and every
-comparison made ineligible.
-`EvidenceGradeV1` is:
+Performance comparison records retain the exact baseline and candidate build,
+workload, corpus, environment, oracle, configuration, platform, coverage,
+paired outcomes, resource results, and one disposition:
+`promote | reject | insufficient_evidence`. A comparison may promote only from
+a reproducible accepted baseline and pins the prior rollback profile. Missing
+lineage, dirty or incompatible subjects, post-result threshold changes,
+coordinated omission, insufficient support, hidden regressions, or incomplete
+coverage yield `reject` or `insufficient_evidence` directly; no attestation,
+signature, evidence-grade taxonomy, cryptographic local proof, or separate
+baseline ceremony is required.
 
-- `Clean`: immutable clean subject trees, verified digests and raw aggregate
-  lineage, required platforms/strata/support/coverage, acceptable A/A noise,
-  frozen thresholds and intervals, and a valid measurement protocol;
-- `Provisional`: structurally valid and privacy-safe, but dirty tree, missing
-  required platform or confirmation cohort, insufficient tail support,
-  excessive censoring/noise, estimated required resource evidence, or partial
-  coverage; its disposition is always `insufficient_evidence`; or
-- `Rejected`: placeholder or invalid digest, missing/fabricated baseline,
-  mismatched comparison identity, absent lineage, post-result threshold
-  change, coordinated-omission/survivor-bias defect, protected-stratum hiding,
-  or leakage from the evidence collection/artifact itself.
-
-A clean attestation may still disposition `reject`; clean describes evidence
-integrity, not candidate quality. A measured candidate correctness, privacy,
-authorization, or recovery failure is clean evidence with `reject` and also
-triggers the hard rollback gate. Plan 15 outcomes map without loss:
-`invalid_run -> Rejected/insufficient_evidence`; `blocked`, `inconclusive`, and
-`runtime_fallback_observed -> Provisional/insufficient_evidence`;
-`rejected -> Clean/reject`; and `accepted -> Clean/promote`.
-
-`ProjectStoreLayout::benchmark_run_dir(suite_id, attestation_id)` owns local
-`manifest.json`, `runs.jsonl`, profiler artifacts, and private oracle
-references under the resolved project store. The search suite uses Plan 15's
-exact checked-in contract:
-`fixture-manifest-v1.json`, `queries-v1.jsonl`, `snapshots-v1.jsonl`,
-`judgments-development-v1.jsonl`, `locked-judgments-v1.json`,
-`temporal-events-v1.jsonl`, `context-spans-v1.jsonl`, `tasks-v1.jsonl`,
-`evidence-index.json`, `run-v1.json`, and `promotion-v1.json`, all under
-`benchmarks/search-quality/`. Sanitization replaces repository, branch,
-worktree, commit/tree/ref, snapshot, allowed-scope, query, anchor,
-contamination, prompt, and task identities with fixture-local random aliases;
-source/store/projection generations and watermarks, temporal event IDs,
-labeler/adjudicator provenance, authorized-store locators, profile/model/tool
-IDs, approval actors, and activation receipts are also replaced or omitted;
-the alias map and HMAC keys for authorized private-query/prompt locators remain
-only in the private oracle store. Checked-in values cannot be joined back to a
-local project without that authorized map. PR20 uses its exact Plan 33
-artifact paths. Evidence indexes contain safe aliases, digests, and
-authorization-bound anchors, never local paths or payloads. Classification,
-digest-mutation, baseline lifecycle/CAS, placeholder, threshold-freeze,
-privacy, and supersession fixtures live in
-`tests/observability_suite/attestation.rs`.
+Checked-in performance fixtures use sanitized realistic data and contain no
+credentials, prompts, private source, provider payloads, local paths, or
+project/user identifiers. PR20 owns the concrete comparison artifact layout
+needed by its production journey.
 
 ### Canonical review and outcome labels
 
@@ -860,12 +750,12 @@ queryable.
 - `adoption-outcomes` shows the outcome funnel, correct abstention,
   independently useful and retained use; `adoption-coverage` shows eligible
   versus observed, late/dropped/capped, suppression, and denominator failures;
-  `analytics-privacy` shows local mode, share staging age, retention/deletion,
+  `analytics-controls` shows local mode, share staging age, retention/deletion,
   and egress failures.
 - `performance-budgets` shows p50/p95/p99 with support and intervals,
   queue/lock/provider spans, RSS/CPU/I/O, no-progress outcomes, and accepted
-  budget revision; `benchmark-attestations` shows clean/provisional/rejected
-  evidence separately from promote/reject/insufficient-evidence disposition.
+  budget revision; `performance-comparisons` shows baseline/candidate evidence
+  and promote/reject/insufficient-evidence disposition.
 - Hint emission, delivery, action, usefulness, dismissal, and unknown-outcome funnels.
 - Appropriate-reliance views keep accepted-correct, accepted-incorrect,
   rejected-correct, rejected-incorrect, independently verified, override with
@@ -883,7 +773,7 @@ queryable.
   latency, observed native fast-forward/merge/cherry-pick outcomes, stale-stack
   age, GitHub stack capability state and generic-fallback availability, unioned and
   cause-attributed blocked time, runtime/test/CI reruns, duplicate effects,
-  operational/privacy leaks, and delivery fanout. Every card exposes support,
+  operational leaks, and delivery fanout. Every card exposes support,
   eligible denominator, censoring/unknowns, interval coverage, horizon,
   descriptor revision, and safe anchors; unsupported or under-floor metrics
   render unavailable rather than zero.
@@ -924,7 +814,7 @@ schema and projector revision, sampling/capping state, redacted-name count,
 and emitted, delayed, dropped, and unreported-event coverage. Rankings and
 rates are unavailable when coverage or cardinality controls make them
 misleading. Low-frequency dimensions are suppressed or coarsened under the
-shared privacy policy; raw values, payloads, prompts, paths, hostnames, user
+shared export allowlist; raw values, payloads, prompts, paths, hostnames, user
 identifiers, secrets, error text, and reversible token digests are neither
 stored nor exposed by drill-down.
 
@@ -934,7 +824,7 @@ provider/model/host biases; compare attempted names with the schema active at
 event time; and evaluate a proposed alias or help change against a pinned
 baseline. They recommend no automatic aliases and never change schemas,
 dispatch, or retry behavior. Alias adoption remains an explicit product
-decision with collision, ambiguity, maintenance, and privacy review.
+decision with collision, ambiguity, and maintenance review.
 
 ### Doctor and health
 
@@ -959,7 +849,7 @@ decision with collision, ambiguity, maintenance, and privacy review.
 - Backend adapters are `src/dashboard/observatory_api.rs` and
   `src/dashboard/costs_api.rs`. The UI implementations are
   `dashboard/observatory/src/{entry,api,types,ObservatoryPage}.tsx`,
-  `dashboard/observatory/src/{Retrieval,Adoption,Performance,Attestation,ExecutionTopology}Panel.tsx`,
+  `dashboard/observatory/src/{Retrieval,Adoption,Performance,ExecutionTopology}Panel.tsx`,
   `dashboard/costs/src/{entry,api,types,CostsPage}.tsx`, and
   `dashboard/costs/src/ExecutionEfficiencyPanel.tsx`. Dashboard formulas are
   prohibited; these files render application read models.
@@ -980,11 +870,12 @@ decision with collision, ambiguity, maintenance, and privacy review.
 - Observatory, CLI, MCP, HTTP, and exports pass value and coverage parity tests
   in PR14; PR18 SDK conformance adds the same parity fixtures for each shipped
   SDK.
-- Privacy fixtures prove events and drill-down anchors contain no prohibited raw content.
+- Product-path tests prove events and drill-down anchors contain no prohibited
+  raw content.
 - Execution-topology contract fixtures serialize and round-trip every exact
   event kind and enum above; schema scans reject every prohibited identity/
   content field and every free-form metric label. Each Plan 14 topology,
-  operation, event, platform, privacy, and retention case contributes at
+  operation, event, platform, and retention case contributes at
   least one source-event assertion and one expected-rollup assertion.
 - Concurrency/fanout fixtures reconcile requested, Plan 24-accepted, Plan
   32-admitted, active, useful, serialized, blocked, and capacity-deferred
@@ -997,8 +888,7 @@ decision with collision, ambiguity, maintenance, and privacy review.
   not-duplicate/censored/unknown outcomes; report wall/tokens/cost/tests/
   effects separately; and prove task splitting, retries, redelivery, or
   duplicate-effect prevention cannot improve the denominator. Duplicate
-  committed effects and privacy-canary leaks are hard non-zero promotion
-  failures.
+  committed effects and prohibited telemetry payloads reject promotion.
 - Conflict fixtures build separate mechanical, semantic, and combined
   confusion matrices from predictions made before integration and
   independent outcomes. They include true/false positive and negative,
@@ -1023,7 +913,7 @@ decision with collision, ambiguity, maintenance, and privacy review.
   and original denominator, and reject log replay, SSE redelivery, the same
   attempt, or a renamed branch as a rerun. Leak fixtures cover lease-after-
   terminal, ownerless attempt, effect-unknown past deadline, missing worktree
-  binding, unbounded delivery, privacy canary, none, and unknown with exact
+  binding, unbounded delivery, none, and unknown with exact
   recovery/coverage semantics.
 - Cardinality, retention, and parity fixtures enforce fixed width/time
   buckets, eight grouping dimensions, 4,096 local cells/day, 256 returned
@@ -1048,10 +938,9 @@ decision with collision, ambiguity, maintenance, and privacy review.
 - Resource fixtures reconcile scheduled-arrival latency, every span, RSS,
   tokens/cost evidence class, and effect state; no-progress fixtures prove a
   heartbeat alone cannot extend the progress frontier or synthesize success.
-- Attestation fixtures prove clean/provisional/rejected classification,
-  immutable digests, independent baseline lineage, frozen thresholds, no
-  fabricated or sentinel baseline, no coordinated omission, protected-stratum
-  visibility, and aggregate-only Git artifacts.
+- Comparison fixtures prove reproducible baseline lineage, frozen thresholds,
+  no fabricated or sentinel baseline, no coordinated omission, protected-
+  stratum visibility, and aggregate-only Git artifacts.
 - Plan 24 routing-review fixtures prove cohort eligibility, minimum sample and
   coverage, policy/evidence revisions, requested-versus-actual route,
   independent outcome evidence, exploration/fallback state, and override

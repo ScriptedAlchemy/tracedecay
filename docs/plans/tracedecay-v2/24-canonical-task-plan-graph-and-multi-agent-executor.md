@@ -54,7 +54,7 @@ The graph retains:
   hints, skills, retrieval anchors, checkpoints, artifacts, outcomes, residual
   risk, token, latency, and cost evidence; and
 - valid and observation time, source watermarks, entity versions, policy,
-  configuration, catalog, privacy, provider, and estimator revisions.
+  configuration, catalog, provider, and estimator revisions.
 
 Task identity is never a card row, title, session, branch, prompt, workflow run,
 provider profile, path, or external issue number. External identifiers are
@@ -64,7 +64,7 @@ items without copying identity.
 
 Every mutation records actor, typed scope, expected graph/item versions,
 idempotency identity, causation, evidence, source watermark, and pinned policy,
-configuration, catalog, and privacy revisions. Same-key/same-input replay
+configuration, and catalog revisions. Same-key/same-input replay
 returns the original receipt; changed input conflicts. Current projections are
 rebuildable from immutable history.
 
@@ -124,7 +124,7 @@ PR17 retains the complete task-intelligence capability:
 
 - task-shape assessment covers complexity, ambiguity, blast radius,
   context/tool burden, coupling, concurrency, integration overhead,
-  security/privacy risk, and unknown feature coverage;
+  sensitive-data/network-boundary risk, and unknown feature coverage;
 - sizing preserves ordinal or heuristic estimates and calibrated ranges with
   estimator, cohort, horizon, support, error, drift, and coverage;
 - decomposition proposals preserve parent/child identity, gating versus
@@ -132,7 +132,7 @@ PR17 retains the complete task-intelligence capability:
   alternatives, fan-out and synthesis shape, integration cost, collapse
   conditions, and independent-review requirements;
 - route recommendations preserve eligible executor/provider/backend/model/
-  effort choices, exact exclusions, capability and privacy fit, expected
+  effort choices, exact exclusions, capability and content-location fit, expected
   ranges, requested and actual route, human override, exploration propensity,
   deterministic fallback, and abstention; and
 - live proposals preserve split, merge, resize, reroute, re-review, restart,
@@ -174,7 +174,7 @@ authorization, source lifecycle, retention, and expiry; returns bounded
 explanation and coverage without a composite person score; and keeps no
 cross-request cache beyond its declared ephemeral lifetime. Revocation,
 deletion, expiry, or authorization loss invalidates active handles immediately
-and purges privacy-bearing inputs, projections, and caches within the bounded
+and purges ephemeral expertise inputs, projections, and caches within the bounded
 retention contract, leaving only a non-reversible deletion tombstone.
 Handoffs record exact work/evidence frontier, unknowns, blockers, legal
 actions, and lineage so rediscovery and reliance can be measured.
@@ -297,9 +297,10 @@ fixture framework, or contract-only phase counts as delivery.
 
 ## Safety constraints
 
-- Authorization, privacy, redaction, secret handling, and non-disclosure apply
-  to every graph relation, evidence expansion, model context, artifact, event,
-  view, metric, and handoff.
+- Every graph relation, evidence expansion, model context, artifact, event,
+  view, metric, and handoff remains bound to its exact authorized project/user
+  scope; logs and fixtures contain no prompts, private source, provider
+  payloads, or credentials.
 - Graph and projection writes use expected-version CAS, idempotency, immutable
   events, deterministic rebuild, and crash-safe owner-shard transactions.
 - No provider receives global board/store access, unrelated sibling context,
@@ -328,7 +329,7 @@ independent review/outcome evidence, and an unapplied replan.
 Focused behavior covers DAG cycles and supersession, current/as-of/evolution/
 forensic history, projection equivalence, no-Git and every supported topology,
 task/stack DAG separation, exact required/produced commits, stale graph/
-evidence/route/config/provider/lease state, authorization/privacy narrowing,
+evidence/route/config/provider/lease state, authorization narrowing,
 partial and unknown evidence, idempotent replay/conflict, capacity deferral,
 cancellation/restart/effect recovery, independent-review isolation, harmful
 recall quarantine, deterministic fallback, calibration drift, no recursive
@@ -339,7 +340,7 @@ role isolation, minority-review preservation, and no false completion.
 Expertise-focused tests prove the separate operation is default-off and
 purpose-authorized; consent grant enables only the scoped ephemeral view;
 revocation, source deletion, expiry, authorization loss, and purge invalidate
-handles and remove privacy-bearing state within the bound; Plan 37 input
+handles and remove ephemeral expertise state within the bound; Plan 37 input
 remains anchored and authorization-checked; and no expertise signal changes
 canonical retrieval/evidence, rank/order, readiness, assignment, reviewer
 selection, acceptance, completion, calibration, or durable task history.

@@ -40,7 +40,7 @@ placement, safe Git integration, remote fencing, and backup/restore behavior.
 1. A Plan 24 accepted work version supplies exact readiness, evidence,
    decomposition/topology, route, grants, budgets, and acceptance references.
 2. The user separately admits execution. The application reauthorizes every
-   reference and one complete policy/configuration/privacy/capability snapshot
+   reference and one complete policy/configuration/capability snapshot
    before the runtime reserves capacity or starts a provider.
 3. The runtime creates one durable run-control aggregate, acquires fenced
    leases, creates an attempt, and negotiates the selected provider. No
@@ -67,7 +67,7 @@ An immutable definition version retains owner and scope, input/output schemas,
 typed steps referencing cataloged application operations, validated references
 to prior outputs, runtime predecessor edges, bounded fan-out groups,
 concurrency/failure policy, route/capability requirements, budgets, result
-conditions, retention, and pinned policy/configuration/catalog/privacy
+conditions, retention, and pinned policy/configuration/catalog
 snapshots.
 
 Definitions are product data, not source code. Unknown operations, cycles,
@@ -150,8 +150,8 @@ without synthesis preserves all failures and disagreement.
 
 Plan 32 never reranks models, infers a provider from a model string, discovers
 ambient executables, or invents fallback. A human override is version checked,
-attributable, limited to eligible routes, and unable to widen grants, privacy,
-egress, budget, or deadline. No route can change after provider startup; any
+attributable, limited to eligible routes, and unable to widen grants, project
+scope, egress, budget, or deadline. No route can change after provider startup; any
 later eligible fallback is a new revalidated attempt.
 
 ## Native provider execution
@@ -202,15 +202,15 @@ is never retried automatically.
 
 Progress and heartbeat update only attempt liveness/history and never renew a
 lost lease or prove completion. Artifacts enter only declared bounded channels
-with identity, type/content validation, authorization, privacy, coverage, and
-retention.
+with identity, type/content validation, exact project authorization, coverage,
+and retention.
 
 Every terminal envelope preserves run/node/attempt/lease, producer, requested
 and actual route, source frontier, terminal receipt, typed observations,
 artifacts, coverage, unknowns, disagreements, budget use, source packets, and
-payload digest. Sealing validates fence, frontier, schema, authorization,
-redaction, and digest. Seal plus outbox publication is atomic and delivery
-acknowledgement is idempotent.
+payload digest. Sealing validates fence, frontier, schema, exact project
+authorization, redaction, and digest. Seal plus outbox publication is atomic,
+and delivery acknowledgement is idempotent.
 
 Completed, unsupported, absent, stale, cancelled, timed out, failed, partial,
 and effect unknown remain distinct. Process exit or provider summary without a
@@ -313,7 +313,7 @@ Plan 32 emits bounded typed source events for run outcome/duration, queue and
 capacity, budget, provider route, retries, cancellation escalation, no-progress
 timeout, effect unknown, recovery, recursive-dispatch rejection, fan-out,
 placement, quarantine, Git preflight, integration, conflicts, ref updates, PR
-retarget, and safety rejection. Plan 26 owns metric meaning, privacy,
+retarget, and safety rejection. Plan 26 owns metric meaning,
 retention, dashboards, and calibration.
 
 High-cardinality task/run/project/user/path/prompt/model-version/artifact
@@ -385,9 +385,9 @@ The same journey expands to prove:
   no recursive execution;
 - native Claude Code routing, Codex app-server and explicitly configured CLI
   fallback, no provider-local defaults or hidden model choice, typed argv/stdin,
-  secret/environment canaries, malformed stream handling, approvals,
+  direct credential/environment handling, malformed stream handling, approvals,
   cancellation escalation, reconnect/resume, and every terminal state;
-- stale graph/readiness/evidence/route/config/privacy/provider/authority/lease
+- stale graph/readiness/evidence/route/config/provider/authority/lease
   rejection before effect, same-key replay and changed-input conflict, no
   duplicate observable effect, and truthful partial/unknown recovery;
 - all retained workflow definition/run/control/history/evidence/provider/

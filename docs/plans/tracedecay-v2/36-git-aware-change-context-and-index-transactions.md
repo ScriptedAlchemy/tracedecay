@@ -47,7 +47,7 @@ Git implementation or unrestricted command runner.
   rename/copy, filter, sparse-path, and other special hunk kinds retain
   explicit capability states; a kind without a proven native round trip stays
   read-only rather than yielding an applicable `HunkRef`.
-- PR12 exposes the same application operations, authorization, privacy,
+- PR12 exposes the same application operations, exact project scope,
   schemas, errors, rendering, and receipts through CLI and MCP. Transports
   contain no Git logic or fallback mutation path.
 
@@ -66,7 +66,7 @@ committed, unchanged, rolled back, or requiring inspection.
 
 1. **Freeze the selected Git scope.** Plan 16 supplies the exact authorized
    `ProjectId`, `RepositoryId`, source/destination `WorktreeId`s, full refs,
-   commit IDs, immutable code snapshots, scope/grant digests, policy epoch, and
+   commit IDs, immutable code snapshots, scope/grant and policy revisions, and
    inventory evidence plus either an explicit independent-branch proposal or
    exact `BranchStackId`/revision/source-node/destination-node/declared-edge
    binding. `stack_snapshot` reauthorizes and freezes the visible node/edge set
@@ -117,7 +117,7 @@ committed, unchanged, rolled back, or requiring inspection.
    and a one-use content-bound approval naming the principal, optional
    delegated agent, exact `NativeIntegrationApply` capability, analysis/scope
    digests, source/destination and independent-proposal/stack-edge binding,
-   mechanical mode, policy digest/epoch, expiry, and nonce. General repository
+   mechanical mode and expiry. General repository
    write, shell, task, query, LSP, collection, inventory, stack-read,
    proximity, daemon locality, or preflight permission is
    insufficient. The daemon reauthorizes before the first durable mutation
@@ -189,8 +189,8 @@ provable terminal outcome.
 - Stack resolution, preflight, and apply remain separate capabilities. A
   partially visible stack exposes neither hidden node identity/count nor
   transitive topology, and apply cannot traverse or infer through a hidden
-  node. Every stack/inventory/scope epoch is rechecked rather than advanced to
-  current.
+  node. Every stack, inventory, and scope snapshot is validated rather than
+  advanced to current.
 - Diffs, paths, untracked content, commit messages, author identities, blame,
   remotes, and review evidence are independently classified. Rendering
   redacts secrets and sensitive paths and omits untracked bodies by default;

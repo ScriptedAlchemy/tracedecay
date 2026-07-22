@@ -49,7 +49,7 @@ not cover a required platform, stratum, or failure mode, PR20 reports
    effects and intervals, and predeclare practical improvement and regression
    margins.
 5. Promote only when the improvement clears its practical margin and every
-   semantic, privacy, authority, quality, lifecycle, resource, and recovery
+   semantic, project-isolation, authority, quality, lifecycle, resource, and recovery
    guard remains within its harm margin on required Linux and Windows strata.
 6. Activate through a versioned performance profile that pins the exact prior
    accepted profile. Runtime rollback returns only to that verified profile and
@@ -142,7 +142,7 @@ or fill a baseline with sentinel values.
   equivalent.
 - Daemon/LSP/provider runtime: bound queues and concurrency, reserve
   health/Doctor/diagnostic/cancellation capacity, coalesce without crossing
-  scope or privacy identity, propagate cancellation, and isolate overlays,
+  project scope, propagate cancellation, and isolate overlays,
   provider context, secrets, and attempts.
 - Developer feedback: remove obsolete dependency/feature/build-script edges
   and split build or test boundaries only when repeated same-workload evidence
@@ -162,7 +162,7 @@ or fill a baseline with sentinel values.
   Reserve health, Doctor, diagnostics, heartbeat, and cancellation capacity so
   bulk load cannot make the daemon unobservable.
 - Multiplex short-lived client connections and share heavy same-worktree engine
-  state only under complete store/generation/scope/privacy/authorization/
+  state only under complete store/generation/scope/authorization/
   configuration identity. Fair leases, read coalescing, connection/file-
   descriptor high-water, reserved recovery capacity, idle eviction, restart,
   connect/disconnect drain, and injected resource-exhaustion recovery remain
@@ -176,7 +176,7 @@ or fill a baseline with sentinel values.
   vectors, task/work horizons, and model cohorts justified by versioned
   dependency evidence.
 - Reuse immutable generations/caches only by complete content, schema, grammar/
-  model, privacy, scope, and configuration identity. Distinguish OS page cache,
+  model, project scope, and configuration identity. Distinguish OS page cache,
   SQLite page cache/mmap, statement/connection cache, immutable application
   generations, and model/vector cache; “cold” and “warm” require exact
   preparation.
@@ -257,7 +257,7 @@ or fill a baseline with sentinel values.
 - Preserve typed argv/stdin, exact executable/protocol/model identity,
   sandbox/approval/environment boundaries, ordered structured events, lease
   fencing, and resume proof. Process pooling or app-server reuse requires exact
-  scope/privacy/configuration identity and cannot retain another attempt's
+  project/configuration identity and cannot retain another attempt's
   context or secrets.
 - Lower startup cost never permits hidden CLI fallback, shell execution,
   PID-only adoption, dropped terminal outcomes, recursive auxiliary dispatch,
@@ -265,7 +265,7 @@ or fill a baseline with sentinel values.
 - Native Claude Code CLI, Codex app-server, and explicitly allowed Codex CLI
   fallback remain distinct strata. Missing/stale executables, version changes,
   malformed/oversized streams, saturation, missing heartbeat, cancellation,
-  daemon restart/resume, secret canaries, and concurrent auxiliary attempts
+  daemon restart/resume, credential-handling failures, and concurrent auxiliary attempts
   across isolated worktrees remain in the journey.
 - The workflow deadline and progress frontier owners remain unchanged.
   Measure queue wait, remaining monotonic deadline, configured no-progress
@@ -274,7 +274,7 @@ or fill a baseline with sentinel values.
 - Stalled temporal/session retrieval exposes last real progress, backlog,
   blocker, retry class, and typed unavailable reason and rejects known
   unavailable reads before expensive retrieval. Heartbeats never synthesize
-  progress, and restart/idempotency/privacy behavior remains unchanged.
+  progress, and restart/idempotency behavior remains unchanged.
 
 #### Git intelligence and LSP gateway
 
@@ -350,31 +350,25 @@ ineligible.
 
 ### Runtime rollout and rollback
 
-- Side-effect-free paths may use concurrent shadow control. Other paths use
-  policy-approved deterministic canary/control assignment with equivalent
-  workload strata and no user, project, or payload labels.
-- The rollout policy pins candidate, control, exact prior accepted profile,
-  their revisions, the accepted baseline revision, and compatibility digest.
-  There is no “latest profile” lookup.
-- Eligible matched windows are non-overlapping 15-minute windows and reset only
-  on profile activation epoch. Live performance rollback requires three
-  consecutive eligible windows whose one-sided harm interval exceeds the
-  frozen margin; one separately configured hard resource/deadline breach rolls
-  back immediately.
-- Without an eligible control, rollout cannot continue: the canary returns to
-  the exact pinned prior accepted profile and records
-  `insufficient_evidence`. Missing telemetry, full control lane, capped
-  coverage, or excessive noise reverts an active canary after one complete
-  window and is not proof of health.
-- Rollback verifies the pinned compatibility digest, preserves durable
-  evidence, keeps in-flight work pinned until the workflow owner fences or
-  reconciles it, and never retries through an effect-unknown outcome.
+- Activate a candidate through a versioned profile that names the exact prior
+  accepted profile and exposes an explicit rollback operation; there is no
+  “latest profile” lookup.
+- Side-effect-free paths may shadow the candidate. Effectful paths use the
+  owning operation's normal receipts and fencing rather than a separate
+  performance-control protocol.
+- Semantic divergence, a practical resource/deadline regression, wrong-project
+  output, duplicate/unknown effects, or recovery failure returns to the pinned
+  prior profile. In-flight work remains under its owning workflow's
+  reconciliation rules.
+- Missing or noisy comparison evidence prevents activation or reports
+  `insufficient_evidence`; it does not create epochs, fixed-window rituals, or
+  a standalone canary gate.
 
 ## Semantic and safety constraints
 
 - One fenced daemon owns each mutable shard. No optimization adds a client
   database connection, second writer, dual write/read, or repair-on-read path.
-- Results preserve authorization, privacy/redaction, stable errors, scope,
+- Results preserve authorization, project isolation, stable errors, scope,
   exact tiers, ordering, cursors, coverage, legal actions, durable effects,
   idempotency receipts, paging, streaming, backpressure, cancellation, retry,
   reconnect/resume, and one canonical terminal outcome.
@@ -382,7 +376,7 @@ ineligible.
   their owner. Batching never weakens atomic cursor/receipt/projection commits
   or crash/restart replay.
 - Cache, process, analyzer, connection, or generation sharing requires complete
-  store, project/worktree generation, scope, privacy, authorization,
+  store, project/worktree generation, scope, authorization,
   configuration, protocol, model/provider, and overlay identity as applicable.
 - Explicit Git mutation preserves preview freshness, index-lock ownership,
   atomicity, receipts, and rejection of autonomous branch, ref, worktree,
@@ -410,13 +404,13 @@ ineligible.
   partial child-process/resource coverage, stale or dirty subject identity, or
   incomplete correctness coverage produces `insufficient_evidence` and no
   rollout.
-- Placeholder/invalid digests, fabricated or incompatible baseline lineage,
-  missing raw aggregate lineage, post-result threshold changes, coordinated
+- Fabricated or incompatible baseline lineage, missing raw aggregate lineage,
+  post-result threshold changes, coordinated
   omission/survivor bias, hidden protected strata, or measurement-artifact
   leakage invalidate the comparison entirely. They do not decide candidate
   quality or remain published as accepted evidence.
 - Active rollout immediately returns to the exact pinned prior accepted profile
-  on semantic divergence, authority/privacy violation, wrong-scope evidence,
+  on semantic divergence, authority violation, wrong-scope evidence,
   hidden fallback, duplicate or unknown unsafe effect, secret disclosure,
   deterministic-order failure, or recovery failure.
 - The final aggregate gate passes with only accepted production changes and

@@ -52,7 +52,7 @@ capabilities:
   provider-execution, topology, placement, integration, evidence, and
   SDK-facing semantic operation listed by Plans 24 and 32.
 
-Rejected-argument observation remains one privacy-safe dispatch event across
+Rejected-argument observation remains one bounded dispatch event across
 CLI, MCP, and HTTP. It may record only a cataloged or bounded unknown operation
 class, normalized argument name that passes the safe grammar, stable rejection
 class, schema/producer/transport/time/trace/idempotency metadata, and trusted
@@ -77,7 +77,7 @@ context extension without turning LSP into a generic tool proxy.
 1. A CLI command, MCP tool, HTTP operation, standard LSP method, or negotiated
    TraceDecay context request resolves one Plan 08 BindingId and decodes into
    the same typed application request and `RequestContext`.
-2. The daemon rechecks capability, authorization, scope, privacy, generation,
+2. The daemon checks capability, exact project/user scope, generation,
    deadline, cancellation, and capacity, then calls the one cataloged
    application handler. No adapter opens a writable business store or supplies
    handler-local query, policy, or fallback behavior.
@@ -230,7 +230,8 @@ arbitrary JSON payload, or Markdown-plan execution entry point.
   Responses reveal no hidden identity, count, cursor, provider state, timing,
   existence, or alternative binding.
 - Terminal controls, Markdown, labels, paths, errors, provider output,
-  artifacts, and logs pass shared output/privacy safety. JSON is never
+  artifacts, and logs contain no credentials, prompts, private source, or
+  provider payloads. JSON is never
   double-encoded, and truncation is never irreversible.
 
 ## Progress, cancellation, and daemon capacity
@@ -318,7 +319,7 @@ Focused failures cover missing/incompatible/saturated daemon, unauthorized or
 hidden resources, stale graph/proposal/configuration/provider evidence, cursor
 theft and expiry, partial and oversized evidence, cancellation before and
 after effect commit, disconnect/reconnect, stream gaps, invalid fallback,
-secret and terminal-control canaries, recursive-dispatch attempts, dirty or
+credential leakage and terminal-control cases, recursive-dispatch attempts, dirty or
 conflicting Git preview, CAS drift, duplicate apply, and effect-unknown
 reconciliation.
 

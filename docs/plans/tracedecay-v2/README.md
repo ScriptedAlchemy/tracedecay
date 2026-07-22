@@ -36,7 +36,7 @@ requirements and boundaries, not separate crate-first work queues.
   sources use bounded fair scheduling, atomic cursor/projection commits, and a
   staged bounded projection rebuild rather than provider-local durable state.
 - Executable native host fixtures and typed hook-telemetry readiness now replace
-  prose-only provider claims. The clean attested PR6 benchmark acceptance is
+  prose-only provider claims. The clean PR6 benchmark acceptance is
   recorded by commit `05da230e`; PR6 is complete.
 
 ## Storage and authority
@@ -102,16 +102,20 @@ Similarity, rank, centrality, and heuristic values are not probabilities, and
 no universal quality, health, reward, readiness, or performance score becomes
 product truth.
 
-The authorization/privacy, durable-integrity/recovery, migration/cutover,
-compatibility, Git-safety, and truthful-unavailable guards are centralized in
-[00-plan-set-index.md](00-plan-set-index.md) and apply to every plan. Numbered
-plans may specialize those guards for a product journey but must not restate or
-weaken them.
+The practical safety baseline is centralized in
+[00-plan-set-index.md](00-plan-set-index.md): no credential, prompt, private
+source, or provider-payload leakage in logs/fixtures; exact project/user
+isolation; authentication at actual network boundaries; and
+confirmation/rollback/CAS for destructive Git, host, or protected
+configuration operations. Numbered plans keep only the operation-local check
+that protects a real boundary and attach it to direct product acceptance.
+They do not add standalone privacy/security matrices, proof packets,
+attestations, or gates.
 
 PR12 transport and PR18 SDK contracts prove structural, semantic, and lifecycle
 compatibility against supported old and current consumers. Direct fault,
-restart, concurrency, cross-platform, privacy, migration, recovery, and deletion
-tests remain part of the product journey they protect.
+restart, concurrency, cross-platform, migration, recovery, and deletion tests
+remain part of the product journey they protect.
 
 Product, contributor, CI, release, and publication behavior preserves stock
 Cargo semantics. A slice that materially changes crate boundaries, dependency

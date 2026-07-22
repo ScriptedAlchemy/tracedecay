@@ -23,7 +23,7 @@ path as working product behavior.
 4. Deterministic policy always remains available. When explicitly configured
    and authorized, the owned model gateway may propose or refine a structured
    candidate using only the approved evidence and current budgets.
-5. Policy checks relevance, novelty, authority, privacy, freshness, timing,
+5. Policy checks relevance, novelty, exact project scope, freshness, timing,
    dedupe, latency, token, and cost limits. Silence or a typed suppression is a
    successful outcome.
 6. The daemon commits at most one ready suggestion for the exact address and
@@ -74,7 +74,7 @@ and treats historical narrative as quoted evidence, never active instruction.
   budget exhaustion, return an explicit outcome and use deterministic fallback
   only where policy permits it.
 - Preserve requested versus actual route/capability receipts, configured
-  success, disabled mode, unavailable provider, disconnect, privacy denial,
+  success, disabled mode, unavailable provider, disconnect, scope denial,
   and cost exhaustion as distinct outcomes.
 
 ### Delivery and feedback
@@ -99,18 +99,13 @@ and treats historical narrative as quoted evidence, never active instruction.
   references for PR14 Doctor. PR13 owns the working Scout operations and
   evidence; PR14 owns canonical diagnosis and remediation orchestration.
 
-## Overlay privacy boundary
+## Overlay handling
 
-Saved content or a clean generation may contribute to a durable suggestion
-only when its identity remains attached through retrieval, commit, delivery,
-feedback, and every durable sink.
-
-Unsaved or dirty-overlay semantic results may inform an explicitly authorized
-immediate session-only suggestion. They must never enter an envelope,
-checkpoint, receipt, feedback history, observation, fact, memory, telemetry
-payload, spool, cache, replica, export, or remote request. If durable delivery
-was requested, Scout returns a typed suppressed or unavailable result instead
-of persisting or forwarding overlay-derived content.
+Durable suggestions require exact saved-content or clean-generation identity.
+Unsaved or dirty-overlay results may inform only the owning client's immediate
+session and never enter durable state, telemetry, fixtures, exports, or remote
+requests. A request for durable delivery is suppressed until the content is
+saved.
 
 ## Replacement and deletion
 
@@ -123,7 +118,7 @@ of persisting or forwarding overlay-derived content.
   or feedback logic.
 - This pruning removes no deterministic or model-assisted path, semantic
   evidence source, timing mode, feedback outcome, control/status surface,
-  restart behavior, compatibility behavior, or privacy requirement.
+  restart behavior, compatibility behavior, or overlay behavior.
 
 ## Direct acceptance
 
@@ -134,7 +129,7 @@ of persisting or forwarding overlay-derived content.
   remain distinguishable and do not damage deterministic Scout.
 - Restart, duplicate event, lease takeover, cancellation, and partial write do
   not duplicate delivery or attach feedback to the wrong address.
-- Wrong project, session, turn, agent, message, content generation, or privacy
+- Wrong project, session, turn, agent, message, or content generation
   domain suppresses delivery.
 - Silence, dedupe, expiry, quiet mode, timing, token, latency, and cost limits
   are enforced without fixed planning-only benchmark packets.
@@ -142,9 +137,8 @@ of persisting or forwarding overlay-derived content.
   volume and preserves the eligible/delayed/suppressed denominator. It proves
   immediate conflicts versus boundary-delayed nonurgent guidance without
   replacing production behavior with paper timing constants.
-- Positive saved-content coverage proves identity survives every durable sink.
-  A negative dirty-overlay secret canary proves no overlay-derived evidence
-  reaches one.
+- Saved-content coverage proves identity survives every durable sink, and
+  dirty-overlay coverage proves overlay-derived evidence reaches none.
 - Scout failure leaves capture, ordinary host feedback, and daemon health
   intact. No result causes an edit, GitHub write, CI rerun, task mutation,
   workflow admission, or automatic agent continuation.

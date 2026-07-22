@@ -49,7 +49,7 @@ right data.
    or fails; it never falls back to CWD, the active checkout, the first
    workspace folder, a cached project, all registered projects, or an
    empty/newest store or collection.
-3. Query fans out only after authorization and privacy classification. It
+3. Query fans out only after exact per-root authorization. It
    bounds concurrency and cost, merges results deterministically while
    preserving per-root provenance, and returns searched, stale, unavailable,
    redacted, denied-without-enumeration, and truncated coverage. Partial
@@ -63,7 +63,7 @@ right data.
    producer, scale/revision, evidence, cohort where applicable, and coverage.
 4. A distributed cursor binds the immutable ordered root set, scope and grant
    digests, collection ID/kind/revision and membership digest when used,
-   canonical member/root orders, policy epoch, per-root
+   canonical member/root orders, per-root
    snapshot/generation/continuation vector, query/fusion profile, last ordering
    key, expiry, and safe coverage summary. Every page reauthorizes every root.
    Membership, root, policy, grant, or generation drift returns stale or
@@ -141,8 +141,8 @@ right data.
 12. The optional default collection and Plan 20 source bindings enter this
    same path as explicit selectors. Default selection never outranks an
    explicit target or widens authority. Source-binding dry-run freezes exact
-   target, locator, scope, membership, authorization-policy, and policy-epoch
-   digests; apply re-resolves and fails closed on ambiguity, expiry,
+   target, locator, scope, membership, and authorization; apply re-resolves and
+   fails closed on ambiguity, expiry,
    revocation, or drift. Missing and denied explicit targets share a
    policy-safe unavailable shape unless all disambiguation candidates are
    visible.
@@ -254,7 +254,7 @@ truthful policy-safe partial coverage; and no document, diagnostic, result, or
 count crosses root authority.
 
 The journey exercises explicit roots, immutable query/workspace collection
-revisions, optional default and source-binding resolution, policy change
+revisions, optional default and source-binding resolution, authorization change
 between pages, score semantics, and exact owner-anchor loading. It inventories
 linked/detached/unborn/locked/prunable worktrees, safely cleans one eligible
 worktree without deleting its branch, reconciles a crash outcome, publishes and

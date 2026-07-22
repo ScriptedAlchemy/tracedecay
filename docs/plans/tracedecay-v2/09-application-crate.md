@@ -92,7 +92,7 @@ admission, or safety checks.
    without mutating the graph or runtime.
 4. **Review and admit.** A user explicitly accepts or rejects the proposal with
    graph/proposal/evidence CAS. A separate command reauthorizes the accepted
-   work version, readiness, scope, route, grants, budgets, privacy, and
+   work version, readiness, scope, route, grants, budgets, and
    configuration immediately before Plan 32 acquires a lease or starts a
    provider.
 5. **Inspect execution.** Reads expose the requested and actual provider/model,
@@ -115,8 +115,8 @@ independent PR17 phases.
 - Preserve actor, ProjectId, repository/worktree/branch scope, capability
   grant, request identity, deadline, cancellation, and disclosure constraints
   through every call.
-- Revalidate authorization, policy, configuration, catalog/provider
-  capability, privacy, evidence, graph versions, readiness, budgets, and
+- Revalidate exact project/user authorization, configuration, catalog/provider
+  capability, evidence, graph versions, readiness, budgets, and
   expected runtime state immediately before every read expansion or effect.
 - Use operation-specific idempotency keys. Same key and canonical input return
   the original receipt; a changed input fails with an idempotency conflict.
@@ -163,7 +163,7 @@ ordered. Invalid or stale calibration remains explicit.
 
 - Proposal generation is read-only. Every proposal pins the work and graph
   versions, evidence watermarks and anchors, code/Git generation, scope,
-  policy/configuration/catalog/privacy revisions, and runtime observations it
+  policy/configuration/catalog revisions, and runtime observations it
   used.
 - Accept, reject, and supersede are separate commands with expected versions,
   authorization, actor, reason, and idempotency identity. Stale or illegal
@@ -241,8 +241,8 @@ One production journey, exercised through the shared application path, must:
 7. generate a justified replan that leaves graph and runtime state unchanged
    until another explicit command.
 
-Focused failures cover cycle and stale-version rejection, authorization and
-privacy narrowing, partial evidence, missing provider capability, invalid
+Focused failures cover cycle and stale-version rejection, authorization
+narrowing, partial evidence, missing provider capability, invalid
 fallback, idempotent replay/conflict, cancellation before and after an effect
 commit point, restart recovery, stale lease/attempt receipts, unknown effects,
 no recursive provider dispatch, and no false completion. The aggregate gate

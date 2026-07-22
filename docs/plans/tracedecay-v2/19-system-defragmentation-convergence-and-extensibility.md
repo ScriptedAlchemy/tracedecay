@@ -49,7 +49,7 @@ the current authority unchanged.
   retain use-case coordination, policy, authorization, and transactions;
   infrastructure retains stores, providers, runtimes, and operating-system
   effects; adapters retain syntax translation only.
-- Storage, configuration, privacy, identity, query, diagnostics, lifecycle,
+- Storage, configuration, identity, query, diagnostics, lifecycle,
   repair, and durable disposition derivation each have one canonical owner.
   Reads never repair. Skip/collision/refusal dispositions are interpreted in
   that derivation owner rather than patched independently into drain, audit,
@@ -108,8 +108,8 @@ the current authority unchanged.
 
 ## Replacement and deletion
 
-The surviving system has one owner for storage, configuration, privacy,
-identity, query, diagnostics, scheduling, and lifecycle. Extensions use typed,
+The surviving system has one owner for storage, configuration, identity,
+query, diagnostics, scheduling, and lifecycle. Extensions use typed,
 revisioned capabilities and cannot bypass authorization or daemon authority.
 A new crate is retained only for a real ownership/runtime boundary or a
 measured build-graph benefit; file size, speculative reuse, or package-count

@@ -25,8 +25,8 @@ after cutover; it never restores V1 as a writer.
    backup. The only usable copy is never overwritten.
 3. The daemon imports every detected supported family into isolated V2 staging
    in bounded transactions. Durable checkpoints bind the migration and source
-   epochs, family and deterministic range, transform/privacy revisions,
-   destination identity, counts, and digest. Restart revalidates those inputs
+   epochs, family and deterministic range, transform revision, exact
+   project/user destination identity, counts, and digest. Restart validates those inputs
    and is idempotent or fails closed.
 4. Verification compares identities, references, counts, normalized content
    and content hashes where applicable, normalized query results,

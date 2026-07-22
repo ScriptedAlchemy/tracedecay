@@ -73,8 +73,10 @@ scheduling, completion, or calibration independently.
    outcome. Every problem preserves exactly the Plan 09 retry directive
    `Never | SameRequest | AfterDelay | AfterRevalidate | AfterReconcile`; SDKs
    never infer retry from transport or status.
-5. Privacy and redaction run before every response, stream item, error,
-   diagnostic, and log. Credential material stays opaque.
+5. Responses, stream items, errors, diagnostics, logs, and fixtures contain no
+   credentials, prompts, private source, or provider payloads. Credential
+   references stay opaque and are resolved only by the daemon for the
+   authorized operation.
 
 Equivalent SDK, CLI, MCP, and HTTP calls have equivalent authorization,
 meaning, stable error codes, redaction, effects, and lifecycle behavior even

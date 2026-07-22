@@ -35,8 +35,8 @@ emulating LSP.
    LSP JSON-RPC to one daemon session. The bridge opens no store, starts no
    analyzer, and owns no routing policy.
 2. The daemon resolves one authorized PR13 workspace root, negotiates client,
-   protocol, catalog, project, analyzer, policy, configuration, and privacy
-   revisions, then accepts document content.
+   protocol, catalog, analyzer, and configuration revisions, then accepts
+   document content.
 3. Incremental open/change/save/close events maintain a versioned document
    snapshot. Unsaved overlays are isolated per client; saved content rejoins
    the clean-generation pipeline only after exact content identity matches.
@@ -193,18 +193,18 @@ review, CI, proximity, or evidence data.
   currentness is not provable, request one fresh daemon snapshot, and report a
   bounded unavailable/partial outcome.
 
-## Compatibility, privacy, and resource safety
+## Compatibility and resource safety
 
 - The stdio bridge remains transport-only and store-free. Direct socket
   registration may coexist only after proving equivalent authentication,
   lifecycle, cancellation, shutdown, and reconnect behavior.
-- LSP sessions use canonical project admission, path containment,
-  authorization, privacy, and redaction. Invalid URIs, symlink escapes, device
-  paths, denied files, stale sessions, and oversized input fail before analyzer
-  or graph access.
+- LSP sessions use exact project admission and path containment. Invalid URIs,
+  symlink escapes, device paths, denied files, stale sessions, and oversized
+  input fail before analyzer or graph access.
 - Unsaved text is memory-only for the authorized client and may reach only an
-  explicitly authorized local analyzer. Remote analyzers require explicit
-  capability and privacy disclosure. Environment inheritance is allowlisted.
+  explicitly configured local analyzer. A remote analyzer requires an
+  authenticated configured endpoint and explicit user enablement. Environment
+  inheritance is allowlisted.
 - Retain hard defaults of 4 MiB per JSON-RPC frame, 2 MiB per document,
   64 pending requests per session, 128 queued requests per engine, four
   concurrent root fan-outs, and eight admitted roots. A publication remains
@@ -274,9 +274,9 @@ review, CI, proximity, or evidence data.
   hook/MCP/CLI, and every other fallback expose the same application semantics
   where capabilities overlap. Unsupported automatic diagnostics are explicitly
   unavailable.
-- Security and restart checks prove no bridge/client opens a writable store,
-  no hidden peer/root is enumerated, no dirty overlay reaches a durable or
-  remote sink, and no LSP action mutates source or external systems.
+- Bridge/restart checks prove no bridge/client opens a writable store, no
+  hidden peer/root is enumerated, no dirty overlay reaches a durable or remote
+  sink, and no LSP action mutates source or external systems.
 - Linux, macOS, and Windows protocol runs preserve URI normalization, UTF-16
   positions, path containment, process discovery/lifecycle, stdio/socket
   behavior, cancellation, and shutdown compatibility.
@@ -291,7 +291,7 @@ review, CI, proximity, or evidence data.
 - **PR15:** Enable callable multi-root admission and
   `workspace/didChangeWorkspaceFolders` after Plan 16 resolves every folder.
   Preserve independent roots, overlays, epochs, generations, diagnostics,
-  coverage, authorization, and hidden-root privacy. Project current Plan 37
+  coverage, authorization, and hidden-root isolation. Project current Plan 37
   stack/PR capability and drift findings through the same bounded diagnostics
   or root-notification path, with standard Git/other-forge fallback when the
   optional GitHub preview is unavailable.

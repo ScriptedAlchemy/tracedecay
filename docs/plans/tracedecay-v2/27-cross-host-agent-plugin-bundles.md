@@ -141,10 +141,10 @@ credential scopes fail before network access.
   all unrelated host configuration and restore the exact prior analyzer
   selection.
 - Use `configure -> dry-run -> confirm -> apply` for host lifecycle changes
-  over Plan 20's protected configuration mutation. Apply verifies actor, base
-  revision, scope, authorization/policy epoch, effective configuration
-  digests, expiry, and the exact confirmed change plan. Raw replacement rules
-  never enter configuration or host artifacts.
+  over Plan 20's protected configuration mutation. Apply uses the exact
+  confirmed change plan and expected base revision; stale or unauthorized
+  state commits nothing. Raw replacement rules never enter configuration or
+  host artifacts.
 - Detect extension and registration conflicts before mutation. Never disable,
   replace, adopt, install, or upgrade third-party software silently.
 - Keep service-manager and daemon lifecycle separate from host registration.
@@ -170,7 +170,8 @@ The concrete GitHub path retains all accepted acquisition behavior:
   object/version identity, and advances its cursor only after canonical
   capture commits every page;
 - whole-root reconciliation stages one generation and publishes deletes only
-  after complete pagination, authorization recheck, and consistency proof;
+  after complete pagination, current repository authorization, and a
+  consistent complete scan;
 - when GitHub cannot provide a stable snapshot token, exactly two complete
   scans must agree on ordered identity/version digests before publication;
 - cursor expiry, source drift, cancellation, crash, incomplete pages, missing
@@ -196,8 +197,8 @@ Replaying an idempotency key returns the existing terminal receipt. Bounded
 full-jitter transport retry starts from one second and caps at five minutes;
 `Retry-After` caps at 15 minutes. The built-in validated defaults permit eight
 attempts and quarantine at eight, with validated limits no greater than 16.
-Authorization revocation, privacy violation, and invalid configuration
-quarantine immediately; the same redacted schema drift on three consecutive
+Authorization loss, unsafe captured input, and invalid configuration
+quarantine immediately; the same schema drift on three consecutive
 attempts, poison data, exhausted retries, or a failed single cursor-recovery
 reconcile quarantines the affected root while
 preserving its last generation. Only an explicit authorized repair against a
@@ -299,9 +300,8 @@ the host observation replay spool.
 - Configuration tests prove deny precedence, scope containment, authorization
   revocation, expiry, CAS/idempotency, and no ambient host/PATH/PID/CWD
   authority.
-- Security checks prove rejected GitHub writes make zero network calls and
-  host processes/hooks cannot open stores, widen authorization, or become
-  daemon writers.
+- Rejected GitHub writes make zero network calls, and host processes/hooks
+  cannot open stores, widen project scope, or become daemon writers.
 - Unavailable daemon, component, host API, GitHub authorization, rate limit,
   and protocol capability remain typed and do not trigger silent fallback.
 - The official lifecycle dogfood, cross-platform host runs,
@@ -350,7 +350,7 @@ the host observation replay spool.
 - GitHub access is read-only with no mutation client or hidden write path.
 - Installed adapters contain no credentials, copied product logic, or durable
   business state and never open TraceDecay stores.
-- Authorization, privacy, redaction, freshness, and coverage are rechecked at
-  acquisition, delivery, and expansion.
+- Acquisition, delivery, and expansion retain the exact authorized
+  project/repository identity.
 - Unsupported capabilities remain honestly unavailable; no host or backend is
   silently emulated by another.

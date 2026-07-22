@@ -146,7 +146,7 @@ probability, and calibrated interval, while coverage remains separate.
    `feedback.proximity.risk_threshold`, revision, and digest; adapters have no
    local default.
 4. Every warning retains risk inputs, relation paths, observation anchors,
-   freshness, expiry, coverage, inclusion/suppression reason, and privacy-safe
+   freshness, expiry, coverage, inclusion/suppression reason, and authorized coarse
    address. Below-threshold is a successful silent outcome.
 5. Delivery reveals only the fact and coarse authorized shape of overlap.
    Hidden actors, sessions, roots, counts, paths, branches, and content remain
@@ -198,7 +198,7 @@ evidence only and never becomes a correctness label.
 - Add GitHub refresh/remap, CI localization, and tiered proximity producers.
 - Produce one reference-only `FeedbackEvidencePacket` carrying exact scope,
   generation, finding IDs, Plan 13 anchors, source state, freshness, coverage,
-  policy/privacy revisions, watermark, counts, omissions, budgets, and cursor.
+  watermark, counts, omissions, budgets, and cursor.
   It copies no source, review body, CI log, diagnostic payload, or private
   session content.
 - Produce a reference-only proximity contribution with warning/risk/threshold
@@ -220,14 +220,12 @@ evidence only and never becomes a correctness label.
 - LCM/session narrative may aid discovery but never replaces canonical
   GitHub, CI, diagnostic, Git, or branch evidence.
 
-### Preserve overlay privacy
+### Keep overlays session-local
 
 Unsaved-overlay feedback is immediate, session-only, and visible only to the
-authorized owner. It cannot enter a packet, anchor payload, checkpoint,
-receipt, history, observation, fact, memory, telemetry payload, spool, cache,
-replica, export, LCM node, remote transport, GitHub evidence, task relation, or
-workflow input. Durable feedback requires exact saved-content or clean-
-generation identity.
+authorized owner. It cannot enter durable state, telemetry, fixtures, exports,
+remote transport, GitHub evidence, task relations, or workflow input. Durable
+feedback requires exact saved-content or clean-generation identity.
 
 ## Replacement and deletion
 
@@ -263,8 +261,8 @@ generation identity.
 - Proximity fixtures cover immediate and above/below-threshold cases, pin the
   effective Plan 20 setting, expire/dedupe correctly, reveal no hidden peer,
   and create no lock or schedule.
-- Positive saved-content and negative dirty-secret canaries prove exact anchor
-  identity through every durable sink and zero overlay leakage.
+- Saved-content and dirty-overlay cases prove exact anchor identity through
+  durable sinks and no overlay persistence.
 - Suggestions remain inert across every surface; no cycle edits source, writes
   GitHub, reruns CI, mutates Git, schedules work, or continues an agent.
 
@@ -274,9 +272,9 @@ generation identity.
 
 Dashboard and Doctor call the same shipped feedback list/get/expand/status
 operations. Plan 26 records system-quality metrics—coverage, relevance,
-diversity, latency, omissions, denial, stale rate, revocation propagation,
-stack transitions, and zero-write/zero-leak canaries—never worker-performance
-metrics. PR14 does not become first availability of any PR13 pillar.
+diversity, latency, omissions, denial, stale rate, revocation propagation, and
+stack transitions—never worker-performance metrics. PR14 does not become first
+availability of any PR13 pillar.
 
 ### PR15: multi-root feedback and stack signals
 
@@ -305,7 +303,7 @@ read-only preflight over visible declared edges with bounded concurrency,
 in-flight joins, cancellation, and exact snapshot pinning. Fanout is
 authorization-checked at enqueue, delivery, and expansion; batches are
 deterministic, bounded, watermark-backed, and drop no state transitions.
-Actual conflicts and authorization/privacy revocation bypass debounce;
+Actual conflicts and authorization loss bypass debounce;
 potential conflicts, readiness, and drift use centralized dedupe/debounce.
 Restart restores durable clean-state watermarks; overlay state remains
 memory-only.
@@ -314,7 +312,7 @@ Retain the accepted bounds and timing: at most four preflights per repository
 and 16 per daemon; 64 recipients and 128 signals per fanout batch; 250 ms
 debounce for dependency-ready and potential-conflict bursts; 1,000 ms for
 stack/PR/CI drift; and a five-minute dedupe TTL. Actual conflict,
-needs-inspection, authorization revocation, privacy revocation, and every
+needs-inspection, authorization loss, and every
 material state transition bypass debounce. Overflow drains in deterministic
 batches instead of dropping transitions.
 
@@ -390,7 +388,7 @@ partial, no-relevant-evidence, abstained, cancelled, timed-out, failed, denied,
 stale, and unavailable outcomes.
 
 Before rank influence, shadow retrieval must prove deterministic replay,
-complete contribution provenance, and no privacy/authority violations on an
+complete contribution provenance, and no wrong-project results on an
 adjudicated multi-source corpus. When at least two source families are
 eligible, at least two remain represented and no family may exceed 60% of the
 top ten; diversity shortfall is explicit. The bounded 0.10 proximity
@@ -421,12 +419,13 @@ actor-indexed expertise view, score, leaderboard, export, workflow authority,
 or employment signal. Focused tests prove revocation/purge removes eligible
 input and cannot change feedback ranking or any canonical task result.
 
-Rollout remains reversible: task retrieval begins in shadow mode; proximity
-rank influence, Plan 24's expertise operation, cross-project cohorts, and
-stack fanout have independent evidence gates and circuit breakers. Privacy/authority
-violations, attempted GitHub writes, dropped stack transitions, prohibited
-purpose, unexplained results, or semantic auto-resolution disable the affected
-extension without disabling base PR13 feedback or canonical read-only evidence.
+Task retrieval begins in shadow mode. Proximity rank influence, Plan 24's
+expertise operation, cross-project cohorts, and stack fanout activate only
+after their direct product behavior and rollback path work. Wrong-project
+results, attempted GitHub writes, dropped stack transitions, prohibited
+purpose, unexplained results, or semantic auto-resolution disable only the
+affected extension without disabling base PR13 feedback or canonical
+read-only evidence.
 
 ## Safety constraints retained
 

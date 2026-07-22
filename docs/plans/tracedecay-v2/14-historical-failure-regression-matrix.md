@@ -13,7 +13,7 @@ file.
 
 No slice is complete merely because its happy path passes. Its direct product
 journey must prevent, expose, and recover truthfully from the corruption,
-routing, privacy, scope, lifecycle, compatibility, and authority failures
+routing, scope, lifecycle, compatibility, and authority failures
 relevant to that slice.
 
 Concrete fixture names, record counts, files, and harness layout remain test
@@ -128,7 +128,8 @@ Journey branches cover:
 - Linux, Windows, and supported macOS path/process identity; moved and
   symlinked repositories; drive/UNC/case/long-path/cross-volume behavior;
   retention and deletion; hook/LSP/CLI/MCP/HTTP/dashboard fanout where owned;
-  lossless TaskId drilldown; and zero secret-canary leakage.
+  lossless TaskId drilldown; and no credentials, prompts, or private source in
+  logs and fixtures.
 
 Claude-designated execution uses native Claude Code, not Hermes Anthropic.
 Codex app-server and policy-eligible CLI fallback remain distinct. Provider
@@ -153,12 +154,12 @@ acceptance, effect success, or an independent outcome.
   protected exact identifiers/phrases, parse/lineage abstention, affected-test
   semantics, and dirty/stale diagnostic suppression survive restart and
   partial language support.
-- **PR10:** semantic search never substitutes models, crosses privacy domains,
+- **PR10:** semantic search never substitutes models, crosses project scope,
   recomputes unchanged documents, demotes protected exact results, hides tail
   failure, or changes lexical fallback bytes/order after model failure.
 - **PR11:** policy, application, configuration, catalog, analyzer, edit/Git
   transactions, and branch-aware feedback remain authorized, deterministic,
-  idempotent, privacy-safe, receipt-backed, and free of surface-local business
+  idempotent, receipt-backed, and free of surface-local business
   logic or guessed clean outcomes.
 - **PR12:** CLI, MCP, HTTP, output, catalog, and LSP agree on lifecycle,
   framing, negotiated capabilities/versions, cancellation, stable problems and
@@ -171,7 +172,7 @@ acceptance, effect success, or an independent outcome.
   Kimi Code manifest/global `PostToolUse`/`Stop`, OpenCode local-plugin edit/
   tool/session/LSP events, Cline-family route/unavailable evidence,
   cross-platform official lifecycle dogfood, competing-extension/interruption/
-  host rollback, and the feedback rollback switch retain privacy, no-write,
+  host rollback, and the feedback rollback switch retain capture redaction, no-write,
   restart, truthful coverage, and all previously supported host features.
 - **PR14:** the direct Doctor/dashboard journey above retains canonical state,
   evidence, accessibility, renderer, observability, configuration, and legal
@@ -196,15 +197,15 @@ acceptance, effect success, or an independent outcome.
   resumability, rollback evidence, stale-client rejection, and deletion of
   superseded paths.
 - **PR20:** accepted production comparisons cannot weaken semantics,
-  authority, privacy, ordering, coverage, durability, crash/restart
+  authority, project isolation, ordering, coverage, durability, crash/restart
   correctness, or hide tail/resource regressions behind averages.
 
 ## Cross-cutting direct acceptance
 
 - Each owning suite injects relevant corruption, disk-full, process death,
   concurrent writer, partial shard/input, wrong scope, stale identity,
-  provider ambiguity, authorization loss, unsupported platform, secret
-  canary, cancellation, and restart/recovery failures through the real product
+  provider ambiguity, authorization loss, unsupported platform, prohibited
+  log/fixture content, cancellation, and restart/recovery failures through the real product
   path, not only validation before work starts.
 - LSP/gateway tests cover malformed/interleaved frames, notification/response
   confusion, stale generations, conflicting overlays, cancellation races,
@@ -219,7 +220,7 @@ acceptance, effect success, or an independent outcome.
   the direct feedback rollback switch.
 - Plan 37 tests keep one-shot termination, GitHub item lifecycle, GitHub ingress
   outcome, semantic-provider state, CI provenance, proximity threshold,
-  privacy, expansion, multi-root fanout, and remote fencing as separate typed
+  expansion, multi-root fanout, and remote fencing as separate typed
   dimensions. No automatic continuation, GitHub write, CI rerun, task
   mutation, Git mutation, schedule, or clean-by-silence is representable.
 - Plan 09 Doctor tests compose source disagreements into one finding family,
