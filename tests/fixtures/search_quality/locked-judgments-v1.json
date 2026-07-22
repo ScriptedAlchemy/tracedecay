@@ -1,9 +1,6 @@
 {
+  "access_policy": "sealed_access_requires_receipt",
   "locator": "authorized-store://search-quality/holdout/judgments-v1",
-  "seal_digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de",
-  "signed_envelope_digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de",
-  "signature_locator": "authorized-store://search-quality/holdout/signatures/judgments-v1",
-  "access_policy": "sealed_reveal_requires_receipt",
-  "reveal_contract": "The sealed holdout label bytes at the locator are never checked in and are never opened during development runs. A locked run may reveal them only after its run manifest is frozen, and the reveal must record a HoldoutAccessReceiptV1 bound to the run id and this seal digest. Any pre-freeze access, digest mismatch, unrecorded reveal, or reuse of revealed labels for selection makes the run invalid_run.",
-  "schema_revision": 1
+  "schema_revision": 1,
+  "seal_digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de"
 }

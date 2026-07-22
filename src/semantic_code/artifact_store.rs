@@ -630,6 +630,7 @@ impl ModelArtifactStore {
         let (staging_id, staging_dir) = (0..16)
             .find_map(|_| {
                 let staging_id = random_staging_id().ok()?;
+                #[allow(unused_mut)] // mode() is unix-only
                 let mut builder = DirBuilder::new();
                 #[cfg(unix)]
                 builder.mode(0o700);
@@ -643,6 +644,7 @@ impl ModelArtifactStore {
                 }
             })
             .ok_or(ArtifactImportErrorV1::StorageFailure)?;
+        #[allow(unused_mut)] // mode() is unix-only
         let mut builder = DirBuilder::new();
         #[cfg(unix)]
         builder.mode(0o700);
@@ -1635,7 +1637,7 @@ fn atomic_write_cap_file(
             .map_err(|_| ArtifactImportErrorV1::UnsafeStorePath)?;
         fsys::quick::write(ambient_parent.join(name), bytes)
             .map_err(|_| ArtifactImportErrorV1::StorageFailure)?;
-        return sync_cap_dir(dir);
+        sync_cap_dir(dir)
     }
     #[cfg(not(windows))]
     {
@@ -1717,6 +1719,7 @@ fn open_or_create_component_dir(parent: &Dir, name: &str) -> Result<Dir, Artifac
     match parent.open_dir_nofollow(name) {
         Ok(dir) => Ok(dir),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            #[allow(unused_mut)] // mode() is unix-only
             let mut builder = DirBuilder::new();
             #[cfg(unix)]
             builder.mode(0o700);

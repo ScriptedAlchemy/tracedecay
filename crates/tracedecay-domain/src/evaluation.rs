@@ -56,8 +56,10 @@ pub const ACCEPTED_PR9_CANDIDATE_EVIDENCE_DIGEST_DOMAIN: &str =
 /// Schema/domain separator for semantic candidate evidence.
 pub const SEMANTIC_CANDIDATE_EVIDENCE_DIGEST_DOMAIN: &str =
     "tracedecay.eval-semantic-candidate-evidence.v1";
-/// Schema/domain separator for durable holdout reveal receipts.
+/// Schema/domain separator for durable holdout access receipts.
 pub const HOLDOUT_ACCESS_RECEIPT_DIGEST_DOMAIN: &str = "tracedecay.eval-holdout-access-receipt.v1";
+/// Schema/domain separator for canonical unsigned owner decisions.
+pub const OWNER_DECISION_DIGEST_DOMAIN: &str = "tracedecay.eval-owner-decision.v1";
 
 /// Validation failures for pure search-quality evaluation values.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -249,6 +251,7 @@ evaluation_digest_id!(
     AcceptedPr9CandidateEvidenceDigest,
     SemanticCandidateEvidenceDigest,
     HoldoutAccessReceiptDigest,
+    OwnerDecisionDigest,
 );
 
 /// Compute the canonical sha256 digest of a typed digest-input payload.
@@ -361,17 +364,17 @@ pub enum MetricDirectionV1 {
     LowerIsBetter,
 }
 
-/// The only holdout access policy at this revision: the sealed label bytes
-/// may be revealed only by an audited locked run that records a
+/// The only holdout access policy at this revision: sealed label bytes may be
+/// opened only by an audited locked run that records a
 /// [`HoldoutAccessReceiptV1`]. Development runs never open the locator.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum HoldoutAccessPolicyV1 {
-    SealedRevealRequiresReceipt,
+    SealedAccessRequiresReceipt,
 }
 
-/// Scope of one evaluation run (Plan 15: the harness signs and freezes the
-/// run manifest before the locked-label access capability is granted).
+/// Scope of one evaluation run (Plan 15: the harness freezes the run
+/// manifest before sealed holdout labels may be accessed).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EvalRunScopeV1 {
@@ -450,7 +453,7 @@ impl AgentJudgmentProvenanceV1 {
 pub struct AgentAdjudicatedLabelProvenanceV1 {
     pub delegated_by: DecisionOwnerId,
     pub blinded_packet_digest: FixtureContentDigest,
-    pub signed_delegation_digest: FixtureContentDigest,
+    pub owner_delegation_digest: FixtureContentDigest,
     #[serde(default)]
     pub final_label_set_digest: Option<LabelSetDigest>,
     pub state: AgentAdjudicationStateV1,
@@ -468,7 +471,7 @@ impl AgentAdjudicatedLabelProvenanceV1 {
             adjudication.validate()?;
         }
         if is_placeholder_digest(self.blinded_packet_digest.as_str())
-            || is_placeholder_digest(self.signed_delegation_digest.as_str())
+            || is_placeholder_digest(self.owner_delegation_digest.as_str())
             || self
                 .final_label_set_digest
                 .as_ref()
@@ -478,9 +481,9 @@ impl AgentAdjudicatedLabelProvenanceV1 {
                 field: "agent adjudication provenance",
             });
         }
-        if self.blinded_packet_digest == self.signed_delegation_digest {
+        if self.blinded_packet_digest == self.owner_delegation_digest {
             return Err(EvaluationContractError::Duplicate {
-                field: "blinded packet and signed delegation digest",
+                field: "blinded packet and owner delegation digest",
             });
         }
 
@@ -510,7 +513,7 @@ impl AgentAdjudicatedLabelProvenanceV1 {
         if self.independent_judgments.iter().any(|judgment| {
             judgment.blinded_packet_digest != self.blinded_packet_digest
                 || judgment.immutable_judgment_artifact_digest == self.blinded_packet_digest
-                || judgment.immutable_judgment_artifact_digest == self.signed_delegation_digest
+                || judgment.immutable_judgment_artifact_digest == self.owner_delegation_digest
         }) {
             return Err(EvaluationContractError::DigestMismatch {
                 field: "agent judgment packet or artifact binding",
@@ -1196,10 +1199,11 @@ pub struct SupportFloorV1 {
 }
 
 /// The sealed holdout locator (Plan 15 `locked-judgments-v1.json`): only the
-/// seal digest, the authorized-store locator, the access policy, and the
-/// reveal audit contract are committed. Locked labels are not checked in and
-/// are never read during tuning; a locked run proves non-access by verifying
-/// this seal over the sealed bytes without parsing them.
+/// seal digest, the authorized-store locator, and the access policy are
+/// committed. Locked labels are not checked in and are never read during
+/// tuning; a locked run proves non-access by verifying this seal over the
+/// sealed bytes without parsing them. No signature locator, reveal capability,
+/// trust root, or attestation is part of the contract.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HoldoutSealV1 {
@@ -1214,12 +1218,7 @@ pub struct HoldoutSealV1 {
     /// deterministic, human-authoritative, or agent-adjudicated labels.
     #[serde(default)]
     pub label_authority: Option<HoldoutLabelAuthorityV1>,
-    pub signed_envelope_digest: FixtureContentDigest,
-    pub signature_locator: String,
     pub access_policy: HoldoutAccessPolicyV1,
-    /// Human-readable reveal audit contract: who may reveal, what receipt is
-    /// recorded, and what invalidates the run on pre-freeze access.
-    pub reveal_contract: String,
     pub schema_revision: u32,
 }
 
@@ -1230,11 +1229,9 @@ impl HoldoutSealV1 {
                 field: "holdout seal locator",
             });
         }
-        if !self.signature_locator.starts_with("authorized-store://")
-            || self.reveal_contract.is_empty()
-        {
-            return Err(EvaluationContractError::Empty {
-                field: "holdout seal signature/reveal contract",
+        if self.schema_revision != 1 {
+            return Err(EvaluationContractError::InvalidIdentity {
+                field: "holdout seal schema_revision",
             });
         }
         if self.labels_content_digest.is_some() != self.label_authority.is_some() {
@@ -1683,22 +1680,19 @@ impl LabelSetV1 {
     }
 }
 
-/// Audited receipt recorded when a locked run reveals the sealed holdout
-/// labels. Its presence in an [`EvidenceBatchV1`] is the only lawful evidence
-/// that holdout bytes were opened (Plan 15: the reveal produces an audited
-/// access receipt bound to the run; any unrecorded reveal invalidates the
-/// run).
+/// Audited receipt recorded when a locked run opens sealed holdout labels.
+/// Its presence in an [`EvidenceBatchV1`] is the only lawful evidence that
+/// holdout bytes were opened. Authority is content identity + owner metadata
+/// only — no signature, capability, trust root, or attestation fields.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HoldoutAccessReceiptV1 {
-    pub capability_digest: FixtureContentDigest,
+    pub labels_content_digest: FixtureContentDigest,
     pub run_id: RunId,
     pub run_manifest_digest: RunManifestDigest,
     pub seal_digest: HoldoutSealDigest,
-    pub signed_by: DecisionOwnerId,
-    pub trust_root_id: String,
-    pub revealed_by: DecisionOwnerId,
-    pub revealed_at_unix: u64,
+    pub accessed_by: DecisionOwnerId,
+    pub accessed_at_unix: u64,
     pub rationale: String,
     pub digest: HoldoutAccessReceiptDigest,
 }
@@ -1706,14 +1700,12 @@ pub struct HoldoutAccessReceiptV1 {
 #[derive(Serialize)]
 struct HoldoutAccessReceiptDigestInput<'a> {
     domain: &'static str,
-    capability_digest: &'a FixtureContentDigest,
+    labels_content_digest: &'a FixtureContentDigest,
     run_id: &'a RunId,
     run_manifest_digest: &'a RunManifestDigest,
     seal_digest: &'a HoldoutSealDigest,
-    signed_by: &'a DecisionOwnerId,
-    trust_root_id: &'a str,
-    revealed_by: &'a DecisionOwnerId,
-    revealed_at_unix: u64,
+    accessed_by: &'a DecisionOwnerId,
+    accessed_at_unix: u64,
     rationale: &'a str,
 }
 
@@ -1724,10 +1716,7 @@ impl HoldoutAccessReceiptV1 {
         seal: &HoldoutSealV1,
         decision_owners: &[DecisionOwnerId],
     ) -> Result<(), EvaluationContractError> {
-        if self.rationale.trim().is_empty()
-            || self.trust_root_id.trim().is_empty()
-            || self.revealed_at_unix == 0
-        {
+        if self.rationale.trim().is_empty() || self.accessed_at_unix == 0 {
             return Err(EvaluationContractError::Empty {
                 field: "holdout access receipt authority metadata",
             });
@@ -1740,28 +1729,75 @@ impl HoldoutAccessReceiptV1 {
                 field: "holdout access receipt run/seal binding",
             });
         }
-        if !decision_owners.contains(&self.signed_by)
-            || !decision_owners.contains(&self.revealed_by)
-        {
+        if let Some(expected) = &seal.labels_content_digest {
+            if &self.labels_content_digest != expected {
+                return Err(EvaluationContractError::DigestMismatch {
+                    field: "holdout access receipt labels content digest",
+                });
+            }
+        }
+        if !decision_owners.contains(&self.accessed_by) {
             return Err(EvaluationContractError::HoldoutAccessViolation(
-                "holdout access receipt signer and owner must be frozen decision owners"
-                    .to_string(),
+                "holdout access receipt owner must be a frozen decision owner".to_string(),
             ));
         }
         self.verify_digest()
     }
 
+    pub fn issue_for_run(
+        run: &RunManifestV1,
+        seal: &HoldoutSealV1,
+        decision_owners: &[DecisionOwnerId],
+        accessed_by: DecisionOwnerId,
+        now_unix: u64,
+    ) -> Result<Self, EvaluationContractError> {
+        run.validate()?;
+        run.verify_digest()?;
+        seal.validate()?;
+        if run.scope != EvalRunScopeV1::Locked
+            || run.authority != FixtureAuthorityV1::LockedQuality
+            || run.locked_outcomes_accessed
+        {
+            return Err(EvaluationContractError::HoldoutAccessViolation(
+                "holdout access requires a frozen locked-quality run".to_string(),
+            ));
+        }
+        let labels_content_digest = seal.labels_content_digest.clone().ok_or_else(|| {
+            EvaluationContractError::Empty {
+                field: "holdout seal labels content digest",
+            }
+        })?;
+        if !decision_owners.contains(&accessed_by) {
+            return Err(EvaluationContractError::HoldoutAccessViolation(
+                "holdout access owner is not a frozen decision owner".to_string(),
+            ));
+        }
+        let mut receipt = Self {
+            labels_content_digest,
+            run_id: run.run_id.clone(),
+            run_manifest_digest: run.digest.clone(),
+            seal_digest: seal.seal_digest.clone(),
+            accessed_by,
+            accessed_at_unix: now_unix,
+            rationale: "sealed holdout opened after frozen run-manifest verification".to_string(),
+            digest: HoldoutAccessReceiptDigest::new(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            )?,
+        };
+        receipt.digest = receipt.compute_digest()?;
+        receipt.validate_for_run(run, seal, decision_owners)?;
+        Ok(receipt)
+    }
+
     pub fn compute_digest(&self) -> Result<HoldoutAccessReceiptDigest, EvaluationContractError> {
         let input = HoldoutAccessReceiptDigestInput {
             domain: HOLDOUT_ACCESS_RECEIPT_DIGEST_DOMAIN,
-            capability_digest: &self.capability_digest,
+            labels_content_digest: &self.labels_content_digest,
             run_id: &self.run_id,
             run_manifest_digest: &self.run_manifest_digest,
             seal_digest: &self.seal_digest,
-            signed_by: &self.signed_by,
-            trust_root_id: &self.trust_root_id,
-            revealed_by: &self.revealed_by,
-            revealed_at_unix: self.revealed_at_unix,
+            accessed_by: &self.accessed_by,
+            accessed_at_unix: self.accessed_at_unix,
             rationale: &self.rationale,
         };
         HoldoutAccessReceiptDigest::new(canonical_json_sha256(&input)?)
@@ -1778,118 +1814,7 @@ impl HoldoutAccessReceiptV1 {
     }
 }
 
-/// A least-privilege capability supplied by the authorized holdout store after
-/// the locked run manifest is frozen. It carries only opaque store locators,
-/// one operation, one run binding, and a bounded validity window. Private
-/// paths and key material are deliberately unrepresentable.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct HoldoutRevealCapabilityV1 {
-    pub schema_revision: u32,
-    pub labels_locator: String,
-    pub envelope_locator: String,
-    pub seal_digest: HoldoutSealDigest,
-    pub run_id: RunId,
-    pub run_manifest_digest: RunManifestDigest,
-    pub revealed_by: DecisionOwnerId,
-    pub operation: String,
-    pub not_before_unix: u64,
-    pub expires_at_unix: u64,
-}
-
-impl HoldoutRevealCapabilityV1 {
-    pub fn validate_shape(&self) -> Result<(), EvaluationContractError> {
-        if self.schema_revision != 1
-            || !self.labels_locator.starts_with("authorized-store://")
-            || !self.envelope_locator.starts_with("authorized-store://")
-            || self.operation != "evaluate_locked_quality_v1"
-            || self.not_before_unix > self.expires_at_unix
-        {
-            return Err(EvaluationContractError::HoldoutAccessViolation(
-                "holdout reveal capability is malformed or over-broad".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn is_valid_at(&self, now_unix: u64) -> Result<(), EvaluationContractError> {
-        self.validate_shape()?;
-        if now_unix < self.not_before_unix || now_unix > self.expires_at_unix {
-            return Err(EvaluationContractError::HoldoutAccessViolation(
-                "holdout reveal capability is outside its validity window".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn issue_receipt(
-        &self,
-        run: &RunManifestV1,
-        seal: &HoldoutSealV1,
-        decision_owners: &[DecisionOwnerId],
-        capability_digest: FixtureContentDigest,
-        signed_by: DecisionOwnerId,
-        trust_root_id: String,
-        now_unix: u64,
-    ) -> Result<HoldoutAccessReceiptV1, EvaluationContractError> {
-        run.validate()?;
-        run.verify_digest()?;
-        if run.scope != EvalRunScopeV1::Locked
-            || run.authority != FixtureAuthorityV1::LockedQuality
-            || run.locked_outcomes_accessed
-        {
-            return Err(EvaluationContractError::HoldoutAccessViolation(
-                "a reveal capability requires a frozen locked-quality run".to_string(),
-            ));
-        }
-        self.is_valid_at(now_unix)?;
-        if self.run_id != run.run_id || self.run_manifest_digest != run.digest {
-            return Err(EvaluationContractError::DigestMismatch {
-                field: "holdout capability run manifest digest",
-            });
-        }
-        if self.labels_locator != seal.locator
-            || self.envelope_locator != seal.signature_locator
-            || self.seal_digest != seal.seal_digest
-        {
-            return Err(EvaluationContractError::HoldoutAccessViolation(
-                "reveal capability does not bind the committed holdout locator and seal"
-                    .to_string(),
-            ));
-        }
-        if !decision_owners.contains(&self.revealed_by) {
-            return Err(EvaluationContractError::HoldoutAccessViolation(
-                "reveal capability owner is not a frozen decision owner".to_string(),
-            ));
-        }
-        if !decision_owners.contains(&signed_by) || trust_root_id.trim().is_empty() {
-            return Err(EvaluationContractError::HoldoutAccessViolation(
-                "reveal capability signer is not a frozen decision owner".to_string(),
-            ));
-        }
-        let mut receipt = HoldoutAccessReceiptV1 {
-            capability_digest,
-            run_id: run.run_id.clone(),
-            run_manifest_digest: run.digest.clone(),
-            seal_digest: seal.seal_digest.clone(),
-            signed_by,
-            trust_root_id,
-            revealed_by: self.revealed_by.clone(),
-            revealed_at_unix: now_unix,
-            rationale: "sealed holdout revealed after frozen run-manifest verification".to_string(),
-            digest: HoldoutAccessReceiptDigest::new(
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            )?,
-        };
-        receipt.digest = receipt.compute_digest()?;
-        receipt.validate_for_run(run, seal, decision_owners)?;
-        Ok(receipt)
-    }
-}
-
-/// A candidate anchor at corpus-document granularity, with an optional
-/// symbol pinpoint.
+/// One candidate anchor used by saved-candidate and evidence contracts.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct EvalCandidateAnchorV1 {
@@ -2326,7 +2251,7 @@ impl SemanticCandidateEvidenceV1 {
 /// runs emit raw samples and aggregates whose digests validate). Scope rules
 /// enforce the contamination contract: a development-scope batch contains no
 /// holdout receipts and no candidate lists for sealed queries; a
-/// locked-scope batch must carry at least one audited reveal receipt.
+/// locked-scope batch must carry at least one audited access receipt.
 /// Canonically digested with [`EVIDENCE_BATCH_DIGEST_DOMAIN`]; the digest
 /// field is excluded from the hashed bytes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -2372,7 +2297,7 @@ impl EvidenceBatchV1 {
             EvalRunScopeV1::Locked => {
                 if self.holdout_receipts.len() != 1 {
                     return Err(EvaluationContractError::HoldoutAccessViolation(
-                        "a locked-scope evidence batch must carry exactly one audited holdout reveal receipt"
+                        "a locked-scope evidence batch must carry exactly one audited holdout access receipt"
                             .to_string(),
                     ));
                 }
@@ -2674,9 +2599,9 @@ impl RunManifestV1 {
         Ok(())
     }
 
-    /// Gate that must succeed before the I/O layer reads a reveal capability
-    /// or resolves an authorized-store locator.
-    pub fn validate_pre_reveal(
+    /// Gate that must succeed before the I/O layer resolves an authorized-store
+    /// locator and opens sealed holdout labels.
+    pub fn validate_pre_holdout_access(
         &self,
         fixture_manifest: &FixtureManifestV1,
         workload: &QueryWorkloadV1,
@@ -2688,7 +2613,7 @@ impl RunManifestV1 {
             || self.authority != FixtureAuthorityV1::LockedQuality
         {
             return Err(EvaluationContractError::HoldoutAccessViolation(
-                "holdout reveal requires locked-quality run authority".to_string(),
+                "holdout access requires locked-quality run authority".to_string(),
             ));
         }
         if self.locked_outcomes_accessed {
@@ -3106,6 +3031,125 @@ impl EvaluationFixtureBundleV1 {
     }
 }
 
+
+/// Canonical unsigned owner decision for local locked-quality acceptance.
+/// Authority is versioned JSON plus SHA-256 content identities and explicit
+/// owner metadata — never a signature, reveal capability, trust root, or
+/// attestation. Outcomes for this contract are accepted, rejected, or
+/// inconclusive only.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerDecisionEvidenceV1 {
+    pub schema_version: u32,
+    pub decision_kind: String,
+    /// Owner authorization metadata (who authorized the decision and how).
+    pub authority: String,
+    pub source_repository_commit: String,
+    pub source_repository_tree: String,
+    pub corpus_digest: FixtureContentDigest,
+    pub partition_digest: FixtureContentDigest,
+    pub label_digest: FixtureContentDigest,
+    pub profile_digest: FixtureContentDigest,
+    pub toolchain_digest: FixtureContentDigest,
+    pub hardware_digest: FixtureContentDigest,
+    pub report_digest: FixtureContentDigest,
+    pub evidence_index_digest: EvidenceIndexDigest,
+    pub outcome: EvalOutcomeV1,
+    pub decided_by: DecisionOwnerId,
+    pub rationale: String,
+    #[serde(default)]
+    pub gate_receipt_digests: Vec<FixtureContentDigest>,
+    pub digest: OwnerDecisionDigest,
+}
+
+#[derive(Serialize)]
+struct OwnerDecisionDigestInput<'a> {
+    domain: &'static str,
+    schema_version: u32,
+    decision_kind: &'a str,
+    authority: &'a str,
+    source_repository_commit: &'a str,
+    source_repository_tree: &'a str,
+    corpus_digest: &'a FixtureContentDigest,
+    partition_digest: &'a FixtureContentDigest,
+    label_digest: &'a FixtureContentDigest,
+    profile_digest: &'a FixtureContentDigest,
+    toolchain_digest: &'a FixtureContentDigest,
+    hardware_digest: &'a FixtureContentDigest,
+    report_digest: &'a FixtureContentDigest,
+    evidence_index_digest: &'a EvidenceIndexDigest,
+    outcome: EvalOutcomeV1,
+    decided_by: &'a DecisionOwnerId,
+    rationale: &'a str,
+    gate_receipt_digests: &'a [FixtureContentDigest],
+}
+
+impl OwnerDecisionEvidenceV1 {
+    pub const DECISION_KIND: &'static str = "owner_decision_v1";
+
+    pub fn validate(&self) -> Result<(), EvaluationContractError> {
+        if self.schema_version != 1 || self.decision_kind != Self::DECISION_KIND {
+            return Err(EvaluationContractError::InvalidIdentity {
+                field: "owner decision kind/schema",
+            });
+        }
+        for (field, value) in [
+            ("owner decision authority", self.authority.as_str()),
+            ("source_repository_commit", self.source_repository_commit.as_str()),
+            ("source_repository_tree", self.source_repository_tree.as_str()),
+            ("owner decision rationale", self.rationale.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(EvaluationContractError::Empty { field });
+            }
+        }
+        match self.outcome {
+            EvalOutcomeV1::Accepted | EvalOutcomeV1::Rejected | EvalOutcomeV1::Inconclusive => {}
+            _ => {
+                return Err(EvaluationContractError::CoverageViolation(
+                    "owner decision outcome must be accepted, rejected, or inconclusive"
+                        .to_string(),
+                ));
+            }
+        }
+        self.verify_digest()
+    }
+
+    pub fn compute_digest(&self) -> Result<OwnerDecisionDigest, EvaluationContractError> {
+        let input = OwnerDecisionDigestInput {
+            domain: OWNER_DECISION_DIGEST_DOMAIN,
+            schema_version: self.schema_version,
+            decision_kind: &self.decision_kind,
+            authority: &self.authority,
+            source_repository_commit: &self.source_repository_commit,
+            source_repository_tree: &self.source_repository_tree,
+            corpus_digest: &self.corpus_digest,
+            partition_digest: &self.partition_digest,
+            label_digest: &self.label_digest,
+            profile_digest: &self.profile_digest,
+            toolchain_digest: &self.toolchain_digest,
+            hardware_digest: &self.hardware_digest,
+            report_digest: &self.report_digest,
+            evidence_index_digest: &self.evidence_index_digest,
+            outcome: self.outcome,
+            decided_by: &self.decided_by,
+            rationale: &self.rationale,
+            gate_receipt_digests: &self.gate_receipt_digests,
+        };
+        OwnerDecisionDigest::new(canonical_json_sha256(&input)?)
+    }
+
+    pub fn verify_digest(&self) -> Result<(), EvaluationContractError> {
+        if self.compute_digest()? == self.digest {
+            Ok(())
+        } else {
+            Err(EvaluationContractError::DigestMismatch {
+                field: "owner decision",
+            })
+        }
+    }
+}
+
 /// The terminal decision record (Plan 15: the harness returns exactly one
 /// typed outcome). Canonically digested with
 /// [`DECISION_RECORD_DIGEST_DOMAIN`]; the digest field is excluded from the
@@ -3337,14 +3381,12 @@ mod tests {
         // A receipt in a development batch is an access violation.
         let mut leaked = batch(EvalRunScopeV1::Development, &workload);
         leaked.holdout_receipts.push(HoldoutAccessReceiptV1 {
-            capability_digest: id(ZERO_DIGEST),
+            labels_content_digest: id(ZERO_DIGEST),
             run_id: id("run.fixture.001"),
             run_manifest_digest: id(ZERO_DIGEST),
             seal_digest: id(ZERO_DIGEST),
-            signed_by: id("owner.fixture"),
-            trust_root_id: "root.fixture".to_string(),
-            revealed_by: id("owner.fixture"),
-            revealed_at_unix: 1,
+            accessed_by: DecisionOwnerId::new("owner.fixture").unwrap(),
+            accessed_at_unix: 1,
             rationale: "unauthorized".to_string(),
             digest: id(ZERO_DIGEST),
         });

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "packet_id": "pr9-pr10-owner-acceptance-v1",
+  "label_authority": "owner_delegated_agent_adjudication",
+  "decision_owner": "owner-search-quality-lead",
+  "delegation": "user_explicitly_authorized_lead_to_generate_label_judge_tune_and_issue_holdout_evidence_2026-07-22",
+  "candidate_is_not_label_authority": true,
+  "labels": [
+    {
+      "query_id": "holdout-001",
+      "anchors": ["time::TimeInterval"],
+      "document_id": "time",
+      "literal": "pub struct TimeInterval"
+    },
+    {
+      "query_id": "holdout-002",
+      "anchors": ["watermark::ShardWatermark::outbox_sequence"],
+      "document_id": "watermark",
+      "literal": "pub outbox_sequence: u64"
+    },
+    {
+      "query_id": "holdout-003",
+      "anchors": ["integration"],
+      "document_id": "integration",
+      "literal": "HostIntegrationIdV1"
+    },
+    {
+      "query_id": "holdout-004",
+      "anchors": ["error::DomainError::InvalidTimeInterval"],
+      "document_id": "error",
+      "literal": "time interval start must not be after its end"
+    },
+    {
+      "query_id": "holdout-005",
+      "anchors": ["dockerfile::APP_VERSION"],
+      "document_id": "dockerfile",
+      "literal": "ARG APP_VERSION=1.0.0"
+    },
+    {
+      "query_id": "holdout-006",
+      "anchors": ["dockerfile::--timeout"],
+      "document_id": "dockerfile",
+      "literal": "HEALTHCHECK --interval=30s --timeout=3s"
+    },
+    {
+      "query_id": "holdout-007",
+      "anchors": ["error::DomainError"],
+      "document_id": "error",
+      "literal": "pub enum DomainError"
+    },
+    {
+      "query_id": "holdout-008",
+      "anchors": ["time::TimeInterval::validate"],
+      "document_id": "time",
+      "literal": "pub fn validate"
+    },
+    {
+      "query_id": "holdout-009",
+      "anchors": [],
+      "absence_literal": "holdout_absent_token_c3f9b6"
+    },
+    {
+      "query_id": "holdout-010",
+      "anchors": [],
+      "forbidden_documents": ["generated_lock"]
+    },
+    {
+      "query_id": "holdout-011",
+      "anchors": [],
+      "forbidden_documents": ["unsupported_cargo_slot"]
+    },
+    {
+      "query_id": "holdout-012",
+      "anchors": ["tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture::tmpfs_scratch_path"],
+      "forbidden_anchors": ["tests/fixtures/search_quality/corpus/cargo-slot/src/main.rs::tmpfs_scratch_path"],
+      "document_id": "unsupported_cargo_slot",
+      "literal": "tmpfs_scratch_path"
+    },
+    {
+      "query_id": "holdout-013",
+      "anchors": ["git:5b81ceeb45647b6b2425cf4c4925f9f8df110f80:crates/tracedecay-domain/src/session.rs::ClosedUtcIntervalV1"],
+      "git_commit": "5b81ceeb45647b6b2425cf4c4925f9f8df110f80",
+      "git_path": "crates/tracedecay-domain/src/session.rs",
+      "literal": "pub struct ClosedUtcIntervalV1"
+    },
+    {
+      "query_id": "holdout-014",
+      "anchors": [],
+      "forbidden_documents": ["session"]
+    },
+    {
+      "query_id": "holdout-015",
+      "anchors": ["auth_session::validate_session"],
+      "document_path": "tests/fixtures/context_eval_project/src/auth/session.rs",
+      "literal": "pub fn validate_session"
+    }
+  ]
+}

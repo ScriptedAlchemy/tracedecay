@@ -14,25 +14,23 @@ fn canonical_validator_accepts_only_the_frozen_real_fixture_packet() {
     assert_eq!(validation.authority, FixtureAuthorityV1::ContractOnly);
     assert_eq!(
         validation.fixture_manifest_digest.as_str(),
-        "sha256:46d0b4fc29125d45a0adf7d408dc9791f1c2a2a6f25ea767c99179d82f6eae23"
+        "sha256:19a6706c6d360854597c6928ba4da2c35b6c86697628de92cd7775d032c9768d"
     );
     assert_eq!(
         validation.run_manifest_digest.as_str(),
-        "sha256:b3108f62e645ce745a5f18dd4180277c309aa20346a2531a7f307793c7e0b36c"
+        "sha256:98eecb3d79e9bd9b8ac125ecb0a9ea27f9c55372994a289649738168b4937e04"
     );
 }
 
 #[test]
-fn contract_only_compare_blocks_without_reading_capability_or_creating_promotion() {
+fn contract_only_compare_blocks_without_opening_holdout_or_creating_promotion() {
     let temp = tempfile::tempdir().unwrap();
 
     let result = compare(&CompareOptions {
         fixture_root: fixtures::fixture_root(),
         run_manifest: None,
         output_root: temp.path().join("runs"),
-        holdout_capability: Some(
-            "authorized-store://search-quality/holdout/v1/reveal-capability/unopened".to_string(),
-        ),
+        holdout_accessed_by: None,
         holdout_profile_root: None,
         holdout_seal: None,
         saved_candidates: None,
@@ -73,7 +71,7 @@ fn evaluator_rejects_run_ids_that_are_not_single_path_components() {
         fixture_root: fixtures::fixture_root(),
         run_manifest: Some(run_path),
         output_root: temp.path().join("runs"),
-        holdout_capability: None,
+        holdout_accessed_by: None,
         holdout_profile_root: None,
         holdout_seal: None,
         saved_candidates: None,
@@ -122,7 +120,7 @@ fn compare_reports_each_lane_ablation_from_saved_candidate_bytes() {
         fixture_root: fixtures::fixture_root(),
         run_manifest: None,
         output_root: temp.path().join("runs"),
-        holdout_capability: None,
+        holdout_accessed_by: None,
         holdout_profile_root: None,
         holdout_seal: None,
         saved_candidates: Some(saved_path),

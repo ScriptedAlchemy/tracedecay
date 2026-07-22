@@ -27,6 +27,8 @@ pub enum EntityKind {
     Message,
     MessageOccurrence,
     SessionSummary,
+    EvidenceSpan,
+    EvidenceBurst,
     Workflow,
     ResponseHandle,
     SourceRecord,

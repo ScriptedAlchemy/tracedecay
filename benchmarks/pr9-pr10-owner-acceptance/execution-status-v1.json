@@ -1,0 +1,71 @@
+{
+  "blocked_on": [
+    "production_train_candidate_outputs_absent",
+    "production_validation_candidate_outputs_absent",
+    "working_tree_search_eval_boundary_not_executable_without_build",
+    "required_current_and_10x_resource_samples_absent",
+    "required_cancellation_and_offline_execution_receipts_absent",
+    "windows_native_fastembed_platform_evidence_absent",
+    "concurrent_external_cargo_jobs_prevent_a_safe_targeted_working_tree_build"
+  ],
+  "candidate_model_graded_itself": false,
+  "chosen_profile": null,
+  "evidence_control": "canonical_sha256_only",
+  "executed_receipts": [
+    {
+      "command": "python3 benchmarks/pr9-pr10-owner-acceptance/owner_acceptance.py validate",
+      "exit_code": 0,
+      "result": "valid train=12 validation=12 sealed_holdout=15"
+    },
+    {
+      "command": "python3 benchmarks/pr9-pr10-owner-acceptance/owner_acceptance.py freeze --owner-labels .owner-evidence/pr9-pr10-holdout-labels-v1.json",
+      "exit_code": 0,
+      "result": "frozen train=12 validation=12 sealed_holdout=15"
+    },
+    {
+      "command": "python3 benchmarks/pr9-pr10-owner-acceptance/owner_acceptance.py tune --candidate-outputs /dev/null",
+      "exit_code": 1,
+      "result": "no production candidate outputs were supplied"
+    },
+    {
+      "command": "python3 benchmarks/pr9-pr10-owner-acceptance/owner_acceptance.py judge --candidate-output /dev/null --owner-labels .owner-evidence/pr9-pr10-holdout-labels-v1.json",
+      "exit_code": 1,
+      "result": "stopped before owner-label access because no frozen chosen profile exists"
+    },
+    {
+      "command": "python3 benchmarks/search-quality/validate_pr9_production_acceptance.py",
+      "exit_code": 0,
+      "result": "valid PR9 production-acceptance preflight; promotion=pending_parent_gates"
+    },
+    {
+      "command": "python3 benchmarks/pr10-semantic-search/validate_packet.py",
+      "exit_code": 0,
+      "result": "valid PR10 semantic packet; state=pending_parent_gates; outcome=pending; executed_contract=6; blocked_on=9; measured_results=absent"
+    },
+    {
+      "command": "python3 -m unittest discover -s tests/search-quality -p test_*.py",
+      "exit_code": 0,
+      "result": "8 tests passed"
+    },
+    {
+      "command": "python3 benchmarks/pr9-pr10-owner-acceptance/validate_packet.py --holdout-labels .owner-evidence/pr9-pr10-holdout-labels-v1.json",
+      "exit_code": 0,
+      "result": "packet and label coverage valid; no owner decision; packet sha256:1a1549d041ba58a1ec8cf55d71c78495ec8d4eadf2b9834aa540bfaadc5a6aa9"
+    }
+  ],
+  "freeze_manifest_file_digest": "sha256:e97cb8ed53b179f5554d07e2f125d3d136160bf4d76e0206bfba9bb65c99d23e",
+  "holdout_judged": false,
+  "holdout_judgment_count": 0,
+  "owner_labels_digest": "sha256:7ae670e0890bc544c7f7ccaf12bd02b9d06e09500e2824fea57814adf5c428c8",
+  "owner_quality_verdict_issued": false,
+  "packet_digest": "sha256:1a1549d041ba58a1ec8cf55d71c78495ec8d4eadf2b9834aa540bfaadc5a6aa9",
+  "packet_id": "pr9-pr10-owner-acceptance-v1",
+  "promotion_allowed": false,
+  "rationale": "No production-bound train and validation candidate outputs exist for the frozen profile matrix. The installed tracedecay binary does not expose the working-tree search-evaluation command, and the checked-in comparison boundary consumes saved candidates but does not compute the required Plan 15/31 metric and resource matrix. Judging the holdout would fabricate evidence and is forbidden.",
+  "record_kind": "execution_status_v1",
+  "schema_version": 1,
+  "semantic_activation_allowed": false,
+  "source_repository_commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
+  "source_repository_tree": "3d8de57a843244229c3b19995c9d0b9e00081769",
+  "status": "blocked_before_tuning"
+}

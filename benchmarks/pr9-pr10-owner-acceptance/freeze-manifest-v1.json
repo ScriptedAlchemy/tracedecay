@@ -1,0 +1,136 @@
+{
+  "canonicalization": "utf8-json-sort-keys-compact-trailing-lf",
+  "corpus_digests": {
+    "auth_login": "sha256:bc55069337a6e1b9d8dcd33a67663393dfb8359ce2449098ff7eef488db6ccd9",
+    "canonical": "sha256:eb4088fc19af1ca3c62d02b1070a75a71f4c1e62f1752ebfe8734382b6da1c38",
+    "config_store": "sha256:5395f280f8e2b0984b9d64efcef3f8ea5c525ab7ad8f3880bb9ff5fae5fbc396",
+    "dockerfile": "sha256:ce03208a1aab2f4a82fef7d8f2dbe13b9522641912535ef271bf60f9df90003d",
+    "error": "sha256:ac3d5d890dd1913b49c1ddecffdafa158cd322a2da8ccf459a901ddcbc97349e",
+    "generated_lock": "sha256:94aa68c77dcbc8e67226f7808c83f4a4a531597ef1c7c6c584c1c38c6d0af611",
+    "integration": "sha256:d5e69b79a73e2d1043fa2fe4a984c165bc4ee290f7491d32a0e8a9c340a60f1c",
+    "repository": "sha256:4c5051b454d78424449118696914d034aeca589b837d8060e21667c0ab0463eb",
+    "session": "sha256:3859562ff861f3cae564206d3f6a5d042e6d4b0e1462de6af43c5f2b422c5678",
+    "time": "sha256:f9a38b7cb1b1500bee592a30d959110a2167430e97e7e8d9ff1ad34eb14633e0",
+    "unsupported_cargo_slot": "sha256:21fbdbca75a12068a2e44e4c7468c6a9caa5dd31a0c3f7d4c5e1a9f325c95bd0",
+    "watermark": "sha256:397010afedbe6c04c42532ce70fbbe51db2dce9fd3c94431d0f3c5e0f1821974"
+  },
+  "decision_policy_digest": "sha256:87308e8bffca1c7f1e00b18d385e567daaaf72ca59d5447f13649b2bf316e0f4",
+  "evidence_control": "canonical_sha256_only",
+  "fixture_checkpoint_commit": "eda50f53000ab4f96ef30e1f3a46b748b3fea6e0",
+  "frozen": true,
+  "holdout_labels_available_to_tuning": false,
+  "owner_labels_digest": "sha256:7ae670e0890bc544c7f7ccaf12bd02b9d06e09500e2824fea57814adf5c428c8",
+  "owner_labels_file_digest": "sha256:5f3d7fdf1203d1fb2476a7fe7c4f905bb409d2d87916991be925b6f52c441ae8",
+  "packet_digest": "sha256:1a1549d041ba58a1ec8cf55d71c78495ec8d4eadf2b9834aa540bfaadc5a6aa9",
+  "packet_file_digest": "sha256:4096cd1661d2bc274488ec33756bf768abcd4ffb2e32a6b9fc73a3892a9b7aeb",
+  "packet_id": "pr9-pr10-owner-acceptance-v1",
+  "partition_counts": {
+    "sealed_holdout": 15,
+    "train": 12,
+    "validation": 12
+  },
+  "partition_seed": 1502531,
+  "profile_matrix_digest": "sha256:25a95c13062073d499429a408dc5f6f29ddf104b6799fc2752cae7fa363059b7",
+  "protected_classes": [
+    "exact_symbol",
+    "qualified_name",
+    "exact_path",
+    "exact_flag",
+    "exact_error",
+    "config_key",
+    "no_answer",
+    "wrong_scope",
+    "privacy_canary"
+  ],
+  "schema_version": 1,
+  "source_repository_commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
+  "source_repository_tree": "3d8de57a843244229c3b19995c9d0b9e00081769",
+  "stratum_support": {
+    "config_key": {
+      "sealed_holdout": 1,
+      "train": 1,
+      "validation": 1
+    },
+    "exact_error": {
+      "sealed_holdout": 1,
+      "train": 1
+    },
+    "exact_flag": {
+      "sealed_holdout": 1,
+      "train": 1,
+      "validation": 1
+    },
+    "exact_path": {
+      "sealed_holdout": 1,
+      "train": 1,
+      "validation": 1
+    },
+    "exact_symbol": {
+      "sealed_holdout": 2,
+      "train": 2,
+      "validation": 1
+    },
+    "generated_vendor_noise": {
+      "sealed_holdout": 1,
+      "train": 1,
+      "validation": 1
+    },
+    "incremental_delete": {
+      "sealed_holdout": 1,
+      "validation": 1
+    },
+    "incremental_edit": {
+      "sealed_holdout": 1,
+      "train": 1
+    },
+    "incremental_rename": {
+      "sealed_holdout": 1,
+      "validation": 1
+    },
+    "natural_language": {
+      "sealed_holdout": 2,
+      "train": 1,
+      "validation": 2
+    },
+    "no_answer": {
+      "sealed_holdout": 4,
+      "train": 3,
+      "validation": 2
+    },
+    "privacy_canary": {
+      "sealed_holdout": 1,
+      "validation": 1
+    },
+    "qualified_name": {
+      "sealed_holdout": 1,
+      "train": 1,
+      "validation": 1
+    },
+    "renamed_moved_symbol": {
+      "sealed_holdout": 1,
+      "validation": 1
+    },
+    "same_name_cross_scope": {
+      "sealed_holdout": 1,
+      "train": 1,
+      "validation": 1
+    },
+    "unsupported_language": {
+      "sealed_holdout": 1,
+      "train": 1
+    },
+    "wrong_scope": {
+      "sealed_holdout": 1,
+      "validation": 1
+    }
+  },
+  "toolchain": {
+    "cpu_model": "AMD EPYC 7742 64-Core Processor",
+    "logical_cpus": 90,
+    "machine": "x86_64",
+    "memory_bytes": 151940530176,
+    "os": "Linux-6.8.0-136-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nLLVM version: 22.1.2"
+  }
+}

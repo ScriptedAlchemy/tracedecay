@@ -7,8 +7,8 @@
     "provider": "checked_in_real_repo_fixture",
     "fixture_manifest": {
       "path": "tests/fixtures/search_quality/fixture-manifest-v1.json",
-      "byte_len": 9973,
-      "digest": "sha256:46d0b4fc29125d45a0adf7d408dc9791f1c2a2a6f25ea767c99179d82f6eae23"
+      "byte_len": 9345,
+      "digest": "sha256:2fd7abfafc0efa06ad4b84bfea0034e304cf63cf6ca84781e2a69711449e0157"
     },
     "query_set": {
       "path": "tests/fixtures/search_quality/queries-v1.jsonl",

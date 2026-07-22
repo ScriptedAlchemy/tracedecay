@@ -1,6 +1,6 @@
 {
   "authority": "contract_only",
-  "digest": "sha256:8663decc7f33d48fe0f4ffeba1bbd9e9c9cc57a990c7815d79c9f0ce2050840c",
+  "digest": "sha256:c5a92ba2f84e93045d74d60cc517fc38648632c077ea617374c0022b69422124",
   "entries": [
     {
       "acceptance_authority": false,
@@ -23,12 +23,12 @@
         "git:eda50f53000ab4f96ef30e1f3a46b748b3fea6e0",
         "git-tree:a29158914bc8b87b7f06fe5cf922d8186514c727"
       ],
-      "run_manifest_digest": "sha256:b3108f62e645ce745a5f18dd4180277c309aa20346a2531a7f307793c7e0b36c"
+      "run_manifest_digest": "sha256:98eecb3d79e9bd9b8ac125ecb0a9ea27f9c55372994a289649738168b4937e04"
     },
     {
       "acceptance_authority": false,
       "aggregate_artifacts": [],
-      "claim": "Only an opaque authorized-store locator and seal metadata are checked in; no holdout labels, revealed outcomes, or promotion evidence are present.",
+      "claim": "Only an opaque authorized-store locator and seal metadata are checked in; no holdout labels, accessed locked outcomes, or promotion evidence are present.",
       "claim_id": "claim-sealed-holdout-nondisclosure",
       "fixture_artifacts": [
         "fixture-manifest-v1.json",
@@ -39,7 +39,7 @@
         "authorized-store://search-quality/holdout/judgments-v1",
         "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de"
       ],
-      "run_manifest_digest": "sha256:b3108f62e645ce745a5f18dd4180277c309aa20346a2531a7f307793c7e0b36c"
+      "run_manifest_digest": "sha256:98eecb3d79e9bd9b8ac125ecb0a9ea27f9c55372994a289649738168b4937e04"
     }
   ],
   "index_id": "evidence-index-search-quality-contract-v1",

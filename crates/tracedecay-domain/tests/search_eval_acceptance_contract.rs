@@ -6,7 +6,7 @@ use tracedecay_domain::{
     CandidateListV1, DecisionOwnerId, EvalCandidateAnchorV1, EvalCandidateV1, EvalOutcomeV1,
     EvalPartitionV1, EvalQueryV1, EvalRunScopeV1, EvaluationFixtureBundleV1, EvidenceIndexV1,
     FixtureAuthorityV1, FixtureContentDigest, FixtureManifestV1, HoldoutLabelAuthorityV1,
-    HoldoutRevealCapabilityV1, JudgmentId, LabelSetDigest, LabelSetId, LabelSetV1, QueryWorkloadV1,
+    HoldoutAccessReceiptV1, JudgmentId, LabelSetDigest, LabelSetId, LabelSetV1, QueryWorkloadV1,
     RelevanceJudgmentV1, RetrieverLaneId, RunManifestV1, SavedCandidateSetDigest,
     SavedCandidateSetV1, WorkloadDigest,
 };
@@ -104,17 +104,17 @@ fn locked_manifest(fixture: &FixtureManifestV1, workload: &QueryWorkloadV1) -> R
 }
 
 #[test]
-fn pre_reveal_validation_rejects_contract_only_authority() {
+fn pre_holdout_access_validation_rejects_contract_only_authority() {
     let bundle = fixture_bundle();
     let error = bundle
         .run
-        .validate_pre_reveal(&bundle.manifest, &bundle.workload)
+        .validate_pre_holdout_access(&bundle.manifest, &bundle.workload)
         .unwrap_err();
     assert!(error.to_string().contains("locked-quality"));
 }
 
 #[test]
-fn reveal_capability_binds_locator_seal_and_frozen_run_digest() {
+fn holdout_access_receipt_binds_locator_seal_and_frozen_run_digest() {
     let mut manifest: FixtureManifestV1 = read_json("fixture-manifest-v1.json");
     manifest.authority = FixtureAuthorityV1::LockedQuality;
     manifest.holdout_seal.labels_content_digest =
@@ -122,53 +122,74 @@ fn reveal_capability_binds_locator_seal_and_frozen_run_digest() {
     manifest.holdout_seal.label_authority = Some(HoldoutLabelAuthorityV1::Deterministic);
     let workload = workload();
     let run = locked_manifest(&manifest, &workload);
-    run.validate_pre_reveal(&manifest, &workload).unwrap();
+    run.validate_pre_holdout_access(&manifest, &workload).unwrap();
 
-    let capability = HoldoutRevealCapabilityV1 {
-        schema_revision: 1,
-        labels_locator: manifest.holdout_seal.locator.clone(),
-        envelope_locator: manifest.holdout_seal.signature_locator.clone(),
-        seal_digest: manifest.holdout_seal.seal_digest.clone(),
-        run_id: run.run_id.clone(),
-        run_manifest_digest: run.digest.clone(),
-        revealed_by: DecisionOwnerId::new("owner-search-quality-lead").unwrap(),
-        operation: "evaluate_locked_quality_v1".to_string(),
-        not_before_unix: 100,
-        expires_at_unix: 200,
-    };
-
-    let receipt = capability
-        .issue_receipt(
-            &run,
-            &manifest.holdout_seal,
-            &manifest.decision_owners,
-            FixtureContentDigest::new(ZERO_DIGEST).unwrap(),
-            manifest.decision_owners[0].clone(),
-            "root-v1".to_string(),
-            150,
-        )
-        .unwrap();
+    let receipt = HoldoutAccessReceiptV1::issue_for_run(
+        &run,
+        &manifest.holdout_seal,
+        &manifest.decision_owners,
+        manifest.decision_owners[0].clone(),
+        150,
+    )
+    .unwrap();
     assert_eq!(receipt.run_id, run.run_id);
     assert_eq!(receipt.run_manifest_digest, run.digest);
     assert_eq!(receipt.seal_digest, manifest.holdout_seal.seal_digest);
+    assert_eq!(
+        receipt.labels_content_digest,
+        manifest.holdout_seal.labels_content_digest.clone().unwrap()
+    );
 
     let mut wrong_run = run.clone();
     wrong_run.candidate_revision.push_str("-changed-after-lock");
     wrong_run.digest = wrong_run.compute_digest().unwrap();
     assert!(
-        capability
-            .issue_receipt(
+        receipt
+            .validate_for_run(
                 &wrong_run,
                 &manifest.holdout_seal,
                 &manifest.decision_owners,
-                FixtureContentDigest::new(ZERO_DIGEST).unwrap(),
-                manifest.decision_owners[0].clone(),
-                "root-v1".to_string(),
-                150,
             )
             .unwrap_err()
             .to_string()
-            .contains("run manifest digest")
+            .contains("run/seal binding")
+    );
+}
+
+#[test]
+fn owner_decision_requires_canonical_identities_and_terminal_outcomes() {
+    use tracedecay_domain::{EvidenceIndexDigest, OwnerDecisionEvidenceV1, OwnerDecisionDigest};
+    let mut decision = OwnerDecisionEvidenceV1 {
+        schema_version: 1,
+        decision_kind: OwnerDecisionEvidenceV1::DECISION_KIND.to_string(),
+        authority: "owner_delegated_by_user_2026-07-22".to_string(),
+        source_repository_commit: "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66".to_string(),
+        source_repository_tree: "3d8de57a843244229c3b19995c9d0b9e00081769".to_string(),
+        corpus_digest: FixtureContentDigest::new(ONE_DIGEST).unwrap(),
+        partition_digest: FixtureContentDigest::new(TWO_DIGEST).unwrap(),
+        label_digest: FixtureContentDigest::new(THREE_DIGEST).unwrap(),
+        profile_digest: FixtureContentDigest::new(FOUR_DIGEST).unwrap(),
+        toolchain_digest: FixtureContentDigest::new(FIVE_DIGEST).unwrap(),
+        hardware_digest: FixtureContentDigest::new(ONE_DIGEST).unwrap(),
+        report_digest: FixtureContentDigest::new(TWO_DIGEST).unwrap(),
+        evidence_index_digest: EvidenceIndexDigest::new(THREE_DIGEST).unwrap(),
+        outcome: EvalOutcomeV1::Inconclusive,
+        decided_by: DecisionOwnerId::new("owner-search-quality-lead").unwrap(),
+        rationale: "low support pending production evidence".to_string(),
+        gate_receipt_digests: vec![FixtureContentDigest::new(FOUR_DIGEST).unwrap()],
+        digest: OwnerDecisionDigest::new(ZERO_DIGEST).unwrap(),
+    };
+    decision.digest = decision.compute_digest().unwrap();
+    decision.validate().unwrap();
+
+    decision.outcome = EvalOutcomeV1::Blocked;
+    decision.digest = decision.compute_digest().unwrap();
+    assert!(
+        decision
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("accepted, rejected, or inconclusive")
     );
 }
 
@@ -313,7 +334,7 @@ fn agent_judgment(
 fn agent_provenance(state: AgentAdjudicationStateV1) -> AgentAdjudicatedLabelProvenanceV1 {
     AgentAdjudicatedLabelProvenanceV1 {
         delegated_by: DecisionOwnerId::new("owner-search-quality-lead").unwrap(),
-        signed_delegation_digest: FixtureContentDigest::new(TWO_DIGEST).unwrap(),
+        owner_delegation_digest: FixtureContentDigest::new(TWO_DIGEST).unwrap(),
         blinded_packet_digest: FixtureContentDigest::new(ONE_DIGEST).unwrap(),
         final_label_set_digest: Some(LabelSetDigest::new(FIVE_DIGEST).unwrap()),
         state,
@@ -402,7 +423,7 @@ fn adjudication_state_is_derived_from_exactly_two_results() {
 #[test]
 fn agent_provenance_rejects_placeholder_reused_and_mismatched_digests() {
     let mut placeholder = agent_provenance(AgentAdjudicationStateV1::Agreement);
-    placeholder.signed_delegation_digest = FixtureContentDigest::new(ZERO_DIGEST).unwrap();
+    placeholder.owner_delegation_digest = FixtureContentDigest::new(ZERO_DIGEST).unwrap();
     assert!(placeholder.validate().is_err());
 
     let mut mismatched_packet = agent_provenance(AgentAdjudicationStateV1::Agreement);

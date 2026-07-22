@@ -1074,7 +1074,7 @@ mod tests {
         ProjectionKeyV1 {
             kind: ProjectionKindV1::Embedding,
             schema_revision: "embedding.test.v1".to_owned(),
-            profile_digest: ManifestDigest::new(format!("sha256:{}", "p".repeat(64)))
+            profile_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
                 .expect("projection profile digest"),
         }
     }

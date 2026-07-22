@@ -14,8 +14,7 @@ use tracedecay::search_eval::{
 };
 use tracedecay_domain::{
     DecisionOwnerId, EvalOutcomeV1, EvidenceIndexV1, FixtureContentDigest, HoldoutLabelAuthorityV1,
-    HoldoutRevealCapabilityV1, HoldoutSealV1, RelevanceJudgmentV1, RunManifestV1,
-    SavedCandidateSetV1,
+    OwnerDecisionEvidenceV1, RelevanceJudgmentV1, RunManifestV1, SavedCandidateSetV1,
 };
 
 #[derive(Debug, Parser)]
@@ -63,8 +62,8 @@ enum Command {
         run_manifest: Option<PathBuf>,
         #[arg(long, default_value = "benchmarks/search-quality/runs")]
         output_root: PathBuf,
-        #[arg(long, value_name = "AUTHORIZED_STORE_LOCATOR")]
-        holdout_capability: Option<String>,
+        #[arg(long)]
+        holdout_accessed_by: Option<String>,
         #[arg(long)]
         holdout_profile_root: Option<PathBuf>,
         #[arg(long)]
@@ -74,7 +73,7 @@ enum Command {
         #[arg(long)]
         require_outcome: Option<OutcomeArg>,
     },
-    /// Import one blinded packet, signed delegation, or immutable judgment.
+    /// Import one blinded packet, owner delegation, or immutable judgment.
     Packet {
         #[arg(long)]
         profile_root: Option<PathBuf>,
@@ -85,13 +84,11 @@ enum Command {
         #[arg(long)]
         owner: Option<String>,
         #[arg(long)]
-        trust_root: Option<String>,
-        #[arg(long)]
         blinded_packet_digest: Option<String>,
         #[arg(long)]
         at_unix: u64,
     },
-    /// Validate, import, and sign one private sealed-label packet.
+    /// Validate and import one private sealed-label packet (content digests only).
     Seal {
         #[arg(long, default_value = "tests/fixtures/search_quality")]
         fixtures: PathBuf,
@@ -106,26 +103,12 @@ enum Command {
         #[arg(long)]
         owner: String,
         #[arg(long)]
-        trust_root: Option<String>,
-        #[arg(long)]
         at_unix: u64,
     },
-    /// Mint one least-privilege run-bound reveal capability.
-    Capability {
+    /// Validate one canonical unsigned owner-decision evidence record.
+    OwnerDecision {
         #[arg(long)]
-        run_manifest: PathBuf,
-        #[arg(long)]
-        seal: PathBuf,
-        #[arg(long)]
-        profile_root: Option<PathBuf>,
-        #[arg(long)]
-        trust_root: Option<String>,
-        #[arg(long)]
-        not_before_unix: u64,
-        #[arg(long)]
-        expires_at_unix: u64,
-        #[arg(long)]
-        at_unix: u64,
+        input: PathBuf,
     },
 }
 
@@ -233,18 +216,36 @@ fn main() -> ExitCode {
             fixtures,
             run_manifest,
             output_root,
-            holdout_capability,
+            holdout_accessed_by,
             holdout_profile_root,
             holdout_seal,
             saved_candidates,
             require_outcome,
         } => {
             let required_outcome = require_outcome.map(Into::into);
+            let accessed_by = match holdout_accessed_by {
+                Some(owner) => Some(DecisionOwnerId::new(owner).map_err(|e| e.to_string())),
+                None => None,
+            };
+            let accessed_by = match accessed_by {
+                Some(Ok(owner)) => Some(owner),
+                Some(Err(error)) => {
+                    return emit(
+                        &json!({
+                            "command": "compare",
+                            "outcome": EvalOutcomeV1::InvalidRun,
+                            "rationale": error,
+                        }),
+                        ExitCode::from(2),
+                    );
+                }
+                None => None,
+            };
             let options = CompareOptions {
                 fixture_root: fixtures,
                 run_manifest,
                 output_root,
-                holdout_capability,
+                holdout_accessed_by: accessed_by,
                 holdout_profile_root,
                 holdout_seal,
                 saved_candidates,
@@ -276,7 +277,6 @@ fn main() -> ExitCode {
             kind,
             input,
             owner,
-            trust_root,
             blinded_packet_digest,
             at_unix,
         } => emit_operation(
@@ -303,15 +303,12 @@ fn main() -> ExitCode {
                         )
                         .map_err(|error| error.to_string())?;
                         store
-                            .sign_agent_delegation(
-                                AgentDelegationPayloadV1 {
-                                    schema_revision: 1,
-                                    delegated_by,
-                                    blinded_packet_digest: packet_digest,
-                                    signed_at_unix: at_unix,
-                                },
-                                trust_root.as_deref().unwrap_or(""),
-                            )
+                            .import_owner_delegation(AgentDelegationPayloadV1 {
+                                schema_revision: 1,
+                                delegated_by,
+                                blinded_packet_digest: packet_digest,
+                                recorded_at_unix: at_unix,
+                            })
                             .map_err(|error| error.to_string())?
                     }
                     PacketKindArg::Judgment => {
@@ -332,64 +329,40 @@ fn main() -> ExitCode {
             profile_root,
             label_authority,
             owner,
-            trust_root,
             at_unix,
         } => emit_operation(
             "seal",
             (|| {
-                let signed_by = DecisionOwnerId::new(owner).map_err(|error| error.to_string())?;
+                let sealed_by = DecisionOwnerId::new(owner).map_err(|error| error.to_string())?;
                 let result = seal_holdout_labels(&SealHoldoutOptions {
                     fixture_root: fixtures,
                     run_manifest,
                     labels_path: labels,
                     profile_root,
                     label_authority: label_authority.into(),
-                    signed_by,
-                    trust_root_id: trust_root.unwrap_or_default(),
-                    signed_at_unix: at_unix,
+                    sealed_by,
+                    sealed_at_unix: at_unix,
                 })
                 .map_err(|error| error.to_string())?;
                 serde_json::to_value(result).map_err(|error| error.to_string())
             })(),
         ),
-        Command::Capability {
-            run_manifest,
-            seal,
-            profile_root,
-            trust_root,
-            not_before_unix,
-            expires_at_unix,
-            at_unix,
-        } => emit_operation(
-            "capability",
+        Command::OwnerDecision { input } => emit_operation(
+            "owner_decision",
             (|| {
-                let run: RunManifestV1 = read_json_file(&run_manifest)?;
-                let seal: HoldoutSealV1 = read_json_file(&seal)?;
-                let revealed_by = run
-                    .decision_owners
-                    .first()
-                    .cloned()
-                    .ok_or("run manifest has no decision owner")?;
-                let store = authority_store(profile_root.as_deref())?;
-                let record = store
-                    .sign_reveal_capability(
-                        HoldoutRevealCapabilityV1 {
-                            schema_revision: 1,
-                            labels_locator: seal.locator,
-                            envelope_locator: seal.signature_locator,
-                            seal_digest: seal.seal_digest,
-                            run_id: run.run_id,
-                            run_manifest_digest: run.digest,
-                            revealed_by,
-                            operation: "evaluate_locked_quality_v1".to_string(),
-                            not_before_unix,
-                            expires_at_unix,
-                        },
-                        trust_root.as_deref().unwrap_or(""),
-                        at_unix,
-                    )
-                    .map_err(|error| error.to_string())?;
-                serde_json::to_value(record).map_err(|error| error.to_string())
+                let decision: OwnerDecisionEvidenceV1 = read_json_file(&input)?;
+                decision.validate().map_err(|error| error.to_string())?;
+                serde_json::to_value(json!({
+                    "decision_kind": decision.decision_kind,
+                    "outcome": decision.outcome,
+                    "digest": decision.digest,
+                    "source_repository_commit": decision.source_repository_commit,
+                    "source_repository_tree": decision.source_repository_tree,
+                    "report_digest": decision.report_digest,
+                    "evidence_index_digest": decision.evidence_index_digest,
+                    "signature": "none_content_addressed_sha256_only",
+                }))
+                .map_err(|error| error.to_string())
             })(),
         ),
     }

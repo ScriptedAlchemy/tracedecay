@@ -344,7 +344,10 @@ def validate_production_apis(workload: dict[str, Any], repository: Path) -> None
             "fastembed_model(artifact)?",
             "TextEmbedding::try_new_from_user_defined",
         ),
-        after="impl EmbeddingRuntime for FastEmbedEmbeddingRuntime",
+        after=(
+            '#[cfg(feature = "semantic-fastembed")]\n'
+            "impl EmbeddingRuntime for FastEmbedEmbeddingRuntime"
+        ),
     )
     require_body_tokens(
         runtime_source,

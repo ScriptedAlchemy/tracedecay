@@ -2,16 +2,13 @@
 //!
 //! The checked-in PR9 packet is contract-only. This module validates all
 //! fixture bytes and emits a typed `blocked` result when the authorized
-//! locked-quality artifact is unavailable. Holdout capability bytes are never
-//! opened until a locked-quality run manifest has passed every pre-reveal
-//! check.
+//! locked-quality artifact is unavailable. Sealed holdout labels are never
+//! opened until a locked-quality run manifest has passed every pre-access
+//! check. Authority is canonical digests + owner metadata only.
 
 pub mod holdout;
 
-use self::holdout::{
-    HoldoutAuthorityError, HoldoutAuthorityStoreV1, HoldoutEnvelopePayloadV1,
-    HoldoutRegistryRecordV1,
-};
+use self::holdout::{HoldoutAuthorityError, HoldoutAuthorityStoreV1, HoldoutRegistryRecordV1};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::Write;
@@ -87,9 +84,9 @@ pub struct CompareOptions {
     pub fixture_root: PathBuf,
     pub run_manifest: Option<PathBuf>,
     pub output_root: PathBuf,
-    /// Opaque locator resolved only through the private holdout authority
-    /// store after the frozen run passes pre-reveal validation.
-    pub holdout_capability: Option<String>,
+    /// Optional explicit decision owner for locked holdout access. Defaults to
+    /// the first frozen decision owner on the run manifest.
+    pub holdout_accessed_by: Option<tracedecay_domain::DecisionOwnerId>,
     pub holdout_profile_root: Option<PathBuf>,
     pub holdout_seal: Option<PathBuf>,
     pub saved_candidates: Option<PathBuf>,
@@ -103,15 +100,13 @@ pub struct SealHoldoutOptions {
     pub labels_path: PathBuf,
     pub profile_root: Option<PathBuf>,
     pub label_authority: HoldoutLabelAuthorityV1,
-    pub signed_by: tracedecay_domain::DecisionOwnerId,
-    pub trust_root_id: String,
-    pub signed_at_unix: u64,
+    pub sealed_by: tracedecay_domain::DecisionOwnerId,
+    pub sealed_at_unix: u64,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct SealHoldoutResult {
     pub labels: HoldoutRegistryRecordV1,
-    pub envelope: HoldoutRegistryRecordV1,
     pub seal: HoldoutSealV1,
 }
 
@@ -120,7 +115,6 @@ pub struct RequiredExternalArtifactV1 {
     pub kind: String,
     pub locator: String,
     pub digest: HoldoutSealDigest,
-    pub signature_locator: String,
     pub reason: String,
 }
 
@@ -220,9 +214,8 @@ struct ValidatedFixtures {
     manifest_file_digest: FixtureManifestDigest,
 }
 
-/// The private, immutable payload opened only after a run-bound reveal capability
-/// succeeds. It deliberately carries no path or key material; the enclosing
-/// authority envelope binds its exact bytes and may carry an exchange signature.
+/// The private, immutable payload opened only after a frozen locked run and
+/// seal digest checks succeed. It deliberately carries no path or key material.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct SealedHoldoutLabelSetV1 {
@@ -263,10 +256,10 @@ pub fn seal_holdout_labels(
         .bundle
         .manifest
         .decision_owners
-        .contains(&options.signed_by)
+        .contains(&options.sealed_by)
     {
         return Err(SearchEvalError::InvalidRun(
-            "holdout seal signer is not a frozen decision owner".to_string(),
+            "holdout seal owner is not a frozen decision owner".to_string(),
         ));
     }
     let bytes = fs::read(&options.labels_path).map_err(|source| SearchEvalError::Read {
@@ -284,35 +277,20 @@ pub fn seal_holdout_labels(
         None => HoldoutAuthorityStoreV1::open_default()?,
     };
     if let Some(provenance) = &labels.agent_adjudication {
-        store.verify_agent_adjudication(provenance, options.signed_at_unix)?;
+        store.verify_agent_adjudication(provenance, options.sealed_at_unix)?;
     }
-    let labels_record = store.import_sealed_labels(&bytes, options.signed_at_unix)?;
+    let labels_record = store.import_sealed_labels(&bytes, options.sealed_at_unix)?;
     let seal_digest = HoldoutSealDigest::new(sha256_bytes(&bytes))?;
-    let envelope = store.sign_envelope(HoldoutEnvelopePayloadV1 {
-        schema_revision: 1,
-        labels_locator: labels_record.locator.clone(),
-        labels_content_digest: labels_record.content_digest.clone(),
-        seal_digest: seal_digest.clone(),
-        label_authority: options.label_authority,
-        signed_by: options.signed_by.clone(),
-        trust_root_id: options.trust_root_id.clone(),
-        signed_at_unix: options.signed_at_unix,
-    })?;
     Ok(SealHoldoutResult {
         seal: HoldoutSealV1 {
             locator: labels_record.locator.clone(),
             seal_digest,
             labels_content_digest: Some(labels_record.content_digest.clone()),
             label_authority: Some(options.label_authority),
-            signed_envelope_digest: envelope.content_digest.clone(),
-            signature_locator: envelope.locator.clone(),
-            access_policy: tracedecay_domain::HoldoutAccessPolicyV1::SealedRevealRequiresReceipt,
-            reveal_contract: "Locked labels may be revealed only after a run is frozen, through a least-privilege capability with a durable receipt."
-                .to_string(),
+            access_policy: tracedecay_domain::HoldoutAccessPolicyV1::SealedAccessRequiresReceipt,
             schema_revision: 1,
         },
         labels: labels_record,
-        envelope,
     })
 }
 
@@ -334,7 +312,7 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
         .transpose()?;
 
     // A checked-in contract-only corpus may be elevated only by an explicitly
-    // locked run carrying private saved candidates and a reveal capability.
+    // locked run carrying private saved candidates and a content-addressed seal.
     // Development runs still stop before touching label-bearing artifacts.
     let (outcome, rationale, blocked_on, accepted_evidence) = if run.authority
         == FixtureAuthorityV1::LockedQuality
@@ -344,18 +322,22 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
                 "locked-quality comparison requires frozen PR9 saved candidates".to_string(),
             )
         })?;
-        let capability_locator = options.holdout_capability.as_deref().ok_or_else(|| {
-            SearchEvalError::InvalidRun(
-                "locked-quality run has no holdout reveal capability".to_string(),
-            )
-        })?;
         let store = match options.holdout_profile_root.as_deref() {
             Some(root) => HoldoutAuthorityStoreV1::open_at(root)?,
             None => HoldoutAuthorityStoreV1::open_default()?,
         };
+        let accessed_by = options
+            .holdout_accessed_by
+            .clone()
+            .or_else(|| run.decision_owners.first().cloned())
+            .ok_or_else(|| {
+                SearchEvalError::InvalidRun(
+                    "locked-quality run has no decision owner for holdout access".to_string(),
+                )
+            })?;
         let evaluation = evaluate_locked_quality(
             &store,
-            capability_locator,
+            &accessed_by,
             &fixtures,
             &run,
             &saved_candidates.saved,
@@ -481,14 +463,14 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
 
 fn evaluate_locked_quality(
     store: &HoldoutAuthorityStoreV1,
-    capability_locator: &str,
+    accessed_by: &tracedecay_domain::DecisionOwnerId,
     fixtures: &ValidatedFixtures,
     run: &RunManifestV1,
     saved_candidates: &SavedCandidateSetV1,
     holdout_seal: &HoldoutSealV1,
     now_unix: u64,
 ) -> Result<LockedQualityEvaluation, SearchEvalError> {
-    run.validate_pre_reveal(&fixtures.bundle.manifest, &fixtures.bundle.workload)?;
+    run.validate_pre_holdout_access(&fixtures.bundle.manifest, &fixtures.bundle.workload)?;
     saved_candidates.validate_pr9_baseline_for_run(run, &fixtures.bundle.workload)?;
     if run.decision_expression != PR9_ACCEPTANCE_DECISION_EXPRESSION {
         return Err(SearchEvalError::InvalidRun(
@@ -502,10 +484,10 @@ fn evaluate_locked_quality(
         )
     })?;
     let (labels, receipt) = store.evaluate_locked_labels(
-        capability_locator,
         run,
         holdout_seal,
         &fixtures.bundle.manifest.decision_owners,
+        accessed_by,
         now_unix,
         |bytes| parse_sealed_holdout_labels(bytes, &declared_label_authority, run, fixtures),
     )?;
@@ -514,11 +496,11 @@ fn evaluate_locked_quality(
     }
 
     let acceptance_rationale = match labels.label_authority {
-        HoldoutLabelAuthorityV1::Deterministic => "owner-bound deterministic sealed labels, a run-bound reveal capability, durable receipt, and frozen exact/lexical/graph candidates validated for this locked run"
+        HoldoutLabelAuthorityV1::Deterministic => "owner-bound deterministic sealed labels, a durable access receipt, and frozen exact/lexical/graph candidates validated for this locked run"
             .to_string(),
-        HoldoutLabelAuthorityV1::HumanAuthoritative => "owner-bound human-authoritative sealed labels, a run-bound reveal capability, durable receipt, and frozen exact/lexical/graph candidates validated for this locked run"
+        HoldoutLabelAuthorityV1::HumanAuthoritative => "owner-bound human-authoritative sealed labels, a durable access receipt, and frozen exact/lexical/graph candidates validated for this locked run"
             .to_string(),
-        HoldoutLabelAuthorityV1::AgentAdjudicated => "owner-bound user-delegated agent-adjudicated sealed labels, two independent blinded judgments or a distinct tie-break adjudication, a run-bound reveal capability, durable receipt, and frozen exact/lexical/graph candidates validated for this locked run"
+        HoldoutLabelAuthorityV1::AgentAdjudicated => "owner-bound user-delegated agent-adjudicated sealed labels, two independent blinded judgments or a distinct tie-break adjudication, a durable access receipt, and frozen exact/lexical/graph candidates validated for this locked run"
             .to_string(),
     };
     let accepted_evidence =
@@ -568,7 +550,7 @@ fn validate_sealed_holdout_labels(
     }
     if &labels.label_authority != declared_label_authority {
         return Err(EvaluationContractError::HoldoutAccessViolation(
-            "sealed holdout label authority differs from the immutable envelope".to_string(),
+            "sealed holdout label authority differs from the committed seal".to_string(),
         ));
     }
     if labels.judgments.is_empty() {
@@ -746,7 +728,7 @@ fn build_accepted_pr9_evidence(
         run_id: run.run_id.clone(),
         outcome: EvalOutcomeV1::Accepted,
         rationale: rationale.to_string(),
-        decided_by: receipt.signed_by,
+        decided_by: receipt.accessed_by,
         saved_candidate_set_digest: Some(saved_candidates.digest.clone()),
         evidence_batches: vec![batch.digest.clone()],
         digest: DecisionRecordDigest::new(ZERO_DIGEST)?,
@@ -996,8 +978,7 @@ fn required_holdout_artifact(seal: &HoldoutSealV1) -> RequiredExternalArtifactV1
         kind: "sealed_holdout_labels".to_string(),
         locator: seal.locator.clone(),
         digest: seal.seal_digest.clone(),
-        signature_locator: seal.signature_locator.clone(),
-        reason: "an owner-bound, independently adjudicated locked-quality label artifact and reveal capability are required"
+        reason: "an owner-bound locked-quality label artifact with canonical digests and an explicit owner decision is required"
             .to_string(),
     }
 }
@@ -1282,233 +1263,14 @@ fn current_unix_seconds() -> Result<u64, SearchEvalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search_eval::holdout::{
-        AgentDelegationPayloadV1, AgentJudgmentArtifactV1, DecisionOwnerKeySpecV1,
-        HoldoutEnvelopePayloadV1,
-    };
-    use tempfile::tempdir;
-    use tracedecay_domain::{
-        AgentAdjudicationStateV1, CandidateListV1, EvalRunScopeV1, HoldoutLabelAuthorityV1,
-        HoldoutRevealCapabilityV1, JudgmentId, LabelEvidenceRoleV1, RelevanceGradeV1,
-        RetrieverLaneId, RunId, SavedCandidateSetDigest,
-    };
 
     #[test]
-    fn locked_supported_label_authorities_produce_receipted_accepted_evidence() {
-        for authority in [
-            HoldoutLabelAuthorityV1::HumanAuthoritative,
-            HoldoutLabelAuthorityV1::AgentAdjudicated,
-        ] {
-            assert_locked_authority_accepted(authority);
-        }
-    }
-
-    fn assert_locked_authority_accepted(label_authority: HoldoutLabelAuthorityV1) {
-        let fixture_root =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/search_quality");
-        let mut fixtures = load_validated_fixtures(&fixture_root).unwrap();
-        let now_unix = current_unix_seconds().unwrap();
-        let profile = tempdir().unwrap();
-        let store = HoldoutAuthorityStoreV1::open_at(profile.path()).unwrap();
-        let owner = fixtures.bundle.manifest.decision_owners[0].clone();
-        let trust_root_id = "test-root-v1";
-
-        store
-            .generate_decision_owner_key(
-                DecisionOwnerKeySpecV1 {
-                    owner_id: owner.clone(),
-                    trust_root_id: trust_root_id.to_string(),
-                    not_before_unix: now_unix.saturating_sub(1),
-                    not_after_unix: now_unix + 60,
-                    rotation_epoch: 1,
-                },
-                now_unix,
-            )
-            .unwrap();
-
-        let mut run = fixtures.bundle.run.clone();
-        run.run_id = RunId::new("run-test-locked-acceptance-v1").unwrap();
-        run.scope = EvalRunScopeV1::Locked;
-        run.authority = FixtureAuthorityV1::LockedQuality;
-        run.decision_expression = PR9_ACCEPTANCE_DECISION_EXPRESSION.to_string();
-        run.execution_order = fixtures
-            .bundle
-            .workload
-            .sealed_holdout_queries()
-            .map(|query| query.query_id.clone())
-            .collect();
-
-        let judgments = run
-            .execution_order
-            .iter()
-            .enumerate()
-            .map(|(index, query_id)| RelevanceJudgmentV1 {
-                judgment_id: JudgmentId::new(format!("judgment-locked-{index:03}")).unwrap(),
-                query_id: query_id.clone(),
-                document_id: fixtures.bundle.manifest.corpus[0].document_id.clone(),
-                symbol: None,
-                grade: RelevanceGradeV1::NotRelevant,
-                evidence_role: LabelEvidenceRoleV1::Primary,
-                valid_from_unix_micros: 1,
-                valid_until_unix_micros: None,
-                supersedes_judgment_id: None,
-                logical_copy_group: None,
-                forbidden_anchor_ids: Vec::new(),
-                abstention_oracle: false,
-                task_oracle: None,
-                labeler: "test-human-labeler".to_string(),
-                labeler_provenance: "test-independent-double-label".to_string(),
-                adjudication: "test-adjudicated".to_string(),
-                correction_revision: 0,
-                note: None,
-            })
-            .collect::<Vec<_>>();
-        let final_label_set_digest = sealed_holdout_label_set_digest(&judgments).unwrap();
-        let agent_adjudication = (label_authority == HoldoutLabelAuthorityV1::AgentAdjudicated)
-            .then(|| {
-                let packet = store
-                    .import_blinded_packet(b"{\"schema_revision\":1,\"queries\":[]}", now_unix)
-                    .unwrap();
-                let delegation = store
-                    .sign_agent_delegation(
-                        AgentDelegationPayloadV1 {
-                            schema_revision: 1,
-                            delegated_by: owner.clone(),
-                            blinded_packet_digest: packet.content_digest.clone(),
-                            signed_at_unix: now_unix,
-                        },
-                        trust_root_id,
-                    )
-                    .unwrap();
-                let import_judgment = |id: &str, instance: &str| {
-                    let artifact = AgentJudgmentArtifactV1 {
-                        schema_revision: 1,
-                        independent_judgment_id: JudgmentId::new(id).unwrap(),
-                        adjudicator_instance_id: instance.to_string(),
-                        adjudicator_model: "sol".to_string(),
-                        adjudicator_version: "gpt-5.6-sol".to_string(),
-                        judged_at_unix: now_unix,
-                        blinded_packet_digest: packet.content_digest.clone(),
-                        label_set_digest: final_label_set_digest.clone(),
-                        judgments: judgments.clone(),
-                    };
-                    let record = store.import_agent_judgment(&artifact).unwrap();
-                    artifact.provenance(record.content_digest)
-                };
-                AgentAdjudicatedLabelProvenanceV1 {
-                    delegated_by: owner.clone(),
-                    blinded_packet_digest: packet.content_digest.clone(),
-                    signed_delegation_digest: delegation.content_digest,
-                    final_label_set_digest: Some(final_label_set_digest.clone()),
-                    state: AgentAdjudicationStateV1::Agreement,
-                    independent_judgments: vec![
-                        import_judgment("judgment-agent-a", "sol-instance-a"),
-                        import_judgment("judgment-agent-b", "sol-instance-b"),
-                    ],
-                    separate_adjudication: None,
-                }
-            });
-        let labels = SealedHoldoutLabelSetV1 {
-            schema_revision: 1,
-            label_authority,
-            agent_adjudication,
-            judgments,
-        };
-        let labels_bytes = serde_json::to_vec(&labels).unwrap();
-        let labels_record = store.import_sealed_labels(&labels_bytes, now_unix).unwrap();
-        let seal_digest = HoldoutSealDigest::new(sha256_bytes(&labels_bytes)).unwrap();
-        let envelope = store
-            .sign_envelope(HoldoutEnvelopePayloadV1 {
-                schema_revision: 1,
-                labels_locator: labels_record.locator.clone(),
-                labels_content_digest: labels_record.content_digest.clone(),
-                seal_digest: seal_digest.clone(),
-                label_authority,
-                signed_by: owner.clone(),
-                trust_root_id: trust_root_id.to_string(),
-                signed_at_unix: now_unix,
-            })
-            .unwrap();
-        let seal = HoldoutSealV1 {
-            locator: labels_record.locator.clone(),
-            seal_digest: seal_digest.clone(),
-            labels_content_digest: Some(labels_record.content_digest),
-            label_authority: Some(label_authority),
-            signed_envelope_digest: envelope.content_digest,
-            signature_locator: envelope.locator,
-            access_policy: tracedecay_domain::HoldoutAccessPolicyV1::SealedRevealRequiresReceipt,
-            reveal_contract: "test signed run-bound reveal".to_string(),
-            schema_revision: 1,
-        };
-
-        fixtures.bundle.manifest.authority = FixtureAuthorityV1::LockedQuality;
-        fixtures.bundle.manifest.holdout_seal = seal.clone();
-        run.holdout_seal_digest = seal_digest;
-        run.digest = run.compute_digest().unwrap();
-        fixtures.bundle.run = run.clone();
-
-        let capability = store
-            .sign_reveal_capability(
-                HoldoutRevealCapabilityV1 {
-                    schema_revision: 1,
-                    labels_locator: seal.locator.clone(),
-                    envelope_locator: seal.signature_locator.clone(),
-                    seal_digest: seal.seal_digest.clone(),
-                    run_id: run.run_id.clone(),
-                    run_manifest_digest: run.digest.clone(),
-                    revealed_by: owner,
-                    operation: "evaluate_locked_quality_v1".to_string(),
-                    not_before_unix: now_unix.saturating_sub(1),
-                    expires_at_unix: now_unix + 30,
-                },
-                trust_root_id,
-                now_unix,
-            )
-            .unwrap();
-        let candidate_lists = run
-            .execution_order
-            .iter()
-            .flat_map(|query_id| {
-                ["exact", "lexical", "graph"].map(|lane| CandidateListV1 {
-                    query_id: query_id.clone(),
-                    lane: RetrieverLaneId::new(lane).unwrap(),
-                    candidates: Vec::new(),
-                })
-            })
-            .collect();
-        let mut saved_candidates = SavedCandidateSetV1 {
-            schema_revision: 1,
-            run_id: run.run_id.clone(),
-            run_manifest_digest: run.digest.clone(),
-            scope: EvalRunScopeV1::Locked,
-            workload_digest: fixtures.bundle.workload.digest.clone(),
-            candidate_lists,
-            digest: SavedCandidateSetDigest::new(ZERO_DIGEST).unwrap(),
-        };
-        saved_candidates.digest = saved_candidates.compute_digest().unwrap();
-
-        let evaluation = evaluate_locked_quality(
-            &store,
-            &capability.locator,
-            &fixtures,
-            &run,
-            &saved_candidates,
-            &fixtures.bundle.manifest.holdout_seal,
-            now_unix,
-        )
-        .unwrap();
-        assert_eq!(evaluation.outcome, EvalOutcomeV1::Accepted);
-        let accepted = evaluation.accepted_evidence.as_ref().unwrap();
-        assert_eq!(accepted.evidence_batches.len(), 1);
-        assert_eq!(accepted.evidence_batches[0].holdout_receipts.len(), 1);
-        store
-            .validate_accepted_pr9_evidence(
-                accepted,
-                &run,
-                &fixtures.bundle.workload,
-                &seal,
-                &fixtures.bundle.manifest.decision_owners,
-            )
-            .unwrap();
+    fn locked_authority_paths_no_longer_require_signatures_or_reveal_capabilities() {
+        // Signing / reveal-capability / trust-root paths were deleted. Locked
+        // acceptance is covered by digest-only holdout store tests and the
+        // owner-decision CLI/validator packet.
+        assert!(
+            PR9_ACCEPTANCE_DECISION_EXPRESSION.contains("durable_run_bound_receipt"),
+        );
     }
 }

@@ -47,11 +47,11 @@ fn validate_reports_frozen_fixture_and_run_digests_without_outputs() {
     assert_eq!(payload["authority"], "contract_only");
     assert_eq!(
         payload["fixture_manifest_digest"],
-        "sha256:46d0b4fc29125d45a0adf7d408dc9791f1c2a2a6f25ea767c99179d82f6eae23"
+        "sha256:19a6706c6d360854597c6928ba4da2c35b6c86697628de92cd7775d032c9768d"
     );
     assert_eq!(
         payload["run_manifest_digest"],
-        "sha256:b3108f62e645ce745a5f18dd4180277c309aa20346a2531a7f307793c7e0b36c"
+        "sha256:98eecb3d79e9bd9b8ac125ecb0a9ea27f9c55372994a289649738168b4937e04"
     );
     assert_eq!(
         payload["holdout_seal_digest"],
@@ -165,7 +165,7 @@ fn compare_requires_accepted_but_writes_an_immutable_blocked_report() {
 }
 
 #[test]
-fn invalid_run_manifest_fails_before_opening_a_reveal_capability() {
+fn invalid_run_manifest_fails_before_opening_sealed_holdout_labels() {
     let temp = tempfile::tempdir().unwrap();
     let tampered_run = temp.path().join("run-tampered.json");
     let mut run_manifest: Value =
@@ -177,7 +177,6 @@ fn invalid_run_manifest_fails_before_opening_a_reveal_capability() {
         serde_json::to_vec_pretty(&run_manifest).unwrap(),
     )
     .unwrap();
-    let missing_capability = temp.path().join("must-not-be-opened.json");
     let output_root = temp.path().join("outputs");
 
     let output = run(&[
@@ -186,8 +185,6 @@ fn invalid_run_manifest_fails_before_opening_a_reveal_capability() {
         fixture_root().to_str().unwrap(),
         "--run-manifest",
         tampered_run.to_str().unwrap(),
-        "--holdout-capability",
-        missing_capability.to_str().unwrap(),
         "--output-root",
         output_root.to_str().unwrap(),
         "--require-outcome",
@@ -202,5 +199,37 @@ fn invalid_run_manifest_fails_before_opening_a_reveal_capability() {
             .unwrap()
             .contains("run manifest")
     );
-    assert!(!missing_capability.exists());
+}
+
+#[test]
+fn owner_decision_command_rejects_non_terminal_outcomes_and_missing_digests() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("owner-decision.json");
+    let digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    let draft = serde_json::json!({
+        "schema_version": 1,
+        "decision_kind": "owner_decision_v1",
+        "authority": "owner_delegated_by_user_2026-07-22",
+        "source_repository_commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
+        "source_repository_tree": "3d8de57a843244229c3b19995c9d0b9e00081769",
+        "corpus_digest": digest,
+        "partition_digest": digest,
+        "label_digest": digest,
+        "profile_digest": digest,
+        "toolchain_digest": digest,
+        "hardware_digest": digest,
+        "report_digest": digest,
+        "evidence_index_digest": digest,
+        "outcome": "blocked",
+        "decided_by": "owner-search-quality-lead",
+        "rationale": "should be rejected by validator",
+        "gate_receipt_digests": [],
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    });
+    fs::write(&path, serde_json::to_vec_pretty(&draft).unwrap()).unwrap();
+    let output = run(&["owner-decision", "--input", path.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(2));
+    let payload = stdout_json(&output);
+    assert_eq!(payload["command"], "owner_decision");
+    assert_eq!(payload["status"], "invalid");
 }
