@@ -10,7 +10,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use serde::Serialize;
 use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
@@ -265,7 +265,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
     /// callers receive `false` and may schedule the newer generation again.
     pub(crate) fn schedule(&self, work: SemanticRuntimeWorkV1) -> bool {
         let (sequence, cancellation) = {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.committing {
                 return false;
             }
@@ -308,7 +308,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
                 let mut state = handle
                     .state
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner());
+                    .unwrap_or_else(PoisonError::into_inner);
                 if state.sequence != sequence || cancellation.cancelled() || state.committing {
                     return;
                 }
@@ -319,7 +319,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
             let mut state = handle
                 .state
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(PoisonError::into_inner);
             if state.sequence != sequence {
                 state.committing = false;
                 return;
@@ -348,7 +348,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
     }
 
     pub(crate) fn status(&self) -> SemanticRuntimeScheduleStatusV1 {
-        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut status = state.status.clone();
         if let (
             SemanticRuntimeScheduleStatusV1::Indexing {
@@ -365,13 +365,26 @@ impl SemanticRuntimeSchedulingHandleV1 {
     pub(crate) fn current(&self) -> Option<SemanticGenerationPointerV1> {
         self.state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .current
             .clone()
     }
 
+    pub(crate) fn restore_current(&self, pointer: SemanticGenerationPointerV1) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(cancellation) = state.cancellation.take() {
+            cancellation.cancel();
+        }
+        state.sequence = state.sequence.wrapping_add(1);
+        state.committing = false;
+        state.current = Some(pointer.clone());
+        state.status = SemanticRuntimeScheduleStatusV1::Current {
+            generation: pointer.generation,
+        };
+    }
+
     pub(crate) fn cancel(&self) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.committing {
             return false;
         }
@@ -391,7 +404,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
     }
 
     fn finish_failure(&self, sequence: u64, reason: SemanticRuntimeScheduleFailureV1) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.sequence == sequence && !state.committing {
             state.cancellation = None;
             state.status = SemanticRuntimeScheduleStatusV1::Failed {
@@ -466,7 +479,7 @@ where
         let _lifecycle = self
             .lifecycle
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         let (authority, factory) = {
             let active = self.read_active();
             (Arc::clone(&active.authority), Arc::clone(&active.factory))
@@ -496,7 +509,7 @@ where
         let _lifecycle = self
             .lifecycle
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         self.replace_locked(authority, factory)
     }
 
@@ -571,13 +584,13 @@ where
     fn read_active(&self) -> RwLockReadGuard<'_, ActiveRuntime<R>> {
         self.active
             .read()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn write_active(&self) -> RwLockWriteGuard<'_, ActiveRuntime<R>> {
         self.active
             .write()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -613,7 +626,7 @@ mod tests {
                     started_tx.send(()).expect("report replacement start");
                     release_rx
                         .lock()
-                        .unwrap_or_else(|error| error.into_inner())
+                        .unwrap_or_else(PoisonError::into_inner)
                         .recv()
                         .expect("release replacement factory");
                 }

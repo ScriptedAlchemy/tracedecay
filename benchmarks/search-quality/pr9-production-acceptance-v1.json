@@ -349,22 +349,35 @@
       "id": "linux",
       "runner": "linux",
       "parent_gate_id": "platform_linux",
-      "status": "pending_parent_gate",
-      "benchmark_measurement": "required"
+      "status": "executed_passed",
+      "benchmark_measurement": "required",
+      "execution": {
+        "state": "executed_passed",
+        "command": "cargo test --all-features --test code_index_suite --test search_quality_suite",
+        "summary": "linux host executed code_index_suite + search_quality_suite"
+      }
     },
     {
       "id": "windows",
       "runner": "windows",
       "parent_gate_id": "platform_windows",
-      "status": "pending_parent_gate",
-      "benchmark_measurement": "not_applicable_linux_proc_metrics"
+      "status": "pending_unsupported_host",
+      "benchmark_measurement": "not_applicable_linux_proc_metrics",
+      "execution": {
+        "state": "pending_unsupported_host",
+        "reason": "no Windows runner available on this Linux execution host"
+      }
     },
     {
       "id": "macos",
       "runner": "macos",
       "parent_gate_id": "platform_macos",
-      "status": "pending_parent_gate",
-      "benchmark_measurement": "not_applicable_linux_proc_metrics"
+      "status": "pending_unsupported_host",
+      "benchmark_measurement": "not_applicable_linux_proc_metrics",
+      "execution": {
+        "state": "pending_unsupported_host",
+        "reason": "no macOS runner available on this Linux execution host"
+      }
     }
   ],
   "promotion": {
@@ -373,6 +386,53 @@
     "locked_report": null,
     "promotion_evidence": null,
     "requires_all_parent_gates": true,
-    "requires_locked_outcome": "accepted"
+    "requires_locked_outcome": "accepted",
+    "blocked_on": [
+      "platform_windows_unsupported_on_execution_host",
+      "platform_macos_unsupported_on_execution_host",
+      "locked_accepted_report_absent"
+    ]
+  },
+  "parent_gate_execution": {
+    "executed_at_unix": 1784709579,
+    "host": {
+      "os": "linux",
+      "uname": "Linux"
+    },
+    "gates": {
+      "code_index_contracts": {
+        "state": "executed_passed",
+        "command": "cargo test --all-features --test code_index_suite",
+        "summary": "76 passed; includes incremental/no-op, generations, projection, git/diagnostic/test joins"
+      },
+      "search_quality_contracts": {
+        "state": "executed_passed",
+        "command": "cargo test --all-features --test search_quality_suite",
+        "summary": "28 passed; exact/lexical/graph ranking, coverage/abstention, fixture integrity"
+      },
+      "search_eval_cli_contracts": {
+        "state": "executed_passed",
+        "command": "cargo test --all-features --test search_eval_cli_test",
+        "summary": "3 passed"
+      },
+      "code_index_benchmark_validation": {
+        "state": "executed_passed",
+        "command": "cargo bench --bench code_index_chunks --all-features -- --validate-only",
+        "summary": "validated 6 cases at current and exact 10x scales"
+      },
+      "platform_linux": {
+        "state": "executed_passed",
+        "command": "cargo test --all-features --test code_index_suite --test search_quality_suite",
+        "summary": "linux host executed code_index_suite + search_quality_suite"
+      },
+      "platform_windows": {
+        "state": "pending_unsupported_host",
+        "reason": "no Windows runner available on this Linux execution host"
+      },
+      "platform_macos": {
+        "state": "pending_unsupported_host",
+        "reason": "no macOS runner available on this Linux execution host"
+      }
+    }
   }
 }

@@ -192,20 +192,14 @@ where
         if !generation.matches(request) {
             return self.abstain(mode, SemanticAbstentionV1::IndexIncompatible, fallback);
         }
-        let calibration = match calibration {
-            Some(calibration) => calibration,
-            None => {
-                return self.abstain(mode, SemanticAbstentionV1::CalibrationUnavailable, fallback);
-            }
+        let Some(calibration) = calibration else {
+            return self.abstain(mode, SemanticAbstentionV1::CalibrationUnavailable, fallback);
         };
         if let Err(abstention) = preflight_calibration(request, calibration) {
             return self.abstain(mode, abstention, fallback);
         }
-        let outcome = match self.lane.retrieve_semantic(request) {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                return self.abstain(mode, SemanticAbstentionV1::LaneFailure, fallback);
-            }
+        let Ok(outcome) = self.lane.retrieve_semantic(request) else {
+            return self.abstain(mode, SemanticAbstentionV1::LaneFailure, fallback);
         };
         let batch = match outcome {
             RetrieverOutcome::Complete(batch) => batch,
@@ -232,12 +226,11 @@ where
             Ok(evidence) => evidence,
             Err(abstention) => return self.abstain(mode, abstention, fallback),
         };
-        let semantic_lane = match CompositionLaneInput::new(
+        let Ok(semantic_lane) = CompositionLaneInput::new(
             RetrieverKind::Semantic,
             RetrieverOutcome::Complete(batch),
-        ) {
-            Ok(lane) => lane,
-            Err(_) => return self.abstain(mode, SemanticAbstentionV1::LaneFailure, fallback),
+        ) else {
+            return self.abstain(mode, SemanticAbstentionV1::LaneFailure, fallback);
         };
         Ok(SemanticQueryServiceOutcomeV1::Augmented {
             semantic_lane,

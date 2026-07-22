@@ -800,7 +800,7 @@ impl DeterministicFixedPointFusion {
                     record
                         .source_occurrence_ids
                         .iter()
-                        .map(|id| id.to_string())
+                        .map(ToString::to_string)
                         .collect::<Vec<_>>()
                         .join(","),
                     record.comparator_revision,

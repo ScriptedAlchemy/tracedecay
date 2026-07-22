@@ -52,6 +52,18 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             .map(|capability| capability.capability_id().as_str())
             .collect::<Vec<_>>(),
         vec![
+            "capability.application.code-query.callees",
+            "capability.application.code-query.callers",
+            "capability.application.code-query.exact-occurrence",
+            "capability.application.code-query.impact",
+            "capability.application.code-query.implementations",
+            "capability.application.code-query.module-api",
+            "capability.application.code-query.phrase-search",
+            "capability.application.code-query.qualified-name",
+            "capability.application.code-query.signature-search",
+            "capability.application.code-query.source-metadata",
+            "capability.application.code-query.symbol-search",
+            "capability.application.code-query.type-hierarchy",
             "capability.application.configuration.audit",
             "capability.application.configuration.batch",
             "capability.application.configuration.explain",

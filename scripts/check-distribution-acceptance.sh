@@ -33,6 +33,8 @@ require_command() {
 
 print_plan() {
   cat <<'EOF'
+python3 tests/distribution/fastembed/prepare_fixture.py --check tests/distribution/fastembed
+# Optional setup accelerator: TRACEDECAY_DISTRIBUTION_FASTEMBED_CACHE=<verified dir>
 python3 tests/distribution/fastembed/prepare_fixture.py tests/distribution/fastembed <temporary verified fixture>
 python3 tests/distribution/fastembed/validate_fixture.py <temporary verified fixture>
 cargo build --workspace --release --all-features --lib --bins
@@ -97,6 +99,12 @@ assert_required_assets() {
     "src/query/retrieval/semantic/service.rs"
     "src/query/retrieval/semantic/tests.rs"
     "src/semantic_code/fastembed_adapter.rs"
+    # Always-compiled benchmark/harness modules embed these via include_str!.
+    "tests/fixtures/provider_normalization/codex/session_meta.input.json"
+    "tests/fixtures/provider_normalization/codex/agent_message.input.json"
+    "tests/fixtures/analytics/codex_skill_prose.txt"
+    "benchmarks/pr5-observation/workload-v1.json"
+    "benchmarks/pr7-memory/workload-v1.json"
   )
   local -a application_assets=(
     "src/feedback/read.rs"
@@ -295,7 +303,12 @@ run_self_test() {
     src/lsp_bridge.rs \
     src/query/retrieval/semantic/service.rs \
     src/query/retrieval/semantic/tests.rs \
-    src/semantic_code/fastembed_adapter.rs; do
+    src/semantic_code/fastembed_adapter.rs \
+    tests/fixtures/provider_normalization/codex/session_meta.input.json \
+    tests/fixtures/provider_normalization/codex/agent_message.input.json \
+    tests/fixtures/analytics/codex_skill_prose.txt \
+    benchmarks/pr5-observation/workload-v1.json \
+    benchmarks/pr7-memory/workload-v1.json; do
     mkdir -p -- "$root/$(dirname -- "$path")"
     : >"$root/$path"
   done

@@ -85,6 +85,19 @@ impl ProjectionPublicationHandoffV1 {
     pub fn into_parts(self) -> (ProjectionBatchRequestV1, ProjectionBatchReceiptV1) {
         (self.request, self.receipt)
     }
+
+    /// Restore a durable handoff only after repeating the same receipt and
+    /// activation checks used by live projection publication.
+    pub(crate) fn restore(
+        request: ProjectionBatchRequestV1,
+        receipt: ProjectionBatchReceiptV1,
+    ) -> Result<Self, ProjectionPublicationErrorV1> {
+        verify_batch_receipt(&request, &receipt)?;
+        if !batch_can_activate(&receipt) {
+            return Err(ProjectionPublicationErrorV1::NotActivatable);
+        }
+        Ok(Self { request, receipt })
+    }
 }
 
 /// Execute projection work and prepare an atomic publication handoff.

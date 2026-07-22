@@ -137,7 +137,7 @@ impl ExactAdmissionValidator for FixtureAuthority {
         }
         let canonical_bytes: Vec<u8> = candidate_bytes
             .iter()
-            .map(|byte| byte.to_ascii_lowercase())
+            .map(u8::to_ascii_lowercase)
             .collect();
         let normalization_steps = if canonical_bytes == candidate_bytes {
             Vec::new()

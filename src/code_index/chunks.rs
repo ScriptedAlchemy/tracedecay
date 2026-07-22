@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
@@ -57,7 +58,8 @@ pub trait CodeChunker {
 
 /// The chunks produced for one file: the generation-bound document manifest
 /// plus its chunks in deterministic order (Plan 25).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CodeFileChunksV1 {
     pub document: CodeSearchDocumentV1,
     pub chunks: Vec<CodeSearchChunkV1>,
@@ -66,7 +68,8 @@ pub struct CodeFileChunksV1 {
 /// Parser-backed evidence for one indexed file. The canonical relation rows
 /// contain only relation kinds the Plan 25 graph contract can represent;
 /// everything else remains a typed abstention rather than a synthetic edge.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CodeFileIndexArtifactsV1 {
     pub chunks: CodeFileChunksV1,
     pub symbols: Vec<LineageSymbolRecordV1>,
@@ -75,7 +78,8 @@ pub struct CodeFileIndexArtifactsV1 {
 }
 
 /// Why one parser relation was not promoted into the canonical graph lane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum CodeIndexEdgeAbstentionReasonV1 {
     MissingSymbolEndpoint,
     UnsupportedRelationKind,
@@ -84,7 +88,8 @@ pub enum CodeIndexEdgeAbstentionReasonV1 {
 /// A parser-observed edge that remains explicitly unavailable to graph
 /// traversal. This preserves the raw limitation without inventing a
 /// semantically stronger relation.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
 pub struct CodeIndexEdgeAbstentionV1 {
     pub source_node_id: String,
     pub target_node_id: String,
@@ -125,6 +130,17 @@ impl ExactExtractionAuthorityV1 {
             );
         }
         Ok(Self { chunk_digests })
+    }
+
+    /// Reconstruct parser-backed exact admission from a sealed file artifact.
+    ///
+    /// The durable generation decoder validates the complete extraction,
+    /// chunk, manifest, receipt, and capability graph before exposing this
+    /// authority. Recomputing digests here avoids persisting forgeable
+    /// authority internals.
+    pub(crate) fn restore(chunks: &CodeFileChunksV1) -> Result<Self, ChunkingFailureV1> {
+        chunks.validate()?;
+        Self::mint(&chunks.chunks)
     }
 
     pub fn admit(

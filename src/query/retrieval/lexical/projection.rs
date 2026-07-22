@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
-    ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, FixedPointScore,
+    ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
+    FixedPointScore,
     FreshnessCompatibilityV1, LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
     SourceOccurrenceId,
@@ -191,7 +192,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 && chunk
                     .exact_terms
                     .iter()
-                    .any(|term| term.requires_extraction_authority())
+                    .any(ExactTechnicalTermV1::requires_extraction_authority)
             {
                 return Err(RetrievalPortError::Contract(
                     "raw exact terms require parser-backed extraction admission".to_owned(),
@@ -789,26 +790,26 @@ fn bm25_score_micros(
     );
     let length_ratio_millis =
         (document_length as u128).saturating_mul(1_000) / average_length.max(1) as u128;
-    let normalization_millis = (1_000 - BM25_B_MILLIS) as u128
-        + (BM25_B_MILLIS as u128).saturating_mul(length_ratio_millis) / 1_000;
+    let normalization_millis = u128::from(1_000 - BM25_B_MILLIS)
+        + u128::from(BM25_B_MILLIS).saturating_mul(length_ratio_millis) / 1_000;
     let denominator_millis = (term_frequency as u128).saturating_mul(1_000)
-        + (BM25_K1_MILLIS as u128).saturating_mul(normalization_millis) / 1_000;
+        + u128::from(BM25_K1_MILLIS).saturating_mul(normalization_millis) / 1_000;
     let tf_micros = (term_frequency as u128)
-        .saturating_mul((BM25_K1_MILLIS + 1_000) as u128)
+        .saturating_mul(u128::from(BM25_K1_MILLIS + 1_000))
         .saturating_mul(1_000_000)
         / denominator_millis.max(1);
-    let score = (idf_micros as u128)
+    let score = u128::from(idf_micros)
         .saturating_mul(tf_micros)
-        .saturating_mul(field_weight_millis as u128)
+        .saturating_mul(u128::from(field_weight_millis))
         / 1_000_000
         / 1_000;
-    score.min(u64::MAX as u128) as u64
+    score.min(u128::from(u64::MAX)) as u64
 }
 
 fn fixed_ln_ratio_micros(numerator: u64, denominator: u64) -> u64 {
     const SCALE: u128 = 1_u128 << 40;
     const LN_2_SCALED: u128 = 762_123_384_786;
-    let mut ratio = (numerator as u128).saturating_mul(SCALE) / denominator.max(1) as u128;
+    let mut ratio = u128::from(numerator).saturating_mul(SCALE) / u128::from(denominator.max(1));
     let mut powers_of_two = 0_u128;
     while ratio >= SCALE.saturating_mul(2) {
         ratio /= 2;
@@ -825,7 +826,7 @@ fn fixed_ln_ratio_micros(numerator: u64, denominator: u64) -> u64 {
     let scaled = sum
         .saturating_mul(2)
         .saturating_add(powers_of_two.saturating_mul(LN_2_SCALED));
-    (scaled.saturating_mul(1_000_000) / SCALE).min(u64::MAX as u128) as u64
+    (scaled.saturating_mul(1_000_000) / SCALE).min(u128::from(u64::MAX)) as u64
 }
 
 fn fuzzy_distance_bound(character_count: usize) -> usize {

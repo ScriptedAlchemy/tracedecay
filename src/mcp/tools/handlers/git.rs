@@ -146,16 +146,18 @@ impl AffectedTestDependents for TraceDecay {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RankedAffectedTest {
-    path: String,
-    distance: usize,
+pub(crate) struct RankedAffectedTest {
+    pub(crate) path: String,
+    pub(crate) distance: usize,
 }
 
-struct AffectedTestTraversal {
-    test_distances: HashMap<String, usize>,
+pub(crate) struct AffectedTestTraversal {
+    pub(crate) test_distances: HashMap<String, usize>,
 }
 
-fn rank_affected_tests(test_distances: &HashMap<String, usize>) -> Vec<RankedAffectedTest> {
+pub(crate) fn rank_affected_tests(
+    test_distances: &HashMap<String, usize>,
+) -> Vec<RankedAffectedTest> {
     let mut ranked = test_distances
         .iter()
         .map(|(path, distance)| RankedAffectedTest {
@@ -171,7 +173,7 @@ fn rank_affected_tests(test_distances: &HashMap<String, usize>) -> Vec<RankedAff
     ranked
 }
 
-fn affected_test_proximity(distance: usize) -> &'static str {
+pub(crate) fn affected_test_proximity(distance: usize) -> &'static str {
     match distance {
         0 => "changed",
         1 => "direct",
@@ -180,7 +182,7 @@ fn affected_test_proximity(distance: usize) -> &'static str {
     }
 }
 
-async fn collect_affected_test_files<D: AffectedTestDependents + ?Sized>(
+pub(crate) async fn collect_affected_test_files<D: AffectedTestDependents + ?Sized>(
     dependents_source: &D,
     files: &[String],
     max_depth: usize,

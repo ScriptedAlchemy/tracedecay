@@ -118,6 +118,34 @@ fn only_a_current_receipt_routes_to_semantic_search() {
             from_generation: generation('a'),
             target_generation: generation('c'),
         },
+        SemanticRuntimeStateV1::SelectedNotDownloaded {
+            model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+            artifact_digest: "a".repeat(64),
+        },
+        SemanticRuntimeStateV1::Downloading {
+            model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+            artifact_digest: "a".repeat(64),
+            bytes_received: 1,
+            bytes_total: 2,
+        },
+        SemanticRuntimeStateV1::Verifying {
+            model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+            artifact_digest: "a".repeat(64),
+        },
+        SemanticRuntimeStateV1::Installed {
+            model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+            artifact_digest: "a".repeat(64),
+        },
+        SemanticRuntimeStateV1::Loading {
+            model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+            artifact_digest: "a".repeat(64),
+        },
+        SemanticRuntimeStateV1::Failed {
+            model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+            artifact_digest: "a".repeat(64),
+            detail: "download failed".to_owned(),
+            retryable: true,
+        },
     ] {
         let status = SemanticRuntimeStatusV1::new(Some(pin.clone()), state);
         assert!(matches!(

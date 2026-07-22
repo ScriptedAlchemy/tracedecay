@@ -119,11 +119,12 @@ fn code_query_capability(
         ))?,
         routing: RoutingContractV1::new(
             1,
-            format!("Read {readable_name}"),
+            format!("Query {readable_name}"),
             format!(
                 "Invoke the generation-bound PR9 {readable_name} query without replacing its owning kernel."
             ),
-            vec![format!("Read {readable_name}")],
+            // Keep examples distinct from primitive-read fixtures ("Read …").
+            vec![format!("Query indexed {readable_name}")],
         )?,
         request_schema: callable_code_request_schema(kind)?,
         result_schema: callable_code_result_schema(kind)?,

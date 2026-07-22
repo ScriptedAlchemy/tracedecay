@@ -1076,6 +1076,23 @@ fn semantic_status_missing_from_daemon_keeps_offline_baseline_healthy() {
 }
 
 #[test]
+fn selected_not_downloaded_is_offline_healthy_with_retry_guidance() {
+    let status = semantic_status(
+        crate::application::semantic_runtime::SemanticRuntimeStateV1::SelectedNotDownloaded {
+            model_id: crate::config::DEFAULT_FASTEMBED_MODEL_ID.to_owned(),
+            artifact_digest: "a".repeat(64),
+        },
+    );
+    let mut counters = DoctorCounters::new();
+    super::check_semantic_runtime_health(
+        &mut counters,
+        Some(&serde_json::json!({ "semantic_runtime": status })),
+    );
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 0);
+}
+
+#[test]
 fn daemon_runtime_request_enables_authority_audit() {
     assert_eq!(
         super::daemon_runtime_args(),

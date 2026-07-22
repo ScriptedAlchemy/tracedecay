@@ -957,11 +957,11 @@ impl ModelArtifactStore {
         let _lock = self.acquire_lock()?;
         self.recover_locked()?;
         let mut inventory = self.load_inventory_locked()?;
-        if let Some(record) = inventory.records.get_mut(&digest.to_string()) {
-            if record.state == ArtifactInventoryStateV1::Installed {
-                record.state = ArtifactInventoryStateV1::RetainedForRollback;
-                record.recorded_at_unix = now_unix;
-            }
+        if let Some(record) = inventory.records.get_mut(&digest.to_string())
+            && record.state == ArtifactInventoryStateV1::Installed
+        {
+            record.state = ArtifactInventoryStateV1::RetainedForRollback;
+            record.recorded_at_unix = now_unix;
         }
         self.save_inventory_locked(&inventory)
     }
@@ -1338,19 +1338,18 @@ impl ModelArtifactStore {
         staging_ids: Vec<String>,
     ) -> Result<(), ArtifactImportErrorV1> {
         for staging_id in staging_ids {
-            let staging_dir = match self.staging_dir.open_dir_nofollow(&staging_id) {
-                Ok(dir) => dir,
-                Err(_) => continue,
+            let Ok(staging_dir) = self.staging_dir.open_dir_nofollow(&staging_id) else {
+                continue;
             };
             let members_dir = staging_dir.open_dir_nofollow("members").ok();
             let meta = match read_staging_meta(&staging_dir) {
                 Ok(meta) if meta.schema == STAGING_SCHEMA_V1 => meta,
                 Ok(_) | Err(_) => continue,
             };
-            let binding = match self.verify_manifest_binding(&meta.manifest, meta.verified_at_unix)
-            {
-                Ok(binding) => binding,
-                Err(_) => continue,
+            let Ok(binding) =
+                self.verify_manifest_binding(&meta.manifest, meta.verified_at_unix)
+            else {
+                continue;
             };
             let mut record = self.record_for(
                 &meta.manifest,
@@ -1524,7 +1523,7 @@ fn check_resource_ceiling(
 
 fn sha256_open_file(mut file: impl Read) -> Result<Sha256DigestHex, ArtifactImportErrorV1> {
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
+    let mut buffer = vec![0u8; 64 * 1024];
     loop {
         let read = file
             .read(&mut buffer)

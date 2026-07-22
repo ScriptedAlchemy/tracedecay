@@ -12,7 +12,7 @@
   },
   "profile": {
     "manifest_path": "Cargo.toml",
-    "manifest_sha256": "5f72c858733538bc635c9bb3b519a461bcc78c1f9485d4ba6f44db28fc064aa3",
+    "manifest_sha256": "523b56e2e398573ce51ca4935a31ca76eb188677b7fdbf5d547fef9a2378e015",
     "cargo_profile": "bench",
     "opt_level": 3,
     "debug": false,
@@ -103,7 +103,7 @@
     },
     {
       "path": "Cargo.toml",
-      "sha256": "5f72c858733538bc635c9bb3b519a461bcc78c1f9485d4ba6f44db28fc064aa3"
+      "sha256": "523b56e2e398573ce51ca4935a31ca76eb188677b7fdbf5d547fef9a2378e015"
     },
     {
       "path": ".github/workflows/ci.yml",

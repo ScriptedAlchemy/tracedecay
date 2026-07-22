@@ -183,7 +183,7 @@ impl CodeGraphEvidenceAdapterV1 {
                         to: edge.to_occurrence.clone(),
                         edge_kind: edge.kind,
                         authority: edge.authority,
-                        evidence_span: edge.evidence_span.clone(),
+                        evidence_span: edge.evidence_span,
                     });
                     if !seen_targets.insert(edge.to_occurrence.clone()) {
                         continue;

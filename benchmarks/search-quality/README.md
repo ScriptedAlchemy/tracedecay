@@ -7,10 +7,12 @@ projection replay after restart, exact non-demotion, lexical ranking,
 graph/Git/diagnostic/test joins, coverage and abstention, V1 import parity,
 and Linux/Windows/macOS execution lanes.
 
-This directory contains preflight evidence, not a completed quality run.
-Promotion remains `pending_parent_gates` until the parent executes every
-allowlisted runtime/platform gate, captures the benchmark result, and produces
-an accepted locked report. The validator never runs Cargo or changes Git state.
+This directory contains production-acceptance preflight plus optional parent-gate
+execution receipts. Linux contract gates may be recorded as `executed_passed`;
+Windows/macOS may remain `pending_unsupported_host` when those runners are
+unavailable. Promotion stays `pending_parent_gates` until every required platform
+gate and a locked accepted report exist. The validator never fabricates accepted
+locked evidence, never runs Cargo, and never changes Git state.
 
 Run the static validator:
 

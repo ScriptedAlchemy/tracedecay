@@ -273,6 +273,13 @@ fn semantic_config_defaults_to_offline_healthy_baseline() {
     assert!(config.semantic.active_profile.is_none());
     assert!(config.semantic.rollback_profile.is_none());
     assert!(config.semantic.validate().is_ok());
+    let catalog = crate::semantic_code::production_fastembed_catalog();
+    let model = catalog
+        .get(super::DEFAULT_FASTEMBED_MODEL_ID)
+        .expect("default semantic model is cataloged");
+    let model_bytes = model.members.get("model").expect("model member").length;
+    assert!(config.semantic.resources.max_model_bytes >= model_bytes);
+    assert!(config.semantic.resources.max_resident_bytes >= model_bytes.saturating_mul(2));
 
     let json = serde_json::to_string(&config).unwrap();
     let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();

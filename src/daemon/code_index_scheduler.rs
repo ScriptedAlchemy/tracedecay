@@ -6,6 +6,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, Weak,
@@ -19,7 +20,7 @@ use notify_debouncer_full::{
     DebounceEventResult, Debouncer, RecommendedCache, new_debouncer,
     notify::{RecommendedWatcher, RecursiveMode},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
@@ -104,24 +105,68 @@ impl SharedCodeIndexBytePoolV1 {
 #[derive(Clone)]
 struct DaemonCodeIndexPublicationStoreV1 {
     active: Arc<Mutex<Option<CodeIndexPublishedGenerationV1>>>,
-    receipt_path: PathBuf,
+    active_path: PathBuf,
+    generations_root: PathBuf,
 }
 
-#[derive(Serialize)]
-struct DurablePublicationReceiptV1<'a> {
-    generation_id: &'a str,
-    snapshot_content_identity: &'a str,
-    publication_digest: &'a str,
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurablePublicationPointerV1 {
+    generation_id: String,
+    snapshot_content_identity: String,
+    publication_digest: String,
     sealed_at_micros: i64,
+    generation_file: String,
+    state_digest: String,
 }
 
 impl DaemonCodeIndexPublicationStoreV1 {
     fn new(store_root: &Path) -> Result<Self, CodeIndexSchedulerErrorV1> {
-        std::fs::create_dir_all(store_root)?;
+        let generations_root = store_root.join("code-generations-v1");
+        std::fs::create_dir_all(&generations_root)?;
         Ok(Self {
             active: Arc::new(Mutex::new(None)),
-            receipt_path: store_root.join("active-code-generation-v1.json"),
+            active_path: store_root.join("active-code-generation-v1.json"),
+            generations_root,
         })
+    }
+
+    fn unavailable(error: impl std::fmt::Display) -> CodeIndexPublicationStoreErrorV1 {
+        CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string())
+    }
+
+    fn sync_directory(path: &Path) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        std::fs::File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(Self::unavailable)
+    }
+
+    fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .map_err(Self::unavailable)?;
+        file.write_all(bytes).map_err(Self::unavailable)?;
+        file.sync_all().map_err(Self::unavailable)
+    }
+
+    fn state_digest(bytes: &[u8]) -> String {
+        format!("sha256:{}", sha256_hex(bytes))
+    }
+
+    fn validate_generation_file(value: &str) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let path = Path::new(value);
+        if value.is_empty()
+            || value.contains(['/', '\\'])
+            || path.file_name().and_then(|name| name.to_str()) != Some(value)
+            || !value.ends_with(".json")
+        {
+            return Err(Self::unavailable(
+                "active code-generation pointer contains an invalid generation file",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -129,15 +174,46 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
     fn load_active(
         &self,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .map_err(|_| {
-                CodeIndexPublicationStoreErrorV1::Unavailable(
-                    "daemon publication lock is poisoned".to_owned(),
-                )
-            })?
-            .clone())
+        let mut active = self.active.lock().map_err(|_| {
+            CodeIndexPublicationStoreErrorV1::Unavailable(
+                "daemon publication lock is poisoned".to_owned(),
+            )
+        })?;
+        if active.is_some() {
+            return Ok(active.clone());
+        }
+        let pointer_bytes = match std::fs::read(&self.active_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Self::unavailable(error)),
+        };
+        let pointer: DurablePublicationPointerV1 =
+            serde_json::from_slice(&pointer_bytes).map_err(|error| {
+                Self::unavailable(format!(
+                    "active code-generation pointer is corrupt: {error}"
+                ))
+            })?;
+        Self::validate_generation_file(&pointer.generation_file)?;
+        let generation_bytes = std::fs::read(self.generations_root.join(&pointer.generation_file))
+            .map_err(Self::unavailable)?;
+        if Self::state_digest(&generation_bytes) != pointer.state_digest {
+            return Err(Self::unavailable(
+                "sealed code-generation bytes do not match the active pointer digest",
+            ));
+        }
+        let generation = CodeIndexPublishedGenerationV1::decode_sealed(&generation_bytes)
+            .map_err(Self::unavailable)?;
+        if generation.manifest().generation_id.as_str() != pointer.generation_id
+            || generation.snapshot().content_identity.as_str() != pointer.snapshot_content_identity
+            || generation.projection().publication_digest().as_str() != pointer.publication_digest
+            || generation.manifest().seal.sealed_at.0 != pointer.sealed_at_micros
+        {
+            return Err(Self::unavailable(
+                "active code-generation pointer does not match the sealed generation",
+            ));
+        }
+        *active = Some(generation.clone());
+        Ok(Some(generation))
     }
 
     fn publish_atomically(
@@ -145,6 +221,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let _ = self.load_active()?;
         let mut active = self.active.lock().map_err(|_| {
             CodeIndexPublicationStoreErrorV1::Unavailable(
                 "daemon publication lock is poisoned".to_owned(),
@@ -157,28 +234,64 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
-        let receipt = DurablePublicationReceiptV1 {
-            generation_id: generation.manifest().generation_id.as_str(),
-            snapshot_content_identity: generation.snapshot().content_identity.as_str(),
-            publication_digest: generation.projection().publication_digest().as_str(),
+        let generation_bytes = generation.encode_sealed().map_err(Self::unavailable)?;
+        let state_digest = Self::state_digest(&generation_bytes);
+        let generation_file = format!(
+            "generation-{}.json",
+            state_digest
+                .strip_prefix("sha256:")
+                .unwrap_or(&state_digest)
+        );
+        let generation_path = self.generations_root.join(&generation_file);
+        if generation_path.exists() {
+            let existing = std::fs::read(&generation_path).map_err(Self::unavailable)?;
+            if existing != generation_bytes {
+                return Err(Self::unavailable(
+                    "immutable code-generation path contains different bytes",
+                ));
+            }
+        } else {
+            let temporary = self
+                .generations_root
+                .join(format!(".{generation_file}.{}.tmp", std::process::id()));
+            if temporary.exists() {
+                std::fs::remove_file(&temporary).map_err(Self::unavailable)?;
+            }
+            Self::write_durable(&temporary, &generation_bytes)?;
+            std::fs::rename(&temporary, &generation_path).map_err(Self::unavailable)?;
+            Self::sync_directory(&self.generations_root)?;
+        }
+
+        let pointer = DurablePublicationPointerV1 {
+            generation_id: generation.manifest().generation_id.as_str().to_owned(),
+            snapshot_content_identity: generation.snapshot().content_identity.as_str().to_owned(),
+            publication_digest: generation
+                .projection()
+                .publication_digest()
+                .as_str()
+                .to_owned(),
             sealed_at_micros: generation.manifest().seal.sealed_at.0,
+            generation_file,
+            state_digest,
         };
-        let bytes = serde_json::to_vec(&receipt).map_err(|error| {
+        let bytes = serde_json::to_vec(&pointer).map_err(|error| {
             CodeIndexPublicationStoreErrorV1::Unavailable(format!(
-                "publication receipt serialization failed: {error}"
+                "publication pointer serialization failed: {error}"
             ))
         })?;
-        let temporary = self.receipt_path.with_extension("json.tmp");
-        std::fs::write(&temporary, bytes).map_err(|error| {
-            CodeIndexPublicationStoreErrorV1::Unavailable(format!(
-                "publication receipt staging failed: {error}"
-            ))
-        })?;
-        std::fs::rename(&temporary, &self.receipt_path).map_err(|error| {
-            CodeIndexPublicationStoreErrorV1::Unavailable(format!(
-                "publication receipt activation failed: {error}"
-            ))
-        })?;
+        let temporary = self
+            .active_path
+            .with_extension(format!("json.{}.tmp", std::process::id()));
+        if temporary.exists() {
+            std::fs::remove_file(&temporary).map_err(Self::unavailable)?;
+        }
+        Self::write_durable(&temporary, &bytes)?;
+        std::fs::rename(&temporary, &self.active_path).map_err(Self::unavailable)?;
+        Self::sync_directory(
+            self.active_path
+                .parent()
+                .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
+        )?;
         *active = Some(generation);
         Ok(())
     }
@@ -457,6 +570,17 @@ impl CodeIndexWorktreeSchedulerV1 {
             DaemonProjectionSinkV1,
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?;
+        let restored = owner.active_generation()?;
+        if let Some(generation) = &restored
+            && generation.snapshot().worktree.as_ref() != Some(&worktree_id)
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "active code generation belongs to a different worktree".to_owned(),
+            ));
+        }
+        let latest_content_identity = restored
+            .as_ref()
+            .map(|generation| generation.snapshot().content_identity.clone());
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
@@ -471,7 +595,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             epoch,
             shutting_down: Arc::new(AtomicBool::new(false)),
             saved_trees: BTreeMap::new(),
-            latest_content_identity: None,
+            latest_content_identity,
             watcher: None,
             semantic_schedule: None,
         };
@@ -851,6 +975,9 @@ impl CodeIndexSchedulerRegistryV1 {
             store_root.join(sha256_hex(project_root.to_string_lossy().as_bytes())),
         )?;
         if let Some(hook) = semantic_schedule {
+            if let Some(latest) = opened.latest_complete() {
+                let _ = hook(&latest.generation);
+            }
             opened.set_semantic_schedule_hook(hook);
         }
         let scheduler = Arc::new(Mutex::new(opened));
@@ -1058,3 +1185,5 @@ fn point_for_offset(bytes: &[u8], offset: usize) -> Point {
 
 #[cfg(test)]
 mod tests;
+
+mod queries;

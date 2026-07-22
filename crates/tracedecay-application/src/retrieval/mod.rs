@@ -36,7 +36,7 @@ pub use requests::{
     GraphCallersRequest, GraphCallersResult, GraphImpactRequest, GraphImpactResult,
     HealthReadRequest, HealthReadResult, PageRequest, ResultProjection, RetrievalOrder,
     RetrievalRequestMeta, SessionLookupRequest, SessionLookupResult, SourceLinesRequest,
-    SourceLinesResult, SymbolSearchRequest, SymbolSearchResult,
+    SourceLinesResult, SourceReference, SymbolSearchRequest, SymbolSearchResult,
 };
 pub use service::{
     AffectedTestsService, GraphCallersService, SourceLinesService, SymbolSearchService,

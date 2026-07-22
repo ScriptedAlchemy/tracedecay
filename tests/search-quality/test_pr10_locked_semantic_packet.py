@@ -157,9 +157,14 @@ class Pr10LockedSemanticPacketTest(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                entry["locked_acceptance"] == "pending_parent_execution"
+                entry["locked_acceptance"]
+                in {"pending_parent_execution", "pending_locked_report"}
                 for entry in audit.values()
             )
+        )
+        self.assertNotIn(
+            "accepted",
+            {entry["locked_acceptance"] for entry in audit.values()},
         )
 
     def test_validator_lints_but_strict_acceptance_remains_pending(self) -> None:

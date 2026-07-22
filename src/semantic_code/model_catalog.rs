@@ -1,10 +1,10 @@
-//! Immutable FastEmbed model catalog for TraceDecay semantic selection.
+//! Immutable `FastEmbed` model catalog for TraceDecay semantic selection.
 //!
 //! Catalog entries pin source revision, license, member lengths, and SHA-256
 //! digests. There are no signatures or trust roots — integrity is the
 //! declared length + digest identity, matching the distribution fixture.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +22,7 @@ pub struct CatalogMemberPinV1 {
     pub sha256: String,
 }
 
-/// Provenance for a cataloged FastEmbed model.
+/// Provenance for a cataloged `FastEmbed` model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogSourceV1 {
@@ -33,7 +33,7 @@ pub struct CatalogSourceV1 {
     pub provenance: String,
 }
 
-/// One supported FastEmbed model that settings may select.
+/// One supported `FastEmbed` model that settings may select.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogedFastEmbedModelV1 {
@@ -46,7 +46,7 @@ pub struct CatalogedFastEmbedModelV1 {
     pub members: BTreeMap<String, CatalogMemberPinV1>,
 }
 
-/// Versioned catalog of supported FastEmbed models.
+/// Versioned catalog of supported `FastEmbed` models.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FastEmbedModelCatalogV1 {
@@ -82,10 +82,10 @@ impl FastEmbedModelCatalogV1 {
         if self.models.is_empty() {
             return Err(CatalogErrorV1::Empty);
         }
-        let mut seen = BTreeMap::new();
+        let mut seen = BTreeSet::new();
         for model in &self.models {
             validate_model(model)?;
-            if seen.insert(model.model_id.as_str(), ()).is_some() {
+            if !seen.insert(model.model_id.as_str()) {
                 return Err(CatalogErrorV1::DuplicateModelId);
             }
         }
@@ -149,7 +149,7 @@ fn validate_model(model: &CatalogedFastEmbedModelV1) -> Result<(), CatalogErrorV
     Ok(())
 }
 
-/// Production pin for FastEmbed `EmbeddingModel::JinaEmbeddingsV2BaseCode`.
+/// Production pin for `FastEmbed` `EmbeddingModel::JinaEmbeddingsV2BaseCode`.
 ///
 /// Digests and lengths match `tests/distribution/fastembed/fixture.json`.
 fn jina_embeddings_v2_base_code() -> CatalogedFastEmbedModelV1 {

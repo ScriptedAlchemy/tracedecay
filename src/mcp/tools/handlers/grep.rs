@@ -35,15 +35,17 @@ const BINARY_SNIFF_BYTES: usize = 8_192;
 const MAX_LINE_BYTES: usize = 4_096;
 
 /// A single content-search hit, enriched with the enclosing graph symbol.
-struct GrepHit {
-    file: String,
-    line: u32,
-    text: String,
-    before: Vec<String>,
-    after: Vec<String>,
-    symbol_name: Option<String>,
-    symbol_id: Option<String>,
-    symbol_kind: Option<String>,
+/// Fields are crate-visible: the application primitives layer projects hits
+/// into typed primitive results without re-running the scan.
+pub(crate) struct GrepHit {
+    pub(crate) file: String,
+    pub(crate) line: u32,
+    pub(crate) text: String,
+    pub(crate) before: Vec<String>,
+    pub(crate) after: Vec<String>,
+    pub(crate) symbol_name: Option<String>,
+    pub(crate) symbol_id: Option<String>,
+    pub(crate) symbol_kind: Option<String>,
 }
 
 /// Handles `tracedecay_grep` tool calls.
@@ -141,7 +143,11 @@ pub(super) async fn handle_grep(
 
 /// Builds the line matcher. Fixed-string search escapes the pattern so regex
 /// metacharacters are treated literally; case-insensitivity is the default.
-fn build_matcher(pattern: &str, fixed_strings: bool, case_sensitive: bool) -> Result<Regex> {
+pub(crate) fn build_matcher(
+    pattern: &str,
+    fixed_strings: bool,
+    case_sensitive: bool,
+) -> Result<Regex> {
     let source = if fixed_strings {
         regex::escape(pattern)
     } else {
@@ -155,16 +161,16 @@ fn build_matcher(pattern: &str, fixed_strings: bool, case_sensitive: bool) -> Re
         })
 }
 
-struct ScanResult {
-    hits: Vec<GrepHit>,
-    files_scanned: usize,
-    truncated: bool,
+pub(crate) struct ScanResult {
+    pub(crate) hits: Vec<GrepHit>,
+    pub(crate) files_scanned: usize,
+    pub(crate) truncated: bool,
 }
 
 /// Walks the working tree respecting `.gitignore`, skipping binary files, and
 /// collects matching lines. Stops early once `max_results` + 1 hits are found
 /// so the caller can report truncation without scanning the whole tree.
-fn scan_tree(
+pub(crate) fn scan_tree(
     project_root: &Path,
     matcher: &Regex,
     overrides: Option<Override>,

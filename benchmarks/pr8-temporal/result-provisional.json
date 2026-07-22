@@ -400,5 +400,5 @@
   },
   "workload_id": "pr8-session-temporal-v1",
   "workload_manifest": "benchmarks/pr8-temporal/workload-v1.json",
-  "workload_manifest_sha256": "13b3fc8ca6f1f061d584d27ab5e565a77a52de19a6a16860683c53c9d1ece69c"
+  "workload_manifest_sha256": "34ba0182b76388452c5d2daf4904dd7678d925c2183591cc880779de14f5fd77"
 }

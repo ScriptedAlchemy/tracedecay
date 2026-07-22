@@ -44,6 +44,17 @@ PARENT_GATE_COMMANDS = {
     "platform_macos": "cargo test --all-features --test code_index_suite --test search_quality_suite",
 }
 REQUIRED_PLATFORMS = {"linux", "windows", "macos"}
+PLATFORM_STATUS_BY_ID = {
+    "linux": {"pending_parent_gate", "executed_passed"},
+    "windows": {"pending_parent_gate", "pending_unsupported_host", "executed_passed"},
+    "macos": {"pending_parent_gate", "pending_unsupported_host", "executed_passed"},
+}
+ALLOWED_GATE_EXECUTION_STATES = {
+    "executed_passed",
+    "pending_unsupported_host",
+    "pending_parent_gate",
+    "blocked",
+}
 SHA256_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
 
 
@@ -150,11 +161,20 @@ def check_packet_shape(packet: dict[str, Any]) -> None:
     for platform in platforms:
         if not isinstance(platform, dict):
             fail("each platform entry must be an object")
-        if platform.get("status") != "pending_parent_gate":
-            fail("platform evidence must remain pending until its parent gate runs")
+        platform_id = platform.get("id")
+        if platform_id not in PLATFORM_STATUS_BY_ID:
+            fail(f"unknown platform id: {platform_id!r}")
+        status = platform.get("status")
+        if status not in PLATFORM_STATUS_BY_ID[str(platform_id)]:
+            fail(
+                f"platform {platform_id} status {status!r} is not allowed; "
+                "pending is reserved for unsupported-host evidence or unrun gates"
+            )
         gate_id = platform.get("parent_gate_id")
         if gate_id != f"platform_{platform.get('id')}":
             fail("each platform must bind its matching parent gate")
+        if status == "pending_unsupported_host" and platform_id == "linux":
+            fail("linux cannot be marked pending_unsupported_host on a Linux host")
 
 
 def check_real_corpus_integrity(
@@ -318,13 +338,23 @@ def check_promotion_pending(packet: dict[str, Any], search_quality_root: Path) -
         fail("promotion must remain pending_parent_gates")
     for field in ("runtime_results", "locked_report", "promotion_evidence"):
         if promotion.get(field) is not None:
-            fail(f"promotion.{field} must remain null before parent gates")
+            fail(f"promotion.{field} must remain null before locked acceptance")
     if promotion.get("requires_all_parent_gates") is not True:
         fail("promotion must require every parent gate")
     if promotion.get("requires_locked_outcome") != "accepted":
         fail("promotion must require a locked accepted outcome")
     if "outcome" in packet:
         fail("a static preflight packet cannot claim a terminal outcome")
+    blocked_on = promotion.get("blocked_on")
+    if blocked_on is not None:
+        if (
+            not isinstance(blocked_on, list)
+            or not blocked_on
+            or not all(isinstance(item, str) and item for item in blocked_on)
+        ):
+            fail("promotion.blocked_on must be a non-empty string array when present")
+        if "locked_accepted_report_absent" not in blocked_on:
+            fail("promotion must keep locked_accepted_report_absent until a locked report exists")
 
     legacy_run = (
         search_quality_root
@@ -337,12 +367,60 @@ def check_promotion_pending(packet: dict[str, Any], search_quality_root: Path) -
         fail("obsolete contract-only run artifacts must not remain as PR9 evidence")
 
 
+def check_parent_gate_execution(packet: dict[str, Any]) -> None:
+    execution = packet.get("parent_gate_execution")
+    if execution is None:
+        return
+    if not isinstance(execution, dict):
+        fail("parent_gate_execution must be an object when present")
+    gates = execution.get("gates")
+    if not isinstance(gates, dict) or set(gates) != set(PARENT_GATE_COMMANDS):
+        fail("parent_gate_execution.gates must cover every parent gate id")
+    for gate_id, receipt in gates.items():
+        if not isinstance(receipt, dict):
+            fail(f"parent_gate_execution.gates.{gate_id} must be an object")
+        state = receipt.get("state")
+        if state not in ALLOWED_GATE_EXECUTION_STATES:
+            fail(f"parent_gate_execution.gates.{gate_id} has invalid state {state!r}")
+        if state == "executed_passed":
+            command = receipt.get("command")
+            expected = PARENT_GATE_COMMANDS[gate_id]
+            command_ok = command == expected or (
+                gate_id == "code_index_benchmark_validation"
+                and isinstance(command, str)
+                and "code_index_chunks" in command
+                and "--validate-only" in command
+            )
+            if not command_ok:
+                fail(f"executed gate {gate_id} command drifted from allowlist")
+            if not isinstance(receipt.get("summary"), str) or not receipt["summary"]:
+                fail(f"executed gate {gate_id} needs a non-empty summary")
+        if state == "pending_unsupported_host":
+            if gate_id not in {"platform_windows", "platform_macos"}:
+                fail(f"{gate_id} cannot use pending_unsupported_host")
+            if not isinstance(receipt.get("reason"), str) or not receipt["reason"]:
+                fail(f"{gate_id} pending_unsupported_host needs a reason")
+
+    platforms = {
+        platform.get("id"): platform.get("status")
+        for platform in cast(list[dict[str, Any]], packet["platforms"])
+    }
+    if platforms.get("linux") == "executed_passed" and gates["platform_linux"].get("state") != "executed_passed":
+        fail("linux platform executed_passed requires matching gate execution receipt")
+    for host in ("windows", "macos"):
+        if platforms.get(host) == "pending_unsupported_host" and gates[f"platform_{host}"].get(
+            "state"
+        ) != "pending_unsupported_host":
+            fail(f"{host} pending_unsupported_host requires matching gate execution receipt")
+
+
 def validate(packet: dict[str, Any], repository: Path, search_quality_root: Path) -> None:
     check_packet_shape(packet)
     documents = check_real_corpus_integrity(packet, repository)
     check_production_api_bindings(packet, repository)
     check_direct_contract_bindings(packet, repository, documents)
     check_promotion_pending(packet, search_quality_root)
+    check_parent_gate_execution(packet)
 
 
 def main() -> int:

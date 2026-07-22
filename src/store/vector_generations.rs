@@ -572,6 +572,31 @@ impl FakeVectorGenerationStoreV1 {
         self.published.active_generation.as_ref()
     }
 
+    /// Atomically repoint reads to an already-published immutable generation.
+    pub fn activate_generation(
+        &mut self,
+        generation_id: &VectorGenerationIdV1,
+        expected_active_generation: Option<&VectorGenerationIdV1>,
+    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
+        if self.published.active_generation.as_ref() != expected_active_generation {
+            return Err(VectorGenerationStoreErrorV1::StaleActiveGeneration);
+        }
+        let generation = self
+            .published
+            .generations
+            .get(generation_id)
+            .cloned()
+            .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
+        generation.validate_persisted()?;
+        let publication = VectorGenerationPublicationV1 {
+            generation_id: generation.generation_id().clone(),
+            manifest_digest: generation.manifest_digest().clone(),
+            checkpoint: generation.checkpoint().clone(),
+        };
+        self.published.active_generation = Some(generation_id.clone());
+        Ok(publication)
+    }
+
     pub fn active_checkpoint(&self) -> Option<&VectorProjectionCheckpointV1> {
         self.active_generation()
             .map(PublishedVectorGenerationV1::checkpoint)
@@ -692,6 +717,17 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
     ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
         self.mutate_state(|state| state.publish_generation(build_id, expected_active_generation))
             .await
+    }
+
+    pub async fn activate_generation(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        expected_active_generation: Option<&VectorGenerationIdV1>,
+    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| {
+            state.activate_generation(generation_id, expected_active_generation)
+        })
+        .await
     }
 
     pub async fn active_generation_id(

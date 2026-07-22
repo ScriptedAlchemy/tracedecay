@@ -1097,4 +1097,18 @@ async fn database_store_survives_restart_and_preserves_superseded_generations() 
         .await
         .expect("deterministic rebuild publication");
     assert_eq!(replay.generation_id, next_publication.generation_id);
+
+    let restored = rebuilt
+        .activate_generation(
+            &initial_publication.generation_id,
+            Some(&next_publication.generation_id),
+        )
+        .await
+        .expect("rollback to immutable prior generation");
+    assert_eq!(restored.generation_id, initial_publication.generation_id);
+    assert_eq!(
+        rebuilt.active_generation_id().await.unwrap(),
+        Some(initial_publication.generation_id),
+        "rollback atomically restores the prior active pointer"
+    );
 }

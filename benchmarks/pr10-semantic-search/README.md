@@ -21,9 +21,11 @@ as evidence-gated research candidates. The exact-flat production scan is the
 semantic oracle. Neither aggregate quality nor public benchmark rank can
 activate a candidate.
 
-`result-pending.json` contains no samples, metrics, fallback digest, locked
-report, promotion evidence, or gate receipts. The only valid checked-in result
-before the parent gates execute is `pending`, with semantics disabled.
+`result-pending.json` stays non-authoritative: no measured locked samples,
+fallback digest, locked report, or promotion evidence. Parent-gate receipts may
+record truthful `executed_contract`, `blocked`, or
+`pending_unsupported_platform` states, but outcome remains `pending` and
+semantics stay disabled until a locked accepted report exists.
 
 Run the local contract without Cargo:
 

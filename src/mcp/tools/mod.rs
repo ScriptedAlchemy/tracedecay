@@ -7,7 +7,7 @@
 mod definitions;
 pub mod dispatch;
 mod dispatch_policy;
-mod handlers;
+pub(crate) mod handlers;
 pub(crate) mod render;
 pub(crate) mod renderers;
 

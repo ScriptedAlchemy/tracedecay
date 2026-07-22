@@ -41,14 +41,14 @@ mod runtime_service;
 pub(crate) mod session_pool;
 mod trust_roots;
 
-pub(crate) use crate::config::DEFAULT_FASTEMBED_MODEL_ID;
+#[cfg(test)]
 pub(crate) use model_catalog::{
-    FastEmbedModelCatalogV1, catalog_package_digest, production_fastembed_catalog,
+    CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1, production_fastembed_catalog,
 };
+#[cfg(test)]
+pub(crate) use model_lifecycle::{ModelLifecycleErrorV1, ModelMemberSourceV1};
 pub(crate) use model_lifecycle::{
-    HfHubModelMemberSourceV1, ModelLifecycleErrorV1, ModelMemberSourceV1,
-    SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
-    SemanticModelRemediationV1, apply_config_and_queue_startup, default_lifecycle_root,
+    SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1, apply_config_and_queue_startup,
     lifecycle_to_runtime_state, shared_lifecycle_owner,
 };
 
@@ -81,6 +81,131 @@ impl LoadedSemanticArtifactV1 {
         authority: Arc<AdmittedProjectionArtifactV1>,
     ) -> Self {
         Self(authority)
+    }
+
+    pub(crate) fn from_lifecycle(
+        lifecycle: &SemanticModelLifecycleOwnerV1,
+        manifest: &tracedecay_domain::CodeGenerationManifestV1,
+        resources: crate::config::SemanticResourceCeilings,
+    ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
+        let status = lifecycle.status();
+        let state = status
+            .state
+            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
+        let (model_id, install_path) = match state {
+            SemanticModelLifecycleStateV1::Installed {
+                model_id,
+                install_path,
+                ..
+            }
+            | SemanticModelLifecycleStateV1::Loading {
+                model_id,
+                install_path,
+                ..
+            }
+            | SemanticModelLifecycleStateV1::Indexing {
+                model_id,
+                install_path,
+                ..
+            }
+            | SemanticModelLifecycleStateV1::Ready {
+                model_id,
+                install_path,
+                ..
+            } => (model_id, install_path),
+            _ => return Err(SemanticRuntimeScheduleFailureV1::Artifact),
+        };
+        let model = lifecycle
+            .catalog()
+            .get(&model_id)
+            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
+        let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
+            model,
+            &install_path,
+            manifest.chunker_revision.clone(),
+            manifest.privacy_domain.clone(),
+            manifest.privacy_key_epoch,
+            resources,
+        )
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Artifact)?;
+        Ok(Self(Arc::new(authority)))
+    }
+
+    pub(crate) fn from_lifecycle_projection(
+        lifecycle: &SemanticModelLifecycleOwnerV1,
+        projection: &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
+        resources: crate::config::SemanticResourceCeilings,
+    ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
+        let status = lifecycle.status();
+        let state = status
+            .state
+            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
+        let install_path = match &state {
+            SemanticModelLifecycleStateV1::Installed { install_path, .. }
+            | SemanticModelLifecycleStateV1::Loading { install_path, .. }
+            | SemanticModelLifecycleStateV1::Indexing { install_path, .. }
+            | SemanticModelLifecycleStateV1::Ready { install_path, .. } => install_path,
+            _ => return Err(SemanticRuntimeScheduleFailureV1::Artifact),
+        };
+        let model = lifecycle
+            .catalog()
+            .get(state.model_id())
+            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
+        let key = projection.embedding_key();
+        let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
+            model,
+            install_path,
+            key.chunker_revision.clone(),
+            key.privacy_domain.clone(),
+            key.privacy_key_epoch,
+            resources,
+        )
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Artifact)?;
+        if authority.projection() != projection {
+            return Err(SemanticRuntimeScheduleFailureV1::Artifact);
+        }
+        Ok(Self(Arc::new(authority)))
+    }
+
+    pub(crate) fn lifecycle_projection(
+        lifecycle: &SemanticModelLifecycleOwnerV1,
+        manifest: &tracedecay_domain::CodeGenerationManifestV1,
+        resources: crate::config::SemanticResourceCeilings,
+    ) -> Result<tracedecay_domain::AdmittedEmbeddingProjectionKeyV1, SemanticRuntimeScheduleFailureV1>
+    {
+        let status = lifecycle.status();
+        let state = status
+            .state
+            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
+        if !matches!(
+            state,
+            SemanticModelLifecycleStateV1::Installed { .. }
+                | SemanticModelLifecycleStateV1::Loading { .. }
+                | SemanticModelLifecycleStateV1::Indexing { .. }
+                | SemanticModelLifecycleStateV1::Ready { .. }
+        ) {
+            return Err(SemanticRuntimeScheduleFailureV1::Artifact);
+        }
+        let model = lifecycle
+            .catalog()
+            .get(state.model_id())
+            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
+        AdmittedProjectionArtifactV1::lifecycle_projection(
+            model,
+            manifest.chunker_revision.clone(),
+            manifest.privacy_domain.clone(),
+            manifest.privacy_key_epoch,
+            resources,
+        )
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Artifact)
+    }
+
+    pub(crate) fn projection(&self) -> &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
+        self.0.projection()
+    }
+
+    fn into_authority(self) -> Arc<AdmittedProjectionArtifactV1> {
+        self.0
     }
 }
 
@@ -328,6 +453,60 @@ impl DaemonSemanticRuntimeHandleV1 {
             .as_ref()?
             .factory_for(source_generation, vector_generation, projection_key)?;
         Some(DaemonSemanticQueryFactoryV1 { inner })
+    }
+
+    /// Bind a warmed query runtime to the atomically current pointer.
+    ///
+    /// Used after publication (and by tests) so application search can obtain a
+    /// `query_factory` without joining FastEmbed download/indexing into the
+    /// search path. The pointer must already be current and compatible with
+    /// the admitted projection authority.
+    pub(crate) fn bind_query_runtime_for_current(
+        &self,
+        authority: Arc<AdmittedProjectionArtifactV1>,
+    ) -> Result<(), SemanticRuntimeScheduleFailureV1> {
+        let pointer = self
+            .current()
+            .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
+        if authority.projection().projection_key() != &pointer.projection_key {
+            return Err(SemanticRuntimeScheduleFailureV1::Publication);
+        }
+        let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
+            fastembed_runtime_factory();
+        let candidate =
+            SemanticRuntimeService::new_owned(authority, factory, self.pool_config.clone())
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+        *self
+            .runtime
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(CurrentSemanticQueryRuntimeV1::new(pointer, candidate));
+        Ok(())
+    }
+
+    pub(crate) fn restore_current(
+        &self,
+        pointer: SemanticGenerationPointerV1,
+        artifact: LoadedSemanticArtifactV1,
+    ) -> Result<(), SemanticRuntimeScheduleFailureV1> {
+        let authority = artifact.into_authority();
+        if authority.projection().projection_key() != &pointer.projection_key {
+            return Err(SemanticRuntimeScheduleFailureV1::Publication);
+        }
+        let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
+            fastembed_runtime_factory();
+        let candidate =
+            SemanticRuntimeService::new_owned(authority, factory, self.pool_config.clone())
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+        *self
+            .runtime
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(CurrentSemanticQueryRuntimeV1::new(
+            pointer.clone(),
+            candidate,
+        ));
+        self.scheduling.restore_current(pointer);
+        Ok(())
     }
 
     pub(crate) fn status_projection(&self) -> SemanticRuntimeStatusProjectionV1 {
@@ -729,6 +908,21 @@ mod scheduling_tests {
         let status = serde_json::to_value(projection).expect("serialize runtime status");
         assert_eq!(status["degraded_reason"], "artifact_unavailable");
         assert!(status["prior_generation"].is_string());
+    }
+
+    #[test]
+    fn restart_restore_installs_current_pointer_without_indexing() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let restored = pointer('r', 'r');
+        handle.restore_current(restored.clone());
+
+        assert_eq!(handle.current(), Some(restored.clone()));
+        assert_eq!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Current {
+                generation: restored.generation,
+            }
+        );
     }
 
     #[tokio::test]

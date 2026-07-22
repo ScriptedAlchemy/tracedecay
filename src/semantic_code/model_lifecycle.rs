@@ -1,4 +1,4 @@
-//! Daemon-owned FastEmbed model acquisition lifecycle.
+//! Daemon-owned `FastEmbed` model acquisition lifecycle.
 //!
 //! Settings select a cataloged model (default [`DEFAULT_FASTEMBED_MODEL_ID`]).
 //! Install stays offline-safe: first daemon startup (or a settings change)
@@ -10,7 +10,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,7 @@ use super::model_catalog::{
 const LIFECYCLE_SCHEMA_V1: &str = "tracedecay.fastembed.model-lifecycle.v1";
 const INSTALL_META_SCHEMA_V1: &str = "tracedecay.fastembed.model-install.v1";
 
-/// Doctor/status lifecycle states for the selected FastEmbed model.
+/// Doctor/status lifecycle states for the selected `FastEmbed` model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SemanticModelLifecycleStateV1 {
@@ -335,23 +335,26 @@ impl SemanticModelLifecycleOwnerV1 {
     }
 
     pub fn status(&self) -> SemanticModelLifecycleStatusV1 {
-        let guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        let remediation = guard
-            .durable
-            .state
-            .as_ref()
-            .map(SemanticModelLifecycleStateV1::remediation)
-            .unwrap_or(SemanticModelRemediationV1 {
+        let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut remediation = guard.durable.state.as_ref().map_or(
+            SemanticModelRemediationV1 {
                 retry: false,
                 remove: false,
                 rollback: false,
-            });
+            },
+            SemanticModelLifecycleStateV1::remediation,
+        );
+        if matches!(
+            guard.durable.previous_ready.as_ref(),
+            Some(SemanticModelLifecycleStateV1::Ready { .. })
+        ) {
+            remediation.rollback = true;
+        }
         let semantics_omitted = guard
             .durable
             .state
             .as_ref()
-            .map(SemanticModelLifecycleStateV1::omits_semantics)
-            .unwrap_or(true);
+            .map_or(true, SemanticModelLifecycleStateV1::omits_semantics);
         SemanticModelLifecycleStatusV1 {
             selected_model: guard.durable.selected_model.clone(),
             auto_download: guard.durable.auto_download,
@@ -368,7 +371,7 @@ impl SemanticModelLifecycleOwnerV1 {
         model_id: Option<&str>,
         auto_download: bool,
     ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         guard.durable.auto_download = auto_download;
         match model_id {
             None => {
@@ -446,10 +449,10 @@ impl SemanticModelLifecycleOwnerV1 {
             return Err(ModelLifecycleErrorV1::Rejected);
         }
         self.cancel.store(true, Ordering::SeqCst);
-        if let Some(state) = &status.state {
-            if let Some(path) = install_path_of(state) {
-                let _ = fs::remove_dir_all(path);
-            }
+        if let Some(state) = &status.state
+            && let Some(path) = install_path_of(state)
+        {
+            let _ = fs::remove_dir_all(path);
         }
         let model_id = status.selected_model.clone();
         self.select_model(model_id.as_deref(), status.auto_download)
@@ -458,7 +461,7 @@ impl SemanticModelLifecycleOwnerV1 {
     pub fn rollback_to_previous(
         &self,
     ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let previous = guard
             .durable
             .previous_ready
@@ -468,7 +471,8 @@ impl SemanticModelLifecycleOwnerV1 {
             return Err(ModelLifecycleErrorV1::Rejected);
         }
         if let Some(SemanticModelLifecycleStateV1::Ready { .. }) = &guard.durable.state {
-            guard.durable.previous_ready = guard.durable.state.clone();
+            let ready_state = guard.durable.state.clone();
+            guard.durable.previous_ready = ready_state;
         }
         guard.durable.selected_model = Some(previous.model_id().to_owned());
         guard.durable.state = Some(previous);
@@ -493,7 +497,7 @@ impl SemanticModelLifecycleOwnerV1 {
         completed_units: u64,
         total_units: u64,
     ) -> Result<(), ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(state) = guard.durable.state.clone() else {
             return Err(ModelLifecycleErrorV1::Rejected);
         };
@@ -540,7 +544,7 @@ impl SemanticModelLifecycleOwnerV1 {
     }
 
     pub fn mark_ready(&self) -> Result<(), ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(state) = guard.durable.state.clone() else {
             return Err(ModelLifecycleErrorV1::Rejected);
         };
@@ -582,14 +586,63 @@ impl SemanticModelLifecycleOwnerV1 {
         persist_durable(&self.root, &guard.durable)
     }
 
+    pub fn mark_runtime_failed(
+        &self,
+        detail: impl Into<String>,
+        retryable: bool,
+    ) -> Result<(), ModelLifecycleErrorV1> {
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(state) = guard.durable.state.clone() else {
+            return Err(ModelLifecycleErrorV1::Rejected);
+        };
+        let (model_id, revision, artifact_digest) = match state {
+            SemanticModelLifecycleStateV1::Installed {
+                model_id,
+                revision,
+                artifact_digest,
+                ..
+            }
+            | SemanticModelLifecycleStateV1::Loading {
+                model_id,
+                revision,
+                artifact_digest,
+                ..
+            }
+            | SemanticModelLifecycleStateV1::Indexing {
+                model_id,
+                revision,
+                artifact_digest,
+                ..
+            }
+            | SemanticModelLifecycleStateV1::Ready {
+                model_id,
+                revision,
+                artifact_digest,
+                ..
+            } => (model_id, revision, artifact_digest),
+            _ => return Err(ModelLifecycleErrorV1::Rejected),
+        };
+        guard.durable.state = Some(SemanticModelLifecycleStateV1::Failed {
+            model_id,
+            revision,
+            artifact_digest,
+            detail: detail.into(),
+            retryable,
+        });
+        persist_durable(&self.root, &guard.durable)
+    }
+
     fn transition_installed_like(
         &self,
         build: impl FnOnce(String, String, String, PathBuf) -> SemanticModelLifecycleStateV1,
     ) -> Result<(), ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(state) = guard.durable.state.clone() else {
             return Err(ModelLifecycleErrorV1::Rejected);
         };
+        if matches!(state, SemanticModelLifecycleStateV1::Ready { .. }) {
+            guard.durable.previous_ready = Some(state.clone());
+        }
         let next = match state {
             SemanticModelLifecycleStateV1::Installed {
                 model_id,
@@ -619,7 +672,7 @@ impl SemanticModelLifecycleOwnerV1 {
         let mut worker = self
             .worker
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         if worker.as_ref().is_some_and(|handle| !handle.is_finished()) {
             return false;
         }
@@ -630,7 +683,7 @@ impl SemanticModelLifecycleOwnerV1 {
         let cancel = Arc::clone(&self.cancel);
         let inner = Arc::clone(&self.inner);
         let selected = {
-            let guard = inner.lock().unwrap_or_else(|error| error.into_inner());
+            let guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
             guard.durable.selected_model.clone()
         };
         let Some(model_id) = selected else {
@@ -684,7 +737,7 @@ fn run_acquisition(
     let bytes_total: u64 = model.members.values().map(|member| member.length).sum();
 
     {
-        let mut guard = inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
         guard.durable.selected_model = Some(model.model_id.clone());
         guard.durable.state = Some(SemanticModelLifecycleStateV1::Downloading {
             model_id: model.model_id.clone(),
@@ -714,7 +767,7 @@ fn run_acquisition(
             return fail_state(root, inner, &model, &digest, &error.to_string(), true);
         }
         bytes_received = bytes_received.saturating_add(member.length);
-        let mut guard = inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
         guard.durable.state = Some(SemanticModelLifecycleStateV1::Downloading {
             model_id: model.model_id.clone(),
             revision: model.source.revision.clone(),
@@ -726,7 +779,7 @@ fn run_acquisition(
     }
 
     {
-        let mut guard = inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
         guard.durable.state = Some(SemanticModelLifecycleStateV1::Verifying {
             model_id: model.model_id.clone(),
             revision: model.source.revision.clone(),
@@ -768,7 +821,7 @@ fn run_acquisition(
     write_json_atomic(&install_path.join("install.json"), &meta)
         .map_err(|_| ModelLifecycleErrorV1::InstallFailed)?;
 
-    let mut guard = inner.lock().unwrap_or_else(|error| error.into_inner());
+    let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
     guard.durable.state = Some(SemanticModelLifecycleStateV1::Installed {
         model_id: model.model_id.clone(),
         revision: model.source.revision.clone(),
@@ -786,7 +839,7 @@ fn fail_state(
     detail: &str,
     retryable: bool,
 ) -> Result<(), ModelLifecycleErrorV1> {
-    let mut guard = inner.lock().unwrap_or_else(|error| error.into_inner());
+    let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
     guard.durable.state = Some(SemanticModelLifecycleStateV1::Failed {
         model_id: model.model_id.clone(),
         revision: model.source.revision.clone(),
@@ -809,10 +862,10 @@ fn load_or_default_durable(
     let path = root.join("lifecycle.json");
     if path.is_file() {
         let bytes = fs::read(&path).map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
-        if let Ok(durable) = serde_json::from_slice::<DurableLifecycleV1>(&bytes) {
-            if durable.schema == LIFECYCLE_SCHEMA_V1 {
-                return Ok(durable);
-            }
+        if let Ok(durable) = serde_json::from_slice::<DurableLifecycleV1>(&bytes)
+            && durable.schema == LIFECYCLE_SCHEMA_V1
+        {
+            return Ok(durable);
         }
     }
     let model = catalog
@@ -920,7 +973,7 @@ fn verify_member_file(path: &Path, length: u64, sha256: &str) -> bool {
         return false;
     };
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let Ok(read) = file.read(&mut buffer) else {
             return false;
@@ -972,40 +1025,34 @@ pub fn lifecycle_to_runtime_state(
             model_id: model_id.clone(),
             artifact_digest: artifact_digest.clone(),
         },
+        // Lifecycle Ready means the package is locally complete. Semantic
+        // search influence still requires a Current activation receipt.
         SemanticModelLifecycleStateV1::Installed {
             model_id,
             artifact_digest,
             ..
+        }
+        | SemanticModelLifecycleStateV1::Ready {
+            model_id,
+            artifact_digest,
+            ..
         } => Runtime::Installed {
             model_id: model_id.clone(),
             artifact_digest: artifact_digest.clone(),
         },
+        // Vector-generation Indexing requires a configuration pin +
+        // generation id. Acquisition-phase indexing is reported as Loading
+        // until the semantic owner publishes an activation receipt.
         SemanticModelLifecycleStateV1::Loading {
             model_id,
             artifact_digest,
             ..
-        } => Runtime::Loading {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-        },
-        SemanticModelLifecycleStateV1::Indexing {
+        }
+        | SemanticModelLifecycleStateV1::Indexing {
             model_id,
             artifact_digest,
             ..
         } => Runtime::Loading {
-            // Vector-generation Indexing requires a configuration pin +
-            // generation id. Acquisition-phase indexing is reported as Loading
-            // until the semantic owner publishes an activation receipt.
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-        },
-        SemanticModelLifecycleStateV1::Ready {
-            model_id,
-            artifact_digest,
-            ..
-        } => Runtime::Installed {
-            // Lifecycle Ready means the package is locally complete. Semantic
-            // search influence still requires a Current activation receipt.
             model_id: model_id.clone(),
             artifact_digest: artifact_digest.clone(),
         },
@@ -1090,12 +1137,12 @@ mod tests {
             (
                 "special_tokens_map",
                 "special_tokens_map.json",
-                br#"{}"#.as_slice(),
+                br"{}".as_slice(),
             ),
             (
                 "tokenizer_config",
                 "tokenizer_config.json",
-                br#"{}"#.as_slice(),
+                br"{}".as_slice(),
             ),
         ] {
             let path = members_dir.join(name);
@@ -1181,6 +1228,38 @@ mod tests {
             Some(SemanticModelLifecycleStateV1::Ready { .. })
         ));
         assert!(!ready.semantics_omitted);
+    }
+
+    #[test]
+    fn runtime_failure_retains_ready_rollback_across_restart() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(FixtureSource {
+            root: fixture.path().to_path_buf(),
+            calls: AtomicUsize::new(0),
+        });
+        let owner =
+            SemanticModelLifecycleOwnerV1::open(root.path(), catalog.clone(), source.clone())
+                .unwrap();
+        owner.select_model(Some(&model_id), true).unwrap();
+        owner.acquire_blocking_for_tests().unwrap();
+        owner.mark_ready().unwrap();
+        owner.mark_loading().unwrap();
+        owner.mark_indexing(1, 2).unwrap();
+        owner
+            .mark_runtime_failed("projection failed", true)
+            .unwrap();
+        assert!(owner.status().remediation.rollback);
+        drop(owner);
+
+        let restarted = SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap();
+        assert!(restarted.status().remediation.rollback);
+        let rolled_back = restarted.rollback_to_previous().unwrap();
+        assert!(matches!(
+            rolled_back.state,
+            Some(SemanticModelLifecycleStateV1::Ready { .. })
+        ));
     }
 
     #[test]

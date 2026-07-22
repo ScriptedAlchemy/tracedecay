@@ -303,7 +303,7 @@ fn callable_code_page_preserves_generation_cursor_and_pr9_fallback() {
 }
 
 #[test]
-fn callable_code_catalog_is_complete_and_inert_until_root_binding() {
+fn callable_code_catalog_is_complete_without_claiming_transport_bindings() {
     let contribution = callable_code_catalog_contribution().unwrap();
     let descriptors = callable_code_handler_descriptors().unwrap();
     let operations = callable_code_operations().unwrap();

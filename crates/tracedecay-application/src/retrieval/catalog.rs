@@ -20,14 +20,15 @@ const SYMBOL_SEARCH_CAPABILITY: &str = "capability.retrieval.symbol-search";
 const SYMBOL_SEARCH_USE_CASE: &str = "use-case.retrieval.symbol-search";
 pub const APPLICATION_DEFAULT_PROFILE_ID: &str = "profile.default";
 
-/// Closed set of inert catalog contributions for declared application use
-/// cases. Adding metadata here requires adding its validation-only typed
-/// handler descriptor to [`crate::application_handler_descriptors`].
+/// Closed set of catalog contributions for declared application use cases.
+/// Adding metadata here requires adding its typed handler descriptor to
+/// [`crate::application_handler_descriptors`].
 pub fn application_catalog_contributions()
 -> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
     Ok(vec![
         symbol_search_contribution()?,
         primitive_read_contribution()?,
+        super::callable_code_catalog_contribution()?,
         crate::git::git_index_catalog_contribution()?,
         crate::git::git_surface_catalog_contribution()?,
         crate::configuration::configuration_surface_catalog_contribution()?,

@@ -17,12 +17,12 @@ pub use ports::{
     SemanticRuntimeControlErrorV1, SemanticRuntimeFuture, SemanticRuntimeIntegrationPortV1,
     SemanticRuntimeRouteV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
-pub use production::{
-    DaemonSemanticRuntimeBackendV1, SavedCodeGenerationScheduleHookV1,
-    application_status_from_projection, current_query_factory,
-    production_saved_generation_schedule_hook, project_semantic_application_status,
-    register_project_semantic_runtime, saved_generation_schedule_hook,
-    schedule_saved_code_generation, semantic_lane_readiness_for_request,
+pub use production::compose_project_application_semantic_search;
+#[cfg(test)]
+pub(crate) use production::{ProductionSemanticRuntimeV1, current_query_factory};
+pub(crate) use production::{
+    SavedCodeGenerationScheduleHookV1, production_saved_generation_schedule_hook,
+    project_semantic_application_status, register_project_semantic_runtime,
     unregister_project_semantic_runtime,
 };
 

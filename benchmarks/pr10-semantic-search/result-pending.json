@@ -2,14 +2,105 @@
   "schema_version": 1,
   "workload_id": "pr10-locked-semantic-search-v1",
   "outcome": "pending",
-  "rationale": "Callable PR10 boundaries and direct regressions are present, but the parent has not executed the library/default-feature, local-model, production FastEmbed/vector, search-during-indexing, atomic-activation, saved-candidate, locked-holdout, resource, native-platform, rollback, and aggregate gates.",
+  "rationale": "Linux static/contract audits and semantic_search_suite fallback/non-ready checks executed. Locked acceptance remains disabled. Remaining blockers: PR12 production.rs compile errors, absent locked PR9/holdout reports, and Windows native runtime evidence.",
   "acceptance_authority": false,
   "semantic_activation_disabled": true,
   "measured_results": null,
   "promotion_evidence": null,
   "fallback_digest": null,
   "locked_report_digest": null,
-  "parent_gate_receipts": [],
+  "parent_gate_receipts": [
+    {
+      "id": "accepted_pr9_locked_baseline",
+      "state": "blocked",
+      "detail": "PR9 locked accepted report absent; Linux contracts executed but promotion remains pending_parent_gates",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "aggregate_all_feature_gate",
+      "state": "blocked",
+      "detail": "cargo check -p tracedecay --all-features fails in src/application/primitives/production.rs (concurrent PR12 wiring)",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "asynchronous_search_during_indexing",
+      "state": "executed_contract",
+      "detail": "semantic_search_suite non-ready fallback contract passed; indexing prep runtime still compile-blocked",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "atomic_compatible_generation_activation",
+      "state": "blocked",
+      "detail": "pr10_vector_generation_prep_test and semantic runtime activation tests blocked by PR12 production.rs compile errors",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "calibration_and_abstention",
+      "state": "blocked",
+      "detail": "semantic lib calibration/abstention tests not executed; cargo lib compile fails in src/application/primitives/production.rs",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "cold_offline_rollback",
+      "state": "blocked",
+      "detail": "cold offline rollback runtime gate not executed due to lib compile errors",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "current_and_10x_resources",
+      "state": "blocked",
+      "detail": "PR9 code_index validate-only proved current/10x; PR10 semantic resource measurement blocked by lib compile errors",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "fallback_byte_stability",
+      "state": "executed_contract",
+      "detail": "semantic_search_suite::retrieval_contract::asynchronous_non_ready_states_preserve_pr9_fallback_bytes passed",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "library_first_default_all_features",
+      "state": "executed_contract",
+      "detail": "validate_packet.py feature contract: default features equal all-features",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "linux_and_windows_native_runtime",
+      "state": "pending_unsupported_platform",
+      "detail": "Linux contract evidence present; Windows native FastEmbed runtime unavailable on this host",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "local_verified_model_bytes",
+      "state": "executed_contract",
+      "detail": "validate_packet.py local model digest/integrity pins verified",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "plan15_locked_holdout_decision",
+      "state": "blocked",
+      "detail": "owner-only locked holdout not revealed/adjudicated",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "production_exact_flat_vector_service",
+      "state": "executed_contract",
+      "detail": "validate_packet.py exact-flat production API/oracle audit",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "production_fastembed_runtime",
+      "state": "executed_contract",
+      "detail": "validate_packet.py production FastEmbed callable body audit",
+      "recorded_at_unix": 1784709623
+    },
+    {
+      "id": "saved_candidate_ablation_evidence",
+      "state": "blocked",
+      "detail": "locked holdout reveal/ablation not produced; development compare is not promotion authority",
+      "recorded_at_unix": 1784709623
+    }
+  ],
   "candidate_decisions": [
     {
       "profile_id": "semantic-exact-flat",
@@ -38,19 +129,13 @@
   ],
   "blocked_on": [
     "accepted_pr9_locked_baseline",
-    "production_fastembed_runtime",
-    "library_first_default_all_features",
-    "local_verified_model_bytes",
-    "production_exact_flat_vector_service",
-    "saved_candidate_ablation_evidence",
-    "calibration_and_abstention",
-    "fallback_byte_stability",
-    "asynchronous_search_during_indexing",
+    "aggregate_all_feature_gate",
     "atomic_compatible_generation_activation",
+    "calibration_and_abstention",
+    "cold_offline_rollback",
     "current_and_10x_resources",
     "linux_and_windows_native_runtime",
-    "cold_offline_rollback",
     "plan15_locked_holdout_decision",
-    "aggregate_all_feature_gate"
+    "saved_candidate_ablation_evidence"
   ]
 }

@@ -8,14 +8,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, CoverageSummaryV1, ExtractionBatchV1,
-    ExtractionFailureV1, FileOccurrenceId, IntakeRejectionV1, PolicyRevisionId, PrivacyDomainId,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, RepositoryId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    SymbolLineageCandidateV1, UtcMicros, ValidatedCodeFileV1,
+    ExtractionFailureV1, FileOccurrenceId, IntakeRejectionV1, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1,
+    ProjectionReplayReasonV1, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SnapshotFileDispositionV1, SymbolLineageCandidateV1, UtcMicros,
+    ValidatedCodeFileV1, canonical_sha256,
 };
 
 use super::{
@@ -148,6 +150,36 @@ struct FileGenerationArtifactsV1 {
     exact_authority: ExactExtractionAuthorityV1,
 }
 
+const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedFileGenerationArtifactsV1 {
+    extraction: ExtractionBatchV1,
+    artifacts: CodeFileIndexArtifactsV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedPublishedGenerationV1 {
+    format_revision: u32,
+    manifest: CodeGenerationManifestV1,
+    snapshot: SanitizedCodeSnapshotV1,
+    files: Vec<PersistedFileGenerationArtifactsV1>,
+    lineage: Vec<SymbolLineageCandidateV1>,
+    coverage: CoverageSummaryV1,
+    capability: CodeIndexCapabilityManifestV1,
+    projection_request: ProjectionBatchRequestV1,
+    projection_receipt: ProjectionBatchReceiptV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SealedPublishedGenerationEnvelopeV1 {
+    state_digest: ManifestDigest,
+    generation: PersistedPublishedGenerationV1,
+}
+
 impl FileGenerationArtifactsV1 {
     fn rematerialize_for_generation(
         &self,
@@ -247,6 +279,114 @@ impl CodeIndexPublishedGenerationV1 {
         }
         chunks.sort_by(|left, right| left.chunk().id.cmp(&right.chunk().id));
         Ok(chunks)
+    }
+
+    /// Encode the complete sealed generation for immutable store publication.
+    ///
+    /// Exact-admission authority internals are deliberately omitted. They are
+    /// recomputed from the validated parser-produced chunks during restore.
+    pub(crate) fn encode_sealed(&self) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+        self.validate()?;
+        let generation = PersistedPublishedGenerationV1 {
+            format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
+            manifest: self.manifest.clone(),
+            snapshot: self.snapshot.clone(),
+            files: self
+                .files
+                .iter()
+                .map(|file| PersistedFileGenerationArtifactsV1 {
+                    extraction: file.extraction.clone(),
+                    artifacts: file.artifacts.clone(),
+                })
+                .collect(),
+            lineage: self.lineage.clone(),
+            coverage: self.coverage.clone(),
+            capability: self.capability.clone(),
+            projection_request: self.projection.request().clone(),
+            projection_receipt: self.projection.receipt().clone(),
+        };
+        let state_digest = canonical_sha256(&generation)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        serde_json::to_vec(&SealedPublishedGenerationEnvelopeV1 {
+            state_digest,
+            generation,
+        })
+        .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation serialization failed: {error}"
+            ))
+        })
+    }
+
+    /// Restore a complete sealed generation and repeat every canonical
+    /// generation, chunk, graph, capability, and projection receipt check.
+    pub(crate) fn decode_sealed(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
+        let envelope: SealedPublishedGenerationEnvelopeV1 =
+            serde_json::from_slice(bytes).map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation decoding failed: {error}"
+                ))
+            })?;
+        if envelope.generation.format_revision != SEALED_GENERATION_FORMAT_REVISION_V1 {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation format revision is incompatible".to_owned(),
+            ));
+        }
+        let expected_digest = canonical_sha256(&envelope.generation)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        if expected_digest != envelope.state_digest {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation state digest does not match its payload".to_owned(),
+            ));
+        }
+
+        let mut files = Vec::with_capacity(envelope.generation.files.len());
+        for file in envelope.generation.files {
+            let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
+                .map_err(CodeIndexProductionErrorV1::Chunk)?;
+            files.push(FileGenerationArtifactsV1 {
+                extraction: file.extraction,
+                artifacts: file.artifacts,
+                exact_authority,
+            });
+        }
+        let chunks = GenerationChunkManifestV1::new(
+            envelope.generation.manifest.generation_id.clone(),
+            files
+                .iter()
+                .map(|file| file.artifacts.chunks.clone())
+                .collect(),
+        )
+        .map_err(CodeIndexProductionErrorV1::Increment)?;
+        let symbols = GenerationSymbolIndexV1::new(
+            envelope.generation.manifest.generation_id.clone(),
+            files
+                .iter()
+                .flat_map(|file| file.artifacts.symbols.clone())
+                .collect(),
+        )
+        .map_err(CodeIndexProductionErrorV1::Lineage)?;
+        let (edges, edge_abstentions) = collect_edge_evidence(&files);
+        let projection = ProjectionPublicationHandoffV1::restore(
+            envelope.generation.projection_request,
+            envelope.generation.projection_receipt,
+        )
+        .map_err(CodeIndexProductionErrorV1::Projection)?;
+        let generation = Self {
+            manifest: envelope.generation.manifest,
+            snapshot: envelope.generation.snapshot,
+            files,
+            chunks,
+            symbols,
+            lineage: envelope.generation.lineage,
+            edges,
+            edge_abstentions,
+            coverage: envelope.generation.coverage,
+            capability: envelope.generation.capability,
+            projection,
+        };
+        generation.validate()?;
+        Ok(generation)
     }
 
     fn validate(&self) -> Result<(), CodeIndexProductionErrorV1> {
@@ -417,6 +557,22 @@ where
         let active = self.publication.load_active()?;
         if let Some(active) = &active {
             active.validate()?;
+            if active.snapshot.repository != self.config.repository
+                || active.manifest.sanitizer_revision != self.config.sanitizer_revision
+                || active.manifest.chunker_revision != self.config.chunker_revision
+                || active.manifest.privacy_domain != self.config.privacy_domain
+                || active.manifest.privacy_key_epoch != self.config.privacy_key_epoch
+                || active
+                    .chunks
+                    .chunks()
+                    .iter()
+                    .any(|chunk| chunk.sensitivity.policy_revision != self.config.policy_revision)
+            {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "active generation is incompatible with the production owner configuration"
+                        .to_owned(),
+                ));
+            }
         }
         Ok(active)
     }

@@ -510,8 +510,11 @@ def validate_implementation_audit(workload: dict[str, Any]) -> None:
     if set(by_id) != EXPECTED_AUDIT_REQUIREMENTS or len(entries) != len(by_id):
         fail("implementation audit must cover every binding PR10 requirement once")
     for requirement, entry in by_id.items():
-        if entry.get("locked_acceptance") != "pending_parent_execution":
-            fail(f"{requirement} must remain pending locked parent acceptance")
+        if entry.get("locked_acceptance") not in {
+            "pending_parent_execution",
+            "pending_locked_report",
+        }:
+            fail(f"{requirement} must remain pending locked acceptance")
         expected_delivery = (
             "activation_guard_delivered_evidence_consumption_pending"
             if requirement == "locked_evidence_before_activation"
@@ -702,6 +705,14 @@ def validate_resource_and_rollback_contract(workload: dict[str, Any]) -> None:
         fail("rollback failure must leave semantics disabled")
 
 
+ALLOWED_PARENT_GATE_STATES = {
+    "pending",
+    "executed_contract",
+    "blocked",
+    "pending_unsupported_platform",
+}
+
+
 def validate_pending_acceptance(
     workload: dict[str, Any],
     result: dict[str, Any],
@@ -716,8 +727,22 @@ def validate_pending_acceptance(
     }
     if set(gate_states) != EXPECTED_PARENT_GATES:
         fail("parent gate set is incomplete")
-    if set(gate_states.values()) != {"pending"}:
-        fail("checked-in packet cannot claim a parent gate passed")
+    if any(state not in ALLOWED_PARENT_GATE_STATES for state in gate_states.values()):
+        fail("parent gate states must be pending, executed_contract, blocked, or pending_unsupported_platform")
+    if any(state == "accepted" for state in gate_states.values()):
+        fail("checked-in packet cannot claim a parent gate accepted")
+    for gate in gates:
+        if not isinstance(gate, dict):
+            fail("each parent gate must be an object")
+        state = gate.get("state")
+        if state == "executed_contract":
+            if not isinstance(gate.get("evidence"), str) or not gate["evidence"]:
+                fail(f"{gate.get('id')} executed_contract requires evidence")
+        if state in {"blocked", "pending_unsupported_platform"}:
+            if not isinstance(gate.get("reason"), str) or not gate["reason"]:
+                fail(f"{gate.get('id')} {state} requires a reason")
+        if state == "pending_unsupported_platform" and gate.get("id") != "linux_and_windows_native_runtime":
+            fail("pending_unsupported_platform is reserved for the native platform gate")
 
     acceptance = workload.get("acceptance")
     if not isinstance(acceptance, dict):
@@ -743,10 +768,33 @@ def validate_pending_acceptance(
     ):
         if result.get(field) is not None:
             fail(f"pending result must not invent {field}")
-    if result.get("parent_gate_receipts") != []:
-        fail("pending result must not invent parent gate receipts")
-    if set(result.get("blocked_on", [])) != EXPECTED_PARENT_GATES:
-        fail("pending result must name every parent gate")
+
+    receipts = result.get("parent_gate_receipts")
+    if not isinstance(receipts, list):
+        fail("parent_gate_receipts must be an array")
+    if receipts:
+        receipt_ids = {receipt.get("id") for receipt in receipts if isinstance(receipt, dict)}
+        if receipt_ids != EXPECTED_PARENT_GATES:
+            fail("parent_gate_receipts must cover every parent gate when present")
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                fail("each parent gate receipt must be an object")
+            if receipt.get("state") != gate_states.get(receipt.get("id")):
+                fail(f"receipt state drifted for {receipt.get('id')}")
+            if not isinstance(receipt.get("detail"), str) or not receipt["detail"]:
+                fail(f"receipt for {receipt.get('id')} needs detail")
+
+    remaining = {
+        gate_id
+        for gate_id, state in gate_states.items()
+        if state in {"pending", "blocked", "pending_unsupported_platform"}
+    }
+    if set(result.get("blocked_on", [])) != remaining:
+        fail("blocked_on must exactly list unfinished parent gates")
+    if "accepted_pr9_locked_baseline" not in remaining:
+        fail("accepted_pr9_locked_baseline must remain unfinished until a locked PR9 report exists")
+    if "plan15_locked_holdout_decision" not in remaining:
+        fail("plan15_locked_holdout_decision must remain unfinished until holdout adjudication")
 
 
 def validate_packet(repository: Path, packet_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -790,17 +838,26 @@ def main() -> int:
         return 2
 
     if args.strict:
+        remaining = result.get("blocked_on") or []
         print(
-            "acceptance pending: parent production, locked-quality, resource, "
-            "platform, rollback, and aggregate gates have not executed",
+            "acceptance pending: locked report absent; unfinished gates: "
+            + ", ".join(remaining),
             file=sys.stderr,
         )
         return 3
 
+    executed = sum(
+        1
+        for gate in workload["parent_gates"]
+        if isinstance(gate, dict) and gate.get("state") == "executed_contract"
+    )
     print(
         "valid PR10 semantic packet; "
         f"state={workload['acceptance']['state']}; "
-        f"outcome={result['outcome']}; measured_results=absent"
+        f"outcome={result['outcome']}; "
+        f"executed_contract={executed}; "
+        f"blocked_on={len(result.get('blocked_on') or [])}; "
+        "measured_results=absent"
     )
     return 0
 

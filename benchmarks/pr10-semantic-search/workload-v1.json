@@ -149,47 +149,47 @@
     {
       "id": "library_first_fastembed",
       "delivery": "delivered",
-      "locked_acceptance": "pending_parent_execution"
+      "locked_acceptance": "pending_locked_report"
     },
     {
       "id": "default_equals_all_features",
       "delivery": "delivered",
-      "locked_acceptance": "pending_parent_execution"
+      "locked_acceptance": "pending_locked_report"
     },
     {
       "id": "local_verified_model_bytes",
       "delivery": "delivered",
-      "locked_acceptance": "pending_parent_execution"
+      "locked_acceptance": "pending_locked_report"
     },
     {
       "id": "exact_flat_baseline",
       "delivery": "delivered",
-      "locked_acceptance": "pending_parent_execution"
+      "locked_acceptance": "pending_locked_report"
     },
     {
       "id": "immutable_generations",
       "delivery": "delivered",
-      "locked_acceptance": "pending_parent_execution"
+      "locked_acceptance": "pending_locked_report"
     },
     {
       "id": "asynchronous_non_blocking_indexing",
       "delivery": "delivered",
-      "locked_acceptance": "pending_parent_execution"
+      "locked_acceptance": "pending_locked_report"
     },
     {
       "id": "calibrated_abstention",
       "delivery": "delivered",
-      "locked_acceptance": "pending_parent_execution"
+      "locked_acceptance": "pending_locked_report"
     },
     {
       "id": "byte_stable_pr9_fallback",
       "delivery": "delivered",
-      "locked_acceptance": "pending_parent_execution"
+      "locked_acceptance": "pending_locked_report"
     },
     {
       "id": "locked_evidence_before_activation",
       "delivery": "activation_guard_delivered_evidence_consumption_pending",
-      "locked_acceptance": "pending_parent_execution"
+      "locked_acceptance": "pending_locked_report"
     }
   ],
   "callable_acceptance": [
@@ -455,63 +455,78 @@
   "parent_gates": [
     {
       "id": "accepted_pr9_locked_baseline",
-      "state": "pending"
+      "state": "blocked",
+      "reason": "PR9 locked accepted report absent; Linux contracts executed but promotion remains pending_parent_gates"
     },
     {
       "id": "production_fastembed_runtime",
-      "state": "pending"
+      "state": "executed_contract",
+      "evidence": "validate_packet.py production FastEmbed callable body audit"
     },
     {
       "id": "library_first_default_all_features",
-      "state": "pending"
+      "state": "executed_contract",
+      "evidence": "validate_packet.py feature contract: default features equal all-features"
     },
     {
       "id": "local_verified_model_bytes",
-      "state": "pending"
+      "state": "executed_contract",
+      "evidence": "validate_packet.py local model digest/integrity pins verified"
     },
     {
       "id": "production_exact_flat_vector_service",
-      "state": "pending"
+      "state": "executed_contract",
+      "evidence": "validate_packet.py exact-flat production API/oracle audit"
     },
     {
       "id": "saved_candidate_ablation_evidence",
-      "state": "pending"
+      "state": "blocked",
+      "reason": "locked holdout reveal/ablation not produced; development compare is not promotion authority"
     },
     {
       "id": "calibration_and_abstention",
-      "state": "pending"
+      "state": "blocked",
+      "reason": "semantic lib calibration/abstention tests not executed; cargo lib compile fails in src/application/primitives/production.rs"
     },
     {
       "id": "fallback_byte_stability",
-      "state": "pending"
+      "state": "executed_contract",
+      "evidence": "semantic_search_suite::retrieval_contract::asynchronous_non_ready_states_preserve_pr9_fallback_bytes passed"
     },
     {
       "id": "asynchronous_search_during_indexing",
-      "state": "pending"
+      "state": "executed_contract",
+      "evidence": "semantic_search_suite non-ready fallback contract passed; indexing prep runtime still compile-blocked"
     },
     {
       "id": "atomic_compatible_generation_activation",
-      "state": "pending"
+      "state": "blocked",
+      "reason": "pr10_vector_generation_prep_test and semantic runtime activation tests blocked by PR12 production.rs compile errors"
     },
     {
       "id": "current_and_10x_resources",
-      "state": "pending"
+      "state": "blocked",
+      "reason": "PR9 code_index validate-only proved current/10x; PR10 semantic resource measurement blocked by lib compile errors"
     },
     {
       "id": "linux_and_windows_native_runtime",
-      "state": "pending"
+      "state": "pending_unsupported_platform",
+      "reason": "Linux contract evidence present; Windows native FastEmbed runtime unavailable on this host"
     },
     {
       "id": "cold_offline_rollback",
-      "state": "pending"
+      "state": "blocked",
+      "reason": "cold offline rollback runtime gate not executed due to lib compile errors"
     },
     {
       "id": "plan15_locked_holdout_decision",
-      "state": "pending"
+      "state": "blocked",
+      "reason": "owner-only locked holdout not revealed/adjudicated"
     },
     {
       "id": "aggregate_all_feature_gate",
-      "state": "pending"
+      "state": "blocked",
+      "reason": "cargo check -p tracedecay --all-features fails in src/application/primitives/production.rs (concurrent PR12 wiring)"
     }
   ],
   "acceptance": {

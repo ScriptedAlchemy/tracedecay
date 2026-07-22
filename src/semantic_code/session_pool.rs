@@ -31,7 +31,7 @@ use std::error::Error;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::{AdmittedEmbeddingProjectionKeyV1, PrivacyDomainId, ProjectionKeyV1};
@@ -315,7 +315,7 @@ struct PoolInner<R: EmbeddingRuntime, C: MonotonicClock> {
 
 impl<R: EmbeddingRuntime, C: MonotonicClock> PoolInner<R, C> {
     fn lock_state(&self) -> MutexGuard<'_, PoolState<R::Session>> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -561,7 +561,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                 .inner
                 .wakeups
                 .wait_timeout(state, timeout)
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(PoisonError::into_inner);
             drop(state);
         }
     }
@@ -1013,13 +1013,13 @@ pub(crate) mod tests {
     fn pool_bound_exhaustion_is_typed_not_blocking() {
         let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
         let authority = authority();
-        let _held = pool.acquire(&authority).expect("first acquire");
+        let held = pool.acquire(&authority).expect("first acquire");
         let result = pool.acquire(&authority);
         assert_eq!(
             result.err(),
             Some(SessionAcquireError::Exhausted { active: 1, max: 1 })
         );
-        drop(_held);
+        drop(held);
         pool.acquire(&authority)
             .expect("acquire succeeds after release");
     }
@@ -1131,43 +1131,43 @@ pub(crate) mod tests {
                     as fn(&mut EmbeddingProjectionKeyV1),
             ),
             (ProjectionArtifactPinV1::TokenizerDigest, |key| {
-                key.tokenizer_digest = domain_digest(9)
+                key.tokenizer_digest = domain_digest(9);
             }),
             (ProjectionArtifactPinV1::ConfigDigest, |key| {
-                key.config_digest = domain_digest(9)
+                key.config_digest = domain_digest(9);
             }),
             (ProjectionArtifactPinV1::QueryInstructionDigest, |key| {
-                key.query_instruction_digest = None
+                key.query_instruction_digest = None;
             }),
             (ProjectionArtifactPinV1::DocumentInstructionDigest, |key| {
-                key.document_instruction_digest = None
+                key.document_instruction_digest = None;
             }),
             (ProjectionArtifactPinV1::Pooling, |key| {
-                key.pooling = EmbeddingPoolingV1::Cls
+                key.pooling = EmbeddingPoolingV1::Cls;
             }),
             (ProjectionArtifactPinV1::TruncationSide, |key| {
-                key.truncation_side = EmbeddingTruncationSideV1::Left
+                key.truncation_side = EmbeddingTruncationSideV1::Left;
             }),
             (ProjectionArtifactPinV1::TruncationLength, |key| {
-                key.truncation_length = 256
+                key.truncation_length = 256;
             }),
             (ProjectionArtifactPinV1::RuntimeBackend, |key| {
-                key.runtime_backend = "other-runtime".to_owned()
+                key.runtime_backend = "other-runtime".to_owned();
             }),
             (ProjectionArtifactPinV1::RuntimeBuildRevision, |key| {
-                key.runtime_build_revision = "other-revision".to_owned()
+                key.runtime_build_revision = "other-revision".to_owned();
             }),
             (ProjectionArtifactPinV1::Dimensions, |key| {
-                key.dimensions += 1
+                key.dimensions += 1;
             }),
             (ProjectionArtifactPinV1::Metric, |key| {
-                key.metric = EmbeddingMetricV1::DotProduct
+                key.metric = EmbeddingMetricV1::DotProduct;
             }),
             (ProjectionArtifactPinV1::Normalization, |key| {
-                key.normalization = EmbeddingNormalizationV1::None
+                key.normalization = EmbeddingNormalizationV1::None;
             }),
             (ProjectionArtifactPinV1::Precision, |key| {
-                key.precision = EmbeddingPrecisionV1::Fp16
+                key.precision = EmbeddingPrecisionV1::Fp16;
             }),
         ];
 
@@ -1358,7 +1358,7 @@ pub(crate) mod tests {
         let result = pool.acquire(&authority());
         match result.err() {
             Some(SessionAcquireError::Open(EmbedError::Runtime(failure))) => {
-                assert_eq!(failure.kind, RuntimeFailureKindV1::OutOfMemory)
+                assert_eq!(failure.kind, RuntimeFailureKindV1::OutOfMemory);
             }
             other => panic!("expected typed open failure, got {other:?}"),
         }

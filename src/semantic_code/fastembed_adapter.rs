@@ -41,14 +41,16 @@ use fastembed::{
 };
 use std::error::Error;
 use std::fmt;
+use std::path::{Path, PathBuf};
 #[cfg(any(test))]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingTruncationSideV1,
-    ManifestDigest,
+    AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
+    EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId,
 };
 
 use super::artifact_store::AdmittedArtifactV1;
@@ -58,6 +60,8 @@ use super::manifest::{
     EmbeddingPrecisionV1 as ManifestPrecisionV1, SemanticMetricV1, Sha256DigestHex,
     TruncationSideV1,
 };
+use super::model_catalog::{CatalogMemberPinV1, CatalogedFastEmbedModelV1, catalog_package_digest};
+use crate::config::SemanticResourceCeilings;
 
 /// Typed failure of one embedding operation or runtime admission (Plan 31:
 /// load failure, OOM, corruption, revocation, or incompatible pins disables
@@ -181,10 +185,17 @@ struct VerifiedEmbeddingArtifactV1 {
     tokenizer_file: String,
     config_file: String,
     artifact: Option<AdmittedArtifactV1>,
+    lifecycle_install: Option<LifecycleInstallArtifactV1>,
     max_batch_texts: u32,
     max_batch_bytes: u32,
     max_threads: u32,
     resident_byte_ceiling: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleInstallArtifactV1 {
+    root: PathBuf,
+    members: std::collections::BTreeMap<String, CatalogMemberPinV1>,
 }
 
 impl VerifiedEmbeddingArtifactV1 {
@@ -242,18 +253,21 @@ impl VerifiedEmbeddingArtifactV1 {
 
     #[cfg(feature = "semantic-fastembed")]
     fn required_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
-        let artifact = self.artifact.as_ref().ok_or_else(|| {
+        if let Some(artifact) = self.artifact.as_ref() {
+            return artifact.read_member_bytes(role).map_err(|_| {
+                fastembed_failure(
+                    RuntimeFailureKindV1::CorruptArtifact,
+                    "verified artifact member no longer matches its signed pin",
+                )
+            });
+        }
+        let lifecycle = self.lifecycle_install.as_ref().ok_or_else(|| {
             fastembed_failure(
                 RuntimeFailureKindV1::LoadFailed,
                 "verified artifact bytes are unavailable",
             )
         })?;
-        artifact.read_member_bytes(role).map_err(|_| {
-            fastembed_failure(
-                RuntimeFailureKindV1::CorruptArtifact,
-                "verified artifact member no longer matches its signed pin",
-            )
-        })
+        lifecycle.read_member_bytes(role)
     }
 }
 
@@ -380,6 +394,7 @@ impl AdmittedProjectionArtifactV1 {
                 tokenizer_file,
                 config_file,
                 artifact: Some(artifact.clone()),
+                lifecycle_install: None,
                 max_batch_texts: payload.resource_ceiling.max_batch_size,
                 max_batch_bytes: payload
                     .resource_ceiling
@@ -392,6 +407,134 @@ impl AdmittedProjectionArtifactV1 {
         })
     }
 
+    pub(super) fn from_lifecycle_install(
+        model: &CatalogedFastEmbedModelV1,
+        install_path: &Path,
+        chunker_revision: ChunkerRevision,
+        privacy_domain: PrivacyDomainId,
+        privacy_key_epoch: u64,
+        resources: SemanticResourceCeilings,
+    ) -> Result<Self, EmbedError> {
+        let projection = Self::lifecycle_projection(
+            model,
+            chunker_revision,
+            privacy_domain,
+            privacy_key_epoch,
+            resources,
+        )?;
+        let member = |role: &str| {
+            model.members.get(role).ok_or_else(|| {
+                fastembed_failure(
+                    RuntimeFailureKindV1::CorruptArtifact,
+                    "cataloged lifecycle install is missing a required member",
+                )
+            })
+        };
+        let model_member = member("model")?;
+        let tokenizer = member("tokenizer")?;
+        let config = member("config")?;
+        member("special_tokens_map")?;
+        member("tokenizer_config")?;
+        let lifecycle_install = LifecycleInstallArtifactV1 {
+            root: install_path.to_path_buf(),
+            members: model.members.clone(),
+        };
+        // Revalidate all members before exposing this authority. Each future
+        // session open repeats the same check when it reads the bytes.
+        for role in [
+            ArtifactMemberRoleV1::Model,
+            ArtifactMemberRoleV1::Tokenizer,
+            ArtifactMemberRoleV1::Config,
+            ArtifactMemberRoleV1::SpecialTokensMap,
+            ArtifactMemberRoleV1::TokenizerConfig,
+        ] {
+            lifecycle_install.read_member_bytes(role)?;
+        }
+        Ok(Self {
+            runtime_artifact: VerifiedEmbeddingArtifactV1 {
+                projection,
+                model_file: model_member.path.clone(),
+                tokenizer_file: tokenizer.path.clone(),
+                config_file: config.path.clone(),
+                artifact: None,
+                lifecycle_install: Some(lifecycle_install),
+                max_batch_texts: resources.max_batch_size,
+                max_batch_bytes: resources
+                    .max_sequence_length
+                    .saturating_mul(resources.max_batch_size)
+                    .saturating_mul(4),
+                max_threads: resources.max_threads,
+                resident_byte_ceiling: resources.max_resident_bytes,
+            },
+        })
+    }
+
+    pub(super) fn lifecycle_projection(
+        model: &CatalogedFastEmbedModelV1,
+        chunker_revision: ChunkerRevision,
+        privacy_domain: PrivacyDomainId,
+        privacy_key_epoch: u64,
+        resources: SemanticResourceCeilings,
+    ) -> Result<AdmittedEmbeddingProjectionKeyV1, EmbedError> {
+        let member = |role: &str| {
+            model.members.get(role).ok_or_else(|| {
+                fastembed_failure(
+                    RuntimeFailureKindV1::CorruptArtifact,
+                    "cataloged lifecycle install is missing a required member",
+                )
+            })
+        };
+        let model_member = member("model")?;
+        let tokenizer = member("tokenizer")?;
+        let config = member("config")?;
+        if model_member.length > resources.max_model_bytes
+            || tokenizer.length > resources.max_tokenizer_bytes
+            || model_member.length > resources.max_resident_bytes
+        {
+            return Err(fastembed_failure(
+                RuntimeFailureKindV1::OutOfMemory,
+                "cataloged lifecycle model exceeds configured resource ceilings",
+            ));
+        }
+        let manifest_digest = |value: &str| {
+            ManifestDigest::new(format!("sha256:{value}")).map_err(|_| {
+                fastembed_failure(
+                    RuntimeFailureKindV1::CorruptArtifact,
+                    "cataloged lifecycle member digest is invalid",
+                )
+            })
+        };
+        let projection = EmbeddingProjectionKeyV1 {
+            model_artifact_digest: manifest_digest(&catalog_package_digest(model))?,
+            tokenizer_digest: manifest_digest(&tokenizer.sha256)?,
+            config_digest: manifest_digest(&config.sha256)?,
+            query_instruction_digest: None,
+            document_instruction_digest: None,
+            pooling: EmbeddingPoolingV1::Mean,
+            truncation_side: EmbeddingTruncationSideV1::Right,
+            truncation_length: model.max_length.min(resources.max_sequence_length),
+            runtime_backend: "fastembed-ort".to_owned(),
+            runtime_build_revision: "fastembed-v5".to_owned(),
+            device_class: EmbeddingDeviceClassV1::Cpu,
+            dimensions: model.expected_dimensions,
+            metric: EmbeddingMetricV1::Cosine,
+            normalization: EmbeddingNormalizationV1::L2,
+            precision: EmbeddingPrecisionV1::Fp32,
+            chunk_schema_revision: "code-search-chunk.v1".to_owned(),
+            chunker_revision,
+            privacy_domain,
+            privacy_key_epoch,
+        }
+        .admit()
+        .map_err(|_| {
+            fastembed_failure(
+                RuntimeFailureKindV1::CorruptArtifact,
+                "cataloged lifecycle projection is invalid",
+            )
+        })?;
+        Ok(projection)
+    }
+
     pub(crate) fn projection(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
         &self.runtime_artifact.projection
     }
@@ -402,6 +545,70 @@ impl AdmittedProjectionArtifactV1 {
 
     pub(super) fn resident_byte_ceiling(&self) -> u64 {
         self.runtime_artifact.resident_byte_ceiling()
+    }
+}
+
+impl LifecycleInstallArtifactV1 {
+    fn read_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
+        let key = match role {
+            ArtifactMemberRoleV1::Model => "model",
+            ArtifactMemberRoleV1::Tokenizer => "tokenizer",
+            ArtifactMemberRoleV1::Config => "config",
+            ArtifactMemberRoleV1::SpecialTokensMap => "special_tokens_map",
+            ArtifactMemberRoleV1::TokenizerConfig => "tokenizer_config",
+            ArtifactMemberRoleV1::QueryInstruction | ArtifactMemberRoleV1::DocumentInstruction => {
+                return Err(fastembed_failure(
+                    RuntimeFailureKindV1::CorruptArtifact,
+                    "cataloged lifecycle install does not declare instruction members",
+                ));
+            }
+        };
+        let pin = self.members.get(key).ok_or_else(|| {
+            fastembed_failure(
+                RuntimeFailureKindV1::CorruptArtifact,
+                "cataloged lifecycle install is missing a required member",
+            )
+        })?;
+        let relative = Path::new(&pin.path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(fastembed_failure(
+                RuntimeFailureKindV1::CorruptArtifact,
+                "cataloged lifecycle member path is not normalized",
+            ));
+        }
+        let path = self.root.join(relative);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
+            fastembed_failure(
+                RuntimeFailureKindV1::CorruptArtifact,
+                "cataloged lifecycle member is unavailable",
+            )
+        })?;
+        if !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() != pin.length
+        {
+            return Err(fastembed_failure(
+                RuntimeFailureKindV1::CorruptArtifact,
+                "cataloged lifecycle member no longer matches its length pin",
+            ));
+        }
+        let bytes = std::fs::read(path).map_err(|_| {
+            fastembed_failure(
+                RuntimeFailureKindV1::CorruptArtifact,
+                "cataloged lifecycle member cannot be read",
+            )
+        })?;
+        if hex::encode(Sha256::digest(&bytes)) != pin.sha256 {
+            return Err(fastembed_failure(
+                RuntimeFailureKindV1::CorruptArtifact,
+                "cataloged lifecycle member no longer matches its digest pin",
+            ));
+        }
+        Ok(bytes)
     }
 }
 
@@ -1128,7 +1335,12 @@ fn pseudo_embedding(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::semantic_code::model_catalog::{
+        CatalogMemberPinV1, CatalogSourceV1, CatalogedFastEmbedModelV1,
+    };
     use tracedecay_domain::{ChunkerRevision, EmbeddingProjectionKeyV1, PrivacyDomainId};
 
     fn id<T>(value: &str) -> T
@@ -1188,6 +1400,7 @@ mod tests {
                 tokenizer_file: "tokenizer.json".to_string(),
                 config_file: "config.json".to_string(),
                 artifact: None,
+                lifecycle_install: None,
                 max_batch_texts: 8,
                 max_batch_bytes: 16 * 1024,
                 max_threads: 4,
@@ -1233,6 +1446,88 @@ mod tests {
             descriptor_paths(&authority),
             ("model.onnx", "tokenizer.json", "config.json")
         );
+    }
+
+    #[test]
+    fn lifecycle_install_authority_revalidates_every_jina_member() {
+        let install = tempfile::tempdir().expect("lifecycle install");
+        let members = [
+            ("model", "model.onnx", b"model".as_slice()),
+            ("tokenizer", "tokenizer.json", b"tokenizer".as_slice()),
+            ("config", "config.json", b"config".as_slice()),
+            (
+                "special_tokens_map",
+                "special_tokens_map.json",
+                b"special".as_slice(),
+            ),
+            (
+                "tokenizer_config",
+                "tokenizer_config.json",
+                b"tokenizer-config".as_slice(),
+            ),
+        ];
+        let mut pins = BTreeMap::new();
+        for (role, path, bytes) in members {
+            std::fs::write(install.path().join(path), bytes).expect("fixture member");
+            pins.insert(
+                role.to_owned(),
+                CatalogMemberPinV1 {
+                    path: path.to_owned(),
+                    upstream_path: path.to_owned(),
+                    length: bytes.len() as u64,
+                    sha256: hex::encode(sha2::Sha256::digest(bytes)),
+                },
+            );
+        }
+        let model = CatalogedFastEmbedModelV1 {
+            model_id: "jina-embeddings-v2-base-code".to_owned(),
+            fastembed_enum: "JinaEmbeddingsV2BaseCode".to_owned(),
+            model_code: "jinaai/jina-embeddings-v2-base-code".to_owned(),
+            source: CatalogSourceV1 {
+                upstream: "https://example.invalid".to_owned(),
+                revision: "fixture-revision".to_owned(),
+                license: "Apache-2.0".to_owned(),
+                license_url: "https://www.apache.org/licenses/LICENSE-2.0".to_owned(),
+                provenance: "fixture".to_owned(),
+            },
+            expected_dimensions: 768,
+            max_length: 8192,
+            members: pins,
+        };
+        let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
+            &model,
+            install.path(),
+            id::<ChunkerRevision>("chunker.v1"),
+            id::<PrivacyDomainId>("privacy.project-a"),
+            7,
+            SemanticResourceCeilings {
+                max_model_bytes: 1024,
+                max_tokenizer_bytes: 1024,
+                max_resident_bytes: 4096,
+                max_threads: 1,
+                max_concurrent_sessions: 1,
+                max_batch_size: 4,
+                max_sequence_length: 128,
+                load_deadline_ms: 1_000,
+            },
+        )
+        .expect("verified lifecycle authority");
+
+        assert_eq!(
+            authority
+                .runtime_artifact()
+                .required_member_bytes(ArtifactMemberRoleV1::Model)
+                .expect("model bytes"),
+            b"model"
+        );
+        std::fs::write(install.path().join("tokenizer.json"), b"mutated")
+            .expect("corrupt tokenizer");
+        assert!(matches!(
+            authority
+                .runtime_artifact()
+                .required_member_bytes(ArtifactMemberRoleV1::Tokenizer),
+            Err(EmbedError::Runtime(_))
+        ));
     }
 
     #[test]

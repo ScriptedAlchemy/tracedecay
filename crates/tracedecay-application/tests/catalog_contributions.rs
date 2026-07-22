@@ -1,7 +1,8 @@
 use tracedecay_application::{
     application_catalog_contributions, application_handler_descriptors,
-    feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
-    git::git_index_catalog_contribution, retrieval::catalog::symbol_search_contribution,
+    callable_code_catalog_contribution, feedback_surface_catalog_contribution,
+    feedback_surface_handler_descriptors, git::git_index_catalog_contribution,
+    retrieval::catalog::symbol_search_contribution,
 };
 use tracedecay_tool_catalog::BindingSurface;
 
@@ -28,10 +29,12 @@ fn direct_symbol_search_contribution_has_one_matching_handler_descriptor() {
 fn application_contribution_set_uses_registered_feedback_handlers() {
     let contributions = application_catalog_contributions().unwrap();
     let handlers = application_handler_descriptors().unwrap();
+    let callable_code = callable_code_catalog_contribution().unwrap();
     let feedback = feedback_surface_catalog_contribution().unwrap();
     let feedback_handlers = feedback_surface_handler_descriptors().unwrap();
 
-    assert_eq!(contributions.len(), 6);
+    assert_eq!(contributions.len(), 7);
+    assert!(contributions.contains(&callable_code));
     assert!(contributions.contains(&feedback));
     assert_eq!(
         contributions

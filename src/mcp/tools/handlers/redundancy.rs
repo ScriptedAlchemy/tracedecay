@@ -40,7 +40,7 @@ use super::super::render::{self, Md};
 use super::support::effective_path;
 
 /// `tracedecay_redundancy` handler.
-pub(super) async fn handle_redundancy(
+pub(crate) async fn handle_redundancy(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,

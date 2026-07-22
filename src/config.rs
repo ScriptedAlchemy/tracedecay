@@ -138,9 +138,9 @@ pub struct SemanticResourceCeilings {
 impl Default for SemanticResourceCeilings {
     fn default() -> Self {
         Self {
-            max_model_bytes: 512 * 1024 * 1024,
+            max_model_bytes: 700 * 1024 * 1024,
             max_tokenizer_bytes: 64 * 1024 * 1024,
-            max_resident_bytes: 1024 * 1024 * 1024,
+            max_resident_bytes: 2 * 1024 * 1024 * 1024,
             max_threads: 4,
             max_concurrent_sessions: 2,
             max_batch_size: 32,

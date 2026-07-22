@@ -84,7 +84,7 @@ pub struct Ed25519PublicKeyHex(String);
 impl Ed25519PublicKeyHex {
     pub fn new(value: impl Into<String>) -> Result<Self, ManifestValidationErrorV1> {
         let value = value.into();
-        let valid_len = hex::decode(&value).ok().filter(|b| b.len() == 32).is_some();
+        let valid_len = hex::decode(&value).ok().is_some_and(|b| b.len() == 32);
         if valid_len
             && value
                 .bytes()
@@ -131,7 +131,7 @@ pub struct Ed25519SignatureHex(String);
 impl Ed25519SignatureHex {
     pub fn new(value: impl Into<String>) -> Result<Self, ManifestValidationErrorV1> {
         let value = value.into();
-        let valid_len = hex::decode(&value).ok().filter(|b| b.len() == 64).is_some();
+        let valid_len = hex::decode(&value).ok().is_some_and(|b| b.len() == 64);
         if valid_len
             && value
                 .bytes()
@@ -287,7 +287,7 @@ pub struct RuntimeCompatibilityV1 {
     pub runtime: String,
     /// Exact build revision of the runtime the artifact pins.
     pub build_revision: String,
-    /// Supported (os, arch) pairs, e.g. ("linux", "x86_64").
+    /// Supported (os, arch) pairs, e.g. ("linux", `x86_64`).
     pub platforms: Vec<PlatformTargetV1>,
 }
 
@@ -503,9 +503,9 @@ impl ModelArtifactManifestV1 {
             ("max_model_bytes", c.max_model_bytes),
             ("max_tokenizer_bytes", c.max_tokenizer_bytes),
             ("max_resident_bytes", c.max_resident_bytes),
-            ("max_threads", c.max_threads as u64),
-            ("max_batch_size", c.max_batch_size as u64),
-            ("max_sequence_length", c.max_sequence_length as u64),
+            ("max_threads", u64::from(c.max_threads)),
+            ("max_batch_size", u64::from(c.max_batch_size)),
+            ("max_sequence_length", u64::from(c.max_sequence_length)),
             ("load_deadline_ms", c.load_deadline_ms),
         ] {
             if value == 0 {
@@ -867,8 +867,8 @@ mod tests {
         );
         assert!(matches!(
             ModelArtifactManifestV1::parse(corrupted.as_bytes()),
-            Err(ManifestValidationErrorV1::MalformedHexDigest { .. })
-                | Err(ManifestValidationErrorV1::NonCanonicalEncoding(_))
+            Err(ManifestValidationErrorV1::MalformedHexDigest { .. }
+                | ManifestValidationErrorV1::NonCanonicalEncoding(_))
         ));
     }
 
