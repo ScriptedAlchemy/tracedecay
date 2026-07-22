@@ -1534,7 +1534,12 @@ pub(super) const TABLES: &[Table] = &[
                 "anchor_id",
                 "NO ACTION"
             ),
-            foreign_key("session_id", "session_occurrences", "session_id", "NO ACTION"),
+            foreign_key(
+                "session_id",
+                "session_occurrences",
+                "session_id",
+                "NO ACTION"
+            ),
             foreign_key_sequence(
                 "generation",
                 "session_occurrences",
@@ -1549,7 +1554,12 @@ pub(super) const TABLES: &[Table] = &[
                 "NO ACTION",
                 2
             ),
-            foreign_key("session_id", "session_occurrences", "session_id", "NO ACTION"),
+            foreign_key(
+                "session_id",
+                "session_occurrences",
+                "session_id",
+                "NO ACTION"
+            ),
             foreign_key_sequence(
                 "generation",
                 "session_occurrences",
@@ -1605,7 +1615,12 @@ pub(super) const TABLES: &[Table] = &[
                 "CASCADE",
                 3
             ),
-            foreign_key("session_id", "session_occurrences", "session_id", "NO ACTION"),
+            foreign_key(
+                "session_id",
+                "session_occurrences",
+                "session_id",
+                "NO ACTION"
+            ),
             foreign_key_sequence(
                 "generation",
                 "session_occurrences",

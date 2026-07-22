@@ -38,7 +38,10 @@ pub(crate) fn generation(value: u64) -> SessionProjectionGenerationV1 {
     SessionProjectionGenerationV1::new(value).unwrap()
 }
 
-pub(crate) fn watermarks(active_generation: u64, source_frontier: u64) -> SessionFrozenWatermarksV1 {
+pub(crate) fn watermarks(
+    active_generation: u64,
+    source_frontier: u64,
+) -> SessionFrozenWatermarksV1 {
     SessionFrozenWatermarksV1::new(
         generation(active_generation),
         source_frontier,
@@ -77,7 +80,11 @@ pub(crate) fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV
     .unwrap()
 }
 
-pub(crate) fn observation(session_id: &SessionId, ordinal: u64, text: &str) -> DurableObservationV1 {
+pub(crate) fn observation(
+    session_id: &SessionId,
+    ordinal: u64,
+    text: &str,
+) -> DurableObservationV1 {
     observation_with_message_ids(
         session_id,
         ordinal,

@@ -1269,8 +1269,6 @@ mod tests {
         // Signing / reveal-capability / trust-root paths were deleted. Locked
         // acceptance is covered by digest-only holdout store tests and the
         // owner-decision CLI/validator packet.
-        assert!(
-            PR9_ACCEPTANCE_DECISION_EXPRESSION.contains("durable_run_bound_receipt"),
-        );
+        assert!(PR9_ACCEPTANCE_DECISION_EXPRESSION.contains("durable_run_bound_receipt"),);
     }
 }

@@ -5,8 +5,8 @@ use tracedecay_domain::{
     AgentAdjudicatedLabelProvenanceV1, AgentAdjudicationStateV1, AgentJudgmentProvenanceV1,
     CandidateListV1, DecisionOwnerId, EvalCandidateAnchorV1, EvalCandidateV1, EvalOutcomeV1,
     EvalPartitionV1, EvalQueryV1, EvalRunScopeV1, EvaluationFixtureBundleV1, EvidenceIndexV1,
-    FixtureAuthorityV1, FixtureContentDigest, FixtureManifestV1, HoldoutLabelAuthorityV1,
-    HoldoutAccessReceiptV1, JudgmentId, LabelSetDigest, LabelSetId, LabelSetV1, QueryWorkloadV1,
+    FixtureAuthorityV1, FixtureContentDigest, FixtureManifestV1, HoldoutAccessReceiptV1,
+    HoldoutLabelAuthorityV1, JudgmentId, LabelSetDigest, LabelSetId, LabelSetV1, QueryWorkloadV1,
     RelevanceJudgmentV1, RetrieverLaneId, RunManifestV1, SavedCandidateSetDigest,
     SavedCandidateSetV1, WorkloadDigest,
 };
@@ -122,7 +122,8 @@ fn holdout_access_receipt_binds_locator_seal_and_frozen_run_digest() {
     manifest.holdout_seal.label_authority = Some(HoldoutLabelAuthorityV1::Deterministic);
     let workload = workload();
     let run = locked_manifest(&manifest, &workload);
-    run.validate_pre_holdout_access(&manifest, &workload).unwrap();
+    run.validate_pre_holdout_access(&manifest, &workload)
+        .unwrap();
 
     let receipt = HoldoutAccessReceiptV1::issue_for_run(
         &run,
@@ -158,7 +159,7 @@ fn holdout_access_receipt_binds_locator_seal_and_frozen_run_digest() {
 
 #[test]
 fn owner_decision_requires_canonical_identities_and_terminal_outcomes() {
-    use tracedecay_domain::{EvidenceIndexDigest, OwnerDecisionEvidenceV1, OwnerDecisionDigest};
+    use tracedecay_domain::{EvidenceIndexDigest, OwnerDecisionDigest, OwnerDecisionEvidenceV1};
     let mut decision = OwnerDecisionEvidenceV1 {
         schema_version: 1,
         decision_kind: OwnerDecisionEvidenceV1::DECISION_KIND.to_string(),

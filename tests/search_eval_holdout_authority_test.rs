@@ -1,9 +1,7 @@
 #![allow(clippy::option_env_unwrap)]
 
 use tempfile::TempDir;
-use tracedecay::search_eval::holdout::{
-    AgentDelegationPayloadV1, HoldoutAuthorityStoreV1,
-};
+use tracedecay::search_eval::holdout::{AgentDelegationPayloadV1, HoldoutAuthorityStoreV1};
 use tracedecay_domain::{DecisionOwnerId, FixtureContentDigest};
 
 fn store() -> (TempDir, HoldoutAuthorityStoreV1) {
@@ -21,7 +19,12 @@ fn private_store_rejects_world_readable_roots_and_keeps_labels_content_addressed
     assert!(record.locator.contains("sealed-labels/"));
 
     // No signing/trust-root machinery is created for local owner acceptance.
-    assert!(!profile.path().join("search-quality-holdout-v1/keys").exists());
+    assert!(
+        !profile
+            .path()
+            .join("search-quality-holdout-v1/keys")
+            .exists()
+    );
     assert!(
         !profile
             .path()
@@ -51,7 +54,11 @@ fn owner_delegation_is_content_addressed_without_signatures() {
         })
         .unwrap();
     assert!(record.locator.contains("owner-delegation/"));
-    assert_ne!(record.content_digest, FixtureContentDigest::new(
-        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-    ).unwrap());
+    assert_ne!(
+        record.content_digest,
+        FixtureContentDigest::new(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        )
+        .unwrap()
+    );
 }

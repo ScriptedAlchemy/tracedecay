@@ -132,8 +132,8 @@ async fn persist_derived_record(
     record: &SessionDerivedEvidenceRecordV1,
 ) -> SessionStoreResult<()> {
     ensure_derived_anchor(conn, record).await?;
-    let evidence_json = serde_json::to_string(record)
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let evidence_json =
+        serde_json::to_string(record).map_err(|error| storage(PERSIST_OPERATION, error))?;
     conn.execute(
         "INSERT INTO session_derived_evidence (
             session_id, generation, evidence_kind, evidence_id,

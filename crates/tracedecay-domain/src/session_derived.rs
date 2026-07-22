@@ -232,18 +232,22 @@ impl SessionDerivedEvidenceRecordV1 {
             .expect("non-empty members")
             .occurrence_id
             .clone();
-        let member_digest = member_digest(evidence_kind, &algorithm_version, &configuration_digest, &members)?;
+        let member_digest = member_digest(
+            evidence_kind,
+            &algorithm_version,
+            &configuration_digest,
+            &members,
+        )?;
         let evidence_id = derive_evidence_id(
             evidence_kind,
             &algorithm_version,
             &configuration_digest,
             &members,
         )?;
-        let member_count = u32::try_from(members.len()).map_err(|_| {
-            SessionContractError::InvalidIdentity {
+        let member_count =
+            u32::try_from(members.len()).map_err(|_| SessionContractError::InvalidIdentity {
                 field: "derived evidence member_count",
-            }
-        })?;
+            })?;
         Ok(Self {
             evidence_id,
             evidence_kind,
@@ -644,8 +648,10 @@ fn derive_derived_anchor_id(
 }
 
 fn digest_from_hasher(hasher: Sha256) -> Result<DataVersionDigest, SessionContractError> {
-    DataVersionDigest::new(encode_sha256(hasher)).map_err(|_| SessionContractError::InvalidIdentity {
-        field: "DataVersionDigest",
+    DataVersionDigest::new(encode_sha256(hasher)).map_err(|_| {
+        SessionContractError::InvalidIdentity {
+            field: "DataVersionDigest",
+        }
     })
 }
 

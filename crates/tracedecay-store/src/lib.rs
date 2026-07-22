@@ -100,6 +100,7 @@ pub use projection::{
     WorkflowFactRecord,
 };
 pub use session::{
+    DerivedEvidenceMemberPageItemV1, DerivedEvidenceMemberPageV1,
     MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_MIGRATION_BATCH_ITEMS,
     MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE,
     SessionFrozenWatermarksV1, SessionGenerationActivateOperation, SessionGenerationActivatePermit,
@@ -120,8 +121,7 @@ pub use session::{
     SessionRefreshProgressRequestV1, SessionRefreshProgressV1, SessionRefreshReceiptReadOperation,
     SessionRefreshReceiptReadPermit, SessionRefreshReceiptRequestV1, SessionRefreshReceiptV1,
     SessionRefreshStateV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
-    DerivedEvidenceMemberPageItemV1, DerivedEvidenceMemberPageV1, SessionRetrievalPageV1,
-    SessionRetrievalStore, SessionSnapshotFreezeOperation,
+    SessionRetrievalPageV1, SessionRetrievalStore, SessionSnapshotFreezeOperation,
     SessionSnapshotFreezePermit, SessionStoreError, SessionStoreResult,
     SessionSummaryPublicationDispositionV1, SessionSummaryPublicationReceiptV1,
     SessionSummaryPublicationRequestV1, SessionSummaryPublishOrReplayOperation,

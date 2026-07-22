@@ -10,8 +10,8 @@ use tracedecay_store::{
     DerivedEvidenceMemberPageItemV1, DerivedEvidenceMemberPageV1,
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1, SessionRetrievalPageV1,
     SessionStoreError, SessionStoreResult, SessionTemporalCapabilitiesV1,
-    SessionTemporalCapabilityV1, SessionTemporalRetrievalRequestV1, SessionTemporalSnapshotRequestV1,
-    SessionTemporalSnapshotV1,
+    SessionTemporalCapabilityV1, SessionTemporalRetrievalRequestV1,
+    SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 
 use super::query::{storage, storage_message};

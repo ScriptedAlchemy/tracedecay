@@ -366,11 +366,9 @@ impl HoldoutAuthorityStoreV1 {
                 locator: seal.locator.clone(),
             });
         }
-        let seal_digest = HoldoutSealDigest::new(format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(&labels))
-        ))
-        .map_err(|error| HoldoutAuthorityError::InvalidMetadata(error.to_string()))?;
+        let seal_digest =
+            HoldoutSealDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&labels))))
+                .map_err(|error| HoldoutAuthorityError::InvalidMetadata(error.to_string()))?;
         if seal_digest != seal.seal_digest {
             return Err(HoldoutAuthorityError::AccessBindingMismatch {
                 field: "seal digest over sealed label bytes",
@@ -539,7 +537,8 @@ impl HoldoutAuthorityStoreV1 {
         file.write_all(&line)
             .and_then(|_| file.sync_all())
             .map_err(|error| map_io("append authority log", error))?;
-        set_private_file_permissions(&path).map_err(|error| map_io("chmod authority log", error))?;
+        set_private_file_permissions(&path)
+            .map_err(|error| map_io("chmod authority log", error))?;
         Ok(())
     }
 

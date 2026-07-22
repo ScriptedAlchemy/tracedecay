@@ -1762,11 +1762,12 @@ impl HoldoutAccessReceiptV1 {
                 "holdout access requires a frozen locked-quality run".to_string(),
             ));
         }
-        let labels_content_digest = seal.labels_content_digest.clone().ok_or_else(|| {
-            EvaluationContractError::Empty {
-                field: "holdout seal labels content digest",
-            }
-        })?;
+        let labels_content_digest =
+            seal.labels_content_digest
+                .clone()
+                .ok_or_else(|| EvaluationContractError::Empty {
+                    field: "holdout seal labels content digest",
+                })?;
         if !decision_owners.contains(&accessed_by) {
             return Err(EvaluationContractError::HoldoutAccessViolation(
                 "holdout access owner is not a frozen decision owner".to_string(),
@@ -3031,7 +3032,6 @@ impl EvaluationFixtureBundleV1 {
     }
 }
 
-
 /// Canonical unsigned owner decision for local locked-quality acceptance.
 /// Authority is versioned JSON plus SHA-256 content identities and explicit
 /// owner metadata — never a signature, reveal capability, trust root, or
@@ -3095,8 +3095,14 @@ impl OwnerDecisionEvidenceV1 {
         }
         for (field, value) in [
             ("owner decision authority", self.authority.as_str()),
-            ("source_repository_commit", self.source_repository_commit.as_str()),
-            ("source_repository_tree", self.source_repository_tree.as_str()),
+            (
+                "source_repository_commit",
+                self.source_repository_commit.as_str(),
+            ),
+            (
+                "source_repository_tree",
+                self.source_repository_tree.as_str(),
+            ),
             ("owner decision rationale", self.rationale.as_str()),
         ] {
             if value.trim().is_empty() {

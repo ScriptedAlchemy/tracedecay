@@ -520,7 +520,9 @@ async fn malformed_source_does_not_starve_valid_sibling_source() {
         .await
         .unwrap();
 
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), Box::pin(server.replay_host_admission(Some(malformed.seq))),
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Box::pin(server.replay_host_admission(Some(malformed.seq))),
     )
     .await
     .expect("bounded replay must not spin on the malformed record");

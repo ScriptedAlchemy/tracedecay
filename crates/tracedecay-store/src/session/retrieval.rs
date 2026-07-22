@@ -1,10 +1,9 @@
 use std::future::Future;
 
 use tracedecay_domain::{
-    DerivedEvidenceIdV1, DerivedEvidenceKindV1, DerivedEvidenceMemberRoleV1,
-    LogicalCopyRecordV1, MessageOccurrenceIdV1, MessageOccurrenceRecordV1, RetrievalGrainV1,
-    SessionId, SessionSummaryRecordV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1,
-    TemporalModeV1,
+    DerivedEvidenceIdV1, DerivedEvidenceKindV1, DerivedEvidenceMemberRoleV1, LogicalCopyRecordV1,
+    MessageOccurrenceIdV1, MessageOccurrenceRecordV1, RetrievalGrainV1, SessionId,
+    SessionSummaryRecordV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
 
 use super::common::{

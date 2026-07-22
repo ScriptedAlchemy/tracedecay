@@ -119,10 +119,7 @@ fn holdout_access_is_not_granted_by_this_harness_revision() {
         &crate::evaluation::RunId::new("run.fixtures.probe").unwrap(),
         &crate::evaluation::DecisionOwnerId::new("owner-search-quality-lead").unwrap(),
     );
-    assert!(
-        result.is_err(),
-        "this packet ships no holdout access grant"
-    );
+    assert!(result.is_err(), "this packet ships no holdout access grant");
 }
 
 #[test]

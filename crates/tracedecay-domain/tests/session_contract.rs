@@ -1084,8 +1084,10 @@ fn derived_evidence_ids_and_manifests_are_stable_and_reject_malformed_inputs() {
     };
     let occurrences = (0..3)
         .map(|index| DerivedEvidenceOccurrenceRefV1 {
-            occurrence_id: MessageOccurrenceIdV1::new(sha_id(&format!("occurrence-{index}"))).unwrap(),
-            retrieval_anchor_id: RetrievalAnchorId::new(sha_id(&format!("anchor-{index}"))).unwrap(),
+            occurrence_id: MessageOccurrenceIdV1::new(sha_id(&format!("occurrence-{index}")))
+                .unwrap(),
+            retrieval_anchor_id: RetrievalAnchorId::new(sha_id(&format!("anchor-{index}")))
+                .unwrap(),
             thread_id: Some(ThreadId::new("thread.derived").unwrap()),
             message_id: Some(MessageId::new(format!("message.derived.{index}")).unwrap()),
             knowledge_at: UtcMicros(index),
@@ -1094,16 +1096,21 @@ fn derived_evidence_ids_and_manifests_are_stable_and_reject_malformed_inputs() {
         })
         .collect::<Vec<_>>();
 
-    let first = derive_session_evidence_from_occurrences(&session_id, &occurrences, &policy).unwrap();
+    let first =
+        derive_session_evidence_from_occurrences(&session_id, &occurrences, &policy).unwrap();
     let second =
         derive_session_evidence_from_occurrences(&session_id, &occurrences, &policy).unwrap();
     assert_eq!(first, second);
-    assert!(first
-        .iter()
-        .any(|record| record.evidence_kind() == DerivedEvidenceKindV1::Burst));
-    assert!(first
-        .iter()
-        .any(|record| record.evidence_kind() == DerivedEvidenceKindV1::Span));
+    assert!(
+        first
+            .iter()
+            .any(|record| record.evidence_kind() == DerivedEvidenceKindV1::Burst)
+    );
+    assert!(
+        first
+            .iter()
+            .any(|record| record.evidence_kind() == DerivedEvidenceKindV1::Span)
+    );
     let encoded = serde_json::to_value(&first).unwrap();
     assert_eq!(encoded, serde_json::to_value(&second).unwrap());
 
