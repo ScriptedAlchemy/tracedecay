@@ -356,7 +356,7 @@ impl LatestCompleteCodeIndexV1 {
     ) -> Result<ProductionCodeIndexQueryOwnersV1, RetrievalPortError> {
         let generation_id = self.generation.manifest().generation_id.clone();
         let freshness = production_code_index_freshness(
-            self.generation.manifest().sealed_at,
+            self.generation.manifest().seal.sealed_at,
             ComponentRevision::new("policy.daemon.v1")
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
         )?;

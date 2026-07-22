@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tempfile::TempDir;
 
@@ -177,4 +178,50 @@ fn one_symbol_unrelated_work_skip() {
         changed.reused_chunks > 0,
         "unrelated symbol chunks must skip projection work"
     );
+}
+
+#[tokio::test]
+async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        registry
+            .mount_worktree(fixture.path(), store.path().to_path_buf())
+            .await
+            .expect("mount daemon-owned scheduler")
+    );
+
+    let first = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(generation) = registry.latest_generation_id(fixture.path()).await {
+                break generation;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial generation published");
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await
+    );
+    let second = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(generation) = registry.latest_generation_id(fixture.path()).await
+                && generation != first
+            {
+                break generation;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("saved edit generation published");
+
+    assert_ne!(first, second);
+    registry.shutdown().await;
 }

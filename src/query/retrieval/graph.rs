@@ -22,6 +22,10 @@ use super::ports::{
     CodeCandidateBindingV1, CompactCandidateLane, GraphEvidenceReadPort, RetrievalPortError,
 };
 
+mod projection;
+
+pub use self::projection::{CodeGraphEvidenceAdapterV1, production_code_index_freshness};
+
 /// Typed graph-lane request: bounded traversal from generation-matched
 /// anchors (Plan 05: relation and path requests preserve edge authority and
 /// weakest coverage state).
