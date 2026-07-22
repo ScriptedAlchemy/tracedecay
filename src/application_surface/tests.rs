@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -6,8 +7,8 @@ use serde_json::Value;
 use tower::ServiceExt;
 use tracedecay_application::{
     CancellationContext, CancellationSignal, CancellationState, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, OperationReceipt, PageRequest,
-    RequestContext, RequestId, ResolvedScope, StreamEvent,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
+    PageRequest, RequestContext, RequestId, ResolvedScope, StreamEvent,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,

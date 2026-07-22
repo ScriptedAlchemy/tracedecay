@@ -777,6 +777,8 @@ fn rollback_receipt_digest(
 
 #[cfg(test)]
 mod validate_contract_tests {
+    use std::collections::BTreeMap;
+
     use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
     use tracedecay_domain::{ManifestDigest, VectorGenerationIdV1};
 

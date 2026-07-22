@@ -619,6 +619,7 @@ fn derive_plan_id(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     use super::*;

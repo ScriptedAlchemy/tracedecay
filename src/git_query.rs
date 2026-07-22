@@ -582,6 +582,7 @@ mod tests {
             .arg("--version")
             .output()
             .map(|output| output.status.success())
+            .unwrap_or(false)
     }
 
     struct Fixture {

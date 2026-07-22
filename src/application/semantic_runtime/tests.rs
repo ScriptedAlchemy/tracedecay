@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
