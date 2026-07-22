@@ -392,39 +392,37 @@ pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
                     config_error(format!("invalid accepted fact add_fact_request: {error}"))
                 })
             });
-        let request = match request {
-            Ok(request) => request,
-            Err(_) => {
-                records.push(rejected_projection(
-                    &proposal_id,
-                    run_id,
-                    evidence_hash.as_deref(),
-                    FactProposalState::Quarantined,
-                    "automation proposal could not be reconstructed",
-                    observed_at,
-                ));
-                continue;
-            }
+        let request = if let Ok(request) = request {
+            request
+        } else {
+            records.push(rejected_projection(
+                &proposal_id,
+                run_id,
+                evidence_hash.as_deref(),
+                FactProposalState::Quarantined,
+                "automation proposal could not be reconstructed",
+                observed_at,
+            ));
+            continue;
         };
-        let command = match automation_fact_proposal_add_command(
+        let command = if let Ok(command) = automation_fact_proposal_add_command(
             memory.owner().clone(),
             request,
             run_id,
             &proposal_id,
             Some(submitter.clone()),
         ) {
-            Ok(command) => command,
-            Err(_) => {
-                records.push(rejected_projection(
-                    &proposal_id,
-                    run_id,
-                    evidence_hash.as_deref(),
-                    FactProposalState::Quarantined,
-                    "automation proposal was rejected by memory privacy validation",
-                    observed_at,
-                ));
-                continue;
-            }
+            command
+        } else {
+            records.push(rejected_projection(
+                &proposal_id,
+                run_id,
+                evidence_hash.as_deref(),
+                FactProposalState::Quarantined,
+                "automation proposal was rejected by memory privacy validation",
+                observed_at,
+            ));
+            continue;
         };
         let semantic_key = (
             command.category(),

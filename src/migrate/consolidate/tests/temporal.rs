@@ -1294,8 +1294,6 @@ async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
              UPDATE session_temporal_generations
              SET state = 'active', activated_at = 3
              WHERE session_id = '{session_id}' AND generation = 1;",
-            session_id = session_id,
-            watermarks = watermarks,
         )
     };
 

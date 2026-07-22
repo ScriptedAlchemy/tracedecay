@@ -12,7 +12,7 @@ use crate::tracedecay::current_timestamp;
 
 use super::{MemoryStore, db_error, db_message, fact_from_row, normalized_limit, sql_i64_list};
 
-impl<'a> MemoryStore<'a> {
+impl MemoryStore<'_> {
     pub async fn list_facts(
         &self,
         category: Option<MemoryCategory>,

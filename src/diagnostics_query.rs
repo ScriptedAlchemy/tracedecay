@@ -906,9 +906,9 @@ mod tests {
     const GEN2: &str = "generation.clean.2";
 
     /// Seeds two generations: gen1 publishes A1 (anchor.1, E0308) and B1
-    /// (anchor.2, dead_code); gen1 is superseded by gen2; gen2 republishes
+    /// (anchor.2, `dead_code`); gen1 is superseded by gen2; gen2 republishes
     /// A1's logical finding as A2 (anchor.3) and adds the new finding C2
-    /// (anchor.4, unused_variables). B1 has no gen2 successor.
+    /// (anchor.4, `unused_variables`). B1 has no gen2 successor.
     async fn seed_two_generations(conn: &Connection) {
         let store = DiagnosticsStore::new(conn);
         store

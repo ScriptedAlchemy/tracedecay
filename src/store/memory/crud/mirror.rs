@@ -481,25 +481,24 @@ async fn compatibility_mirror_replace_entities_tx(
             )
             .await
             .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-        let entity_id = match existing
+        let entity_id = if let Some(row) = existing
             .next()
             .await
             .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
         {
-            Some(row) => row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION)?,
-            None => {
-                drop(existing);
-                transaction
-                    .execute(
-                        "INSERT INTO memory_entities(
-                            name, normalized_name, entity_type, aliases, created_at, updated_at
-                         ) VALUES(?1, ?2, 'unknown', '[]', ?3, ?3)",
-                        params![name.as_str(), key.as_str(), timestamp],
-                    )
-                    .await
-                    .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-                compatibility_last_insert_rowid_tx(transaction).await?
-            }
+            row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION)?
+        } else {
+            drop(existing);
+            transaction
+                .execute(
+                    "INSERT INTO memory_entities(
+                        name, normalized_name, entity_type, aliases, created_at, updated_at
+                     ) VALUES(?1, ?2, 'unknown', '[]', ?3, ?3)",
+                    params![name.as_str(), key.as_str(), timestamp],
+                )
+                .await
+                .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            compatibility_last_insert_rowid_tx(transaction).await?
         };
         transaction
             .execute(

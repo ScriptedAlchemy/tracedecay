@@ -4,7 +4,7 @@ use crate::errors::Result;
 
 use super::db_error;
 
-/// Unions the source shard's memory_v2 durable authority into the attached
+/// Unions the source shard's `memory_v2` durable authority into the attached
 /// target graph connection. Every carried table is owner-bound (fact ids embed
 /// the owner digest), so rows are unioned by their identity columns with
 /// `INSERT OR IGNORE` — never renumbered — mirroring the observation-authority

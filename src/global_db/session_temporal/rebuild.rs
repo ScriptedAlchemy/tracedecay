@@ -47,42 +47,39 @@ impl GlobalDb {
             BEGIN_OPERATION,
         )
         .await?;
-        let disposition = match existing {
-            Some(existing) => {
-                if existing.frozen_watermarks_json != watermarks_json {
-                    return Err(SessionStoreError::FrozenWatermarkMismatch);
+        let disposition = if let Some(existing) = existing {
+            if existing.frozen_watermarks_json != watermarks_json {
+                return Err(SessionStoreError::FrozenWatermarkMismatch);
+            }
+            match existing.state.as_str() {
+                "building" => SessionGenerationRebuildDispositionV1::Resumed,
+                "ready" | "active" | "superseded" => {
+                    SessionGenerationRebuildDispositionV1::Complete
                 }
-                match existing.state.as_str() {
-                    "building" => SessionGenerationRebuildDispositionV1::Resumed,
-                    "ready" | "active" | "superseded" => {
-                        SessionGenerationRebuildDispositionV1::Complete
-                    }
-                    state => {
-                        return Err(storage_message(
-                            BEGIN_OPERATION,
-                            format!("generation cannot resume from state {state}"),
-                        ));
-                    }
+                state => {
+                    return Err(storage_message(
+                        BEGIN_OPERATION,
+                        format!("generation cannot resume from state {state}"),
+                    ));
                 }
             }
-            None => {
-                let recorded_at = now_micros(BEGIN_OPERATION)?;
-                transaction
-                    .execute(
-                        "INSERT INTO session_temporal_generations (
-                            session_id, generation, state, frozen_watermarks_json, created_at
-                         ) VALUES (?1, ?2, 'building', ?3, ?4)",
-                        params![
-                            request.session_id().as_str(),
-                            generation_i64(request.candidate_generation(), BEGIN_OPERATION)?,
-                            watermarks_json,
-                            recorded_at.0,
-                        ],
-                    )
-                    .await
-                    .map_err(|error| storage(BEGIN_OPERATION, error))?;
-                SessionGenerationRebuildDispositionV1::Started
-            }
+        } else {
+            let recorded_at = now_micros(BEGIN_OPERATION)?;
+            transaction
+                .execute(
+                    "INSERT INTO session_temporal_generations (
+                        session_id, generation, state, frozen_watermarks_json, created_at
+                     ) VALUES (?1, ?2, 'building', ?3, ?4)",
+                    params![
+                        request.session_id().as_str(),
+                        generation_i64(request.candidate_generation(), BEGIN_OPERATION)?,
+                        watermarks_json,
+                        recorded_at.0,
+                    ],
+                )
+                .await
+                .map_err(|error| storage(BEGIN_OPERATION, error))?;
+            SessionGenerationRebuildDispositionV1::Started
         };
         let recorded_at = now_micros(BEGIN_OPERATION)?;
         transaction

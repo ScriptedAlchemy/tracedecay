@@ -159,12 +159,11 @@ fn summary_source_rejection(
     {
         prefer_summary_rejection(&mut rejection, SummaryLineageRejection::CreatedAfterCutoff);
     }
-    let valid_through = match horizon.valid_through {
-        Some(valid_through) => Some(valid_through),
-        None => {
-            prefer_summary_rejection(&mut rejection, SummaryLineageRejection::MissingValidHorizon);
-            None
-        }
+    let valid_through = if let Some(valid_through) = horizon.valid_through {
+        Some(valid_through)
+    } else {
+        prefer_summary_rejection(&mut rejection, SummaryLineageRejection::MissingValidHorizon);
+        None
     };
     if let (TemporalModeV1::AsOf { cutoff }, Some(valid_through)) = (mode, valid_through)
         && (horizon.knowledge_through > cutoff || valid_through > cutoff)

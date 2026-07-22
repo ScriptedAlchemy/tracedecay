@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{TraceDecayConfig, db_filename, load_config_from_path, save_config_to_path};
+use crate::daemon::store_runtime::driver::{GraphLibsqlCompatDriver, GraphStoreOpenMode};
 use crate::db::{Database, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::extraction::LanguageRegistry;
@@ -40,7 +41,12 @@ impl TraceDecay {
         };
         save_config_to_path(&store_layout.config_path, &config)?;
 
-        let (db, _migrated) = Database::initialize(&store_layout.graph_db_path, &authority).await?;
+        let (db, _migrated) = GraphLibsqlCompatDriver::open(
+            GraphStoreOpenMode::Initialize,
+            &store_layout.graph_db_path,
+            &authority,
+        )
+        .await?;
         let active_graph_layout = active_graph_layout(&store_layout.graph_db_path);
         if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
             storage::write_store_manifest(&store_layout)?;
@@ -122,7 +128,12 @@ impl TraceDecay {
             std::process::id()
         ));
         let authority = DatabaseAuthority::acquire_test(&db_path, "latest schema version")?;
-        let (db, _) = Database::initialize(&db_path, &authority).await?;
+        let (db, _) = GraphLibsqlCompatDriver::open(
+            GraphStoreOpenMode::Initialize,
+            &db_path,
+            &authority,
+        )
+        .await?;
         let version = Self::schema_version(&db, "latest_schema_version").await;
         db.close();
         delete_db_files(&db_path);
@@ -404,7 +415,13 @@ impl TraceDecay {
             // writable open below; do not force offline recovery for it. The
             // read-only open runs its own integrity validation, so the damage
             // can surface either as its open error or as a problem row here.
-            match Database::open_read_only(&db_path, &authority).await {
+            match GraphLibsqlCompatDriver::open(
+                GraphStoreOpenMode::ReadOnly,
+                &db_path,
+                &authority,
+            )
+            .await
+            {
                 Ok((verification, _)) => {
                     let integrity = verification.quick_check_report().await;
                     verification.close();
@@ -442,7 +459,8 @@ impl TraceDecay {
         // process may still hold the current DB/WAL/SHM inodes, and deleting
         // them here would split readers and writers across different stores.
         let authority = DatabaseAuthority::for_runtime(&db_path, "open project store")?;
-        let mut open_result = Database::open(&db_path, &authority).await;
+        let mut open_result =
+            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::Open, &db_path, &authority).await;
         // Open-time validation fails closed on any corruption, including
         // FTS-only damage that is fully derivable from the content table.
         // Rebuild that index under the open's writer authority and retry
@@ -453,7 +471,14 @@ impl TraceDecay {
         {
             eprintln!("[tracedecay] repairing FTS index after interrupted operation ({error})…");
             match Database::repair_fts_offline(&db_path, &authority).await {
-                Ok(()) => open_result = Database::open(&db_path, &authority).await,
+                Ok(()) => {
+                    open_result = GraphLibsqlCompatDriver::open(
+                        GraphStoreOpenMode::Open,
+                        &db_path,
+                        &authority,
+                    )
+                    .await;
+                }
                 Err(repair_error) => {
                     print_corruption_warning(&db_path);
                     return Err(recovery_required_error(&db_path, repair_error));
@@ -590,7 +615,9 @@ impl TraceDecay {
         }
 
         let authority = DatabaseAuthority::for_runtime(&db_path, "open project store read-only")?;
-        let (db, _) = Database::open_read_only(&db_path, &authority).await?;
+        let (db, _) =
+            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::ReadOnly, &db_path, &authority)
+                .await?;
         Ok(Self {
             db,
             config,
@@ -834,7 +861,8 @@ impl TraceDecay {
         }
 
         let authority = DatabaseAuthority::for_runtime(&db_path, "open branch store")?;
-        let (db, _) = Database::open(&db_path, &authority).await?;
+        let (db, _) =
+            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::Open, &db_path, &authority).await?;
         Ok(Self {
             db,
             config,
@@ -1212,7 +1240,14 @@ impl std::fmt::Display for StoreIdentityInventory {
 async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventory {
     let authority = DatabaseAuthority::for_runtime(&layout.graph_db_path, "store inventory");
     let open_result = match authority {
-        Ok(authority) => Database::open_read_only(&layout.graph_db_path, &authority).await,
+        Ok(authority) => {
+            GraphLibsqlCompatDriver::open(
+                GraphStoreOpenMode::ReadOnly,
+                &layout.graph_db_path,
+                &authority,
+            )
+            .await
+        }
         Err(error) => Err(error),
     };
     let (graph_health, nodes, files, facts) = match open_result {
@@ -1301,7 +1336,7 @@ fn count_tree_files(root: &Path) -> u64 {
 
 /// Whether a `PRAGMA quick_check` problem row describes damage confined to the
 /// graph's FTS5 index (e.g. "malformed inverted index for FTS5 table
-/// main.nodes_fts"). Such damage is fully derivable from the content table via
+/// `main.nodes_fts`"). Such damage is fully derivable from the content table via
 /// [`crate::db::Database::rebuild_fts`] and never requires offline recovery.
 pub(crate) fn is_fts_only_corruption(problem: &str) -> bool {
     problem.contains("malformed inverted index for FTS5 table main.nodes_fts")

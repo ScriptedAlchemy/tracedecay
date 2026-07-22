@@ -187,7 +187,7 @@ pub(super) fn compatibility_receipt_u64(
     })
 }
 
-impl<'a> DatabaseFactStore<'a> {
+impl DatabaseFactStore<'_> {
     pub(super) async fn compatibility_read<T>(
         &self,
         work: impl for<'tx> FnOnce(

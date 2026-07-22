@@ -1198,7 +1198,7 @@ pub(in crate::store::memory) fn proposal_transition_id(transition_json: &str) ->
     id
 }
 
-impl<'a> DatabaseFactStore<'a> {
+impl DatabaseFactStore<'_> {
     pub(in crate::store::memory) async fn commit_batch(
         &self,
         batch: &FactWriteBatch,

@@ -172,8 +172,7 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         1
     );
     eprintln!(
-        "same_worktree_live_engine_proxy clients={} open_attempts=1 retained_servers={retained_servers} cache_hits={}",
-        PARALLEL_CLIENT_IDENTITIES, PARALLEL_CLIENT_IDENTITIES
+        "same_worktree_live_engine_proxy clients={PARALLEL_CLIENT_IDENTITIES} open_attempts=1 retained_servers={retained_servers} cache_hits={PARALLEL_CLIENT_IDENTITIES}"
     );
     drop(cached);
     drop(alias_server);
@@ -497,13 +496,13 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
     registry.insert_at(
         oldest.clone(),
         Arc::new(1),
-        now - std::time::Duration::from_secs(20),
+        now.checked_sub(std::time::Duration::from_secs(20)).unwrap(),
     );
     registry.bind_route(route("oldest-active"), oldest.clone());
     registry.insert_at(
         idle.clone(),
         Arc::new(2),
-        now - std::time::Duration::from_secs(10),
+        now.checked_sub(std::time::Duration::from_secs(10)).unwrap(),
     );
     registry.bind_route(route("idle"), idle.clone());
     let active_lease = Arc::clone(registry.get(&oldest).expect("oldest server"));

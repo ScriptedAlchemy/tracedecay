@@ -741,104 +741,99 @@ pub(in crate::store::memory) async fn import_legacy_compatibility_fact_proposals
                 "legacy_proposal_id": legacy_proposal_id,
             }),
         )?;
-        let resolved_id = match compatibility_legacy_proposal_mapping_tx(
-            transaction,
-            request.owner(),
-            request.source_store_id(),
-            legacy_proposal_id,
-        )
-        .await?
+        let resolved_id = if let Some((existing_id, import_receipt)) =
+            compatibility_legacy_proposal_mapping_tx(
+                transaction,
+                request.owner(),
+                request.source_store_id(),
+                legacy_proposal_id,
+            )
+            .await?
         {
-            Some((existing_id, import_receipt)) => {
-                if import_receipt.get("sidecar_digest").and_then(Value::as_str)
-                    != Some(request.sidecar_digest().as_str())
-                {
-                    return Err(storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        "legacy proposal id was reused with a different sidecar digest",
-                    )
-                    .into());
-                }
-                let stored_digest =
-                    compatibility_proposal_digest_tx(transaction, request.owner(), &existing_id)
-                        .await?
-                        .ok_or_else(|| {
-                            storage_message(
-                                COMPATIBILITY_WRITE_OPERATION,
-                                "legacy proposal map references a missing proposal",
-                            )
-                        })?;
-                if stored_digest != record_digest {
-                    return Err(storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        "legacy proposal id was reused with a different request",
-                    )
-                    .into());
-                }
-                existing_id
-            }
-            None => {
-                if let Some(existing_id) = compatibility_proposal_for_digest_tx(
-                    transaction,
-                    request.owner(),
-                    &record_digest,
+            if import_receipt.get("sidecar_digest").and_then(Value::as_str)
+                != Some(request.sidecar_digest().as_str())
+            {
+                return Err(storage_message(
+                    COMPATIBILITY_WRITE_OPERATION,
+                    "legacy proposal id was reused with a different sidecar digest",
                 )
-                .await?
-                {
-                    return Err(storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        format!(
-                            "legacy proposal request is already bound to proposal {}",
-                            existing_id.as_str()
-                        ),
-                    )
-                    .into());
-                }
-                compatibility_insert_proposal_tx(
-                    transaction,
-                    &proposal_id,
-                    record.request(),
-                    &proposal_id,
-                    &record_digest,
-                    &json!({
-                        "source_store_id": request.source_store_id().as_str(),
-                        "sidecar_digest": request.sidecar_digest().as_str(),
-                        "legacy_proposal_id": legacy_proposal_id,
-                    }),
-                    state,
-                    None,
-                    reason,
-                    "legacy_import",
-                    now,
-                )
-                .await?;
-                transaction
-                    .execute(
-                        "INSERT INTO memory_v2_legacy_proposal_map(
-                            owner_kind, project_id, source_store_id, legacy_proposal_id,
-                            proposal_id, history_coverage, import_receipt_json, imported_at
-                         ) VALUES(?1, ?2, ?3, ?4, ?5, 'unknown', ?6, ?7)",
-                        params![
-                            OwnerKey::new(request.owner())?.kind,
-                            OwnerKey::new(request.owner())?.project_id.as_str(),
-                            request.source_store_id().as_str(),
-                            legacy_proposal_id.to_string(),
-                            proposal_id.as_str(),
-                            to_json(
-                                &json!({
-                                    "source_store_id": request.source_store_id().as_str(),
-                                    "sidecar_digest": request.sidecar_digest().as_str(),
-                                    "request_digest": record_digest,
-                                }),
-                                "serialize compatibility legacy proposal import receipt",
-                            )?,
-                            now.0,
-                        ],
-                    )
-                    .await
-                    .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-                proposal_id
+                .into());
             }
+            let stored_digest =
+                compatibility_proposal_digest_tx(transaction, request.owner(), &existing_id)
+                    .await?
+                    .ok_or_else(|| {
+                        storage_message(
+                            COMPATIBILITY_WRITE_OPERATION,
+                            "legacy proposal map references a missing proposal",
+                        )
+                    })?;
+            if stored_digest != record_digest {
+                return Err(storage_message(
+                    COMPATIBILITY_WRITE_OPERATION,
+                    "legacy proposal id was reused with a different request",
+                )
+                .into());
+            }
+            existing_id
+        } else {
+            if let Some(existing_id) =
+                compatibility_proposal_for_digest_tx(transaction, request.owner(), &record_digest)
+                    .await?
+            {
+                return Err(storage_message(
+                    COMPATIBILITY_WRITE_OPERATION,
+                    format!(
+                        "legacy proposal request is already bound to proposal {}",
+                        existing_id.as_str()
+                    ),
+                )
+                .into());
+            }
+            compatibility_insert_proposal_tx(
+                transaction,
+                &proposal_id,
+                record.request(),
+                &proposal_id,
+                &record_digest,
+                &json!({
+                    "source_store_id": request.source_store_id().as_str(),
+                    "sidecar_digest": request.sidecar_digest().as_str(),
+                    "legacy_proposal_id": legacy_proposal_id,
+                }),
+                state,
+                None,
+                reason,
+                "legacy_import",
+                now,
+            )
+            .await?;
+            transaction
+                .execute(
+                    "INSERT INTO memory_v2_legacy_proposal_map(
+                        owner_kind, project_id, source_store_id, legacy_proposal_id,
+                        proposal_id, history_coverage, import_receipt_json, imported_at
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, 'unknown', ?6, ?7)",
+                    params![
+                        OwnerKey::new(request.owner())?.kind,
+                        OwnerKey::new(request.owner())?.project_id.as_str(),
+                        request.source_store_id().as_str(),
+                        legacy_proposal_id.to_string(),
+                        proposal_id.as_str(),
+                        to_json(
+                            &json!({
+                                "source_store_id": request.source_store_id().as_str(),
+                                "sidecar_digest": request.sidecar_digest().as_str(),
+                                "request_digest": record_digest,
+                            }),
+                            "serialize compatibility legacy proposal import receipt",
+                        )?,
+                        now.0,
+                    ],
+                )
+                .await
+                .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            proposal_id
         };
         let proposal = compatibility_proposal_record_tx(transaction, request.owner(), &resolved_id)
             .await?

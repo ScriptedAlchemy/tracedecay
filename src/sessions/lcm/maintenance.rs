@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libsql::{Builder, Connection, OpenFlags, params};
+#[cfg(test)]
+use libsql::{Builder, OpenFlags};
+use libsql::{Connection, params};
 use serde_json::{Value, json};
 
 use super::LcmError;
@@ -112,9 +114,7 @@ fn allocate_backup_directory(
 }
 
 async fn verify_sqlite_backup(path: &Path) -> Result<(), LcmError> {
-    let db = Builder::new_local(path)
-        .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .build()
+    let db = crate::db::libsql_local::open_local_database(path, true)
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
     let conn = db

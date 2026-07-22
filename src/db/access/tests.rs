@@ -1,3 +1,7 @@
+use std::fs::OpenOptions;
+
+use fs2::FileExt;
+
 use super::*;
 
 static SCOPE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -890,4 +894,32 @@ fn maintenance_scope_is_reentrant_across_nested_intents() {
     drop(inner);
     drop(outer);
     drop(lifecycle);
+}
+
+#[test]
+fn ambient_test_authority_fails_closed_while_foreign_daemon_lock_is_held() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path();
+    let db_path = profile.join("projects/p1/tracedecay.db");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let lock_path = profile.join("daemon-authority.lock");
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    let lock = options.open(&lock_path).unwrap();
+    FileExt::try_lock_exclusive(&lock).unwrap();
+
+    let error = DatabaseAuthority::for_runtime(&db_path, "rejected contender open")
+        .expect_err("foreign daemon election must suppress ambient Test authority");
+    assert!(
+        error
+            .to_string()
+            .contains("managed-daemon or exclusive-maintenance authority"),
+        "unexpected authority error: {error}"
+    );
+
+    drop(lock);
+
+    let authority = DatabaseAuthority::for_runtime(&db_path, "fixture open").unwrap();
+    assert_eq!(authority.role(), DatabaseAuthorityRole::Test);
 }

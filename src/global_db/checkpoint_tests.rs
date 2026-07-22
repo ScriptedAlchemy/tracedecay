@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::db::libsql_local;
+
 async fn pinned_wal_reader() -> (tempfile::TempDir, GlobalDb, libsql::Database, Connection) {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
@@ -16,9 +18,7 @@ async fn pinned_wal_reader() -> (tempfile::TempDir, GlobalDb, libsql::Database, 
         .await
         .unwrap();
 
-    let reader_db = Builder::new_local(&db_path)
-        .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .build()
+    let reader_db = libsql_local::open_local_database(&db_path, true)
         .await
         .unwrap();
     let reader = reader_db.connect().unwrap();

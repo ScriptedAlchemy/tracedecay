@@ -199,7 +199,7 @@ impl TemporalHydrationPort for FakeHydrator {
 struct Words;
 
 impl VersionedTokenEstimator for Words {
-    fn version(&self) -> &str {
+    fn version(&self) -> &'static str {
         "words-v1"
     }
 

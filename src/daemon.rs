@@ -111,6 +111,9 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
     let requested = transport::default_loopback_endpoint();
+    // Same fail-closed order as the Unix path: lifecycle → exclusive daemon
+    // authority → database scope → durable SQLite. Rejected contenders exit
+    // before any store open.
     let _lifecycle_lease = crate::lifecycle_lease::acquire_shared_for_profile(
         &profile_root,
         "managed daemon database ownership",
@@ -208,6 +211,13 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
     let endpoint = transport::DaemonEndpoint::Unix(socket_path);
+    // Startup order is intentional and fail-closed:
+    // 1) shared lifecycle (blocks exclusive maintenance),
+    // 2) exclusive daemon authority (rejected contenders exit here),
+    // 3) daemon database write scope,
+    // 4) only then durable SQLite opens (git watcher, project servers, etc.).
+    // Contenders that lose the authority election must perform zero durable
+    // SQLite opens or writes before returning.
     let _lifecycle = crate::lifecycle_lease::acquire_shared_for_profile(
         &profile_root,
         "managed daemon database ownership",
@@ -836,6 +846,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         self.bind_route(route, key);
     }
 
+    #[allow(dead_code)] // retained for project-route binding paths still landing
     fn bind_or_insert_route(
         &mut self,
         route: ProjectRouteKey,
@@ -1504,15 +1515,15 @@ impl DaemonEngine {
             route_registered.store(false, Ordering::Release);
             return Err(project_server_capacity_error());
         };
-        if !inserted {
-            route_registered.store(false, Ordering::Release);
-        } else {
+        if inserted {
             self.spawn_project_maintenance_activation(
                 key.clone(),
                 canonical_project_path.clone(),
                 handshake.clone(),
                 Arc::clone(&server),
             );
+        } else {
+            route_registered.store(false, Ordering::Release);
         }
         Ok((key, canonical_project_path, server, inserted))
     }
@@ -1854,6 +1865,7 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
 }
 
 #[cfg(unix)]
+#[allow(dead_code)] // retained for unix socket admission wrappers still landing
 async fn serve_authenticated_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,

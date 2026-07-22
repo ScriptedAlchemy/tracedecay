@@ -30,7 +30,7 @@ use crate::query::temporal::ports::{
 use crate::query::temporal::resolution::ValidatedAuthorization;
 use crate::sessions::SessionMessageRecord;
 
-use self::cursor_keys::GlobalDbCursorKeyProvider;
+pub(crate) use self::cursor_keys::GlobalDbCursorKeyProvider;
 use self::hydration::GlobalDbTemporalHydrationPort;
 use self::retrieval::GlobalDbTemporalReadPort;
 

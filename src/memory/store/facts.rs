@@ -25,7 +25,7 @@ use super::{
     to_json_string,
 };
 
-impl<'a> MemoryStore<'a> {
+impl MemoryStore<'_> {
     pub async fn add_fact(
         &self,
         request: AddFactRequest,

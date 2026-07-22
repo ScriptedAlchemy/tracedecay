@@ -477,6 +477,7 @@ impl ModelArtifactStore {
     /// Verify manifest structure, trust-root admission, and the detached
     /// Ed25519 signature over the canonical payload bytes. Runs BEFORE any
     /// byte is staged, so a bad signature never reaches disk.
+    #[allow(dead_code)] // public import gate retained for artifact runtime prep
     pub fn verify_manifest(
         &self,
         manifest: &ModelArtifactManifestV1,
@@ -863,11 +864,11 @@ impl ModelArtifactStore {
         let _lock = self.acquire_lock()?;
         self.recover_locked()?;
         let mut inventory = self.load_inventory_locked()?;
-        if let Some(record) = inventory.records.get_mut(&digest.to_string()) {
-            if record.state == ArtifactInventoryStateV1::Installed {
-                record.state = ArtifactInventoryStateV1::RetainedForRollback;
-                record.recorded_at_unix = now_unix;
-            }
+        if let Some(record) = inventory.records.get_mut(&digest.to_string())
+            && record.state == ArtifactInventoryStateV1::Installed
+        {
+            record.state = ArtifactInventoryStateV1::RetainedForRollback;
+            record.recorded_at_unix = now_unix;
         }
         self.save_inventory_locked(&inventory)
     }

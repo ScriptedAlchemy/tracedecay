@@ -210,7 +210,7 @@ impl DaemonSessionRetrievalRoot {
 struct MessageSearchWordEstimator;
 
 impl VersionedTokenEstimator for MessageSearchWordEstimator {
-    fn version(&self) -> &str {
+    fn version(&self) -> &'static str {
         "words-v1"
     }
 
@@ -745,21 +745,15 @@ impl DaemonSessionRetrievalService {
 }
 
 impl SessionRetrievalServicePort for DaemonSessionRetrievalService {
-    fn execute<'a>(
-        &'a self,
-        command: SessionRetrievalCommand,
-    ) -> SessionRetrievalServiceFuture<'a> {
+    fn execute(&self, command: SessionRetrievalCommand) -> SessionRetrievalServiceFuture<'_> {
         Box::pin(async move { self.execute_command(command).await })
     }
 
-    fn describe_lcm<'a>(
-        &'a self,
-        command: LcmDescribeServiceCommand,
-    ) -> LcmDescribeServiceFuture<'a> {
+    fn describe_lcm(&self, command: LcmDescribeServiceCommand) -> LcmDescribeServiceFuture<'_> {
         Box::pin(async move { self.execute_lcm_describe(command).await })
     }
 
-    fn expand_lcm<'a>(&'a self, command: LcmExpandServiceCommand) -> LcmExpandServiceFuture<'a> {
+    fn expand_lcm(&self, command: LcmExpandServiceCommand) -> LcmExpandServiceFuture<'_> {
         Box::pin(async move { self.execute_lcm_expand(command).await })
     }
 }

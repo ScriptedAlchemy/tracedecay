@@ -254,15 +254,12 @@ impl<P: ContextPayload> Serialize for CanonicalPayload<'_, P> {
     {
         let mut frame = serializer.serialize_struct("CanonicalPayload", 3)?;
         frame.serialize_field("anchor_id", self.0.anchor_id())?;
-        match std::str::from_utf8(self.0.bytes()) {
-            Ok(text) => {
-                frame.serialize_field("encoding", "utf8")?;
-                frame.serialize_field("data", text)?;
-            }
-            Err(_) => {
-                frame.serialize_field("encoding", "bytes")?;
-                frame.serialize_field("data", self.0.bytes())?;
-            }
+        if let Ok(text) = std::str::from_utf8(self.0.bytes()) {
+            frame.serialize_field("encoding", "utf8")?;
+            frame.serialize_field("data", text)?;
+        } else {
+            frame.serialize_field("encoding", "bytes")?;
+            frame.serialize_field("data", self.0.bytes())?;
         }
         frame.end()
     }

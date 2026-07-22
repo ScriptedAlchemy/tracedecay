@@ -116,9 +116,7 @@ async fn wait_for_finished_task(
 #[cfg(unix)]
 fn remaining_test_budget(deadline: tokio::time::Instant, message: &str) -> std::time::Duration {
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    if remaining.is_zero() {
-        panic!("{message}");
-    }
+    assert!(!remaining.is_zero(), "{message}");
     remaining
 }
 

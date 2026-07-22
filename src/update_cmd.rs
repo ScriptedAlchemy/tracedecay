@@ -105,11 +105,8 @@ fn refresh_daemon_service_with_spec(
     let socket_path = tracedecay::daemon::installed_service_socket_path()?
         .unwrap_or_else(|| spec.socket_path.clone());
     Ok(
-        tracedecay::daemon::refresh_installed_service_under_lease_with_state(
-            &spec,
-            previous_state,
-        )?
-        .map(|service_path| (service_path, socket_path)),
+        tracedecay::daemon::refresh_installed_service_under_lease_with_state(spec, previous_state)?
+            .map(|service_path| (service_path, socket_path)),
     )
 }
 
@@ -160,14 +157,13 @@ where
                 previous_state,
                 tracedecay::daemon::DaemonServiceState::RunningEnabled
                     | tracedecay::daemon::DaemonServiceState::RunningDisabled
-            ) {
-                if let Err(restore_error) = restore(previous_state) {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
-                        message: format!(
-                            "{acquire_error}; additionally failed to restore the managed daemon service: {restore_error}"
-                        ),
-                    });
-                }
+            ) && let Err(restore_error) = restore(previous_state)
+            {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "{acquire_error}; additionally failed to restore the managed daemon service: {restore_error}"
+                    ),
+                });
             }
             return Err(acquire_error);
         }

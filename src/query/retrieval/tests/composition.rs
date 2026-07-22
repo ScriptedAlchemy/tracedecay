@@ -467,7 +467,7 @@ impl LateHydrationSource<String> for FakeHydrationSource {
     ) -> HydrationAuthorizationV1 {
         self.authorization
             .get(candidate.candidate.anchor_id.as_str())
-            .cloned()
+            .copied()
             .unwrap_or(HydrationAuthorizationV1::Authorized)
     }
 

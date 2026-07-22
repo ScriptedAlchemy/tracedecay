@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::daemon::store_runtime::driver::{GraphLibsqlCompatDriver, GraphStoreOpenMode};
 use crate::db::Database;
 use crate::errors::Result;
 
@@ -14,10 +15,12 @@ pub fn user_memory_db_path(profile_root: &Path) -> PathBuf {
 pub async fn open_user_memory_db(profile_root: &Path) -> Result<Database> {
     let path = user_memory_db_path(profile_root);
     let authority = crate::db::DatabaseAuthority::for_runtime(&path, "open user memory")?;
-    if path.is_file() {
-        return Database::open(&path, &authority).await.map(|(db, _)| db);
-    }
-    Database::initialize(&path, &authority)
+    let mode = if path.is_file() {
+        GraphStoreOpenMode::Open
+    } else {
+        GraphStoreOpenMode::Initialize
+    };
+    GraphLibsqlCompatDriver::open(mode, &path, &authority)
         .await
         .map(|(db, _)| db)
 }

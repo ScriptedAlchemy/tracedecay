@@ -12,7 +12,7 @@ use super::{
     normalized_limit, parse_category,
 };
 
-impl<'a> MemoryStore<'a> {
+impl MemoryStore<'_> {
     pub async fn compute_missing_vectors(&self, limit: usize) -> Result<usize> {
         let limit = normalized_limit(limit);
         let mut rows = self

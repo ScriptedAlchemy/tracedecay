@@ -170,7 +170,7 @@ pub(in crate::db) async fn upgrade_v21_schema(conn: &Connection, operation: &str
 }
 
 /// Installs V22's explicit compatibility state. V20/V21 upgrades deliberately
-/// do not call this installer so their user_version remains schema-accurate.
+/// do not call this installer so their `user_version` remains schema-accurate.
 pub(in crate::db) async fn upgrade_v22_schema(conn: &Connection, operation: &str) -> Result<()> {
     install_v22_compatibility_schema(conn, operation).await?;
     ensure_v22_proposal_schema(conn, operation).await?;

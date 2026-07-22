@@ -1,6 +1,6 @@
 //! Private holdout authority storage and Ed25519 verification.
 //!
-//! All sensitive bytes live below the supported TraceDecay user profile. Public
+//! All sensitive bytes live below the supported `TraceDecay` user profile. Public
 //! values are content-addressed locators, digests, fingerprints, and lifecycle
 //! metadata; this module never returns a private path or signing seed.
 
@@ -720,7 +720,7 @@ impl HoldoutAuthorityStoreV1 {
             not_after_unix: root.not_after_unix,
             rotation_epoch: root.rotation_epoch,
             public_key: decode_hex_array(&root.public_key_hex)
-                .map_err(|_| HoldoutAuthorityError::KeyUnavailable)?,
+                .map_err(|()| HoldoutAuthorityError::KeyUnavailable)?,
         })
     }
 
@@ -843,7 +843,7 @@ impl HoldoutAuthorityStoreV1 {
                 .as_deref()
                 .ok_or(HoldoutAuthorityError::InvalidSignature)?;
             let signature_bytes: [u8; 64] = decode_hex_array(signature_hex)
-                .map_err(|_| HoldoutAuthorityError::InvalidSignature)?;
+                .map_err(|()| HoldoutAuthorityError::InvalidSignature)?;
             let payload_bytes = serde_json::to_vec(&envelope.payload)
                 .map_err(|error| HoldoutAuthorityError::InvalidMetadata(error.to_string()))?;
             VerifyingKey::from_bytes(&root.public_key)
@@ -1006,7 +1006,7 @@ impl HoldoutAuthorityStoreV1 {
                 .as_deref()
                 .ok_or(HoldoutAuthorityError::InvalidSignature)?;
             let signature_bytes: [u8; 64] = decode_hex_array(signature_hex)
-                .map_err(|_| HoldoutAuthorityError::InvalidSignature)?;
+                .map_err(|()| HoldoutAuthorityError::InvalidSignature)?;
             VerifyingKey::from_bytes(&root.public_key)
                 .map_err(|_| HoldoutAuthorityError::InvalidSignature)?
                 .verify_strict(&payload_bytes, &Signature::from_bytes(&signature_bytes))
@@ -1200,6 +1200,7 @@ impl HoldoutAuthorityStoreV1 {
         Ok(())
     }
 
+    #[allow(dead_code)] // retained for PR9 semantic evidence gates still landing
     pub(crate) fn validate_semantic_candidate_evidence(
         &self,
         semantic: &SemanticCandidateEvidenceV1,
@@ -1273,7 +1274,7 @@ impl HoldoutAuthorityStoreV1 {
                 .as_deref()
                 .ok_or(HoldoutAuthorityError::InvalidSignature)?;
             let signature_bytes: [u8; 64] = decode_hex_array(signature_hex)
-                .map_err(|_| HoldoutAuthorityError::InvalidSignature)?;
+                .map_err(|()| HoldoutAuthorityError::InvalidSignature)?;
             VerifyingKey::from_bytes(&root.public_key)
                 .map_err(|_| HoldoutAuthorityError::InvalidSignature)?
                 .verify_strict(&payload_bytes, &Signature::from_bytes(&signature_bytes))
@@ -2090,7 +2091,7 @@ mod tests {
                 now_unix,
             )
             .unwrap();
-        let (_, receipt) = fixture
+        let ((), receipt) = fixture
             .store
             .evaluate_locked_labels(
                 &capability.locator,
@@ -2112,7 +2113,7 @@ mod tests {
     #[test]
     fn acceptance_requires_the_persisted_receipt_and_revalidates_its_authority() {
         let fixture = locked_fixture();
-        let (_, receipt) = fixture
+        let ((), receipt) = fixture
             .store
             .evaluate_locked_labels(
                 &fixture.capability.locator,

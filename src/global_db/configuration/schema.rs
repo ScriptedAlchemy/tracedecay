@@ -1,4 +1,4 @@
-//! Additive SQLite schema for the revisioned configuration control plane.
+//! Additive `SQLite` schema for the revisioned configuration control plane.
 
 use thiserror::Error;
 

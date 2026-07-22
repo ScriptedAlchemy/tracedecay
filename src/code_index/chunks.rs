@@ -179,19 +179,19 @@ impl CodeFileChunksV1 {
             chunk.anchor.generation_id = generation_id.clone();
             chunk.anchor.file_occurrence_id = file_occurrence_id.clone();
             if let Some(prior_occurrence) = chunk.anchor.symbol_occurrence_id.clone() {
-                let current_occurrence = match occurrences.get(&prior_occurrence) {
-                    Some(current) => current.clone(),
-                    None => {
-                        let current = rematerialized_symbol_occurrence_id(
-                            &generation_id,
-                            &file_occurrence_id,
-                            &prior_occurrence,
-                        )?;
-                        occurrences.insert(prior_occurrence, current.clone());
-                        current
-                    }
+                let current_occurrence = if let Some(current) = occurrences.get(&prior_occurrence) {
+                    current.clone()
+                } else {
+                    let current = rematerialized_symbol_occurrence_id(
+                        &generation_id,
+                        &file_occurrence_id,
+                        &prior_occurrence,
+                    )?;
+                    occurrences.insert(prior_occurrence, current.clone());
+                    current
                 };
-                chunk.anchor.symbol_occurrence_id = Some(current_occurrence);
+                chunk.anchor.symbol_occurrence_id = Some(current_occurrence.clone());
+                rematerialize_whole_symbol_terms(&mut chunk.exact_terms, &current_occurrence)?;
             }
         }
 
@@ -394,6 +394,26 @@ fn rematerialized_symbol_occurrence_id(
         SymbolOccurrenceId::new(format!("symbol.v1.{digest}"))
             .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
     })
+}
+
+/// Rebind parser-derived whole-symbol evidence to its rematerialized symbol
+/// occurrence. Other exact terms have no symbol-occurrence authority.
+fn rematerialize_whole_symbol_terms(
+    terms: &mut [ExactTechnicalTermV1],
+    symbol_occurrence_id: &SymbolOccurrenceId,
+) -> Result<(), ChunkingFailureV1> {
+    for term in terms {
+        if term.kind() == ExactTechnicalTermKindV1::WholeSymbol {
+            let rematerialized = ExactTechnicalTermV1::untrusted_whole_symbol_candidate(
+                term.original_bytes().to_vec(),
+                term.span(),
+                symbol_occurrence_id.clone(),
+            )
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?;
+            *term = rematerialized;
+        }
+    }
+    Ok(())
 }
 
 /// Kinds whose nodes never become symbol chunks: imports, preprocessor
@@ -2007,6 +2027,58 @@ pub fn real_symbol() {}
         ] {
             assert!(!symbols.contains(rejected));
         }
+    }
+
+    #[test]
+    fn rematerialization_rebinds_whole_symbol_term_authority() {
+        let prior = chunk_source("pub fn real_symbol() {}\n");
+        let prior_chunk = prior
+            .chunks
+            .iter()
+            .find(|chunk| {
+                chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolBody
+                    && chunk.sanitized_text.as_str().contains("real_symbol")
+            })
+            .expect("symbol body chunk");
+        let prior_occurrence = prior_chunk
+            .anchor
+            .symbol_occurrence_id
+            .as_ref()
+            .expect("prior symbol occurrence")
+            .clone();
+        assert!(
+            prior_chunk
+                .exact_terms
+                .iter()
+                .any(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
+        );
+
+        let current = prior
+            .rematerialize_for_generation(
+                id::<CodeGenerationId>("generation.carried"),
+                id::<FileOccurrenceId>("file.carried"),
+            )
+            .expect("rematerialized chunks");
+        let current_chunk = current
+            .chunks
+            .iter()
+            .find(|chunk| chunk.id == prior_chunk.id)
+            .expect("carried chunk");
+        let current_occurrence = current_chunk
+            .anchor
+            .symbol_occurrence_id
+            .as_ref()
+            .expect("current symbol occurrence");
+
+        assert_ne!(current_occurrence, &prior_occurrence);
+        assert!(
+            current_chunk
+                .exact_terms
+                .iter()
+                .filter(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
+                .all(|term| term.symbol_occurrence_id() == Some(current_occurrence))
+        );
+        current.validate().expect("rematerialized chunks validate");
     }
 
     #[test]

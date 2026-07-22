@@ -3,8 +3,9 @@
 //! `ShardRuntime` and the registry own collection. This module only transforms
 //! their already-captured, path-free values; it does not open a store, sample a
 //! metrics backend, retain global state, or derive identity from a locator.
-
-#![allow(dead_code)] // Registered before daemon read surfaces consume the projection.
+//!
+//! Dead-code allowance lives on the parent `store_runtime` module until daemon
+//! read surfaces consume the projection.
 
 use std::cmp::Ordering;
 use std::time::Duration;
@@ -13,6 +14,7 @@ use tracedecay_store::{
     AdmissionConfigV1, QueueBudgetV1, RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, WalBudgetV1,
 };
 
+use super::registry::PhysicalRuntimeSnapshot;
 use super::shard::{
     ShardRuntimeEvictionEligibility, ShardRuntimeHealth, ShardRuntimeHealthSnapshot,
     ShardRuntimeObservation,
@@ -33,6 +35,7 @@ pub(crate) const MAX_PROJECTED_RUNTIME_SHARDS: usize = 64;
 pub(crate) struct RuntimeRegistryInventoryEntry {
     pub(crate) health: ShardRuntimeHealthSnapshot,
     pub(crate) eviction: ShardRuntimeEvictionEligibility,
+    pub(crate) physical: PhysicalRuntimeSnapshot,
 }
 
 impl From<ShardRuntimeObservation> for RuntimeRegistryInventoryEntry {
@@ -40,6 +43,7 @@ impl From<ShardRuntimeObservation> for RuntimeRegistryInventoryEntry {
         Self {
             health: observation.health,
             eviction: observation.eviction,
+            physical: PhysicalRuntimeSnapshot::default(),
         }
     }
 }
@@ -92,6 +96,7 @@ pub(crate) struct ShardRuntimeTelemetry {
     pub(crate) queued_operations: u32,
     pub(crate) queued_bytes: u64,
     pub(crate) writer_present: bool,
+    pub(crate) physical_reader_handles: u32,
     pub(crate) leases: ShardRuntimeLeaseCounts,
     pub(crate) wal_bytes: u64,
     pub(crate) wal_budget: WalBudgetV1,
@@ -162,6 +167,7 @@ pub(crate) struct RuntimeTelemetryAggregate {
     pub(crate) pinned_profiles: u32,
     pub(crate) eviction_eligible: u32,
     pub(crate) writer_present: u32,
+    pub(crate) physical_reader_handles: u64,
     pub(crate) queued_operations: u64,
     pub(crate) queued_bytes: u64,
     pub(crate) general_reader_leases: u64,
@@ -190,6 +196,9 @@ impl RuntimeTelemetryAggregate {
         self.writer_present = self
             .writer_present
             .saturating_add(count_if(health.writer_present));
+        self.physical_reader_handles = self
+            .physical_reader_handles
+            .saturating_add(u64::from(entry.physical.reader_handles));
         self.queued_operations = self
             .queued_operations
             .saturating_add(u64::from(health.queued_operations));
@@ -290,6 +299,7 @@ fn project_shard(
         queued_operations: health.queued_operations,
         queued_bytes: health.queued_bytes,
         writer_present: health.writer_present,
+        physical_reader_handles: entry.physical.reader_handles,
         leases: ShardRuntimeLeaseCounts::from_health(health),
         wal_bytes: health.wal_bytes,
         wal_budget: admission.wal.clone(),
@@ -373,7 +383,7 @@ mod tests {
             client_leases: 1,
             wal_bytes: 8_192,
             memory_estimate_bytes: 16_384,
-            idle_for: Duration::from_secs(60),
+            idle_for: Duration::from_mins(1),
             health: ShardRuntimeHealth::Healthy,
         }
     }
@@ -388,6 +398,7 @@ mod tests {
                 blockers,
             },
             health,
+            physical: PhysicalRuntimeSnapshot::default(),
         }
     }
 
@@ -461,13 +472,14 @@ mod tests {
             .unwrap();
         let health = runtime.health_snapshot();
         let eviction = runtime.eviction_eligibility_at(
-            runtime.last_activity() + Duration::from_secs(60),
-            Duration::from_secs(60),
+            runtime.last_activity() + Duration::from_mins(1),
+            Duration::from_mins(1),
         );
         let projection =
             project_runtime_telemetry(&inventory(vec![RuntimeRegistryInventoryEntry {
                 health,
                 eviction,
+                physical: PhysicalRuntimeSnapshot::default(),
             }]));
         let shard = projection.shards.first().unwrap();
 

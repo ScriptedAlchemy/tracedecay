@@ -25,7 +25,7 @@ use super::primitives::{
 const COMPATIBILITY_LEGACY_CUTOVER_BATCH_SIZE: i64 = 500;
 
 /// Upper bound on empty backfill-phase transitions drained inside one cutover
-/// pass. The phase walk is feedback → oplog → facts → awaiting_cutover, so a
+/// pass. The phase walk is feedback → oplog → facts → `awaiting_cutover`, so a
 /// small bound comfortably covers draining every empty phase in a single tick
 /// while still guaranteeing the loop terminates.
 const COMPATIBILITY_LEGACY_CUTOVER_MAX_EMPTY_PHASE_DRAIN: usize = 8;

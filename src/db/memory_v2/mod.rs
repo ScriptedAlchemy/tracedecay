@@ -474,9 +474,9 @@ fn cutover_replay_identity(receipt_json: &str) -> Result<String> {
 }
 
 /// A legacy mapping's identity is (owner, source store, legacy fact) -> fact
-/// id. Its import attributes (history coverage, migrated_at) are produced by
+/// id. Its import attributes (history coverage, `migrated_at`) are produced by
 /// whichever path imported the fact first — the compatibility write path
-/// records Complete/now while the backfill records Unknown/started_at — so a
+/// records Complete/now while the backfill records `Unknown/started_at` — so a
 /// replayed or duplicate import must not collide on them.
 fn canonical_mapping_replay(existing: String, candidate: &str) -> Result<()> {
     canonical_replay(

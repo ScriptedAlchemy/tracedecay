@@ -150,17 +150,14 @@ fn split_quoted(text: &str) -> (Vec<String>, String) {
     while let Some(character) = chars.next() {
         if in_quote {
             if character == '\\' {
-                match chars.peek().copied() {
-                    Some('"' | '\\') => {
-                        if let Some(escaped) = chars.next() {
-                            current.push(escaped);
-                            remainder.push(' ');
-                        }
-                    }
-                    _ => {
-                        current.push(character);
+                if let Some('"' | '\\') = chars.peek().copied() {
+                    if let Some(escaped) = chars.next() {
+                        current.push(escaped);
                         remainder.push(' ');
                     }
+                } else {
+                    current.push(character);
+                    remainder.push(' ');
                 }
                 at_token_boundary = false;
                 continue;
@@ -297,7 +294,7 @@ mod tests {
         assert!(plan.contains(CandidateChannel::Lexical, "trailing"));
 
         let plan = plan_candidates(r#""path\\to\\file" kept"#);
-        assert!(plan.contains(CandidateChannel::Phrase, r#"path\to\file"#));
+        assert!(plan.contains(CandidateChannel::Phrase, r"path\to\file"));
         assert!(plan.contains(CandidateChannel::Lexical, "kept"));
     }
 

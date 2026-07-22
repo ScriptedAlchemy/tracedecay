@@ -82,7 +82,7 @@ const STATE_CLEARED: &str = "cleared";
 /// clearing) update only the `record_state`/`state_generation` columns so the
 /// full historical chain stays queryable while active publication reads only
 /// current rows (Plan 35: "Stale and historical diagnostics remain queryable
-/// through TraceDecay application APIs but are excluded from active
+/// through `TraceDecay` application APIs but are excluded from active
 /// publication").
 pub struct DiagnosticsStore<'a> {
     conn: &'a Connection,

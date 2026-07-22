@@ -218,7 +218,7 @@ pub(super) async fn add_column_if_missing(
     Ok(true)
 }
 
-/// SQLite cannot relax a table CHECK in place. Rebuild the immutable proposal
+/// `SQLite` cannot relax a table CHECK in place. Rebuild the immutable proposal
 /// transition log and its current-state projection together so v19 databases
 /// retain every transition while allowing an applied, assertion-less batch.
 pub(super) async fn rebuild_v20_proposal_transition_tables(

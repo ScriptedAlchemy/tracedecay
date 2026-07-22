@@ -94,7 +94,7 @@ fn assemble_context_controlled(
 struct WordEstimator;
 
 impl VersionedTokenEstimator for WordEstimator {
-    fn version(&self) -> &str {
+    fn version(&self) -> &'static str {
         "words-v1"
     }
 
@@ -106,7 +106,7 @@ impl VersionedTokenEstimator for WordEstimator {
 struct TrackingEstimator;
 
 impl VersionedTokenEstimator for TrackingEstimator {
-    fn version(&self) -> &str {
+    fn version(&self) -> &'static str {
         "tracking-v1"
     }
 
@@ -457,7 +457,7 @@ fn context_checks_live_work_budget_while_streaming_payload() {
 struct WholeDocumentEstimator;
 
 impl VersionedTokenEstimator for WholeDocumentEstimator {
-    fn version(&self) -> &str {
+    fn version(&self) -> &'static str {
         "whole-document-v1"
     }
 
@@ -469,7 +469,7 @@ impl VersionedTokenEstimator for WholeDocumentEstimator {
 struct PayloadCountEstimator;
 
 impl VersionedTokenEstimator for PayloadCountEstimator {
-    fn version(&self) -> &str {
+    fn version(&self) -> &'static str {
         "payload-count-v1"
     }
 
@@ -481,7 +481,7 @@ impl VersionedTokenEstimator for PayloadCountEstimator {
 struct CharacterEstimator;
 
 impl VersionedTokenEstimator for CharacterEstimator {
-    fn version(&self) -> &str {
+    fn version(&self) -> &'static str {
         "chars-v1"
     }
 

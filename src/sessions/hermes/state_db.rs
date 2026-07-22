@@ -506,9 +506,7 @@ pub(crate) async fn try_ingest_user_state_db_bounded(
 /// Opens a Hermes `state.db` strictly read-only so the sweep can never write
 /// to (or create) another agent's live store.
 pub(crate) async fn open_read_only_strict(path: &Path) -> Result<libsql::Connection, String> {
-    let db = libsql::Builder::new_local(path)
-        .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .build()
+    let db = crate::db::libsql_local::open_local_database(path, true)
         .await
         .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))?;
     db.connect()

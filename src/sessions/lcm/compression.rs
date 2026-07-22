@@ -115,7 +115,7 @@ pub(crate) async fn lifecycle_state(
 /// Records a compression-boundary session start, mirroring hermes-lcm
 /// `_continue_compression_boundary`.
 ///
-/// When the host's `old_session_id` matches the bound session, TraceDecay
+/// When the host's `old_session_id` matches the bound session, `TraceDecay`
 /// appends a lifecycle boundary link and leaves message, summary, and payload
 /// ownership unchanged. A mismatched boundary starts a short compression
 /// cooldown so the new session does not cascade straight back into compression

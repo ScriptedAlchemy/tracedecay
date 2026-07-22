@@ -169,6 +169,7 @@ impl SessionTemporalQuery {
         &self.query
     }
 
+    #[allow(dead_code)] // retained for session retrieval compatibility filters
     pub(crate) fn compatibility_filter_digest(&self) -> Option<&str> {
         self.compatibility_filter_digest.as_deref()
     }
@@ -396,7 +397,7 @@ where
         let expected_execution = execution.clone();
         let result = match context
             .run_interruptible(self.execution.execute(execution, &self.estimator), || {
-                cancellation_control.cancel()
+                cancellation_control.cancel();
             })
             .await
         {

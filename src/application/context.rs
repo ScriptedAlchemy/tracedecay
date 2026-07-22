@@ -387,8 +387,8 @@ impl RequestContext {
         tokio::pin!(deadline);
         tokio::select! {
             biased;
-            _ = &mut cancelled => RequestInterruption::Cancelled,
-            _ = &mut deadline => RequestInterruption::DeadlineExceeded,
+            () = &mut cancelled => RequestInterruption::Cancelled,
+            () = &mut deadline => RequestInterruption::DeadlineExceeded,
         }
     }
 

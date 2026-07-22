@@ -1,6 +1,5 @@
 mod maintenance;
 mod read;
-mod write;
 
 use super::Database;
 

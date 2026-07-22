@@ -315,7 +315,7 @@ impl FakeVectorGenerationStoreV1 {
                 ProjectionOperationV1::Deleted => {
                     let tombstone = tombstone_by_chunk
                         .get(&receipt.chunk_id)
-                        .ok_or_else(|| VectorGenerationStoreErrorV1::BatchIdentityMismatch)?;
+                        .ok_or(VectorGenerationStoreErrorV1::BatchIdentityMismatch)?;
                     if receipt.prior_chunk_digest.as_ref() != Some(&tombstone.prior_chunk_digest) {
                         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
                     }

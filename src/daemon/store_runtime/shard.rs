@@ -3,8 +3,9 @@
 //! This is the runtime object published by [`super::registry::StoreRuntimeRegistry`].
 //! It owns no database handle yet; S4 attaches the persistent writer to the
 //! writer-presence guard defined here.
-
-#![allow(dead_code)] // S3 lands before all daemon call sites consume the runtime.
+//!
+//! Dead-code allowance lives on the parent `store_runtime` module until all
+//! daemon call sites consume the runtime.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
@@ -955,7 +956,7 @@ mod tests {
         assert!(matches!(
             runtime
                 .transition(Draining)
-                .and_then(|_| runtime.transition(Closed)),
+                .and_then(|()| runtime.transition(Closed)),
             Err(ShardRuntimeError::TransitionRequiresDrainedRuntime { .. })
         ));
         assert_eq!(runtime.prune_expired_runtime_leases(UtcMicros(expires)), 1);

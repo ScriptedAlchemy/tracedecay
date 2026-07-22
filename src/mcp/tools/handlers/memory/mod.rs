@@ -147,7 +147,12 @@ pub(super) async fn open_target_memory_db<'a>(
         )));
     }
     let authority = crate::db::DatabaseAuthority::for_runtime(&db_path, "open memory target")?;
-    let (db, _) = Database::open(&db_path, &authority).await?;
+    let (db, _) = crate::daemon::store_runtime::driver::GraphLibsqlCompatDriver::open(
+        crate::daemon::store_runtime::driver::GraphStoreOpenMode::Open,
+        &db_path,
+        &authority,
+    )
+    .await?;
     Ok(TargetMemoryDb {
         db: ProjectMemoryDbHandle::Owned(Box::new(db)),
         project_root: PathBuf::from(context.project.display_root),

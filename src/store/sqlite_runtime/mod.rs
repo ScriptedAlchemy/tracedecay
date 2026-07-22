@@ -1,3 +1,10 @@
+//! Borrowed [`GlobalDb`] compatibility ports for the storage-runtime cutover.
+//!
+//! Call sites still land behind these facades during S8, so unused helpers are
+//! retained until every live open routes through the registry adapters.
+
+#![allow(dead_code)]
+
 use std::path::Path;
 
 use crate::global_db::{GlobalDb, GlobalDbSessionTemporalExecution, ProjectRegistryContext};
@@ -100,7 +107,7 @@ mod tests {
         {
         }
 
-        fn assert_facade<'db>(db: &'db GlobalDb) {
+        fn assert_facade(db: &GlobalDb) {
             let facade = GlobalDbRuntime::new(db);
             let registry = facade.project_registry();
             assert_registry_lookup(registry.project_registry_context_by_id("project-id"));

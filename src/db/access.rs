@@ -1,8 +1,10 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, Mutex};
+
+use fs2::FileExt;
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -234,7 +236,14 @@ impl DatabaseAuthority {
         if maintenance_active {
             return Self::acquire_identity(identity, DatabaseAuthorityRole::Maintenance, intent);
         }
-        if cfg!(debug_assertions) && is_isolated_test_path(&identity.database_path) {
+        // Debug fixtures may use ambient Test authority on isolated temp paths,
+        // but never while another process already holds exclusive daemon
+        // authority for the profile. Rejected contenders and brokered clients
+        // must fail closed with zero durable SQLite opens/writes.
+        if cfg!(debug_assertions)
+            && is_isolated_test_path(&identity.database_path)
+            && !foreign_daemon_authority_held(&identity.profile_root)
+        {
             return Self::acquire_identity(identity, DatabaseAuthorityRole::Test, intent);
         }
         if let Some(role) = scoped_runtime_role(&identity, intent)? {
@@ -467,6 +476,32 @@ fn is_isolated_test_path(path: &Path) -> bool {
                 };
                 path.starts_with(root.canonicalize().unwrap_or(root))
             })
+}
+
+/// Matches `src/daemon/authority.rs` `LOCK_FILE`. Kept local so the access
+/// layer can fail closed without depending on the daemon module.
+const DAEMON_AUTHORITY_LOCK_FILE: &str = "daemon-authority.lock";
+
+/// Returns true when another process currently holds the profile's exclusive
+/// daemon-authority lock. Used to keep ambient Test opens from mutating a
+/// store while a live daemon owner is elected.
+fn foreign_daemon_authority_held(profile_root: &Path) -> bool {
+    let lock_path = profile_root.join(DAEMON_AUTHORITY_LOCK_FILE);
+    // Probe with a read-only open so a rejected contender mutates zero bytes
+    // before exclusive authority is granted.
+    let mut options = OpenOptions::new();
+    options.read(true).write(false).create(false);
+    let Ok(file) = options.open(&lock_path) else {
+        return false;
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = FileExt::unlock(&file);
+            false
+        }
+        Err(error) if is_lock_contended(&error) => true,
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

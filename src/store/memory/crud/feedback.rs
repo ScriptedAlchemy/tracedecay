@@ -122,15 +122,15 @@ fn compatibility_feedback_batch(
     actor: Option<ActorId>,
     now: UtcMicros,
 ) -> FactStoreResult<FactWriteBatch> {
-    let kind = if new_trust != fact.trust() {
-        FactLineageEventKindV1::TrustChanged {
-            previous: fact.trust(),
-            current: new_trust,
+    let kind = if new_trust == fact.trust() {
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::Retained,
             evidence_ids: Vec::new(),
         }
     } else {
-        FactLineageEventKindV1::Curated {
-            action: FactCurationActionV1::Retained,
+        FactLineageEventKindV1::TrustChanged {
+            previous: fact.trust(),
+            current: new_trust,
             evidence_ids: Vec::new(),
         }
     };

@@ -172,6 +172,7 @@ pub(crate) async fn handle_status_command(
     })?
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_status_command_within(
     deadline: Instant,
     path: Option<String>,

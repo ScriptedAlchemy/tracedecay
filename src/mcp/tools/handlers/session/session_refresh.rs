@@ -99,7 +99,7 @@ pub(crate) type SessionRefreshServiceFuture<'a> =
     Pin<Box<dyn Future<Output = SessionRefreshServiceOutcome> + Send + 'a>>;
 
 pub(crate) trait SessionRefreshServicePort: Send + Sync {
-    fn execute<'a>(&'a self, command: SessionRefreshCommand) -> SessionRefreshServiceFuture<'a>;
+    fn execute(&self, command: SessionRefreshCommand) -> SessionRefreshServiceFuture<'_>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

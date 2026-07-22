@@ -2,6 +2,7 @@ mod access;
 mod analytics;
 mod connection;
 mod coverage;
+pub(crate) mod libsql_local;
 mod edges;
 mod files;
 mod fingerprints;

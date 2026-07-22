@@ -796,35 +796,32 @@ async fn invoke_helper(
             return Err(error);
         }
     };
-    let stdin = match child.stdin.take() {
-        Some(stdin) => stdin,
-        None => {
-            terminate_and_reap(&mut child, process_group).await;
-            return Err(RusqliteParityInfrastructureErrorV1::Transport {
-                stage: "stdin setup",
-                message: "piped stdin was unavailable".to_string(),
-            });
-        }
+    let stdin = if let Some(stdin) = child.stdin.take() {
+        stdin
+    } else {
+        terminate_and_reap(&mut child, process_group).await;
+        return Err(RusqliteParityInfrastructureErrorV1::Transport {
+            stage: "stdin setup",
+            message: "piped stdin was unavailable".to_string(),
+        });
     };
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            terminate_and_reap(&mut child, process_group).await;
-            return Err(RusqliteParityInfrastructureErrorV1::Transport {
-                stage: "stdout setup",
-                message: "piped stdout was unavailable".to_string(),
-            });
-        }
+    let stdout = if let Some(stdout) = child.stdout.take() {
+        stdout
+    } else {
+        terminate_and_reap(&mut child, process_group).await;
+        return Err(RusqliteParityInfrastructureErrorV1::Transport {
+            stage: "stdout setup",
+            message: "piped stdout was unavailable".to_string(),
+        });
     };
-    let stderr = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
-            terminate_and_reap(&mut child, process_group).await;
-            return Err(RusqliteParityInfrastructureErrorV1::Transport {
-                stage: "stderr setup",
-                message: "piped stderr was unavailable".to_string(),
-            });
-        }
+    let stderr = if let Some(stderr) = child.stderr.take() {
+        stderr
+    } else {
+        terminate_and_reap(&mut child, process_group).await;
+        return Err(RusqliteParityInfrastructureErrorV1::Transport {
+            stage: "stderr setup",
+            message: "piped stderr was unavailable".to_string(),
+        });
     };
 
     let mut stdin_task = Some(tokio::spawn(async move {

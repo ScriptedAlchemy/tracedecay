@@ -11,7 +11,7 @@ use crate::tracedecay::current_timestamp;
 
 use super::{MemoryStore, db_error, db_message, relations_conflict, to_json_string};
 
-impl<'a> MemoryStore<'a> {
+impl MemoryStore<'_> {
     pub async fn normalize_fact_tags(&self, fact_id: i64, tags: &[String]) -> Result<Vec<String>> {
         self.with_immediate_tx(
             "normalize_fact_tags",

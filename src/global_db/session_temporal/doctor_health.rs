@@ -1,7 +1,15 @@
+//! Session-temporal Doctor health lane.
+//!
+//! Diagnosis is production-mounted; repair helpers remain available for Doctor
+//! tests and exclusive-maintenance callers that are still landing.
+
+#![allow(dead_code)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use libsql::{Builder, Connection, OpenFlags};
+use libsql::Connection as LibsqlConnection;
+use rusqlite::{Connection as RusqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::global_db::GlobalDb;
@@ -10,9 +18,6 @@ use super::schema::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
 const MAX_FINDING_COUNT: u64 = 1_000_000;
 const SQLITE_CORRUPT_VTAB: i32 = 267;
-/// `SQLITE_OPEN_URI` — not exposed by libsql's [`OpenFlags`], so we OR the raw
-/// bit (matches `sqlite_read_snapshot` / cursor composer immutable opens).
-const SQLITE_OPEN_URI: i32 = 0x0000_0040;
 
 const OCCURRENCE_FTS_CHECK_SQL: &str = "SELECT
     (SELECT COUNT(*) FROM (
@@ -619,7 +624,7 @@ struct HealthCheck {
 }
 
 /// Produces a redacted temporal health snapshot through a truly non-mutating
-/// SQLite open.
+/// `SQLite` open.
 ///
 /// The path is opened with `file:…?immutable=1&mode=ro` and `PRAGMA query_only`.
 /// It never acquires `DatabaseAuthority` / lock / owner files, never creates
@@ -650,35 +655,16 @@ pub(crate) async fn session_temporal_doctor_health_at(
             Some("uncheckpointed_wal"),
         );
     }
-    let read = match open_immutable_doctor_read(db_path).await {
-        Ok(read) => read,
+    let connection = match tracedecay_rusqlite_runtime::open_immutable_health_reader(db_path) {
+        Ok(connection) => connection,
         Err(error) => {
             return unavailable_report_with_reason(
-                classify_error(&error),
+                classify_rusqlite_error(&error),
                 Some("session_store_unavailable"),
             );
         }
     };
-    diagnose_connection(&read.conn).await
-}
-
-struct ImmutableDoctorRead {
-    _db: libsql::Database,
-    conn: Connection,
-}
-
-async fn open_immutable_doctor_read(db_path: &Path) -> Result<ImmutableDoctorRead, libsql::Error> {
-    let uri = crate::sqlite_read_snapshot::immutable_uri(db_path).map_err(|error| {
-        libsql::Error::ConnectionFailed(format!(
-            "immutable doctor URI for '{}': {error}",
-            db_path.display()
-        ))
-    })?;
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::from_bits_retain(SQLITE_OPEN_URI);
-    let db = Builder::new_local(uri).flags(flags).build().await?;
-    let conn = db.connect()?;
-    conn.execute_batch("PRAGMA query_only = ON;").await?;
-    Ok(ImmutableDoctorRead { _db: db, conn })
+    diagnose_connection(&connection)
 }
 
 impl GlobalDb {
@@ -784,10 +770,10 @@ impl GlobalDb {
     }
 }
 
-async fn diagnose_connection(conn: &Connection) -> SessionTemporalHealthReport {
-    let inventory = match schema_inventory(conn).await {
+fn diagnose_connection(conn: &RusqliteConnection) -> SessionTemporalHealthReport {
+    let inventory = match schema_inventory(conn) {
         Ok(inventory) => inventory,
-        Err(error) => return unavailable_report(classify_error(&error)),
+        Err(error) => return unavailable_report(classify_rusqlite_error_raw(&error)),
     };
     let temporal_tables = inventory
         .tables
@@ -817,11 +803,11 @@ async fn diagnose_connection(conn: &Connection) -> SessionTemporalHealthReport {
             missing_tables,
         ));
     } else {
-        match schema_version(conn).await {
+        match schema_version(conn) {
             Ok(Some(version)) if version == SESSION_TEMPORAL_SCHEMA_VERSION => {}
             Ok(_) => findings.push(finding(SessionTemporalHealthFindingKind::MigrationGap, 1)),
             Err(error) => {
-                if is_locked(&error) {
+                if is_rusqlite_locked(&error) {
                     return unavailable_report(SessionTemporalHealthStatus::Locked);
                 }
                 status = SessionTemporalHealthStatus::Partial;
@@ -856,7 +842,7 @@ async fn diagnose_connection(conn: &Connection) -> SessionTemporalHealthReport {
         );
     }
 
-    match column_shape_drift(conn, &inventory).await {
+    match column_shape_drift(conn, &inventory) {
         Ok(0) => {}
         Ok(drift) => {
             status = SessionTemporalHealthStatus::Partial;
@@ -866,7 +852,7 @@ async fn diagnose_connection(conn: &Connection) -> SessionTemporalHealthReport {
                 drift,
             );
         }
-        Err(error) if is_locked(&error) => {
+        Err(error) if is_rusqlite_locked(&error) => {
             return unavailable_report(SessionTemporalHealthStatus::Locked);
         }
         Err(_) => return unavailable_report(SessionTemporalHealthStatus::Unavailable),
@@ -881,13 +867,16 @@ async fn diagnose_connection(conn: &Connection) -> SessionTemporalHealthReport {
             status = SessionTemporalHealthStatus::Partial;
             continue;
         }
-        match count(conn, check.sql).await {
+        match count(conn, check.sql) {
             Ok(0) => {}
             Ok(value) => merge_finding(&mut findings, check.kind, value),
-            Err(error) if is_fts_finding(check.kind) && is_fts_virtual_table_corruption(&error) => {
+            Err(error)
+                if is_fts_finding(check.kind)
+                    && is_rusqlite_fts_virtual_table_corruption(&error) =>
+            {
                 merge_finding(&mut findings, check.kind, 1);
             }
-            Err(error) if is_locked(&error) => {
+            Err(error) if is_rusqlite_locked(&error) => {
                 return SessionTemporalHealthReport {
                     status: SessionTemporalHealthStatus::Locked,
                     findings,
@@ -911,20 +900,23 @@ struct SchemaInventory {
     triggers: BTreeMap<String, String>,
 }
 
-async fn schema_inventory(conn: &Connection) -> Result<SchemaInventory, libsql::Error> {
-    let mut rows = conn
-        .query(
-            "SELECT type, name, COALESCE(sql, '') FROM sqlite_master
-             WHERE type IN ('table', 'index', 'trigger')",
-            (),
-        )
-        .await?;
+fn schema_inventory(conn: &RusqliteConnection) -> Result<SchemaInventory, rusqlite::Error> {
+    let mut statement = conn.prepare(
+        "SELECT type, name, COALESCE(sql, '') FROM sqlite_master
+         WHERE type IN ('table', 'index', 'trigger')",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
     let mut tables = BTreeSet::new();
     let mut indexes = BTreeSet::new();
     let mut triggers = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let kind = row.get::<String>(0)?;
-        let name = row.get::<String>(1)?;
+    for row in rows {
+        let (kind, name, sql) = row?;
         match kind.as_str() {
             "table" => {
                 tables.insert(name);
@@ -933,7 +925,7 @@ async fn schema_inventory(conn: &Connection) -> Result<SchemaInventory, libsql::
                 indexes.insert(name);
             }
             "trigger" => {
-                triggers.insert(name, row.get::<String>(2)?);
+                triggers.insert(name, sql);
             }
             _ => {}
         }
@@ -945,24 +937,20 @@ async fn schema_inventory(conn: &Connection) -> Result<SchemaInventory, libsql::
     })
 }
 
-async fn column_shape_drift(
-    conn: &Connection,
+fn column_shape_drift(
+    conn: &RusqliteConnection,
     inventory: &SchemaInventory,
-) -> Result<u64, libsql::Error> {
+) -> Result<u64, rusqlite::Error> {
     let mut drift = 0_u64;
     for &(table, expected) in TEMPORAL_TABLE_COLUMNS {
         if !inventory.tables.contains(table) {
             continue;
         }
-        let mut rows = conn
-            .query(
-                "SELECT name FROM pragma_table_info(?1) ORDER BY cid",
-                libsql::params![table],
-            )
-            .await?;
+        let mut statement = conn.prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")?;
+        let rows = statement.query_map([table], |row| row.get::<_, String>(0))?;
         let mut actual = Vec::new();
-        while let Some(row) = rows.next().await? {
-            actual.push(row.get::<String>(0)?);
+        for row in rows {
+            actual.push(row?);
         }
         if actual.as_slice() != expected {
             drift = drift.saturating_add(1).min(MAX_FINDING_COUNT);
@@ -977,25 +965,21 @@ fn normalize_sql(sql: &str) -> String {
         .collect()
 }
 
-async fn schema_version(conn: &Connection) -> Result<Option<i64>, libsql::Error> {
-    let mut rows = conn
-        .query(
-            "SELECT version FROM session_temporal_schema_migrations
-             WHERE name = 'session-temporal'",
-            (),
-        )
-        .await?;
-    rows.next().await?.map(|row| row.get(0)).transpose()
+fn schema_version(conn: &RusqliteConnection) -> Result<Option<i64>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT version FROM session_temporal_schema_migrations
+         WHERE name = 'session-temporal'",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
-async fn count(conn: &Connection, sql: &str) -> Result<u64, libsql::Error> {
-    let mut rows = conn.query(sql, ()).await?;
-    let Some(row) = rows.next().await? else {
-        return Ok(0);
-    };
-    let value = row.get::<i64>(0)?;
-    Ok(u64::try_from(value)
-        .unwrap_or_default()
+fn count(conn: &RusqliteConnection, sql: &str) -> Result<u64, rusqlite::Error> {
+    let value: Option<i64> = conn.query_row(sql, [], |row| row.get(0)).optional()?;
+    Ok(value
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(0)
         .min(MAX_FINDING_COUNT))
 }
 
@@ -1033,8 +1017,14 @@ fn is_fts_virtual_table_corruption(error: &libsql::Error) -> bool {
     )
 }
 
+fn is_rusqlite_fts_virtual_table_corruption(error: &rusqlite::Error) -> bool {
+    error
+        .sqlite_error()
+        .is_some_and(|err| err.extended_code == SQLITE_CORRUPT_VTAB)
+}
+
 async fn require_quick_check(
-    conn: &Connection,
+    conn: &LibsqlConnection,
     repair_occurrences: bool,
     repair_summaries: bool,
 ) -> Result<(), libsql::Error> {
@@ -1077,7 +1067,7 @@ fn is_allowed_fts_quick_check(
             && message == "malformed inverted index for FTS5 table main.session_summary_nodes_fts")
 }
 
-async fn connection_count(conn: &Connection, table: &str) -> Result<i64, libsql::Error> {
+async fn connection_count(conn: &LibsqlConnection, table: &str) -> Result<i64, libsql::Error> {
     let sql = match table {
         "session_occurrences" => "SELECT COUNT(*) FROM session_occurrences",
         "session_summary_nodes" => "SELECT COUNT(*) FROM session_summary_nodes",
@@ -1091,7 +1081,7 @@ async fn connection_count(conn: &Connection, table: &str) -> Result<i64, libsql:
 }
 
 async fn verify_fts_repair(
-    conn: &Connection,
+    conn: &LibsqlConnection,
     integrity_sql: &str,
     drift_sql: &str,
 ) -> Result<(), libsql::Error> {
@@ -1115,15 +1105,26 @@ fn repair_refused(message: &str) -> libsql::Error {
     libsql::Error::Misuse(message.to_string())
 }
 
-fn classify_error(error: &libsql::Error) -> SessionTemporalHealthStatus {
-    if is_locked(error) {
+fn classify_rusqlite_error(
+    error: &tracedecay_rusqlite_runtime::ConnectionPolicyError,
+) -> SessionTemporalHealthStatus {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("locked") || message.contains("busy") {
         SessionTemporalHealthStatus::Locked
     } else {
         SessionTemporalHealthStatus::Unavailable
     }
 }
 
-fn is_locked(error: &libsql::Error) -> bool {
+fn classify_rusqlite_error_raw(error: &rusqlite::Error) -> SessionTemporalHealthStatus {
+    if is_rusqlite_locked(error) {
+        SessionTemporalHealthStatus::Locked
+    } else {
+        SessionTemporalHealthStatus::Unavailable
+    }
+}
+
+fn is_rusqlite_locked(error: &rusqlite::Error) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("locked") || message.contains("busy")
 }

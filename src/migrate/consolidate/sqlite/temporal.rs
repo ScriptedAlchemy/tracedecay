@@ -518,7 +518,7 @@ async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
     if columns.is_empty() {
         return Err(db_message(
             "preflight_temporal_authority",
-            format!("{} table is missing", table),
+            format!("{table} table is missing"),
         ));
     }
     Ok(columns)

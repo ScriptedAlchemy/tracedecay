@@ -503,9 +503,7 @@ fn recent_session_slices_from_temporal(
                 .map(|item| item.ordinal)
                 .collect::<Option<Vec<_>>>()?;
             let total_messages = messages
-                .iter()
-                .filter_map(|item| item.session_total_messages)
-                .next()
+                .iter().find_map(|item| item.session_total_messages)
                 .or_else(|| {
                     let max = ordinals.iter().copied().max()?;
                     u64::try_from(max).ok()

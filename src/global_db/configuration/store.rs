@@ -1,4 +1,4 @@
-//! SQLite primitives for configuration migration receipts and quarantine.
+//! `SQLite` primitives for configuration migration receipts and quarantine.
 //!
 //! The shared global-db lifecycle wires this adapter into its transaction
 //! boundary. This module intentionally does not register itself or mutate the
@@ -41,7 +41,7 @@ pub enum ConfigurationStorageError {
     Encoding(String),
 }
 
-/// Narrow asynchronous SQLite adapter. It owns no migration registration or
+/// Narrow asynchronous `SQLite` adapter. It owns no migration registration or
 /// configuration policy logic; callers must supply validated typed values.
 pub struct ConfigurationSqlStore<'a> {
     connection: &'a Connection,
@@ -1701,7 +1701,7 @@ impl ConfigurationSqlStore<'_> {
             Ok(receipt) => transaction
                 .commit()
                 .await
-                .map(|_| receipt)
+                .map(|()| receipt)
                 .map_err(unavailable_store),
             Err(error) => {
                 let _ = transaction.rollback().await;
