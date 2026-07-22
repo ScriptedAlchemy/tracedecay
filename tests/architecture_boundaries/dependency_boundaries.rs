@@ -254,6 +254,50 @@ fn store_session_contracts_are_adapter_free() {
 }
 
 #[test]
+fn store_runtime_contracts_are_driver_executor_and_platform_authority_free() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("crates/tracedecay-store/src/runtime")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve store runtime sources");
+    assert!(!sources.is_empty(), "store runtime sources must exist");
+
+    let forbidden: &[&[&str]] = &[
+        &["libsql"],
+        &["rusqlite"],
+        &["sqlx"],
+        &["diesel"],
+        &["sea_orm"],
+        &["postgres"],
+        &["mongodb"],
+        &["redis"],
+        &["rocksdb"],
+        &["cassandra_cpp"],
+        &["tokio"],
+        &["async_std"],
+        &["async_executor"],
+        &["async_io"],
+        &["futures_executor"],
+        &["smol"],
+        &["rayon"],
+        &["std", "fs"],
+        &["std", "io"],
+        &["std", "net"],
+        &["std", "process"],
+        &["std", "thread"],
+        &["std", "os"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect store runtime contracts");
+    assert!(
+        violations.is_empty(),
+        "store runtime contracts must remain driver/executor and platform-authority free:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
 fn git_index_transaction_store_contracts_are_adapter_and_runtime_free() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let sources = [PathBuf::from(

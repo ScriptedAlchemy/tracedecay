@@ -178,7 +178,12 @@ impl TraceDecay {
             &self.store_layout.graph_db_path,
             "open diagnostics project store",
         )?;
-        let (db, _) = Database::open(&self.store_layout.graph_db_path, &authority).await?;
+        let (db, _) = crate::daemon::store_runtime::driver::GraphLibsqlCompatDriver::open(
+            crate::daemon::store_runtime::driver::GraphStoreOpenMode::Open,
+            &self.store_layout.graph_db_path,
+            &authority,
+        )
+        .await?;
         Ok(db)
     }
 
@@ -187,8 +192,12 @@ impl TraceDecay {
             &self.store_layout.graph_db_path,
             "open diagnostics project store read-only",
         )?;
-        let (db, _) =
-            Database::open_read_only(&self.store_layout.graph_db_path, &authority).await?;
+        let (db, _) = crate::daemon::store_runtime::driver::GraphLibsqlCompatDriver::open(
+            crate::daemon::store_runtime::driver::GraphStoreOpenMode::ReadOnly,
+            &self.store_layout.graph_db_path,
+            &authority,
+        )
+        .await?;
         Ok(db)
     }
 

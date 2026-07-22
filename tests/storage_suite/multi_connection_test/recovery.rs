@@ -66,8 +66,8 @@ fn daemon_recovers_killed_writer_dirty_wal_before_serving_clients() {
             .env("TRACEDECAY_FIXTURE_READY", &ready_path)
             .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn writer fixture"),
     );
@@ -79,10 +79,20 @@ fn daemon_recovers_killed_writer_dirty_wal_before_serving_clients() {
             if ready_path.exists() {
                 return Some(());
             }
-            assert!(
-                writer.try_wait().expect("writer status").is_none(),
-                "writer exited early"
-            );
+            if let Some(status) = writer.try_wait().expect("writer status") {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                if let Some(mut out) = writer.stdout.take() {
+                    let _ = out.read_to_string(&mut stdout);
+                }
+                if let Some(mut err) = writer.stderr.take() {
+                    let _ = err.read_to_string(&mut stderr);
+                }
+                panic!(
+                    "writer exited early ({status}); db={}; stdout={stdout}; stderr={stderr}",
+                    db_path.display()
+                );
+            }
             None
         },
         || "writer fixture did not become ready".to_string(),

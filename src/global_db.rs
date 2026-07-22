@@ -14,8 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Weak};
 
 use libsql::{
-    Builder, Connection, Database as LibsqlDatabase, OpenFlags, Transaction, TransactionBehavior,
-    Value, params,
+    Connection, Database as LibsqlDatabase, Transaction, TransactionBehavior, Value, params,
 };
 use serde_json::Value as JsonValue;
 
@@ -389,8 +388,7 @@ pub async fn repair_session_temporal_store(db_path: &Path) -> crate::errors::Res
     }
     let authority = DatabaseAuthority::for_runtime(db_path, "repair session temporal store")?;
     let canonical_path = authority.canonical_database_path().to_path_buf();
-    let db = Builder::new_local(&canonical_path)
-        .build()
+    let db = crate::db::libsql_local::open_local_database(&canonical_path, false)
         .await
         .map_err(|error| global_db_operation_error("open session temporal repair store", error))?;
     let conn = db.connect().map_err(|error| {
@@ -1377,13 +1375,7 @@ impl GlobalDb {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let builder = if read_only {
-            Builder::new_local(&db_path).flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-        } else {
-            Builder::new_local(&db_path)
-        };
-        let db = builder
-            .build()
+        let db = crate::db::libsql_local::open_local_database(&db_path, read_only)
             .await
             .map_err(|error| global_db_operation_error("build global database", error))?;
         let setup_conn = db

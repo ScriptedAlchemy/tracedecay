@@ -14,6 +14,7 @@ pub mod global_db;
 pub mod memory;
 pub mod observation;
 pub mod session;
+pub(crate) mod sqlite_runtime;
 pub(crate) mod vector_generations;
 
 pub use global_db::GlobalDbTranscriptStore;

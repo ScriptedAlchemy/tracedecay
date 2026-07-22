@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -387,6 +389,31 @@ pub(super) fn storage_snapshot(db_path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         .collect()
 }
 
+/// Compact digest of a storage family snapshot for assertion messages.
+pub(super) fn storage_snapshot_digest(snapshot: &BTreeMap<PathBuf, Vec<u8>>) -> String {
+    let mut hasher = DefaultHasher::new();
+    for (path, bytes) in snapshot {
+        path.hash(&mut hasher);
+        bytes.hash(&mut hasher);
+    }
+    format!("{:016x}:{} files", hasher.finish(), snapshot.len())
+}
+
+pub(super) fn assert_storage_unchanged(
+    label: &str,
+    before: &BTreeMap<PathBuf, Vec<u8>>,
+    db_path: &Path,
+) {
+    let after = storage_snapshot(db_path);
+    assert_eq!(
+        after,
+        *before,
+        "{label}: durable SQLite family changed\nbefore={}\nafter={}",
+        storage_snapshot_digest(before),
+        storage_snapshot_digest(&after),
+    );
+}
+
 /// Blocks until the owner daemon's post-open maintenance (legacy memory
 /// cutover receipts, repair passes) stops mutating the project store, so
 /// byte-stability assertions measure only the window under test instead of
@@ -394,6 +421,7 @@ pub(super) fn storage_snapshot(db_path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 pub(super) fn wait_for_quiescent_storage(db_path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let deadline = Instant::now() + Duration::from_secs(20);
     let previous = RefCell::new(storage_snapshot(db_path));
+    let stable_samples = RefCell::new(0_u8);
     common::poll_until(
         deadline,
         Duration::ZERO,
@@ -401,9 +429,12 @@ pub(super) fn wait_for_quiescent_storage(db_path: &Path) -> BTreeMap<PathBuf, Ve
             std::thread::sleep(Duration::from_millis(250));
             let current = storage_snapshot(db_path);
             if current == *previous.borrow() {
-                Some(current)
+                let mut stable_samples = stable_samples.borrow_mut();
+                *stable_samples += 1;
+                (*stable_samples >= 8).then_some(current)
             } else {
                 *previous.borrow_mut() = current;
+                *stable_samples.borrow_mut() = 0;
                 None
             }
         },

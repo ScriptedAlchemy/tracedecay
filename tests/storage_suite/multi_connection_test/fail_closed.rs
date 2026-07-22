@@ -48,10 +48,16 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         authority_before,
         "rejected contender changed daemon authority generation"
     );
-    assert_eq!(
-        storage_snapshot(&db_path),
-        storage_before_contender,
-        "rejected contender wrote through a competing or fallback database owner"
+    assert_storage_unchanged(
+        "rejected contender wrote through a competing or fallback database owner",
+        &storage_before_contender,
+        &db_path,
+    );
+    // Contender must be gone before the unavailable-daemon client probes; a
+    // surviving second owner would still race the byte snapshot.
+    assert!(
+        contender.try_wait().expect("contender status").is_some(),
+        "rejected contender is still running after fail-closed rejection"
     );
 
     stop_child(&mut owner);
@@ -100,10 +106,10 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        assert_eq!(
-            storage_snapshot(&db_path),
-            before,
-            "{label} used a local SQLite fallback"
+        assert_storage_unchanged(
+            &format!("{label} used a local SQLite fallback"),
+            &before,
+            &db_path,
         );
     }
     let hook_event = json!({
@@ -133,10 +139,10 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         wait_for_exit(&mut hook).is_some(),
         "unavailable-daemon hook client exceeded {PROCESS_TIMEOUT:?}"
     );
-    assert_eq!(
-        storage_snapshot(&db_path),
-        before,
-        "hook used a local SQLite fallback while daemon was unavailable"
+    assert_storage_unchanged(
+        "hook used a local SQLite fallback while daemon was unavailable",
+        &before,
+        &db_path,
     );
 
     let mut restarted = spawn_daemon(&home_path, &socket_path);

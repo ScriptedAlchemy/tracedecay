@@ -574,6 +574,7 @@ impl ModelArtifactStore {
     /// Verify manifest structure, trust-root admission, and the detached
     /// Ed25519 signature over the canonical payload bytes. Runs BEFORE any
     /// byte is staged, so a bad signature never reaches disk.
+    #[allow(dead_code)] // public import gate retained for artifact runtime prep
     pub fn verify_manifest(
         &self,
         manifest: &ModelArtifactManifestV1,

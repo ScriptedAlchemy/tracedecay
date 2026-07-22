@@ -90,6 +90,7 @@ mod profile_host_admission_replay;
 mod scheduler;
 mod service;
 pub(crate) mod session_temporal_refresh_scheduler;
+pub(crate) mod store_runtime;
 pub(crate) mod transport;
 pub(crate) use service::invocation::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonAdvisoryRuntimeRegistrar,

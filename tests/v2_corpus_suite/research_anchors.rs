@@ -13,6 +13,7 @@ use tracedecay_domain::research::{
     ShardDispositionV1, ShardId, WatermarkDriftV1,
 };
 
+#[allow(clippy::duplicate_mod)]
 #[path = "research_anchors/support.rs"]
 mod support;
 

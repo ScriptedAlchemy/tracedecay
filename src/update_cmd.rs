@@ -157,14 +157,13 @@ where
                 previous_state,
                 tracedecay::daemon::DaemonServiceState::RunningEnabled
                     | tracedecay::daemon::DaemonServiceState::RunningDisabled
-            ) {
-                if let Err(restore_error) = restore(previous_state) {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
-                        message: format!(
-                            "{acquire_error}; additionally failed to restore the managed daemon service: {restore_error}"
-                        ),
-                    });
-                }
+            ) && let Err(restore_error) = restore(previous_state)
+            {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "{acquire_error}; additionally failed to restore the managed daemon service: {restore_error}"
+                    ),
+                });
             }
             return Err(acquire_error);
         }

@@ -11,6 +11,7 @@ pub mod git_index_transactions;
 pub mod memory;
 pub mod observation;
 pub mod projection;
+pub mod runtime;
 pub mod session;
 pub mod transcript;
 
@@ -99,6 +100,7 @@ pub use projection::{
     SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, WorkflowFactProjection,
     WorkflowFactRecord,
 };
+pub use runtime::*;
 pub use session::{
     DerivedEvidenceMemberPageItemV1, DerivedEvidenceMemberPageV1,
     MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_MIGRATION_BATCH_ITEMS,

@@ -180,6 +180,7 @@ impl SessionTemporalQuery {
         &self.query
     }
 
+    #[allow(dead_code)] // retained for session retrieval compatibility filters
     pub(crate) fn compatibility_filter_digest(&self) -> Option<&str> {
         self.compatibility_filter_digest.as_deref()
     }

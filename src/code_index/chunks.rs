@@ -2600,6 +2600,58 @@ pub fn real_symbol() {}
     }
 
     #[test]
+    fn rematerialization_rebinds_whole_symbol_term_authority() {
+        let prior = chunk_source("pub fn real_symbol() {}\n");
+        let prior_chunk = prior
+            .chunks
+            .iter()
+            .find(|chunk| {
+                chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolBody
+                    && chunk.sanitized_text.as_str().contains("real_symbol")
+            })
+            .expect("symbol body chunk");
+        let prior_occurrence = prior_chunk
+            .anchor
+            .symbol_occurrence_id
+            .as_ref()
+            .expect("prior symbol occurrence")
+            .clone();
+        assert!(
+            prior_chunk
+                .exact_terms
+                .iter()
+                .any(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
+        );
+
+        let current = prior
+            .rematerialize_for_generation(
+                id::<CodeGenerationId>("generation.carried"),
+                id::<FileOccurrenceId>("file.carried"),
+            )
+            .expect("rematerialized chunks");
+        let current_chunk = current
+            .chunks
+            .iter()
+            .find(|chunk| chunk.id == prior_chunk.id)
+            .expect("carried chunk");
+        let current_occurrence = current_chunk
+            .anchor
+            .symbol_occurrence_id
+            .as_ref()
+            .expect("current symbol occurrence");
+
+        assert_ne!(current_occurrence, &prior_occurrence);
+        assert!(
+            current_chunk
+                .exact_terms
+                .iter()
+                .filter(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
+                .all(|term| term.symbol_occurrence_id() == Some(current_occurrence))
+        );
+        current.validate().expect("rematerialized chunks validate");
+    }
+
+    #[test]
     fn extraction_authority_rejects_matching_occurrence_forgery() {
         let source = "pub fn real_symbol() {\n    // comment_fake\n}\n";
         let file = validated_file("src/lib.rs", source.as_bytes());

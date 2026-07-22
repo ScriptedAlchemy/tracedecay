@@ -43,6 +43,7 @@ const BOUNDED_ROW_AUDIT_VIOLATIONS: &[&str] = &[
 ];
 
 /// Expensive audits that must stay exhaustive-only (explicit classification).
+#[allow(dead_code)] // retained for exhaustive-only Doctor audits
 const EXPENSIVE_ROW_AUDIT_VIOLATIONS: &[&str] = &[
     "observation projection provenance contains a receipt mismatch",
     "workflow projection contains an observation receipt mismatch",

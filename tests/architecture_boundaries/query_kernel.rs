@@ -68,7 +68,6 @@ const QUERY_ALLOWED_DERIVES: &[&str] = &[
     "PartialEq",
     "PartialOrd",
 ];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UseBinding {
     pub(crate) path: Vec<String>,
@@ -368,10 +367,11 @@ fn is_local_module_root(root: &str, current_module: &[String], graph: &QueryModu
 fn graph_module_symbols(graph: &QueryModuleGraph, module: &[String]) -> BTreeSet<String> {
     let mut symbols = graph.symbols.get(module).cloned().unwrap_or_default();
     for candidate in &graph.modules {
-        if candidate.len() == module.len() + 1 && candidate.starts_with(module) {
-            if let Some(name) = candidate.last() {
-                symbols.insert(name.clone());
-            }
+        if candidate.len() == module.len() + 1
+            && candidate.starts_with(module)
+            && let Some(name) = candidate.last()
+        {
+            symbols.insert(name.clone());
         }
     }
     symbols
@@ -1493,7 +1493,7 @@ fn temporal_kernel_sources_respect_dependency_boundary() {
         physical_manifest_layout(&repository).expect("inspect tracked physical Cargo manifests");
     assert!(
         physical.violations.is_empty(),
-        "PR8 permits exactly the root/domain/store first-party Cargo packages:\n{}",
+        "PR8 permits only its exact first-party manifest snapshot, including the private storage parity and runtime crates:\n{}",
         physical
             .violations
             .iter()
@@ -1505,7 +1505,7 @@ fn temporal_kernel_sources_respect_dependency_boundary() {
     let layout = cargo_source_layout(&repository).expect("inspect Cargo workspace membership");
     assert!(
         layout.pr8_violations.is_empty(),
-        "PR8 workspace/dependency/target contract violations:\n{}",
+        "PR8 workspace/dependency/target contract must match the exact frozen storage-runtime snapshot:\n{}",
         layout
             .pr8_violations
             .iter()

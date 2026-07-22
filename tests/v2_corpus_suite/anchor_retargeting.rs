@@ -52,7 +52,7 @@ use tracedecay_store::{
 
 use crate::common::{git_program, open_lcm_db};
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::duplicate_mod)]
 #[path = "research_anchors/support.rs"]
 mod support;
 
@@ -640,6 +640,7 @@ fn moved_rewritten_and_deleted_refs_never_retarget_frozen_manifest_anchors() {
     // Refs are routing inputs only: moving the branch to another commit,
     // rewriting the branch tip, or deleting the ref in the frozen git snapshot
     // must never change what an already-recorded anchor means.
+    #[allow(clippy::type_complexity)]
     let scenarios: [(&str, fn(&mut GitTruthManifest)); 3] = [
         ("moved ref", |snapshot| {
             snapshot.refs = vec![(

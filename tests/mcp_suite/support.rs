@@ -1392,6 +1392,7 @@ pub(crate) async fn seed_temporal_lcm_tool_result_message(
     projection
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn persist_temporal_lcm_observation(
     cg: &TraceDecay,
     provider: &str,
@@ -1418,6 +1419,7 @@ pub(crate) async fn persist_temporal_lcm_observation(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn persist_temporal_lcm_observation_with_access(
     cg: &TraceDecay,
     provider: &str,
@@ -1457,7 +1459,7 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
             success: Some(true),
         }],
         _ => vec![CanonicalObservationFactV1::Message {
-            role: role.clone(),
+            role,
             content: Value::String(text),
             model: Some("test-model".to_string()),
             timestamp: Some(message_timestamp),

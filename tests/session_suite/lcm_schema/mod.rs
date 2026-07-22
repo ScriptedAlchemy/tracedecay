@@ -25,15 +25,14 @@ impl ContentionProbe {
 
     fn observe_busy(&self) {
         let previous = self.busy_retries.fetch_add(1, Ordering::SeqCst);
-        if previous == 0 {
-            if let Some(tx) = self
+        if previous == 0
+            && let Some(tx) = self
                 .first_busy
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take()
-            {
-                let _ = tx.send(());
-            }
+        {
+            let _ = tx.send(());
         }
     }
 
@@ -131,10 +130,8 @@ async fn execute_with_busy_retry(
                 let message = error.to_string();
                 let lower = message.to_ascii_lowercase();
                 let retryable = lower.contains("busy") || lower.contains("locked");
-                if retryable {
-                    if let Some(probe) = probe {
-                        probe.observe_busy();
-                    }
+                if retryable && let Some(probe) = probe {
+                    probe.observe_busy();
                 }
                 if !retryable || attempt + 1 == MAX_ATTEMPTS {
                     return Err(message);

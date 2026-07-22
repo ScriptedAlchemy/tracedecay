@@ -1,0 +1,383 @@
+{
+  "scan_roots": [
+    "src",
+    "crates/tracedecay-rusqlite-runtime/src",
+    "crates/tracedecay-rusqlite-parity/src"
+  ],
+  "direct_open_suffixes": [
+    "Builder::new_local",
+    "Database::initialize",
+    "Database::open",
+    "Database::open_read_only",
+    "Connection::open",
+    "Connection::open_in_memory",
+    "Connection::open_with_flags"
+  ],
+  "allowed": [
+    {
+      "path": "crates/tracedecay-rusqlite-parity/src/snapshot.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "process-isolated immutable parity probe"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/backup/driver.rs",
+      "callee": "Connection::open",
+      "disposition": "private restore staging destination"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/backup/driver.rs",
+      "callee": "Connection::open_in_memory",
+      "disposition": "test-only backup authority fixture"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/backup/driver.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "read-only staged restore verification"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/backup/sqlite.rs",
+      "callee": "Connection::open",
+      "disposition": "test-only online-backup fixture"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/backup/sqlite.rs",
+      "callee": "Connection::open_in_memory",
+      "disposition": "test-only online-backup fixture"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/connection/mod.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "permanent daemon-owned shard opener"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/effects/sqlite.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "bounded read-only effect receipt probe over the writer-owned shard"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/evidence.rs",
+      "callee": "Connection::open",
+      "disposition": "standalone S11 evidence over private fixture copies; never live authority"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/evidence.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "read-only logical evidence over private fixture copies"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/graph/fixtures.rs",
+      "callee": "Connection::open",
+      "disposition": "test-only graph parity fixture"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/maintenance/sqlite.rs",
+      "callee": "Connection::open_in_memory",
+      "disposition": "test-only maintenance fixture"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/persistence.rs",
+      "callee": "Connection::open_in_memory",
+      "disposition": "test-only persistence fixture"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/repair/sqlite.rs",
+      "callee": "Connection::open_in_memory",
+      "disposition": "test-only repair fixture"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/runtime/doctor.rs",
+      "callee": "Connection::open",
+      "disposition": "test-only Doctor fixture"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/s11_evidence_tests.rs",
+      "callee": "Connection::open",
+      "disposition": "test-only S11 evidence fixture"
+    },
+    {
+      "path": "src/automation/fact_proposals_test.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only automation fixture"
+    },
+    {
+      "path": "src/automation/outcomes_test.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only automation fixture"
+    },
+    {
+      "path": "src/automation/runner.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only automation fixture"
+    },
+    {
+      "path": "src/automation/runner.rs",
+      "callee": "crate::db::Database::initialize",
+      "disposition": "test-only automation fixture"
+    },
+    {
+      "path": "src/daemon/core_doctor.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only Doctor fixture"
+    },
+    {
+      "path": "src/daemon/store_runtime/driver/libsql_compat.rs",
+      "callee": "Database::initialize",
+      "disposition": "daemon-owned temporary graph compatibility driver pending S11"
+    },
+    {
+      "path": "src/daemon/store_runtime/driver/libsql_compat.rs",
+      "callee": "Database::open",
+      "disposition": "daemon-owned temporary graph compatibility driver pending S11"
+    },
+    {
+      "path": "src/daemon/store_runtime/driver/libsql_compat.rs",
+      "callee": "Database::open_read_only",
+      "disposition": "daemon-owned temporary graph compatibility driver pending S11"
+    },
+    {
+      "path": "src/daemon/store_runtime/graph_compat.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only graph compatibility fixture"
+    },
+    {
+      "path": "src/daemon/store_runtime/rusqlite_parity.rs",
+      "callee": "Builder::new_local",
+      "disposition": "process-isolated parity fixture"
+    },
+    {
+      "path": "src/dashboard/memory_curate.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only dashboard fixture"
+    },
+    {
+      "path": "src/dashboard/token_count.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only dashboard fixture"
+    },
+    {
+      "path": "src/dashboard/util.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only dashboard fixture"
+    },
+    {
+      "path": "src/db/connection.rs",
+      "callee": "Builder::new_local",
+      "disposition": "daemon-owned temporary graph libsql opener pending S11"
+    },
+    {
+      "path": "src/db/connection.rs",
+      "callee": "Database::initialize",
+      "disposition": "daemon-owned temporary graph libsql opener pending S11"
+    },
+    {
+      "path": "src/db/connection.rs",
+      "callee": "Database::open",
+      "disposition": "daemon-owned temporary graph libsql opener pending S11"
+    },
+    {
+      "path": "src/db/connection.rs",
+      "callee": "Database::open_read_only",
+      "disposition": "daemon-owned temporary graph libsql opener pending S11"
+    },
+    {
+      "path": "src/db/connection/integrity.rs",
+      "callee": "Builder::new_local",
+      "disposition": "daemon-owned temporary integrity probe pending S11"
+    },
+    {
+      "path": "src/db/coverage.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only store fixture"
+    },
+    {
+      "path": "src/db/files.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only store fixture"
+    },
+    {
+      "path": "src/db/fingerprints.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only store fixture"
+    },
+    {
+      "path": "src/db/libsql_local.rs",
+      "callee": "Builder::new_local",
+      "disposition": "daemon-owned temporary profile/session libsql opener pending S11"
+    },
+    {
+      "path": "src/db/migrations.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only migration fixture"
+    },
+    {
+      "path": "src/db/redundancy_pairs.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only store fixture"
+    },
+    {
+      "path": "src/db/retrieval_anchor_schema.rs",
+      "callee": "Builder::new_local",
+      "disposition": "test-only schema fixture"
+    },
+    {
+      "path": "src/diagnostics_query.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only diagnostics fixture"
+    },
+    {
+      "path": "src/diagnostics_store.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only diagnostics fixture"
+    },
+    {
+      "path": "src/global_db/configuration/schema.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only configuration fixture"
+    },
+    {
+      "path": "src/global_db/configuration/store.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only configuration fixture"
+    },
+    {
+      "path": "src/global_db/observation_projection/schema.rs",
+      "callee": "Builder::new_local",
+      "disposition": "test-only observation schema fixture"
+    },
+    {
+      "path": "src/global_db/session_temporal/schema.rs",
+      "callee": "Builder::new_local",
+      "disposition": "test-only session schema fixture"
+    },
+    {
+      "path": "src/memory/store.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only memory fixture"
+    },
+    {
+      "path": "src/migrate/consolidate/sqlite.rs",
+      "callee": "Database::open",
+      "disposition": "temporary migration inspection pending final migration"
+    },
+    {
+      "path": "src/migrate/consolidate/sqlite.rs",
+      "callee": "Database::open_read_only",
+      "disposition": "temporary migration inspection pending final migration"
+    },
+    {
+      "path": "src/migrate/consolidate/sqlite/inspect.rs",
+      "callee": "Builder::new_local",
+      "disposition": "temporary migration inspection pending final migration"
+    },
+    {
+      "path": "src/migrate/hermes.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only Hermes migration fixture"
+    },
+    {
+      "path": "src/migrate/hermes.rs",
+      "callee": "Database::open",
+      "disposition": "test-only Hermes migration fixture"
+    },
+    {
+      "path": "src/migrate/hermes.rs",
+      "callee": "Database::open_read_only",
+      "disposition": "test-only Hermes migration fixture"
+    },
+    {
+      "path": "src/migrate/hermes.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only Hermes migration fixture"
+    },
+    {
+      "path": "src/migrate/hermes/memory.rs",
+      "callee": "Database::initialize",
+      "disposition": "temporary Hermes memory migration path"
+    },
+    {
+      "path": "src/migrate/hermes/memory.rs",
+      "callee": "Database::open",
+      "disposition": "temporary Hermes memory migration path"
+    },
+    {
+      "path": "src/migrate/hermes/pipeline.rs",
+      "callee": "Database::open_read_only",
+      "disposition": "temporary Hermes migration inspection"
+    },
+    {
+      "path": "src/migrate/inventory/sqlite.rs",
+      "callee": "Builder::new_local",
+      "disposition": "temporary migration inspection pending final migration"
+    },
+    {
+      "path": "src/migrate/manifest.rs",
+      "callee": "crate::db::Database::open_read_only",
+      "disposition": "temporary migration manifest inspection"
+    },
+    {
+      "path": "src/retention.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only retention fixture"
+    },
+    {
+      "path": "src/sessions/claude_observation.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only observation fixture"
+    },
+    {
+      "path": "src/sessions/claude_observation_benchmark/runner.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "benchmark-only observation fixture"
+    },
+    {
+      "path": "src/sessions/lcm/doctor.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only LCM Doctor fixture"
+    },
+    {
+      "path": "src/sessions/lcm/maintenance.rs",
+      "callee": "Builder::new_local",
+      "disposition": "test-only session backup fixture"
+    },
+    {
+      "path": "src/sessions/lcm/query/status.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only LCM status fixture"
+    },
+    {
+      "path": "src/sessions/lcm/schema.rs",
+      "callee": "Builder::new_local",
+      "disposition": "test-only LCM schema fixture"
+    },
+    {
+      "path": "src/sqlite_read_snapshot.rs",
+      "callee": "Builder::new_local",
+      "disposition": "test-only read snapshot fixture"
+    },
+    {
+      "path": "src/store/memory/memory_cutover_test.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only memory cutover fixture"
+    },
+    {
+      "path": "src/store/memory/memory_cutover_test.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "test-only memory cutover fixture"
+    },
+    {
+      "path": "src/store/memory/memory_repair_test.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only memory repair fixture"
+    },
+    {
+      "path": "src/store/memory_benchmark.rs",
+      "callee": "Database::initialize",
+      "disposition": "benchmark-only memory fixture"
+    },
+    {
+      "path": "src/store/memory_benchmark.rs",
+      "callee": "libsql::Builder::new_local",
+      "disposition": "benchmark-only memory fixture"
+    }
+  ]
+}

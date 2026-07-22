@@ -860,7 +860,12 @@ async fn create_consistent_branch_snapshot(src: &Path, dst: &Path) -> crate::err
     let result = async {
         let authority =
             crate::db::DatabaseAuthority::for_runtime(src, "create branch snapshot")?;
-        let (source, _) = crate::db::Database::open(src, &authority).await?;
+        let (source, _) = crate::daemon::store_runtime::driver::GraphLibsqlCompatDriver::open(
+            crate::daemon::store_runtime::driver::GraphStoreOpenMode::Open,
+            src,
+            &authority,
+        )
+        .await?;
         source.snapshot_to(&temp).await?;
         std::fs::hard_link(&temp, dst).map_err(|error| {
             crate::errors::TraceDecayError::Config {

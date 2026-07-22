@@ -36,6 +36,9 @@ const PR8_WORKSPACE_MANIFESTS: &[&str] = &[
     "crates/tracedecay-domain/Cargo.toml",
     "crates/tracedecay-hooks/Cargo.toml",
     "crates/tracedecay-policy/Cargo.toml",
+    "crates/tracedecay-rusqlite-parity/Cargo.toml",
+    "crates/tracedecay-rusqlite-runtime/Cargo.toml",
+    "crates/tracedecay-sqlite-parity-protocol/Cargo.toml",
     "crates/tracedecay-store/Cargo.toml",
     "crates/tracedecay-tool-catalog/Cargo.toml",
 ];
@@ -74,11 +77,22 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-policy|routing_admission|test|crates/tracedecay-policy/tests/routing_admission.rs",
     "tracedecay-policy|sink_recheck|test|crates/tracedecay-policy/tests/sink_recheck.rs",
     "tracedecay-policy|source_authorization|test|crates/tracedecay-policy/tests/source_authorization.rs",
+    "tracedecay-rusqlite-parity|tracedecay_rusqlite_parity|lib|crates/tracedecay-rusqlite-parity/src/lib.rs",
+    "tracedecay-rusqlite-parity|tracedecay-rusqlite-parity|bin|crates/tracedecay-rusqlite-parity/src/main.rs",
+    "tracedecay-rusqlite-parity|subprocess_protocol|test|crates/tracedecay-rusqlite-parity/tests/subprocess_protocol.rs",
+    "tracedecay-rusqlite-runtime|tracedecay_rusqlite_runtime|lib|crates/tracedecay-rusqlite-runtime/src/lib.rs",
+    "tracedecay-rusqlite-runtime|storage-runtime-evidence|bin|crates/tracedecay-rusqlite-runtime/src/bin/storage_runtime_evidence.rs",
+    "tracedecay-rusqlite-runtime|repository_attachment|test|crates/tracedecay-rusqlite-runtime/tests/repository_attachment.rs",
+    "tracedecay-rusqlite-runtime|runtime_actor|test|crates/tracedecay-rusqlite-runtime/tests/runtime_actor.rs",
+    "tracedecay-rusqlite-runtime|s5_s10|test|crates/tracedecay-rusqlite-runtime/tests/s5_s10.rs",
+    "tracedecay-rusqlite-runtime|s5_snapshot_restart|test|crates/tracedecay-rusqlite-runtime/tests/s5_snapshot_restart.rs",
+    "tracedecay-sqlite-parity-protocol|tracedecay_sqlite_parity_protocol|lib|crates/tracedecay-sqlite-parity-protocol/src/lib.rs",
     "tracedecay-store|tracedecay_store|lib|crates/tracedecay-store/src/lib.rs",
     "tracedecay-store|configuration_contract|test|crates/tracedecay-store/tests/configuration_contract.rs",
     "tracedecay-store|diagnostics_contract|test|crates/tracedecay-store/tests/diagnostics_contract.rs",
     "tracedecay-store|external_source_commit|test|crates/tracedecay-store/tests/external_source_commit.rs",
     "tracedecay-store|session_contract|test|crates/tracedecay-store/tests/session_contract.rs",
+    "tracedecay-store|storage_runtime_contract|test|crates/tracedecay-store/tests/storage_runtime_contract.rs",
     "tracedecay-tool-catalog|tracedecay_tool_catalog|lib|crates/tracedecay-tool-catalog/src/lib.rs",
     "tracedecay-tool-catalog|manifest_contract|test|crates/tracedecay-tool-catalog/tests/manifest_contract.rs",
     "tracedecay-tool-catalog|profile_budget|test|crates/tracedecay-tool-catalog/tests/profile_budget.rs",
@@ -86,6 +100,7 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay-tool-catalog|snapshot_contract|test|crates/tracedecay-tool-catalog/tests/snapshot_contract.rs",
     "tracedecay|tracedecay|lib|src/lib.rs",
     "tracedecay|tracedecay|bin|src/main.rs",
+    "tracedecay|tracedecay-rusqlite-parity|bin|src/bin/tracedecay-rusqlite-parity.rs",
     "tracedecay|tracedecay-search-eval|bin|src/bin/tracedecay-search-eval.rs",
     "tracedecay|bench_extract|example|examples/bench_extract.rs",
     "tracedecay|agent_suite|test|tests/agent_suite/main.rs",
@@ -120,6 +135,12 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay|search_quality_suite|test|tests/search_quality_suite/main.rs",
     "tracedecay|semantic_search_suite|test|tests/semantic_search_suite/main.rs",
     "tracedecay|session_suite|test|tests/session_suite/main.rs",
+    "tracedecay|storage_runtime_graph_cutover|test|tests/storage_runtime_graph_cutover.rs",
+    "tracedecay|storage_runtime_open_boundary|test|tests/storage_runtime_open_boundary.rs",
+    "tracedecay|storage_runtime_rollback_rehearsal|test|tests/storage_runtime_rollback_rehearsal.rs",
+    "tracedecay|storage_runtime_rusqlite_suite|test|tests/storage_runtime_rusqlite_suite/main.rs",
+    "tracedecay|storage_runtime_s8_cutover|test|tests/storage_runtime_s8_cutover.rs",
+    "tracedecay|storage_runtime_suite|test|tests/storage_runtime_suite/main.rs",
     "tracedecay|storage_suite|test|tests/storage_suite/main.rs",
     "tracedecay|tool_client_transport|test|tests/tool_client_transport.rs",
     "tracedecay|transcript_ingest_suite|test|tests/transcript_ingest_suite/main.rs",
@@ -377,6 +398,15 @@ fn expected_pr8_package_name(manifest_path: &Path) -> Option<&'static str> {
         Some("crates/tracedecay-domain/Cargo.toml") => Some("tracedecay-domain"),
         Some("crates/tracedecay-hooks/Cargo.toml") => Some("tracedecay-hooks"),
         Some("crates/tracedecay-policy/Cargo.toml") => Some("tracedecay-policy"),
+        Some("crates/tracedecay-rusqlite-parity/Cargo.toml") => {
+            Some("tracedecay-rusqlite-parity")
+        }
+        Some("crates/tracedecay-rusqlite-runtime/Cargo.toml") => {
+            Some("tracedecay-rusqlite-runtime")
+        }
+        Some("crates/tracedecay-sqlite-parity-protocol/Cargo.toml") => {
+            Some("tracedecay-sqlite-parity-protocol")
+        }
         Some("crates/tracedecay-store/Cargo.toml") => Some("tracedecay-store"),
         Some("crates/tracedecay-tool-catalog/Cargo.toml") => Some("tracedecay-tool-catalog"),
         _ => None,
@@ -460,6 +490,29 @@ fn contract_allowed_packages(manifest_path: &Path) -> &'static [&'static str] {
             "tracedecay-domain",
             "tracedecay-tool-catalog",
         ],
+        Some("crates/tracedecay-rusqlite-parity/Cargo.toml") => &[
+            "hex",
+            "rusqlite",
+            "serde_json",
+            "sha2",
+            "tempfile",
+            "tracedecay-sqlite-parity-protocol",
+            "url",
+        ],
+        Some("crates/tracedecay-rusqlite-runtime/Cargo.toml") => &[
+            "proptest",
+            "rusqlite",
+            "serde",
+            "serde_json",
+            "sha2",
+            "tempfile",
+            "tokio",
+            "tracedecay-domain",
+            "tracedecay-store",
+        ],
+        Some("crates/tracedecay-sqlite-parity-protocol/Cargo.toml") => {
+            &["hex", "serde", "serde_json", "sha2", "tempfile"]
+        }
         _ => QUERY_ALLOWED_PACKAGES,
     }
 }
@@ -996,6 +1049,10 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
     let domain_id = "path+file:///workspace/crates/domain#domain@0.1.0";
     let hooks_id = "path+file:///workspace/crates/tracedecay-hooks#tracedecay-hooks@0.1.0";
     let policy_id = "path+file:///workspace/crates/tracedecay-policy#tracedecay-policy@0.1.0";
+    let parity_id =
+        "path+file:///workspace/crates/tracedecay-rusqlite-parity#tracedecay-rusqlite-parity@0.1.0";
+    let runtime_id = "path+file:///workspace/crates/tracedecay-rusqlite-runtime#tracedecay-rusqlite-runtime@0.1.0";
+    let protocol_id = "path+file:///workspace/crates/tracedecay-sqlite-parity-protocol#tracedecay-sqlite-parity-protocol@0.1.0";
     let store_id = "path+file:///workspace/crates/store#store@0.1.0";
     let catalog_id = "path+file:///workspace/crates/tool-catalog#tool-catalog@0.1.0";
     let metadata = serde_json::json!({
@@ -1052,6 +1109,24 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
                 ]
             },
             {
+                "id": parity_id,
+                "name": "tracedecay-rusqlite-parity",
+                "manifest_path": repository.join("crates/tracedecay-rusqlite-parity/Cargo.toml"),
+                "targets": []
+            },
+            {
+                "id": runtime_id,
+                "name": "tracedecay-rusqlite-runtime",
+                "manifest_path": repository.join("crates/tracedecay-rusqlite-runtime/Cargo.toml"),
+                "targets": []
+            },
+            {
+                "id": protocol_id,
+                "name": "tracedecay-sqlite-parity-protocol",
+                "manifest_path": repository.join("crates/tracedecay-sqlite-parity-protocol/Cargo.toml"),
+                "targets": []
+            },
+            {
                 "id": store_id,
                 "name": "tracedecay-store",
                 "manifest_path": repository.join("crates/tracedecay-store/Cargo.toml"),
@@ -1080,6 +1155,9 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
             domain_id,
             hooks_id,
             policy_id,
+            parity_id,
+            runtime_id,
+            protocol_id,
             store_id,
             catalog_id
         ]
@@ -1119,6 +1197,9 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
             PathBuf::from("crates/tracedecay-domain"),
             PathBuf::from("crates/tracedecay-hooks"),
             PathBuf::from("crates/tracedecay-policy"),
+            PathBuf::from("crates/tracedecay-rusqlite-parity"),
+            PathBuf::from("crates/tracedecay-rusqlite-runtime"),
+            PathBuf::from("crates/tracedecay-sqlite-parity-protocol"),
             PathBuf::from("crates/tracedecay-store"),
             PathBuf::from("crates/tracedecay-tool-catalog"),
             PathBuf::from("examples"),

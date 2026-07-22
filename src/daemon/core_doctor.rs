@@ -183,20 +183,24 @@ async fn doctor_read_only_database(
     }
     let authority = crate::db::DatabaseAuthority::for_runtime(db_path, intent)
         .map_err(|_| "store_unavailable")?;
-    crate::db::Database::open_read_only(db_path, &authority)
-        .await
-        .map(|(database, _)| database)
-        .map_err(|error| {
-            let message = error.to_string().to_ascii_lowercase();
-            if message.contains("database is locked")
-                || message.contains("database table is locked")
-                || message.contains("sqlite_busy")
-            {
-                "store_locked"
-            } else {
-                "store_unavailable"
-            }
-        })
+    crate::daemon::store_runtime::driver::GraphLibsqlCompatDriver::open(
+        crate::daemon::store_runtime::driver::GraphStoreOpenMode::ReadOnly,
+        db_path,
+        &authority,
+    )
+    .await
+    .map(|(database, _)| database)
+    .map_err(|error| {
+        let message = error.to_string().to_ascii_lowercase();
+        if message.contains("database is locked")
+            || message.contains("database table is locked")
+            || message.contains("sqlite_busy")
+        {
+            "store_locked"
+        } else {
+            "store_unavailable"
+        }
+    })
 }
 
 async fn doctor_connection_i64_result(
@@ -281,9 +285,7 @@ async fn cold_doctor_graph_value(
         // A rollback-journal store can be checked with SQLite's ordinary
         // read-only lock protocol without creating WAL/SHM sidecars. This
         // preserves the typed locked result that immutable mode would hide.
-        libsql::Builder::new_local(graph_path)
-            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .build()
+        crate::db::libsql_local::open_local_database(graph_path, true)
             .await
             .map_err(|error| doctor_graph_error_reason(&error))?
     } else {
@@ -291,9 +293,7 @@ async fn cold_doctor_graph_value(
             .map_err(|_| "project_store_unavailable")?;
         let flags = libsql::OpenFlags::SQLITE_OPEN_READ_ONLY
             | libsql::OpenFlags::from_bits_retain(SQLITE_OPEN_URI);
-        libsql::Builder::new_local(uri)
-            .flags(flags)
-            .build()
+        crate::db::libsql_local::open_local_database_with_flags(std::path::Path::new(&uri), flags)
             .await
             .map_err(|error| doctor_graph_error_reason(&error))?
     };

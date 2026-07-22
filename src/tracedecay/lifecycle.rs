@@ -12,6 +12,7 @@ use crate::config::{
     db_filename, install_configuration_daemon_client_for_project,
     open_runtime_configuration_for_layout, open_runtime_configuration_for_layout_read_only,
 };
+use crate::daemon::store_runtime::driver::{GraphLibsqlCompatDriver, GraphStoreOpenMode};
 use crate::db::{Database, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::extraction::LanguageRegistry;
@@ -40,7 +41,12 @@ impl TraceDecay {
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let authority = DatabaseAuthority::for_runtime(&store_layout.graph_db_path, "init")?;
 
-        let (db, _migrated) = Database::initialize(&store_layout.graph_db_path, &authority).await?;
+        let (db, _migrated) = GraphLibsqlCompatDriver::open(
+            GraphStoreOpenMode::Initialize,
+            &store_layout.graph_db_path,
+            &authority,
+        )
+        .await?;
         let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_layout(project_root, &store_layout).await?,
         )?);
@@ -132,7 +138,12 @@ impl TraceDecay {
             std::process::id()
         ));
         let authority = DatabaseAuthority::acquire_test(&db_path, "latest schema version")?;
-        let (db, _) = Database::initialize(&db_path, &authority).await?;
+        let (db, _) = GraphLibsqlCompatDriver::open(
+            GraphStoreOpenMode::Initialize,
+            &db_path,
+            &authority,
+        )
+        .await?;
         let version = Self::schema_version(&db, "latest_schema_version").await;
         db.close();
         delete_db_files(&db_path);
@@ -413,7 +424,13 @@ impl TraceDecay {
             // writable open below; do not force offline recovery for it. The
             // read-only open runs its own integrity validation, so the damage
             // can surface either as its open error or as a problem row here.
-            match Database::open_read_only(&db_path, &authority).await {
+            match GraphLibsqlCompatDriver::open(
+                GraphStoreOpenMode::ReadOnly,
+                &db_path,
+                &authority,
+            )
+            .await
+            {
                 Ok((verification, _)) => {
                     let integrity = verification.quick_check_report().await;
                     verification.close();
@@ -451,7 +468,8 @@ impl TraceDecay {
         // process may still hold the current DB/WAL/SHM inodes, and deleting
         // them here would split readers and writers across different stores.
         let authority = DatabaseAuthority::for_runtime(&db_path, "open project store")?;
-        let mut open_result = Database::open(&db_path, &authority).await;
+        let mut open_result =
+            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::Open, &db_path, &authority).await;
         // Open-time validation fails closed on any corruption, including
         // FTS-only damage that is fully derivable from the content table.
         // Rebuild that index under the open's writer authority and retry
@@ -462,7 +480,14 @@ impl TraceDecay {
         {
             eprintln!("[tracedecay] repairing FTS index after interrupted operation ({error})…");
             match Database::repair_fts_offline(&db_path, &authority).await {
-                Ok(()) => open_result = Database::open(&db_path, &authority).await,
+                Ok(()) => {
+                    open_result = GraphLibsqlCompatDriver::open(
+                        GraphStoreOpenMode::Open,
+                        &db_path,
+                        &authority,
+                    )
+                    .await;
+                }
                 Err(repair_error) => {
                     print_corruption_warning(&db_path);
                     return Err(recovery_required_error(&db_path, repair_error));
@@ -626,7 +651,9 @@ impl TraceDecay {
         }
 
         let authority = DatabaseAuthority::for_runtime(&db_path, "open project store read-only")?;
-        let (db, _) = Database::open_read_only(&db_path, &authority).await?;
+        let (db, _) =
+            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::ReadOnly, &db_path, &authority)
+                .await?;
         let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_layout_read_only(project_root, &store_layout).await?,
         )?);
@@ -879,7 +906,8 @@ impl TraceDecay {
         }
 
         let authority = DatabaseAuthority::for_runtime(&db_path, "open branch store")?;
-        let (db, _) = Database::open(&db_path, &authority).await?;
+        let (db, _) =
+            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::Open, &db_path, &authority).await?;
         let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_layout(project_root, &store_layout).await?,
         )?);
@@ -1267,7 +1295,14 @@ impl std::fmt::Display for StoreIdentityInventory {
 async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventory {
     let authority = DatabaseAuthority::for_runtime(&layout.graph_db_path, "store inventory");
     let open_result = match authority {
-        Ok(authority) => Database::open_read_only(&layout.graph_db_path, &authority).await,
+        Ok(authority) => {
+            GraphLibsqlCompatDriver::open(
+                GraphStoreOpenMode::ReadOnly,
+                &layout.graph_db_path,
+                &authority,
+            )
+            .await
+        }
         Err(error) => Err(error),
     };
     let (graph_health, nodes, files, facts) = match open_result {

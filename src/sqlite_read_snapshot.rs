@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use fs2::FileExt;
-use libsql::{Builder, Connection, OpenFlags};
+#[cfg(test)]
+use libsql::Builder;
+use libsql::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
@@ -375,9 +377,7 @@ async fn finish_one(
             Some(scratch),
         )
     };
-    let database = Builder::new_local(&open_path)
-        .flags(flags)
-        .build()
+    let database = crate::db::libsql_local::open_local_database_with_flags(&open_path, flags)
         .await
         .map_err(io::Error::other)?;
     let connection = database.connect().map_err(io::Error::other)?;

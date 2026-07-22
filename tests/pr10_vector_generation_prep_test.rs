@@ -546,7 +546,7 @@ fn checkpoint_and_active_pointer_publish_atomically() {
             projection_key.clone(),
             ProjectionReplayReasonV1::SourceEdit,
         ),
-        &[alpha.clone()],
+        std::slice::from_ref(&alpha),
         &mut FakeEncoder::default(),
     )
     .unwrap();

@@ -5,6 +5,9 @@ members = [
     "crates/tracedecay-domain",
     "crates/tracedecay-hooks",
     "crates/tracedecay-policy",
+    "crates/tracedecay-rusqlite-parity",
+    "crates/tracedecay-rusqlite-runtime",
+    "crates/tracedecay-sqlite-parity-protocol",
     "crates/tracedecay-store",
     "crates/tracedecay-tool-catalog",
 ]
@@ -195,6 +198,10 @@ lang-quint = ["dep:tracedecay-large-treesitters"]
 lang-toml = ["dep:tracedecay-large-treesitters"]
 lang-lean = ["dep:tracedecay-large-treesitters"]
 test-transport = []
+# Builds the root-package helper shim for integration tests. The rusqlite
+# dependency is used only by that bin target; normal root targets never import
+# it and are link-checked separately.
+rusqlite-parity-helper = ["dep:tracedecay-rusqlite-parity"]
 
 # PR10 FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
 # image defaults disabled. Runtime inference still loads only from locally
@@ -214,6 +221,23 @@ name = "tracedecay"
 name = "tracedecay"
 path = "src/main.rs"
 
+# Cargo exposes this target to same-package integration tests through
+# CARGO_BIN_EXE_tracedecay-rusqlite-parity when the feature is enabled. The
+# binary is a process boundary; it is not linked into the normal CLI or lib.
+[[bin]]
+name = "tracedecay-rusqlite-parity"
+path = "src/bin/tracedecay-rusqlite-parity.rs"
+required-features = ["rusqlite-parity-helper"]
+test = false
+bench = false
+
+# Process-isolated storage runtime parity suite. Requires the root helper
+# shim so CARGO_BIN_EXE_tracedecay-rusqlite-parity names a built binary.
+[[test]]
+name = "storage_runtime_suite"
+path = "tests/storage_runtime_suite/main.rs"
+required-features = ["rusqlite-parity-helper"]
+
 [dependencies]
 axum = "0.8"
 tower = "0.5"
@@ -231,6 +255,12 @@ tracedecay-application = { path = "crates/tracedecay-application", version = "0.
 tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "crates/tracedecay-hooks", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
+tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", version = "0.1.0", optional = true, default-features = false }
+# Disable the runtime's bundled amalgamation at the root edge so rusqlite and
+# transitional libsql do not both statically define sqlite3_* symbols.
+tracedecay-rusqlite-runtime = { path = "crates/tracedecay-rusqlite-runtime", version = "0.1.0", default-features = false }
+rusqlite = { version = "0.40.1", default-features = false }
+tracedecay-sqlite-parity-protocol = { path = "crates/tracedecay-sqlite-parity-protocol", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
@@ -313,6 +343,7 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 # sleeps.
 tokio = { version = "1", features = ["full", "test-util"] }
 jsonschema = { version = "0.46.8", default-features = false }
+static_assertions = "1.1.0"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
