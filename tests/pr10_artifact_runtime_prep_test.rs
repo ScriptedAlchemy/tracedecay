@@ -6,6 +6,8 @@ mod artifact_store;
 mod fastembed_adapter;
 #[path = "../src/semantic_code/manifest.rs"]
 mod manifest;
+#[path = "../src/semantic_code/model_catalog.rs"]
+pub mod model_catalog;
 #[path = "../src/semantic_code/runtime_query.rs"]
 mod runtime_query;
 #[path = "../src/semantic_code/runtime_service.rs"]
@@ -17,6 +19,17 @@ mod trust_roots;
 
 pub mod query {
     pub use tracedecay::query::*;
+}
+
+// The included sources resolve `crate::config` and
+// `crate::semantic_code::model_catalog` against this test crate's root, so
+// mirror those paths onto the real lib module and the path-included copy.
+pub mod config {
+    pub use tracedecay::config::*;
+}
+
+pub mod semantic_code {
+    pub use crate::model_catalog;
 }
 
 #[test]
