@@ -58,6 +58,8 @@ pub const SEMANTIC_CANDIDATE_EVIDENCE_DIGEST_DOMAIN: &str =
     "tracedecay.eval-semantic-candidate-evidence.v1";
 /// Schema/domain separator for durable holdout access receipts.
 pub const HOLDOUT_ACCESS_RECEIPT_DIGEST_DOMAIN: &str = "tracedecay.eval-holdout-access-receipt.v1";
+/// Schema/domain separator for canonical unsigned owner decisions.
+pub const OWNER_DECISION_DIGEST_DOMAIN: &str = "tracedecay.eval-owner-decision.v1";
 
 /// Validation failures for pure search-quality evaluation values.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -249,6 +251,7 @@ evaluation_digest_id!(
     AcceptedPr9CandidateEvidenceDigest,
     SemanticCandidateEvidenceDigest,
     HoldoutAccessReceiptDigest,
+    OwnerDecisionDigest,
 );
 
 /// Compute the canonical sha256 digest of a typed digest-input payload.
@@ -3026,6 +3029,130 @@ impl EvaluationFixtureBundleV1 {
             });
         }
         Ok(())
+    }
+}
+
+/// Canonical unsigned owner decision for local locked-quality acceptance.
+/// Authority is versioned JSON plus SHA-256 content identities and explicit
+/// owner metadata — never a signature, reveal capability, trust root, or
+/// attestation. Outcomes for this contract are accepted, rejected, or
+/// inconclusive only.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerDecisionEvidenceV1 {
+    pub schema_version: u32,
+    pub decision_kind: String,
+    /// Owner authorization metadata (who authorized the decision and how).
+    pub authority: String,
+    pub source_repository_commit: String,
+    pub source_repository_tree: String,
+    pub corpus_digest: FixtureContentDigest,
+    pub partition_digest: FixtureContentDigest,
+    pub label_digest: FixtureContentDigest,
+    pub profile_digest: FixtureContentDigest,
+    pub toolchain_digest: FixtureContentDigest,
+    pub hardware_digest: FixtureContentDigest,
+    pub report_digest: FixtureContentDigest,
+    pub evidence_index_digest: EvidenceIndexDigest,
+    pub outcome: EvalOutcomeV1,
+    pub decided_by: DecisionOwnerId,
+    pub rationale: String,
+    #[serde(default)]
+    pub gate_receipt_digests: Vec<FixtureContentDigest>,
+    pub digest: OwnerDecisionDigest,
+}
+
+#[derive(Serialize)]
+struct OwnerDecisionDigestInput<'a> {
+    domain: &'static str,
+    schema_version: u32,
+    decision_kind: &'a str,
+    authority: &'a str,
+    source_repository_commit: &'a str,
+    source_repository_tree: &'a str,
+    corpus_digest: &'a FixtureContentDigest,
+    partition_digest: &'a FixtureContentDigest,
+    label_digest: &'a FixtureContentDigest,
+    profile_digest: &'a FixtureContentDigest,
+    toolchain_digest: &'a FixtureContentDigest,
+    hardware_digest: &'a FixtureContentDigest,
+    report_digest: &'a FixtureContentDigest,
+    evidence_index_digest: &'a EvidenceIndexDigest,
+    outcome: EvalOutcomeV1,
+    decided_by: &'a DecisionOwnerId,
+    rationale: &'a str,
+    gate_receipt_digests: &'a [FixtureContentDigest],
+}
+
+impl OwnerDecisionEvidenceV1 {
+    pub const DECISION_KIND: &'static str = "owner_decision_v1";
+
+    pub fn validate(&self) -> Result<(), EvaluationContractError> {
+        if self.schema_version != 1 || self.decision_kind != Self::DECISION_KIND {
+            return Err(EvaluationContractError::InvalidIdentity {
+                field: "owner decision kind/schema",
+            });
+        }
+        for (field, value) in [
+            ("owner decision authority", self.authority.as_str()),
+            (
+                "source_repository_commit",
+                self.source_repository_commit.as_str(),
+            ),
+            (
+                "source_repository_tree",
+                self.source_repository_tree.as_str(),
+            ),
+            ("owner decision rationale", self.rationale.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(EvaluationContractError::Empty { field });
+            }
+        }
+        match self.outcome {
+            EvalOutcomeV1::Accepted | EvalOutcomeV1::Rejected | EvalOutcomeV1::Inconclusive => {}
+            _ => {
+                return Err(EvaluationContractError::CoverageViolation(
+                    "owner decision outcome must be accepted, rejected, or inconclusive"
+                        .to_string(),
+                ));
+            }
+        }
+        self.verify_digest()
+    }
+
+    pub fn compute_digest(&self) -> Result<OwnerDecisionDigest, EvaluationContractError> {
+        let input = OwnerDecisionDigestInput {
+            domain: OWNER_DECISION_DIGEST_DOMAIN,
+            schema_version: self.schema_version,
+            decision_kind: &self.decision_kind,
+            authority: &self.authority,
+            source_repository_commit: &self.source_repository_commit,
+            source_repository_tree: &self.source_repository_tree,
+            corpus_digest: &self.corpus_digest,
+            partition_digest: &self.partition_digest,
+            label_digest: &self.label_digest,
+            profile_digest: &self.profile_digest,
+            toolchain_digest: &self.toolchain_digest,
+            hardware_digest: &self.hardware_digest,
+            report_digest: &self.report_digest,
+            evidence_index_digest: &self.evidence_index_digest,
+            outcome: self.outcome,
+            decided_by: &self.decided_by,
+            rationale: &self.rationale,
+            gate_receipt_digests: &self.gate_receipt_digests,
+        };
+        OwnerDecisionDigest::new(canonical_json_sha256(&input)?)
+    }
+
+    pub fn verify_digest(&self) -> Result<(), EvaluationContractError> {
+        if self.compute_digest()? == self.digest {
+            Ok(())
+        } else {
+            Err(EvaluationContractError::DigestMismatch {
+                field: "owner decision",
+            })
+        }
     }
 }
 
