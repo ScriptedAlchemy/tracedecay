@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
 use tracedecay_application::{
     AuthorizationPortOutcome, RequestContext, ResolvedScope, SourceAuthorizationSnapshot,

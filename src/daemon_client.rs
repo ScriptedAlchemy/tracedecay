@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Shared adapter-to-daemon dispatch contracts.
 //!
 //! This module deliberately owns request correlation and transport-neutral

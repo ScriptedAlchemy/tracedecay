@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Graph traversal tool handlers: `search`, `context`, `callers`, `callees`,
 //! `impact`, `node`, `similar`, `rename_preview`, `callers_for`, `by_qualified_name`,
 //! `signature`.

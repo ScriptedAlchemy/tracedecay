@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Durable journal transitions for daemon-owned Git index mutations.
 
 use thiserror::Error;

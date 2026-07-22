@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Output-format rendering for MCP tool responses.
 
 use std::fmt::Write as _;

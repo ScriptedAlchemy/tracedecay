@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Private holdout authority storage and Ed25519 verification.
 //!
 //! All sensitive bytes live below the supported `TraceDecay` user profile. Public

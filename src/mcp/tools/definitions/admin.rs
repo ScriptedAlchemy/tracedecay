@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Project registry, runtime, and automation admin tool definitions.
 
 use serde_json::json;

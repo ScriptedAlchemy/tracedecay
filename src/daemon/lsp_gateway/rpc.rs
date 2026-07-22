@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! JSON-RPC 2.0 framing helpers, parameter parsing, and gateway response encoding.
 
 use serde_json::{Map, Value, json};

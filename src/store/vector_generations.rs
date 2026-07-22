@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Immutable semantic vector-generation storage.
 //!
 //! The deterministic state machine is retained as a test oracle. Production

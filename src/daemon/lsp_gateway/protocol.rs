@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Typed JSON-RPC 2.0 / LSP 3.17 session actor.
 //!
 //! The actor accepts already-authenticated, already-framed payloads from the

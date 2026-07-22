@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Retained daemon composition for the configuration control plane.
 //!
 //! This module owns only lifetime and delegation. Resolution, validation,

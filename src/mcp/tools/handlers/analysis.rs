@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Structural analysis tool handlers: `dead_code`, `hotspots`, `circular`,
 //! `coupling`, `rank`, `largest`, `recursion`, `complexity`, `distribution`,
 //! `unused_imports`, `god_class`, `doc_coverage`, `inheritance_depth`, `module_api`.

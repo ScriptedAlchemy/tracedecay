@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use std::fs::File;
 use std::io;
 use std::path::Path;

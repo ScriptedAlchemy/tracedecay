@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Status, files, `type_hierarchy`, body, todos, `simplify_scan`, `port_status`,
 //! `port_order` tool handlers.
 

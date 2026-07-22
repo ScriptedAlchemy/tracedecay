@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Process-local singleton ownership for PR11 Git index transaction stores.
 //!
 //! One bounded store actor is retained per canonical project `GlobalDb` path.

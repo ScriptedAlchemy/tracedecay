@@ -75,6 +75,10 @@ pub mod retention;
 pub mod runtime_identity;
 pub mod runtime_telemetry;
 pub mod search_eval;
+// In-flight semantic retrieval/code-index feature; many APIs are staged ahead
+// of their production wiring (activation landed under active development), so
+// dead_code is allowed module-wide rather than deleting a co-editor's work.
+#[allow(dead_code)]
 mod semantic_code;
 pub mod serde_util;
 pub mod serve;

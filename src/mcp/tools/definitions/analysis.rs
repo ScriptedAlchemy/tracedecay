@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Code-health and architecture analysis tool definitions.
 
 use serde_json::json;

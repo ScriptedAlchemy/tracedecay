@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;

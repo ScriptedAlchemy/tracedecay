@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -95,10 +96,10 @@ pub(crate) use service::invocation::{
     DaemonAdvisoryRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrationError, DaemonInvocationOutcome, DaemonInvocationProblem,
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonInvocationService,
-    DaemonLspInvocationOwner, DaemonLspOwnerRegistrar, DaemonLspSessionAccess,
-    DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
-    DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
-    daemon_operation_event_authority, parse_daemon_invocation_request,
+    DaemonLspOwnerRegistrar, DaemonLspSessionAccess, DaemonPrimitiveRuntimeRegistrar,
+    DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
+    DaemonSemanticRuntimeRegistrationError, daemon_operation_event_authority,
+    parse_daemon_invocation_request,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
@@ -639,8 +640,7 @@ async fn ensure_git_index_transactions_before_advertising(
         i64::try_from(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_micros())
-                .unwrap_or(0),
+                .map_or(0, |duration| duration.as_micros()),
         )
         .unwrap_or(i64::MAX),
     );
@@ -1706,9 +1706,7 @@ impl DaemonEngine {
             route_registered.store(false, Ordering::Release);
             return Err(project_server_capacity_error());
         };
-        if !inserted {
-            route_registered.store(false, Ordering::Release);
-        } else {
+        if inserted {
             self.invocation
                 .mount_code_index(
                     &canonical_project_path,
@@ -1748,6 +1746,8 @@ impl DaemonEngine {
                 handshake.clone(),
                 Arc::clone(&server),
             );
+        } else {
+            route_registered.store(false, Ordering::Release);
         }
         Ok((key, canonical_project_path, server, inserted))
     }

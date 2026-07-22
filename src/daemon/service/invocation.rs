@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Closed, authenticated daemon invocation protocol.
 //!
 //! This module deliberately accepts a small typed operation set after the

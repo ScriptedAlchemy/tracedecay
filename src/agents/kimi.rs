@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 // Rust guideline compliant 2025-10-17
 //! Kimi Code CLI agent integration.
 //!
@@ -298,8 +299,7 @@ fn local_mcp_has_tracedecay(project_root: &Path) -> bool {
 fn kimi_code_home(home: &Path) -> PathBuf {
     std::env::var_os(KIMI_CODE_HOME_ENV)
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".kimi-code"))
+        .map_or_else(|| home.join(".kimi-code"), PathBuf::from)
 }
 
 /// The managed plugin deploy dir: `<kimi-code-home>/plugins/managed/tracedecay`.
@@ -469,22 +469,21 @@ fn upsert_kimi_installed_entry(kimi_code_home: &Path) -> Result<()> {
     let existing = plugins
         .iter()
         .position(|entry| entry.get("id").and_then(|value| value.as_str()) == Some(KIMI_PLUGIN_ID));
-    let (enabled, installed_at) = existing
-        .map(|index| &plugins[index])
-        .map(|entry| {
+    let (enabled, installed_at) = existing.map(|index| &plugins[index]).map_or_else(
+        || (true, now.clone()),
+        |entry| {
             (
                 entry
                     .get("enabled")
-                    .and_then(|value| value.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true),
                 entry
                     .get("installedAt")
                     .and_then(|value| value.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| now.clone()),
+                    .map_or_else(|| now.clone(), str::to_string),
             )
-        })
-        .unwrap_or_else(|| (true, now.clone()));
+        },
+    );
     let entry = json!({
         "id": KIMI_PLUGIN_ID,
         "root": root,

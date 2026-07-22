@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Daemon-owned scheduling and reconciliation for production code generations.
 //!
 //! Notify events are bounded wake-up hints only. Every run reconstructs its
@@ -541,7 +542,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     saved_trees: BTreeMap<String, SavedTreeV1>,
     latest_content_identity: Option<ContentDigest>,
     watcher: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
-    /// Optional PR10 hook: schedule FastEmbed projection without joining it.
+    /// Optional PR10 hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
         Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
 }
@@ -604,7 +605,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// Connect saved code generations to PR10 `schedule_generation`. The hook
-    /// must return immediately; FastEmbed download/indexing never blocks
+    /// must return immediately; `FastEmbed` download/indexing never blocks
     /// exact/lexical/graph search.
     pub fn set_semantic_schedule_hook(
         &mut self,
