@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments, clippy::cloned_ref_to_slice_refs)] // test builders
 //! Store-level fact merge/hydration integration tests against a real database.
 //!
 //! NEXT.md (PR7) requires provenance preservation, contradiction, supersession,

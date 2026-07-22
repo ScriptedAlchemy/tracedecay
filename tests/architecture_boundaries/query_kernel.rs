@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)] // test scaffolding
 //! Query kernel source guards.
 //!
 //! Validates that `src/query` stays pure: only allowlisted dependency roots,

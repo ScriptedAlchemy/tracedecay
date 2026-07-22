@@ -1,3 +1,4 @@
+#![allow(clippy::drop_non_drop)] // explicit early drop in test
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay::application::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};

@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)] // test scaffolding
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

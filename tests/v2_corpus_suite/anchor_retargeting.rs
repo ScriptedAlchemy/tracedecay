@@ -1,3 +1,4 @@
+#![allow(clippy::duplicate_mod, clippy::type_complexity)] // shared corpus module + complex fixture type
 //! Anchor-retargeting acceptance coverage for the PR7 provenance contract:
 //! moving refs, rewriting a branch, or removing a checkout must never retarget
 //! retained commit/tree/blob or captured-state anchors, and unavailable git

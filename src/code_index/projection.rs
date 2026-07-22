@@ -1,3 +1,4 @@
+#![allow(dead_code)] // white-box test include; not all items exercised
 //! Projection execution and atomic publication handoff (Plan 25).
 //!
 //! Projectors receive one immutable [`ProjectionBatchRequestV1`] and return

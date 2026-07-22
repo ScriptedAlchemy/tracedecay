@@ -1,3 +1,4 @@
+#![allow(dead_code)] // white-box test include; not all items exercised
 use std::ops::Range;
 
 use regex::Regex;

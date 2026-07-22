@@ -1,3 +1,4 @@
+#![allow(clippy::assertions_on_constants)] // intentional const assertion
 use super::*;
 
 #[tokio::test]

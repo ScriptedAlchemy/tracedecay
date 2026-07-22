@@ -1,3 +1,4 @@
+#![allow(clippy::clone_on_copy)] // test builders
 use std::collections::BTreeSet;
 use std::fs;
 use std::sync::Arc;

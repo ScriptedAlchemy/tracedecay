@@ -1,3 +1,4 @@
+#![allow(clippy::cloned_ref_to_slice_refs, clippy::drop_non_drop)] // test builders and explicit early drops
 #![forbid(unsafe_code)]
 
 use std::fmt::Write as _;

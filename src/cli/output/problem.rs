@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight CLI output helpers
 //! Non-disclosing problem helpers shared by CLI presenters.
 
 use tracedecay_application::{ApplicationProblem, ApplicationProblemKind};

@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight CLI dispatch not yet wired
 //! CLI construction of transport-neutral catalog dispatches.
 //!
 //! Command parsing remains in the command tree. This module accepts already

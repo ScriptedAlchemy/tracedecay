@@ -1,3 +1,4 @@
+#![allow(clippy::option_env_unwrap)] // compile-time env probe in test
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

@@ -1,3 +1,4 @@
+#![allow(dead_code)] // white-box test include of in-flight module
 //! Digest-addressed model artifact store with verified resumable import
 //! (Plan 31 "Model and offline lifecycle", packet
 //! `pr10/prep-artifact-manifest`).

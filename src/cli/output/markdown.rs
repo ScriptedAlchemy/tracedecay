@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight CLI output helpers
 //! Compact human-view contract for CLI and MCP presenters.
 
 use super::view::{CanonicalHumanView, HumanFieldValue};

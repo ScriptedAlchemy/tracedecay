@@ -1,3 +1,4 @@
+#![allow(dead_code)] // white-box test include of in-flight module
 //! Production lifecycle boundary for the bounded embedding-session pool.
 //!
 //! A service owns the admitted projection/artifact authority, an owned runtime
