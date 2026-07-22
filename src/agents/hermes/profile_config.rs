@@ -10,7 +10,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use tracedecay_application::{DirectorySyncPolicy, atomic_write};
-use yaml_edit::{Document, Mapping, Sequence, SequenceBuilder};
+use yaml_edit::{Document, Mapping, Sequence, YamlNode};
 
 use crate::agents::backup_config_file;
 use crate::errors::{Result, TraceDecayError};

@@ -426,7 +426,7 @@ impl FakeVectorGenerationStoreV1 {
                 ProjectionOperationV1::Deleted => {
                     let tombstone = tombstone_by_chunk
                         .get(&receipt.chunk_id)
-                        .ok_or_else(|| VectorGenerationStoreErrorV1::BatchIdentityMismatch)?;
+                        .ok_or(VectorGenerationStoreErrorV1::BatchIdentityMismatch)?;
                     if receipt.prior_chunk_digest.as_ref() != Some(&tombstone.prior_chunk_digest) {
                         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
                     }
@@ -830,12 +830,12 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
 fn validate_loaded_state(
     state: &FakeVectorGenerationStoreV1,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
-    if let Some(active) = &state.published.active_generation {
-        if !state.published.generations.contains_key(active) {
-            return Err(VectorGenerationStoreErrorV1::Storage(
-                "active vector generation pointer is dangling".to_string(),
-            ));
-        }
+    if let Some(active) = &state.published.active_generation
+        && !state.published.generations.contains_key(active)
+    {
+        return Err(VectorGenerationStoreErrorV1::Storage(
+            "active vector generation pointer is dangling".to_string(),
+        ));
     }
     for (generation_id, generation) in &state.published.generations {
         if generation.generation_id() != generation_id {

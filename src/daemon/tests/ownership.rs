@@ -4,6 +4,7 @@ use super::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+    const PARALLEL_CLIENT_IDENTITIES: usize = 16;
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     let project_alias = temp.path().join("project-alias");
@@ -147,7 +148,6 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         0,
         "cache hits must not re-probe unchanged automation config"
     );
-    const PARALLEL_CLIENT_IDENTITIES: usize = 16;
     for client_index in 0..PARALLEL_CLIENT_IDENTITIES {
         let mut client = direct.clone();
         client.client_instance_id = format!("{client_index:032x}");
