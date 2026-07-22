@@ -5,15 +5,18 @@ contract for the PR7 slice required by `docs/plans/tracedecay-v2/NEXT.md`:
 bounded fact-write, anchor-create, anchor resolution, replay, and migration
 baselines recorded for later PR20 comparison.
 
-The versioned [workload](workload-v1.json) is machine-asserted by a normal
-test in `src/store/memory_benchmark.rs` with unknown fields denied. Each
-measured repetition commits a bounded batch of records through the production
-path and samples latency, CPU, process write I/O, database storage growth, and
-peak RSS under the same Linux `/proc` contract as the PR5 baseline. Record and
-batch construction, database open and schema initialization, daemon authority
-acquisition, and all correctness point-reads are excluded from the measured
-samples. Every phase reports nearest-rank p50/p95/p99 and sample standard
-deviation over 30 measured repetitions after 3 warmups.
+The measurement harness (`src/store/memory_benchmark.rs`) has been removed
+from the test suite; recover it from git history (last present at commit
+`b8370b62`) to re-run or re-record. The versioned
+[workload](workload-v1.json) remains as the machine-checked description of
+what was measured. Each measured repetition committed a bounded batch of
+records through the production path and sampled latency, CPU, process write
+I/O, database storage growth, and peak RSS under the same Linux `/proc`
+contract as the PR5 baseline. Record and batch construction, database open and
+schema initialization, daemon authority acquisition, and all correctness
+point-reads were excluded from the measured samples. Every phase reports
+nearest-rank p50/p95/p99 and sample standard deviation over 30 measured
+repetitions after 3 warmups.
 
 Measured phases:
 
@@ -54,10 +57,9 @@ currently provide that acceptance path, so commit-attested naming
 (`result-<date>-<commithash>.json`) and the `acceptance` evidence status cannot
 be used here.
 
-- The measurement runs as an `#[ignore]`-gated test,
-  `store::memory_benchmark::pr7_memory_baseline` (skipped by the default
-  `cargo test` / `cargo nextest` runs so CI test jobs do not pay it; run it
-  explicitly by adding `--ignored` as shown above). When run, it rewrites
+- The measurement ran as `store::memory_benchmark::pr7_memory_baseline`
+  before the harness was removed; restore the harness from git history to
+  regenerate. When run, it rewrites
   [result-provisional.json](result-provisional.json) on Linux
   (unsupported platforms skip without emitting). The artifact carries
   `"evidence_status": "provisional"`,
@@ -108,9 +110,11 @@ artifact will attest:
 4. `cargo test --lib application::anchor_resolution::tests::topology_drilldown_preserves_sources_and_reports_stale_or_retargeted -- --exact`
 5. `cargo test --lib application::evidence_assembly::tests::authorized_drilldown_expands_contribution_span_set_and_exact_members -- --exact`
 6. `cargo test --all-features`
-7. `cargo test --release --lib store::memory_benchmark::pr7_memory_baseline -- --exact --ignored --nocapture --test-threads=1`
-8. `cargo test --lib store::memory_benchmark::workload_manifest_matches_code_contract -- --exact`
-9. `cargo test --lib store::memory_benchmark::evidence_directory_matches_index_contract -- --exact`
+7. Restore the measurement harness (`src/store/memory_benchmark.rs` and its
+   `mod` declaration, last present at commit `b8370b62`), then run
+   `cargo test --release --lib store::memory_benchmark::pr7_memory_baseline -- --exact --ignored --nocapture --test-threads=1`
+8. `cargo test --lib store::memory_benchmark::workload_manifest_matches_code_contract -- --exact` (restored harness)
+9. `cargo test --lib store::memory_benchmark::evidence_directory_matches_index_contract -- --exact` (restored harness)
 
 The parent must additionally use a clean-archive attestation path equivalent to
 the PR5 runner, verify the artifact's commit equals the clean source commit,
@@ -119,13 +123,15 @@ the embedded workload and harness digests against the compiler inputs. No such
 PR7 acceptance artifact has been generated yet. Until all of those conditions
 hold, the index remains pending with `current_acceptance: null`.
 
-Any `cargo test --lib store::memory_benchmark -- --ignored` invocation
-re-executes the measurement and re-emits the provisional artifact (the
-measurement is `#[ignore]`-gated, so a bare `cargo test --lib
-store::memory_benchmark` now runs only the un-ignored manifest and evidence
-directory validators). Those validators run in the same module and hold an
-inter-process file lock plus atomic rename so concurrent test processes never
-read a partial artifact.
+With the harness restored, any `cargo test --lib store::memory_benchmark --
+--ignored` invocation re-executes the measurement and re-emits the
+provisional artifact; the manifest and evidence-directory validators run in
+the same module and hold an inter-process file lock plus atomic rename so
+concurrent test processes never read a partial artifact. Note the harness
+embeds digests of its own source and of the workload manifest, so evidence
+validation only passes against the exact harness revision that recorded the
+artifact — another reason the harness lives in git history rather than
+drifting in-tree.
 
 ## Provisional measurement snapshot
 

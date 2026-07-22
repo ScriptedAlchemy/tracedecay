@@ -12,8 +12,6 @@ use crate::sessions::git_correlation::{CommitSessionRecord, SpanObservation};
 
 pub mod global_db;
 pub mod memory;
-#[cfg(test)]
-mod memory_benchmark;
 pub mod observation;
 pub mod session;
 pub(crate) mod vector_generations;
