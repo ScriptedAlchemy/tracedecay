@@ -125,7 +125,7 @@ fn application_default_profile(
         capability_ids,
         enabled_surfaces,
         requires_cli_mcp_pairing: true,
-        budget: ProfileBudget::new(160, 20_000_000, 18_000)?,
+        budget: ProfileBudget::new(160, 32_000_000, 18_000)?,
         routing_fixtures,
     })?)
 }

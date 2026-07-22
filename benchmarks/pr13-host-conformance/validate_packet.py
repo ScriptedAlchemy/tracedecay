@@ -165,6 +165,7 @@ def check_fixture_references(packet: dict[str, Any], repository: Path) -> None:
         "tests/pr13_daemon_runtime_acceptance.rs",
         "mandatory PR13 daemon runtime target",
     )
+    repository_file(repository, packet.get("owner_receipt"), "owner acceptance receipt")
     hosts = packet.get("hosts")
     if not isinstance(hosts, list):
         fail("hosts must be an array")
@@ -195,6 +196,40 @@ def check_fixture_references(packet: dict[str, Any], repository: Path) -> None:
     if not isinstance(opencode, dict):
         fail("OpenCode install contract must be an object")
     repository_file(repository, opencode.get("plugin_capture"), "OpenCode plugin capture")
+
+
+UNSUPPORTED_PLATFORM_GATES = {
+    "platform_windows_lifecycle",
+    "platform_macos_lifecycle",
+}
+
+
+def check_owner_receipt(packet: dict[str, Any], repository: Path) -> None:
+    receipt_path = repository_file(repository, packet.get("owner_receipt"), "owner acceptance receipt")
+    receipt = load_object(receipt_path)
+    if receipt.get("receipt_kind") != "owner_acceptance_v1":
+        fail("owner receipt kind must be owner_acceptance_v1")
+    if receipt.get("signature") != "none_content_addressed_sha256_only":
+        fail("owner receipt must remain content-addressed without custom signatures")
+    if not isinstance(receipt.get("commit"), str) or len(receipt["commit"]) != 40:
+        fail("owner receipt requires an exact 40-character commit")
+    toolchain = receipt.get("toolchain")
+    if not isinstance(toolchain, dict) or not all(
+        isinstance(toolchain.get(key), str) and toolchain[key]
+        for key in ("rustc", "cargo", "host", "os")
+    ):
+        fail("owner receipt requires rustc/cargo/host/os toolchain metadata")
+    gates = receipt.get("gates")
+    if not isinstance(gates, dict):
+        fail("owner receipt gates must be an object")
+    for gate_id in UNSUPPORTED_PLATFORM_GATES:
+        entry = gates.get(gate_id)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("state") != "pending_unsupported_host":
+            fail(f"{gate_id} must remain pending_unsupported_host on this Linux host")
+        if not isinstance(entry.get("reason"), str) or not entry["reason"]:
+            fail(f"{gate_id} pending receipt requires a reason")
 
 
 STATIC_GATES: dict[str, Callable[[dict[str, Any], Path], None]] = {
@@ -229,12 +264,26 @@ def run_static_gates(packet: dict[str, Any], repository: Path) -> None:
     executor.shutdown(wait=True)
 
 
-def strict_acceptance(packet: dict[str, Any]) -> None:
+def strict_acceptance(packet: dict[str, Any], repository: Path) -> None:
     gaps = packet.get("red_gaps")
     if not isinstance(gaps, list):
         fail("red_gaps must be an array")
     if gaps:
         fail("strict acceptance incomplete: " + ", ".join(str(gap) for gap in gaps))
+    check_owner_receipt(packet, repository)
+    receipt = load_object(
+        repository_file(repository, packet.get("owner_receipt"), "owner acceptance receipt")
+    )
+    gates = cast(dict[str, Any], receipt.get("gates", {}))
+    for gate_id in packet.get("ci_gate_ids", []):
+        if gate_id in UNSUPPORTED_PLATFORM_GATES:
+            entry = gates.get(gate_id)
+            if not isinstance(entry, dict) or entry.get("state") != "pending_unsupported_host":
+                fail(f"strict owner receipt missing pending_unsupported_host for {gate_id}")
+            continue
+        entry = gates.get(gate_id)
+        if not isinstance(entry, dict) or entry.get("state") != "executed_passed":
+            fail(f"strict owner receipt missing executed_passed for {gate_id}")
 
 
 def main() -> int:
@@ -252,8 +301,9 @@ def main() -> int:
     else:
         fail("unknown static gate self-test unexpectedly passed")
     run_static_gates(packet, repository)
+    check_owner_receipt(packet, repository)
     if args.strict:
-        strict_acceptance(packet)
+        strict_acceptance(packet, repository)
     gaps = cast(list[Any], packet.get("red_gaps", []))
     print(f"valid PR13 host packet lint; strict gaps={len(gaps)}")
     if gaps:

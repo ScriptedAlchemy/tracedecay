@@ -235,7 +235,7 @@ async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
         optional_i64(&conn, "PRAGMA user_version", ())
             .await
             .unwrap(),
-        Some(23)
+        Some(24)
     );
     assert!(
         table_exists(&conn, "memory_v2_compatibility_banks")

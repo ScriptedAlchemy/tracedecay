@@ -3801,11 +3801,127 @@ async fn projectless_tools_call_response(
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };
     }
+    if tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search" {
+        return projectless_user_lcm_tools_call_response(
+            id,
+            tool_name,
+            arguments,
+            client_identity,
+            store_administration,
+        )
+        .await;
+    }
+    if matches!(
+        tool_name,
+        "tracedecay_fact_store" | "tracedecay_fact_feedback" | "tracedecay_memory_status"
+    ) {
+        if arguments
+            .get("memory_scope")
+            .and_then(serde_json::Value::as_str)
+            != Some("user")
+        {
+            return JsonRpcResponse::error(
+                id,
+                ErrorCode::InvalidParams,
+                "projectless memory dispatch requires memory_scope=user".to_string(),
+            );
+        }
+        return match crate::mcp::tools::handle_user_memory_tool(
+            tool_name,
+            arguments,
+            &client_identity.profile_root,
+        )
+        .await
+        {
+            Ok(result) => JsonRpcResponse::success(id, result.value),
+            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        };
+    }
     JsonRpcResponse::error(
         id,
         ErrorCode::InternalError,
         format!("{tool_name} requires an initialized code project"),
     )
+}
+
+async fn projectless_user_lcm_tools_call_response(
+    id: serde_json::Value,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    client_identity: &DaemonClientIdentity,
+    store_administration: &StoreAdministration,
+) -> crate::mcp::JsonRpcResponse {
+    if arguments
+        .get("storage_scope")
+        .and_then(serde_json::Value::as_str)
+        != Some("user")
+    {
+        return JsonRpcResponse::error(
+            id,
+            ErrorCode::InvalidParams,
+            "projectless LCM dispatch requires storage_scope=user".to_string(),
+        );
+    }
+    let user_session_db = match store_administration
+        .user_session_database(&client_identity.global_db_path)
+        .await
+    {
+        Ok(user_session_db) => user_session_db,
+        Err(error) => {
+            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+        }
+    };
+    let refresh_wake = store_administration
+        .session_temporal_refresh_schedulers()
+        .ensure_profile(
+            user_session_db.db_path().to_path_buf(),
+            Arc::clone(&user_session_db),
+        )
+        .await;
+    let retrieval_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let retrieval_service = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
+        .and_then(|root| {
+            crate::mcp::server::DaemonSessionRetrievalService::new(
+                Arc::clone(&user_session_db),
+                root,
+                Arc::clone(&retrieval_calls),
+                Some(refresh_wake.clone()),
+            )
+        })
+        .map(|service| {
+            Arc::new(service) as Arc<dyn crate::mcp::tools::SessionRetrievalServicePort>
+        });
+    let result = crate::mcp::tools::handle_user_lcm_tool_with_retained_authority(
+        tool_name,
+        arguments.clone(),
+        &client_identity.profile_root,
+        &user_session_db,
+        retrieval_service.as_deref(),
+    )
+    .await;
+    match result {
+        Ok(result) => {
+            if tool_name == "tracedecay_lcm_preflight"
+                && arguments
+                    .get("transcript_projection")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            {
+                let _ = refresh_wake
+                    .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
+                    .await;
+            } else if matches!(
+                tool_name,
+                "tracedecay_lcm_preflight"
+                    | "tracedecay_lcm_compress"
+                    | "tracedecay_lcm_session_boundary"
+            ) {
+                refresh_wake.wake();
+            }
+            JsonRpcResponse::success(id, result.value)
+        }
+        Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+    }
 }
 
 fn projectless_tool_call(

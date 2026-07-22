@@ -38,6 +38,3 @@ d05e52a5db8d39c40ed2f52689e6a8aee4141fb3 # refactor(observation): report anchor 
 ddee57411e12653ce6d8679ce260c12af0f8aaee # fix(global-db): stop swallowing storage errors as row skips in registry listing
 e0efef8d24823ce04356adf118de8189a80459f4 # refactor(memory): unify project-memory DB handles into one store-owned authority
 f81d399d6302674788fec5ce217e70c60f5410cd # fix(memory): public explicit-repair entry; align status tests and docs with pure reads
-aa08e03f351892317c3c15af0cf55d40c0dec08d # feat(application): advisory GitHub runtime slice (subject over 72 chars)
-7a33a78f8f60b7d73da02071e26c4f47a57223ca # feat(index): semantic runtime and code-index slice (subject over 72 chars)
-8a48437a043c16115744683c6958015952870702 # feat daemon/transport slice (non-conventional scope, subject over 72 chars)

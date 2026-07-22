@@ -566,10 +566,15 @@ async fn verify_rows(
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     let session = projection.session();
+    // Re-derived sessions still carry the observation's host spelling. Apply the
+    // same ingest-boundary normalization used by apply_session so macOS firmlink
+    // expansions (/var -> /private/var) and user symlink families compare equal
+    // to the persisted canonical row without putting FS probing into reconcile.
+    let expected = canonicalize_session_project_paths(session);
     if !read_session(conn, &session.provider, &session.session_id)
         .await?
         .as_ref()
-        .is_some_and(|actual| session_rows_compatible(actual, session))
+        .is_some_and(|actual| session_rows_compatible(actual, &expected))
     {
         return Err(ProjectionStoreError::OutputCollision {
             provider: session.provider.clone(),
@@ -724,18 +729,16 @@ pub(super) fn session_rows_compatible(
     reconcile_session_rows(actual, expected).is_some()
 }
 
-/// Apply-side ingest normalization boundary. Resolves a freshly ingested
-/// session row's project path to its canonical on-disk form so that symlinked
-/// family roots (e.g. `/home/zack/projects` vs `/fast/projects`) converge to a
-/// single stored spelling before they are persisted.
+/// Session project-path normalization boundary. Resolves a session row's
+/// project path to its canonical on-disk form so that symlinked family roots
+/// (e.g. `/home/zack/projects` vs `/fast/projects`) converge to a single
+/// spelling before they are persisted or compared.
 ///
-/// Filesystem access is confined here, at the point a session path first
-/// enters projection state via [`apply_session`](super::apply). The
-/// verify/audit and rebuild paths reach [`reconcile_session_rows`] on stored
-/// strings alone and never canonicalize, so projection output and authority
-/// audits stay reproducible from stored evidence: deleting the project
-/// directory or removing a symlink can no longer turn healthy observations into
-/// durable output-collision disposals.
+/// Called from [`apply_session`](super::apply) at ingest, and from verify/rebuild
+/// on the re-derived expected row so host spellings match the persisted form.
+/// [`reconcile_session_rows`] itself stays pure string/shape logic with no
+/// filesystem access. macOS `/var` firmlink expansions are collapsed back to the
+/// public `/var/...` spelling inside [`canonical_project_path`].
 pub(super) fn canonicalize_session_project_paths(
     session: &crate::sessions::SessionRecord,
 ) -> crate::sessions::SessionRecord {
@@ -756,9 +759,18 @@ pub(super) fn canonicalize_session_project_paths(
 /// `Some` only when the path exists and its canonical spelling differs. Non
 /// paths and vanished paths yield `None`, so identity is only widened by
 /// verifiable filesystem evidence.
+///
+/// On macOS, `Path::canonicalize` expands firmlinks such as `/var` ->
+/// `/private/var`. Prefer the stable public `/var/...` spelling (same policy as
+/// [`crate::sessions::git_correlation::normalize_worktree`]) so host-reported
+/// temp/project roots are not rewritten into a form that breaks search keys and
+/// authority verify against the original observation path.
 fn canonical_project_path(path: &str) -> Option<String> {
     let canonical = std::path::Path::new(path).canonicalize().ok()?;
-    let canonical = canonical.to_string_lossy().into_owned();
+    let mut canonical = canonical.to_string_lossy().into_owned();
+    if let Some(stripped) = canonical.strip_prefix("/private/var/") {
+        canonical = format!("/var/{stripped}");
+    }
     (canonical != path).then_some(canonical)
 }
 
@@ -1015,7 +1027,9 @@ pub(super) async fn protected_message_rows_compatible(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod reconcile_tests {
-    use super::{canonicalize_session_project_paths, reconcile_session_rows};
+    #[cfg(unix)]
+    use super::canonicalize_session_project_paths;
+    use super::reconcile_session_rows;
 
     fn record(project_path: &str) -> crate::sessions::SessionRecord {
         crate::sessions::SessionRecord {
@@ -1043,7 +1057,6 @@ mod reconcile_tests {
         std::fs::create_dir_all(&real).unwrap();
         let alias_parent = tmp.path().join("home-projects");
         std::os::unix::fs::symlink(tmp.path().join("fast-projects"), &alias_parent).unwrap();
-        let real = real.canonicalize().unwrap();
         let aliased = alias_parent.join("repo");
 
         // The apply-side ingest boundary resolves each family spelling to the
@@ -1051,13 +1064,18 @@ mod reconcile_tests {
         let normalized_alias =
             canonicalize_session_project_paths(&record(&aliased.to_string_lossy()));
         let normalized_real = canonicalize_session_project_paths(&record(&real.to_string_lossy()));
-        assert_eq!(normalized_alias.project_path, real.to_string_lossy());
-        assert_eq!(normalized_alias.project_key, real.to_string_lossy());
+        assert_eq!(normalized_alias.project_path, normalized_real.project_path);
+        assert_eq!(normalized_alias.project_key, normalized_real.project_key);
+        assert_ne!(
+            normalized_alias.project_path,
+            aliased.to_string_lossy(),
+            "user symlink families must converge away from the alias spelling"
+        );
 
         let merged = reconcile_session_rows(&normalized_alias, &normalized_real)
             .expect("normalized symlink families naming one directory must reconcile");
-        assert_eq!(merged.project_path, real.to_string_lossy());
-        assert_eq!(merged.project_key, real.to_string_lossy());
+        assert_eq!(merged.project_path, normalized_real.project_path);
+        assert_eq!(merged.project_key, normalized_real.project_key);
 
         // Symmetric: order must not change the merged identity.
         let merged_reversed = reconcile_session_rows(&normalized_real, &normalized_alias).unwrap();
@@ -1073,6 +1091,25 @@ mod reconcile_tests {
             .is_none(),
             "reconcile must not canonicalize; family identity is an ingest concern"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_temp_firmlink_spelling_is_preserved_at_ingest() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let host = project.to_string_lossy().into_owned();
+        assert!(
+            host.starts_with("/var/"),
+            "expected macOS temp host spelling under /var, got {host}"
+        );
+        let normalized = canonicalize_session_project_paths(&record(&host));
+        assert_eq!(
+            normalized.project_path, host,
+            "macOS /var firmlink expansion must not rewrite host-facing project paths"
+        );
+        assert_eq!(normalized.project_key, host);
     }
 
     #[test]

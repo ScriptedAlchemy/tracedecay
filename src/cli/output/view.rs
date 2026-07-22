@@ -403,7 +403,7 @@ mod tests {
                 "\n- Termination: `partial`",
                 "\n- Receipt: `started=10, ended=20, deadline=30, units=3, bytes=40, elapsed_us=10`",
                 "\n- Cancellation stage: `during_read`",
-                "\n- Payload: object(keys=items; json_bytes=15); complete: --json",
+                "\n- Payload: object(keys=items; json\\_bytes=15); complete: --json",
             )
         );
     }

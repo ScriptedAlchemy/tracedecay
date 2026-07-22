@@ -42,6 +42,7 @@ pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry,
     handle_tool_call_with_registry_and_implicit_project, handle_user_lcm_tool,
 };
+pub(crate) use handlers::handle_user_lcm_tool_with_retained_authority;
 
 /// Maximum character length for a tool response before truncation.
 const MAX_RESPONSE_CHARS: usize = 15_000;

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::PoisonError;
 
 #[cfg(unix)]

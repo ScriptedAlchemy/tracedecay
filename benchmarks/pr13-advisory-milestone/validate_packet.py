@@ -139,6 +139,39 @@ def check_references(packet: dict[str, Any], repository: Path) -> None:
     repository_file(repository, contract.get("test"), "behavioral acceptance test")
     repository_file(repository, contract.get("runtime_test"), "runtime decoder acceptance test")
     repository_file(repository, packet.get("host_packet"), "host acceptance packet")
+    repository_file(repository, packet.get("owner_receipt"), "owner acceptance receipt")
+
+
+def check_owner_receipt(packet: dict[str, Any], repository: Path) -> None:
+    receipt_path = repository_file(repository, packet.get("owner_receipt"), "owner acceptance receipt")
+    receipt = load_object(receipt_path)
+    if receipt.get("receipt_kind") != "owner_acceptance_v1":
+        fail("owner receipt kind must be owner_acceptance_v1")
+    if receipt.get("signature") != "none_content_addressed_sha256_only":
+        fail("owner receipt must remain content-addressed without custom signatures")
+    if not isinstance(receipt.get("commit"), str) or len(receipt["commit"]) != 40:
+        fail("owner receipt requires an exact 40-character commit")
+    toolchain = receipt.get("toolchain")
+    if not isinstance(toolchain, dict) or not all(
+        isinstance(toolchain.get(key), str) and toolchain[key]
+        for key in ("rustc", "cargo", "host", "os")
+    ):
+        fail("owner receipt requires rustc/cargo/host/os toolchain metadata")
+    gates = receipt.get("gates")
+    if not isinstance(gates, dict):
+        fail("owner receipt gates must be an object")
+    for gate_id in packet.get("ci_gate_ids", []):
+        entry = gates.get(gate_id)
+        if not isinstance(entry, dict):
+            # Receipt may still be filling; lint allows missing until strict mode.
+            continue
+        state = entry.get("state")
+        if state not in {"executed_passed", "pending_unsupported_host", "blocked", "pending_parent_gate"}:
+            fail(f"owner receipt gate {gate_id} has invalid state {state!r}")
+        if state == "executed_passed":
+            digest = entry.get("stdout_sha256")
+            if not isinstance(digest, str) or not digest.startswith("sha256:"):
+                fail(f"owner receipt gate {gate_id} requires stdout_sha256")
 
 
 STATIC_GATES: dict[str, Callable[[dict[str, Any], Path], None]] = {
@@ -181,12 +214,21 @@ def assert_unknown_gate_rejected() -> None:
     fail("unknown static gate self-test unexpectedly passed")
 
 
-def strict_acceptance(packet: dict[str, Any]) -> None:
+def strict_acceptance(packet: dict[str, Any], repository: Path) -> None:
     gaps = packet.get("provider_gaps")
     if not isinstance(gaps, list):
         fail("provider_gaps must be an array")
     if gaps:
         fail("strict acceptance incomplete: " + ", ".join(str(gap) for gap in gaps))
+    check_owner_receipt(packet, repository)
+    receipt = load_object(
+        repository_file(repository, packet.get("owner_receipt"), "owner acceptance receipt")
+    )
+    gates = cast(dict[str, Any], receipt.get("gates", {}))
+    for gate_id in packet.get("ci_gate_ids", []):
+        entry = gates.get(gate_id)
+        if not isinstance(entry, dict) or entry.get("state") != "executed_passed":
+            fail(f"strict owner receipt missing executed_passed for {gate_id}")
 
 
 def main() -> int:
@@ -207,8 +249,9 @@ def main() -> int:
     packet = load_object(directory / "workload-v1.json")
     assert_unknown_gate_rejected()
     run_static_gates(packet, repository)
+    check_owner_receipt(packet, repository)
     if args.strict:
-        strict_acceptance(packet)
+        strict_acceptance(packet, repository)
     gaps = packet.get("provider_gaps", [])
     print(f"valid PR13 advisory packet lint; strict gaps={len(gaps)}")
     if gaps:

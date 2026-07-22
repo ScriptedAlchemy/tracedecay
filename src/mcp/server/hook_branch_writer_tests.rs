@@ -87,13 +87,11 @@ async fn add_branch_plan_uses_injected_writer_without_direct_fallback() {
     .await;
     let snapshot = server.cg_snapshot().await;
 
-    server
-        .run_hook_event_plan(
-            snapshot.clone(),
-            &root,
-            HookEventPlan::AddBranch(branch.into()),
-        )
-        .await;
+        Box::pin(server.run_hook_event_plan(
+        snapshot.clone(),
+        &root,
+        HookEventPlan::AddBranch(branch.into())
+    )).await;
 
     assert_eq!(
         observed.lock().expect("recording lock").as_slice(),
@@ -128,17 +126,15 @@ async fn add_branch_at_plan_delegates_open_and_sync_without_direct_fallback() {
     .await;
     let snapshot = server.cg_snapshot().await;
 
-    server
-        .run_hook_event_plan(
-            snapshot.clone(),
-            &root,
-            HookEventPlan::AddBranchAt {
+        Box::pin(server.run_hook_event_plan(
+        snapshot.clone(),
+        &root,
+        HookEventPlan::AddBranchAt {
                 root: root.clone(),
-                branch: branch.to_string(),
-                agent: HookAgent::Codex,
-            },
-        )
-        .await;
+        branch: branch.to_string(),
+        agent: HookAgent::Codex,
+        }
+    )).await;
 
     assert_eq!(
         observed.lock().expect("recording lock").as_slice(),
@@ -173,16 +169,14 @@ async fn sync_current_branch_deferred_writer_does_not_fall_back_to_direct_sync()
     let marker =
         hook_events::sync_marker_path(&snapshot.store_layout().data_root, HookAgent::Codex);
 
-    server
-        .run_hook_event_plan(
-            snapshot,
-            &root,
-            HookEventPlan::SyncCurrentBranch {
+        Box::pin(server.run_hook_event_plan(
+        snapshot,
+        &root,
+        HookEventPlan::SyncCurrentBranch {
                 branch: branch.clone(),
-                agent: HookAgent::Codex,
-            },
-        )
-        .await;
+        agent: HookAgent::Codex,
+        }
+    )).await;
 
     assert_eq!(
         observed.lock().expect("recording lock").as_slice(),
@@ -214,16 +208,14 @@ async fn sync_current_branch_writer_error_does_not_fall_back_to_direct_sync() {
     let marker =
         hook_events::sync_marker_path(&snapshot.store_layout().data_root, HookAgent::Codex);
 
-    server
-        .run_hook_event_plan(
-            snapshot,
-            &root,
-            HookEventPlan::SyncCurrentBranch {
+        Box::pin(server.run_hook_event_plan(
+        snapshot,
+        &root,
+        HookEventPlan::SyncCurrentBranch {
                 branch: branch.clone(),
-                agent: HookAgent::Codex,
-            },
-        )
-        .await;
+        agent: HookAgent::Codex,
+        }
+    )).await;
 
     assert_eq!(
         observed.lock().expect("recording lock").as_slice(),

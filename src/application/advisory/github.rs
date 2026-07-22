@@ -403,7 +403,7 @@ mod tests {
                 ),
             )
             .await;
-        assert_eq!(outcome, GitHubReviewReadPortOutcomeV1::Unavailable);
+        assert_eq!(outcome, GitHubReviewReadPortOutcomeV1::Denied);
         assert_eq!(transport_calls.rest.load(Ordering::SeqCst), 0);
         assert_eq!(transport_calls.graphql.load(Ordering::SeqCst), 0);
 

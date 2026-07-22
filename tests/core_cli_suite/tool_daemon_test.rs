@@ -1556,3 +1556,263 @@ fn status_command_times_out_when_daemon_never_replies() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+fn spawn_handshake_capturing_daemon(socket_path: PathBuf) -> mpsc::Receiver<Value> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (handshake_tx, handshake_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        ready_tx.send(()).expect("notify fake daemon readiness");
+
+        let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
+        let (stream, _) = common::poll_until(
+            deadline,
+            Duration::from_millis(10),
+            || match listener.accept() {
+                Ok(accepted) => Some(accepted),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+                Err(e) => panic!("accept fake daemon client: {e}"),
+            },
+            || "timed out waiting for tool CLI to connect to fake daemon".to_string(),
+        );
+        stream
+            .set_nonblocking(false)
+            .expect("set accepted stream blocking");
+        let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
+
+        let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+        let mut handshake = String::new();
+        reader
+            .read_line(&mut handshake)
+            .expect("read daemon handshake");
+        let handshake: Value = serde_json::from_str(handshake.trim()).expect("handshake JSON");
+        handshake_tx
+            .send(handshake)
+            .expect("send observed handshake");
+
+        let mut request = String::new();
+        reader
+            .read_line(&mut request)
+            .expect("read JSON-RPC request");
+        let request: Value = serde_json::from_str(request.trim()).expect("request JSON");
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request["id"].clone(),
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": "{\"status\":\"ok\"}"
+                }]
+            }
+        });
+        let mut writer = stream;
+        writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+            .expect("write fake daemon response");
+    });
+
+    ready_rx
+        .recv_timeout(LOCAL_READY_TIMEOUT)
+        .expect("fake daemon should become ready");
+    handshake_rx
+}
+
+#[test]
+fn user_scoped_lcm_tool_cli_handshakes_projectless_from_filesystem_root_cwd() {
+    let home = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let observed_handshake = spawn_handshake_capturing_daemon(socket_path.clone());
+    let args = json!({
+        "provider": "hermes",
+        "session_id": "stock-check-session",
+        "storage_scope": "user",
+        "transcript_projection": true,
+        "messages": [
+            {"role": "user", "content": "hello", "id": "m1"},
+            {"role": "assistant", "content": "hi there", "id": "m2"}
+        ],
+    })
+    .to_string();
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(std::path::Path::new("/"))
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args([
+            "tool",
+            "tracedecay_lcm_preflight",
+            "--json",
+            "--args",
+            args.as_str(),
+        ])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert!(
+        output.status.success(),
+        "user-scoped LCM from cwd=/ must reach the daemon projectless\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let handshake = observed_handshake
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
+        .expect("fake daemon should observe handshake");
+    assert!(
+        handshake.get("project_path").is_none()
+            || handshake.get("project_path") == Some(&Value::Null),
+        "Hermes user scope must not invent project=/; handshake was {handshake}"
+    );
+}
+
+#[test]
+fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
+    // Mirrors scripts/hermes_stock_check.py: user-scoped sync_turn (cwd=/) then
+    // project-scoped lcm_grep must stay available without inventing project=/.
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let project_arg = project_path.to_string_lossy().to_string();
+    let socket = common::daemon_socket_path(&home_path);
+
+    let user_args = json!({
+        "provider": "hermes",
+        "session_id": "stock-check-session",
+        "storage_scope": "user",
+        "transcript_projection": true,
+        "messages": [
+            {
+                "role": "user",
+                "content": "hello",
+                "id": "tracedecay_sync_1_user",
+                "timestamp": 1.0,
+                "associated_project_roots": [project_arg],
+            },
+            {
+                "role": "assistant",
+                "content": "hi there",
+                "id": "tracedecay_sync_1_assistant",
+                "timestamp": 1.0,
+                "associated_project_roots": [project_arg],
+            }
+        ],
+    })
+    .to_string();
+    let user_output = tracedecay_command_with_home(&home_path)
+        .current_dir(std::path::Path::new("/"))
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket)
+        .args([
+            "tool",
+            "tracedecay_lcm_preflight",
+            "--json",
+            "--args",
+            user_args.as_str(),
+        ])
+        .output()
+        .expect("user-scoped sync_turn preflight should run");
+    assert!(
+        user_output.status.success(),
+        "user-scoped Hermes preflight must succeed projectless\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&user_output.stdout),
+        String::from_utf8_lossy(&user_output.stderr)
+    );
+
+    let project_args = json!({
+        "provider": "hermes",
+        "session_id": "stock-check-session",
+        "transcript_projection": true,
+        "messages": [
+            {
+                "role": "user",
+                "content": "hello",
+                "id": "tracedecay_sync_1_user",
+                "timestamp": 1.0,
+                "associated_project_roots": [project_arg],
+            },
+            {
+                "role": "assistant",
+                "content": "hi there",
+                "id": "tracedecay_sync_1_assistant",
+                "timestamp": 1.0,
+                "associated_project_roots": [project_arg],
+            }
+        ],
+    })
+    .to_string();
+    let project_output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "tracedecay_lcm_preflight",
+            "--json",
+            "--args",
+            project_args.as_str(),
+        ])
+        .output()
+        .expect("project-scoped sync_turn preflight should run");
+    assert!(
+        project_output.status.success(),
+        "project-scoped Hermes preflight must succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&project_output.stdout),
+        String::from_utf8_lossy(&project_output.stderr)
+    );
+
+    let grep_args = json!({
+        "provider": "hermes",
+        "session_id": "stock-check-session",
+        "query": "hello",
+        "scope": "all",
+    })
+    .to_string();
+    let grep_output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "tracedecay_lcm_grep",
+            "--json",
+            "--args",
+            grep_args.as_str(),
+        ])
+        .output()
+        .expect("project-scoped lcm_grep should run");
+    assert!(
+        grep_output.status.success(),
+        "lcm_grep after sync_turn must succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&grep_output.stdout),
+        String::from_utf8_lossy(&grep_output.stderr)
+    );
+    let grep: Value = serde_json::from_slice(&grep_output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "lcm_grep should return JSON ({error}): {}",
+            String::from_utf8_lossy(&grep_output.stdout)
+        )
+    });
+    let payload = grep
+        .pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .unwrap_or(grep);
+    assert!(
+        payload.get("error").is_none(),
+        "stock Hermes regression: grep must remain available after sync_turn, got {payload}"
+    );
+    assert_ne!(
+        payload.get("status").and_then(Value::as_str),
+        Some("unavailable"),
+        "stock Hermes regression: temporal store must stay attached, got {payload}"
+    );
+}

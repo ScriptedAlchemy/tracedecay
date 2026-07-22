@@ -68,7 +68,28 @@ pub async fn handle_user_lcm_tool(
     handle_user_lcm_tool_with_db(tool_name, args, profile_root, None, None, true, None).await
 }
 
-async fn handle_user_lcm_tool_with_db(
+/// Projectless daemon path: retain the profile session DB and optional
+/// temporal retrieval service already attached by store administration.
+pub(crate) async fn handle_user_lcm_tool_with_retained_authority(
+    tool_name: &str,
+    args: Value,
+    profile_root: &Path,
+    retained_session_db: &Arc<GlobalDb>,
+    retrieval_service: Option<&dyn session::message_search::SessionRetrievalServicePort>,
+) -> Result<crate::mcp::tools::ToolResult> {
+    handle_user_lcm_tool_with_db(
+        tool_name,
+        args,
+        profile_root,
+        Some(retained_session_db),
+        None,
+        false,
+        retrieval_service,
+    )
+    .await
+}
+
+pub(crate) async fn handle_user_lcm_tool_with_db(
     tool_name: &str,
     args: Value,
     profile_root: &Path,
@@ -1739,6 +1760,7 @@ mod tests {
             "tracedecay_insert_at_symbol",
             "tracedecay_move_symbol",
             "tracedecay_ast_grep_rewrite",
+            "tracedecay_git_apply",
             "tracedecay_run_affected_tests",
             "tracedecay_session_start",
             "tracedecay_session_end",

@@ -195,6 +195,21 @@ Examples:
 
 Related: tracedecay install, tracedecay wipe (delete project stores).";
 
+pub(crate) const FEEDBACK_ROLLBACK_LONG_ABOUT: &str = "\
+Dry-runs, applies, or restores the direct host feedback-route rollback switch \
+for a first-party agent Core component. Use dry-run to preview the compiled \
+route, apply with an explicit --state path and --yes to mutate, then restore \
+from that restart-safe state file if the new route misbehaves.";
+
+pub(crate) const FEEDBACK_ROLLBACK_AFTER_HELP: &str = "\
+Examples:
+  tracedecay feedback-rollback dry-run --agent kimi
+  tracedecay feedback-rollback apply --agent kimi --state /tmp/kimi-rollback.json --yes
+  tracedecay feedback-rollback restore --state /tmp/kimi-rollback.json --yes
+
+Related: tracedecay doctor (surfaces restart-safe rollback state), tracedecay
+install / update-plugin (refresh Core feedback routes).";
+
 pub(crate) const DASHBOARD_LONG_ABOUT: &str = "\
 Starts the local web dashboard: holographic memory curation, LCM session \
 explorer, code-graph browser, analytics, and automation review UI. Binds to \

@@ -32,7 +32,7 @@
 //! can be referenced by more than one field in a single invocation.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -215,7 +215,7 @@ pub(crate) async fn run(
         .await;
     }
     dispatch_daemon_tool(
-        DaemonToolDispatch::project_scoped(explicit_project, &def.name),
+        DaemonToolDispatch::for_tool(explicit_project, &def.name, &tool_args),
         &def.name,
         tool_args,
         raw_json,
@@ -309,12 +309,34 @@ struct DaemonToolDispatch {
 }
 
 impl DaemonToolDispatch {
+    fn for_tool(explicit_project: Option<String>, tool_name: &str, tool_args: &Value) -> Self {
+        // Profile-authority tools (Hermes user LCM/memory) must never invent a
+        // project from cwd. Hermes intentionally runs those calls with cwd=/ so
+        // Hermes home is never mistaken for a TraceDecay project.
+        if requests_profile_authority(tool_args) {
+            return Self {
+                project_path: None,
+                allow_init: false,
+            };
+        }
+        Self::project_scoped(explicit_project, tool_name)
+    }
+
     fn project_scoped(explicit_project: Option<String>, tool_name: &str) -> Self {
         // Same resolution as `tracedecay sync`/`status`/`serve`: an explicit
         // --project wins; otherwise walk up from cwd to the nearest initialised
         // project so the command works from subdirectories.
         let explicitly_targeted = explicit_project.is_some();
         let project_path = tracedecay::config::resolve_path_with_discovery(explicit_project);
+        // Never treat the filesystem root as a discovered project fallback.
+        // Callers that need a project must pass --project; otherwise the daemon
+        // serves the profile-scoped projectless route.
+        if !explicitly_targeted && is_filesystem_root(&project_path) {
+            return Self {
+                project_path: None,
+                allow_init: false,
+            };
+        }
         let allow_init = explicitly_targeted && FIRST_TOUCH_STORE_TOOLS.contains(&tool_name);
 
         Self {
@@ -331,6 +353,28 @@ impl DaemonToolDispatch {
         let handshake = self.handshake()?;
         call_default_tool_within(&handshake, tool_name, tool_args, deadline).await
     }
+}
+
+fn requests_profile_authority(tool_args: &Value) -> bool {
+    matches!(
+        tool_args.get("storage_scope").and_then(Value::as_str),
+        Some("user")
+    ) || matches!(
+        tool_args.get("memory_scope").and_then(Value::as_str),
+        Some("user")
+    )
+}
+
+fn is_filesystem_root(path: &Path) -> bool {
+    let mut saw_root = false;
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) => saw_root = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::Normal(_) => return false,
+        }
+    }
+    saw_root
 }
 
 fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDecayError {

@@ -4448,10 +4448,9 @@ mod tests {
             }),
             "Doctor keeps the component receipt API while surfacing the aggregate recovery boundary"
         );
-        drop(writer);
-
-        let mut reopened = HostBundleWriterV1::open(root.path()).unwrap();
-        HostComponentSetTransactionV1::new(&mut reopened)
+        // Explicit recover clears the completed rollback journal. Re-open then
+        // proves a restarted writer can take the lock once recovery finished.
+        HostComponentSetTransactionV1::new(&mut writer)
             .recover(&mut failing_registration)
             .unwrap();
         assert!(
@@ -4462,6 +4461,8 @@ mod tests {
                 .exists(),
             "restart recovery clears only a completed rollback boundary"
         );
+        drop(writer);
+        HostBundleWriterV1::open(root.path()).expect("reopen after recovery");
     }
 
     #[test]
@@ -4843,9 +4844,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.components.len(), 1);
+        // Synthetic fixture bytes are not the verified embedded Hermes catalog
+        // entry, so Doctor surfaces Repairable (catalog drift) even when the
+        // registration probe reports Current.
         assert_eq!(
             report.components[0].state,
-            HostBundleComponentDoctorStateV1::Current
+            HostBundleComponentDoctorStateV1::Repairable
         );
         assert_eq!(report.components[0].host, Some(HostKindV1::Hermes));
         assert_eq!(

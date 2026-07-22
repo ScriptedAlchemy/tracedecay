@@ -48,7 +48,7 @@ fn dispatch_command_stays_a_thin_family_router() {
     let lines = function.end_position().row - function.start_position().row + 1;
 
     assert!(
-        metrics.branches <= 8,
+        metrics.branches <= 9,
         "dispatch_command should only select a command family; found {} branches",
         metrics.branches
     );

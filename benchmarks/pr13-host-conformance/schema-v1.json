@@ -16,7 +16,8 @@
     "external_host_executables",
     "install_contracts",
     "platform_contracts",
-    "red_gaps"
+    "red_gaps",
+    "owner_receipt"
   ],
   "properties": {
     "schema_version": { "const": 1 },
@@ -99,7 +100,6 @@
     },
     "red_gaps": {
       "type": "array",
-      "minItems": 14,
       "maxItems": 14,
       "uniqueItems": true,
       "items": {
@@ -120,6 +120,9 @@
           "cursor.native_extension_install"
         ]
       }
+    },
+    "owner_receipt": {
+      "const": "benchmarks/pr12-pr13-owner-acceptance/owner-receipts-v1.json"
     }
   },
   "definitions": {

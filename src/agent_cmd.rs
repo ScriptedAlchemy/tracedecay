@@ -2288,10 +2288,13 @@ mod tests {
             explicit.component_set.components[0].manifest.component,
             tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp
         );
-        assert!(
-            canonical_host_component_set("hermes", None, 0)
-                .unwrap()
-                .is_none()
+        let hermes = canonical_host_component_set("hermes", None, 0)
+            .unwrap()
+            .expect("Hermes has a first-party default Core set");
+        assert_eq!(hermes.component_set.components.len(), 1);
+        assert_eq!(
+            hermes.component_set.components[0].manifest.component,
+            tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
         );
     }
 }

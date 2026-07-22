@@ -268,5 +268,6 @@
     "platform.windows_lifecycle",
     "platform.macos_lifecycle",
     "cursor.native_extension_install"
-  ]
+  ],
+  "owner_receipt": "benchmarks/pr12-pr13-owner-acceptance/owner-receipts-v1.json"
 }

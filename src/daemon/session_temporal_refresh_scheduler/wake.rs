@@ -460,6 +460,34 @@ impl SessionTemporalRefreshWake {
         }
     }
 
+    /// Wake the refresh worker and wait until it finishes the resulting pass.
+    ///
+    /// Live LCM transcript projection writes must become temporally searchable
+    /// before the mutating tool returns so Hermes `sync_turn` → `lcm_grep`
+    /// stays available on the same route without inventing stores or weakening
+    /// empty/unavailable semantics.
+    pub(crate) async fn wake_and_wait_until_idle(&self, timeout: std::time::Duration) -> bool {
+        let Some(state) = self.target() else {
+            return false;
+        };
+        let before = state.pass_count.load(Ordering::Acquire);
+        state.wake();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let pass_count = state.pass_count.load(Ordering::Acquire);
+            let busy = state.busy.load(Ordering::Acquire);
+            let dirty = state.dirty.load(Ordering::Acquire);
+            let pending = state.has_requests();
+            if pass_count > before && !busy && !dirty && !pending {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return pass_count > before && !busy && !dirty && !pending;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     pub(crate) fn status(&self) -> SessionTemporalRefreshWorkerStatus {
         self.target()
             .map_or_else(SessionTemporalRefreshWorkerStatus::missing, |state| {

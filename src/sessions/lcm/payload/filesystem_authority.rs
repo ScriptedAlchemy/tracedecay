@@ -144,7 +144,7 @@ where
     #[cfg(windows)]
     {
         delete_open_file_windows(&file)?;
-        return Ok(true);
+        Ok(true)
     }
 
     #[cfg(not(windows))]
@@ -800,7 +800,7 @@ pub(super) fn write_private_file(
 ) -> Result<PayloadFileWrite, LcmError> {
     #[cfg(windows)]
     {
-        return write_private_file_windows(path, content);
+        write_private_file_windows(path, content)
     }
 
     #[cfg(not(windows))]
@@ -900,6 +900,7 @@ fn write_private_file_windows(path: &Path, content: &[u8]) -> Result<PayloadFile
     })
 }
 
+#[cfg(not(windows))]
 fn finish_private_file_write(
     path: &Path,
     content: &[u8],
@@ -1296,13 +1297,13 @@ mod windows_tests {
             .arg(&outside)
             .status()
             .is_ok_and(|status| status.success());
-        if !junction_created {
-            if let Err(error) = symlink_dir(&outside, &link) {
-                if error.raw_os_error() == Some(1314) {
-                    return;
-                }
-                panic!("failed to create Windows directory reparse point: {error}");
+        if !junction_created
+            && let Err(error) = symlink_dir(&outside, &link)
+        {
+            if error.raw_os_error() == Some(1314) {
+                return;
             }
+            panic!("failed to create Windows directory reparse point: {error}");
         }
 
         assert_eq!(

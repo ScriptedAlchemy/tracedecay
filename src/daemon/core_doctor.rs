@@ -11,7 +11,7 @@ use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
 use crate::errors::Result;
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 
-pub(crate) const DOCTOR_GRAPH_SCHEMA_VERSION: i64 = 23;
+pub(crate) const DOCTOR_GRAPH_SCHEMA_VERSION: i64 = 24;
 /// `SQLITE_OPEN_URI`, which libsql does not expose through [`libsql::OpenFlags`].
 pub(crate) const SQLITE_OPEN_URI: i32 = 0x0000_0040;
 

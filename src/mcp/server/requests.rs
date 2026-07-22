@@ -349,7 +349,7 @@ impl McpServer {
         // appended, even when effect processing is deferred/retained. Do not
         // wait for Committed — delayed replay must not leave tools unrouted.
         self.update_hook_workspace_route(&event, route_cache).await;
-        let outcome = self.replay_host_admission(Some(admitted.seq)).await;
+        let outcome = Box::pin(self.replay_host_admission(Some(admitted.seq))).await;
         // Route analytics + span observations are side writes: only after the
         // durable spool record is authoritatively committed (Committed or
         // ExactDuplicate). Failures are best-effort and must never change the
@@ -1264,6 +1264,12 @@ impl McpServer {
                     .await;
                 self.prepend_index_warnings(&cg, &mut result).await;
                 mark_semantic_tool_error(&mut result);
+                self.refresh_after_live_transcript_projection(
+                    &tool_name,
+                    &analytics_arguments,
+                    &result,
+                )
+                .await;
                 JsonRpcResponse::success(id, result.value)
             }
             Err(error) => {
@@ -1278,6 +1284,34 @@ impl McpServer {
                 });
                 tool_error_response(id, &tool_name, &error)
             }
+        }
+    }
+
+    async fn refresh_after_live_transcript_projection(
+        &self,
+        tool_name: &str,
+        arguments: &Value,
+        result: &ToolResult,
+    ) {
+        if tool_name != "tracedecay_lcm_preflight"
+            || arguments
+                .get("transcript_projection")
+                .and_then(Value::as_bool)
+                != Some(true)
+            || tool_result_has_semantic_error(result)
+        {
+            return;
+        }
+        let user_scope = arguments.get("storage_scope").and_then(Value::as_str) == Some("user");
+        let wake = if user_scope {
+            self.user_session_refresh_wake.as_ref()
+        } else {
+            self.project_session_refresh_wake.as_ref()
+        };
+        if let Some(wake) = wake {
+            let _ = wake
+                .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
+                .await;
         }
     }
 

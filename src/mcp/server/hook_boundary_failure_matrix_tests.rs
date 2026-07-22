@@ -325,7 +325,7 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
         counting_success_writer(Arc::clone(&writes)),
     ))
     .await;
-    server.replay_host_admission(None).await;
+    Box::pin(server.replay_host_admission(None)).await;
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(*writes.lock().unwrap(), 1);
     server.shutdown().await;

@@ -209,7 +209,7 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
     // The constructor schedules startup replay. This explicit pass joins the
     // same single-flight, so either ordering leaves one authoritative attempt
     // and an empty durable backlog.
-    server.replay_host_admission(None).await;
+    Box::pin(server.replay_host_admission(None)).await;
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(*writes.lock().unwrap(), 1);
     server.shutdown().await;
@@ -321,7 +321,7 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
         .await
         .unwrap();
 
-    let outcome = server.replay_host_admission(Some(admitted.seq)).await;
+    let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
 
     assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
     assert_eq!(outcome.reason_code, Some("host_event_payload_malformed"));
@@ -349,7 +349,7 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
         McpServer::new_with_context(context_with_broker(reopened, Arc::clone(&broker), writer))
             .await;
 
-    let outcome = server.replay_host_admission(Some(admitted.seq)).await;
+    let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
 
     assert_eq!(outcome.status, HostAdmissionStatus::AcceptedForReplay);
     assert_eq!(broker.pending_count().await, 0);
@@ -388,7 +388,7 @@ async fn unsupported_payload_version_is_retryable_and_retained_across_reopen() {
         .await
         .unwrap();
 
-    let outcome = server.replay_host_admission(Some(admitted.seq)).await;
+    let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
 
     assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
     assert_eq!(
@@ -448,7 +448,7 @@ async fn quarantine_releases_active_capacity_then_full_fails_closed() {
         )
         .await
         .unwrap();
-    let first_outcome = server.replay_host_admission(Some(first.seq)).await;
+    let first_outcome = Box::pin(server.replay_host_admission(Some(first.seq))).await;
     assert_eq!(
         first_outcome.reason_code,
         Some("host_event_payload_malformed")
@@ -463,7 +463,7 @@ async fn quarantine_releases_active_capacity_then_full_fails_closed() {
         )
         .await
         .expect("first terminal must release the one-record active capacity");
-    let second_outcome = server.replay_host_admission(Some(second.seq)).await;
+    let second_outcome = Box::pin(server.replay_host_admission(Some(second.seq))).await;
     assert_eq!(second_outcome, HostAdmissionOutcome::quarantine_full());
     assert!(!matches!(
         second_outcome.status,
@@ -520,9 +520,7 @@ async fn malformed_source_does_not_starve_valid_sibling_source() {
         .await
         .unwrap();
 
-    let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        server.replay_host_admission(Some(malformed.seq)),
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), Box::pin(server.replay_host_admission(Some(malformed.seq))),
     )
     .await
     .expect("bounded replay must not spin on the malformed record");
@@ -536,7 +534,7 @@ async fn malformed_source_does_not_starve_valid_sibling_source() {
     );
     assert_eq!(broker.quarantine_count().await, 1);
 
-    server.replay_host_admission(Some(malformed.seq)).await;
+    Box::pin(server.replay_host_admission(Some(malformed.seq))).await;
     assert_eq!(
         *attempts.lock().unwrap(),
         1,
@@ -595,7 +593,7 @@ async fn cancelled_canonical_attempt_is_recovered_and_replayed() {
     attempt.abort();
     assert!(attempt.await.unwrap_err().is_cancelled());
 
-    let outcome = server.replay_host_admission(None).await;
+    let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert_eq!(outcome.status, HostAdmissionStatus::AcceptedForReplay);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(broker.pending_count().await, 0);
@@ -690,7 +688,7 @@ async fn add_branch_at_replay_rejects_stale_root_after_adversarial_replace() {
     super::writer_test_support::git(&worktree, &["add", "."]);
     super::writer_test_support::git(&worktree, &["commit", "-q", "-m", "replacement"]);
 
-    let outcome = server.replay_host_admission(Some(admitted.seq)).await;
+    let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
     assert_eq!(outcome.reason_code, Some("stale_branch_authorization"));
     assert!(!*attempted.lock().unwrap(), "stale root must not write");
@@ -698,7 +696,7 @@ async fn add_branch_at_replay_rejects_stale_root_after_adversarial_replace() {
     assert_eq!(broker.quarantine_count().await, 1);
 
     // A second pass cannot reauthorize or write the terminal admission.
-    let outcome = server.replay_host_admission(Some(admitted.seq)).await;
+    let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::AcceptedForReplay);
     assert!(!*attempted.lock().unwrap());
     server.shutdown().await;
@@ -737,7 +735,7 @@ async fn add_branch_at_replay_rejects_stale_branch_after_switch() {
         .await
         .unwrap();
 
-    let outcome = server.replay_host_admission(Some(admitted.seq)).await;
+    let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
     assert_eq!(outcome.reason_code, Some("stale_branch_authorization"));
     assert_eq!(attempted.load(Ordering::SeqCst), 0);
@@ -780,7 +778,7 @@ async fn add_branch_replay_rejects_stale_branch_after_delayed_switch() {
     // Delayed switch after admit, before effect/replay.
     super::writer_test_support::git(project.path(), &["switch", "-c", "feature/other"]);
 
-    let outcome = server.replay_host_admission(Some(admitted.seq)).await;
+    let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
     assert_eq!(outcome.reason_code, Some("stale_branch_authorization"));
     assert!(!outcome.retryable);
@@ -788,7 +786,7 @@ async fn add_branch_replay_rejects_stale_branch_after_delayed_switch() {
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(broker.quarantine_count().await, 1);
 
-    let outcome = server.replay_host_admission(Some(admitted.seq)).await;
+    let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::AcceptedForReplay);
     assert_eq!(attempted.load(Ordering::SeqCst), 0);
     server.shutdown().await;
@@ -838,7 +836,7 @@ async fn add_branch_restart_replay_rejects_stale_branch_after_switch() {
         McpServer::new_with_context(context_with_broker(reopened, Arc::clone(&broker), writer))
             .await;
 
-    let outcome = server.replay_host_admission(None).await;
+    let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
         outcome.status,
         HostAdmissionStatus::Degraded | HostAdmissionStatus::AcceptedForReplay
@@ -886,7 +884,7 @@ async fn sync_current_branch_replay_rejects_stale_branch_after_delayed_switch() 
 
     super::writer_test_support::git(project.path(), &["switch", "-c", "feature/sync-other"]);
 
-    let outcome = server.replay_host_admission(Some(admitted.seq)).await;
+    let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
     assert_eq!(outcome.reason_code, Some("stale_branch_authorization"));
     assert!(!outcome.retryable);
@@ -894,7 +892,7 @@ async fn sync_current_branch_replay_rejects_stale_branch_after_delayed_switch() 
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(broker.quarantine_count().await, 1);
 
-    let outcome = server.replay_host_admission(Some(admitted.seq)).await;
+    let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::AcceptedForReplay);
     assert_eq!(attempted.load(Ordering::SeqCst), 0);
     server.shutdown().await;
@@ -944,7 +942,7 @@ async fn sync_current_branch_restart_replay_rejects_stale_branch_after_switch() 
         McpServer::new_with_context(context_with_broker(reopened, Arc::clone(&broker), writer))
             .await;
 
-    let outcome = server.replay_host_admission(None).await;
+    let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
         outcome.status,
         HostAdmissionStatus::Degraded | HostAdmissionStatus::AcceptedForReplay
@@ -1019,7 +1017,7 @@ async fn add_branch_at_restart_replay_rejects_common_dir_drift() {
         McpServer::new_with_context(context_with_broker(reopened, Arc::clone(&broker), writer))
             .await;
 
-    let outcome = server.replay_host_admission(None).await;
+    let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
         outcome.status,
         HostAdmissionStatus::Degraded | HostAdmissionStatus::AcceptedForReplay
@@ -1089,7 +1087,7 @@ async fn add_branch_at_restart_replay_rejects_symlink_swap() {
         McpServer::new_with_context(context_with_broker(reopened, Arc::clone(&broker), writer))
             .await;
 
-    let outcome = server.replay_host_admission(None).await;
+    let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
         outcome.status,
         HostAdmissionStatus::Degraded | HostAdmissionStatus::AcceptedForReplay
@@ -1324,7 +1322,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
         .expect("query pre-commit hook spans");
     assert!(spans.is_empty(), "retained effects must not leak git spans");
 
-    let replayed = server.replay_host_admission(None).await;
+    let replayed = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
         replayed.status,
         HostAdmissionStatus::AcceptedForReplay

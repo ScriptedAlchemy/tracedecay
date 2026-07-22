@@ -1,0 +1,95 @@
+{
+  "authority": "owner_acceptance",
+  "commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
+  "executed_at": "2026-07-22T19:11:06+00:00",
+  "gates": {
+    "cursor_native_extension_check": {
+      "command": [
+        "npm",
+        "--prefix",
+        "plugin/cursor-native-extension",
+        "run",
+        "check"
+      ],
+      "command_sha256": "sha256:6c4a3c2444208b7325bf442281cc6e8c125821a96a1d111bfdd93bcad12c8fb8",
+      "elapsed_ms": 255,
+      "exit_code": 0,
+      "gate_id": "cursor_native_extension_check",
+      "recorded_at": "2026-07-22T19:11:06+00:00",
+      "state": "executed_passed",
+      "stderr_path": "benchmarks/pr12-pr13-owner-acceptance/logs/cursor_native_extension_check.stderr.log",
+      "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_path": "benchmarks/pr12-pr13-owner-acceptance/logs/cursor_native_extension_check.stdout.log",
+      "stdout_sha256": "sha256:1aab4ffea817131aa8ce5a4ceac8c9e854086987f5e7e0cd520dad8e7927277a"
+    },
+    "cursor_native_extension_package": {
+      "command": [
+        "npm",
+        "--prefix",
+        "plugin/cursor-native-extension",
+        "run",
+        "package"
+      ],
+      "command_sha256": "sha256:8d2846755515d278b1e1a415a0381bce2b056f2efdc085e261fe673ec3ea75ee",
+      "elapsed_ms": 1137,
+      "exit_code": 0,
+      "gate_id": "cursor_native_extension_package",
+      "recorded_at": "2026-07-22T19:11:08+00:00",
+      "state": "executed_passed",
+      "stderr_path": "benchmarks/pr12-pr13-owner-acceptance/logs/cursor_native_extension_package.stderr.log",
+      "stderr_sha256": "sha256:d1e94778d769dc24b8957367c6912f2f3a4ced0e7d4782864d9b418f0c397d6d",
+      "stdout_path": "benchmarks/pr12-pr13-owner-acceptance/logs/cursor_native_extension_package.stdout.log",
+      "stdout_sha256": "sha256:28020d93567df6b01bfe731b3949d446f56bb2c11cfeadfeec2d5bdc9ddf973b",
+      "summary": "DONE  Packaged: dist/tracedecay-cursor-native.vsix (6 files, 140.7 KB)"
+    },
+    "cursor_native_extension_test": {
+      "command": [
+        "npm",
+        "--prefix",
+        "plugin/cursor-native-extension",
+        "test"
+      ],
+      "command_sha256": "sha256:00ccc3441a41eb431d1cbef40a26e011b5b48c46afbbb492c4da46813a0dd345",
+      "elapsed_ms": 408,
+      "exit_code": 0,
+      "gate_id": "cursor_native_extension_test",
+      "recorded_at": "2026-07-22T19:11:07+00:00",
+      "state": "executed_passed",
+      "stderr_path": "benchmarks/pr12-pr13-owner-acceptance/logs/cursor_native_extension_test.stderr.log",
+      "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_path": "benchmarks/pr12-pr13-owner-acceptance/logs/cursor_native_extension_test.stdout.log",
+      "stdout_sha256": "sha256:dda6e061f1d1a00caeaa0e95e701fef28f6f1983a6e7b1be774ffa627720332f"
+    },
+    "platform_macos_lifecycle": {
+      "gate_id": "platform_macos_lifecycle",
+      "reason": "no macOS runner available on this Linux execution host",
+      "recorded_at": "2026-07-22T19:11:06+00:00",
+      "state": "pending_unsupported_host"
+    },
+    "platform_windows_lifecycle": {
+      "gate_id": "platform_windows_lifecycle",
+      "reason": "no Windows runner available on this Linux execution host",
+      "recorded_at": "2026-07-22T19:11:06+00:00",
+      "state": "pending_unsupported_host"
+    }
+  },
+  "host": {
+    "os": "linux",
+    "uname": "Linux 6.8.0-136-generic x86_64"
+  },
+  "receipt_kind": "owner_acceptance_v1",
+  "schema_version": 1,
+  "signature": "none_content_addressed_sha256_only",
+  "toolchain": {
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+    "host": "Linux 6.8.0-136-generic x86_64",
+    "os": "linux",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)"
+  },
+  "workload_sha256": {
+    "benchmarks/pr12-lsp-gateway/workload-v1.json": "sha256:5cb464c2e5d4b2cc60a58d1fbf4cfd0a44d75cb29376a18a8042f3f6b85bf203",
+    "benchmarks/pr12-transport-boundary/compile-baseline.json": "sha256:8626af1f3ce55da88081eef645e9dbdb2da9df5211220a5ffa271e93f052797f",
+    "benchmarks/pr13-advisory-milestone/workload-v1.json": "sha256:b441e6acc183cf9d268656da3a9ef6c8fe1d7e3cc83408804b349e90d311db3f",
+    "benchmarks/pr13-host-conformance/workload-v1.json": "sha256:75c6a016554d581258d175803d47af7da995e7715dbd21a350facb7ed94a7358"
+  }
+}

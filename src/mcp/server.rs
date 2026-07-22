@@ -650,7 +650,7 @@ impl McpServer {
                     let Some(server) = server.upgrade() else {
                         return HostAdmissionOutcome::retained_unavailable("spool_unavailable");
                     };
-                    let outcome = server.replay_host_admission(None).await;
+                    let outcome = Box::pin(server.replay_host_admission(None)).await;
                     Self::report_host_admission_outcome(outcome);
                     outcome
                 })

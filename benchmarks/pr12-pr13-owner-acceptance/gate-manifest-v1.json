@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "manifest_id": "pr12-pr13-owner-acceptance-gates-v1",
+  "gates": {
+    "pr12_transport_compile": [
+      "cargo", "check", "-p", "tracedecay-api", "-p", "tracedecay", "--lib", "--all-features"
+    ],
+    "pr12_lsp_gateway_runtime": [
+      "cargo", "test", "--test", "hooks_lsp_suite", "lsp_gateway_protocol", "--", "--nocapture"
+    ],
+    "pr11_project_open_runtime": [
+      "cargo", "test", "--all-features", "--test", "pr11_pr12_runtime_acceptance",
+      "project_open_application_boundary", "--", "--exact"
+    ],
+    "pr12_git_cli_runtime": [
+      "cargo", "test", "--all-features", "--test", "api_application_parity",
+      "cli_mcp_and_http_dispatch_the_same_callable_contracts", "--", "--exact"
+    ],
+    "pr12_git_mcp_runtime": [
+      "cargo", "test", "--all-features", "--test", "api_application_parity",
+      "cli_mcp_and_http_dispatch_the_same_callable_contracts", "--", "--exact"
+    ],
+    "pr12_git_http_runtime": [
+      "cargo", "test", "--all-features", "--test", "api_application_parity",
+      "cli_mcp_and_http_dispatch_the_same_callable_contracts", "--", "--exact"
+    ],
+    "pr12_http_sse_stream": [
+      "cargo", "test", "--all-features", "--test", "api_application_parity",
+      "sse_projects_the_same_canonical_feedback_payload", "--", "--exact"
+    ],
+    "pr12_feedback_handle_bootstrap": [
+      "cargo", "test", "--all-features", "--test", "pr11_pr12_runtime_acceptance",
+      "feedback_handle_bootstrap_reads", "--", "--exact"
+    ],
+    "pr12_primitives_config_parity": [
+      "cargo", "test", "--all-features", "--test", "pr11_pr12_runtime_acceptance",
+      "primitive_config_markdown_json_parity", "--", "--exact"
+    ],
+    "pr12_cancellation_capacity_resume": [
+      "cargo", "test", "--all-features", "--test", "pr11_pr12_runtime_acceptance",
+      "cancellation_capacity_resume", "--", "--exact"
+    ],
+    "pr13_advisory_compile": [
+      "cargo", "test", "--all-features", "--test", "pr13_advisory_runtime_acceptance", "--no-run"
+    ],
+    "pr13_advisory_schema": [
+      "cargo", "test", "--all-features", "--test", "pr13_host_bundle_acceptance",
+      "draft07_schemas_validate_contract_packets", "--", "--exact"
+    ],
+    "pr13_host_schema": [
+      "cargo", "test", "--all-features", "--test", "pr13_host_bundle_acceptance",
+      "draft07_schemas_validate_contract_packets", "--", "--exact"
+    ],
+    "pr13_advisory_runtime_decoders": [
+      "cargo", "test", "--all-features", "--test", "pr13_advisory_runtime_acceptance",
+      "authentic_github_and_ci_responses_use_production_decoders", "--", "--exact"
+    ],
+    "pr13_advisory_pagination_cas": [
+      "cargo", "test", "--all-features", "--lib",
+      "github_nested_pagination_and_cas_are_owner_bound", "--", "--exact"
+    ],
+    "pr13_advisory_proximity_overlap": [
+      "cargo", "test", "--all-features", "--test", "pr13_advisory_runtime_acceptance",
+      "proximity_file_overlap_and_tiering", "--", "--exact"
+    ],
+    "pr13_advisory_structure": [
+      "cargo", "test", "--all-features", "--test", "pr13_host_bundle_acceptance",
+      "structural_checks_ignore_commented_out_symbols", "--", "--exact"
+    ],
+    "pr13_host_structure": [
+      "cargo", "test", "--all-features", "--test", "pr13_host_bundle_acceptance",
+      "structural_checks_ignore_commented_out_symbols", "--", "--exact"
+    ],
+    "pr13_advisory_no_secret": [
+      "cargo", "test", "--all-features", "--test", "pr13_host_bundle_acceptance",
+      "packets_pass_shared_minimal_no_secret_kernel", "--", "--exact"
+    ],
+    "pr13_host_no_secret": [
+      "cargo", "test", "--all-features", "--test", "pr13_host_bundle_acceptance",
+      "packets_pass_shared_minimal_no_secret_kernel", "--", "--exact"
+    ],
+    "pr13_daemon_runtime_pipeline": [
+      "cargo", "test", "--all-features", "--test", "pr13_daemon_runtime_acceptance",
+      "authentic_callback_to_all_delivery_surfaces", "--", "--exact"
+    ],
+    "pr13_host_decoders": [
+      "cargo", "test", "--all-features", "--test", "pr13_host_bundle_acceptance",
+      "authentic_host_fixtures_use_production_typed_decoders", "--", "--exact"
+    ],
+    "pr13_host_receipt_doctor": [
+      "cargo", "test", "--all-features", "--test", "pr13_host_bundle_acceptance",
+      "receipt_backed_doctor_checks_deployed_digests_registration_and_repair", "--", "--exact"
+    ],
+    "pr13_lite_grammar_contract": [
+      "cargo", "test", "--no-default-features", "--features", "lite", "--test",
+      "pr13_host_bundle_acceptance", "structural_checks_ignore_commented_out_symbols",
+      "--", "--exact"
+    ],
+    "cursor_native_extension_check": [
+      "npm", "--prefix", "plugin/cursor-native-extension", "run", "check"
+    ],
+    "cursor_native_extension_test": [
+      "npm", "--prefix", "plugin/cursor-native-extension", "test"
+    ],
+    "cursor_native_extension_package": [
+      "npm", "--prefix", "plugin/cursor-native-extension", "run", "package"
+    ],
+    "cursor_native_extension_receipt": [
+      "cargo", "test", "--all-features", "--test", "pr13_host_bundle_acceptance",
+      "cursor_native_extension_receipt_matches_embedded_assets", "--", "--exact"
+    ],
+    "cursor_native_extension_runtime": [
+      "cargo", "test", "--all-features", "--lib",
+      "cursor_native_diagnostics_are_merged_but_not_republished"
+    ],
+    "platform_linux_lifecycle": [
+      "cargo", "test", "--all-features", "--test", "pr13_host_bundle_acceptance",
+      "receipt_backed_doctor_checks_deployed_digests_registration_and_repair", "--", "--exact"
+    ],
+    "cursor_native_extension_install": [
+      "tracedecay", "update-plugin"
+    ]
+  }
+}

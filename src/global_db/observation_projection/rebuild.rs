@@ -753,6 +753,9 @@ async fn stage_rebuild_session(
     generation: &str,
     expected: &SessionRecord,
 ) -> ProjectionStoreResult<()> {
+    // Match apply_session / verify_rows: normalize host spellings before pure
+    // string reconcile so macOS /var firmlinks and user symlink families converge.
+    let expected = super::state::canonicalize_session_project_paths(expected);
     let actual =
         match read_staged_session(conn, generation, &expected.provider, &expected.session_id)
             .await?
@@ -762,14 +765,14 @@ async fn stage_rebuild_session(
         };
     let session = match actual {
         Some(actual) => {
-            super::state::reconcile_session_rows(&actual, expected).ok_or_else(|| {
+            super::state::reconcile_session_rows(&actual, &expected).ok_or_else(|| {
                 ProjectionStoreError::OutputCollision {
                     provider: expected.provider.clone(),
                     message_id: format!("session:{}", expected.session_id),
                 }
             })?
         }
-        None => expected.clone(),
+        None => expected,
     };
     let json = encode_json(&session, "encode staged projection session")?;
     conn.execute(

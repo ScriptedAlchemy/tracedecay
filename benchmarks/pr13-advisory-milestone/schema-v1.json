@@ -12,7 +12,8 @@
     "ci_gate_ids",
     "behavioral_contract",
     "provider_gaps",
-    "host_packet"
+    "host_packet",
+    "owner_receipt"
   ],
   "properties": {
     "schema_version": { "const": 1 },
@@ -84,7 +85,6 @@
     },
     "provider_gaps": {
       "type": "array",
-      "minItems": 2,
       "maxItems": 2,
       "uniqueItems": true,
       "items": {
@@ -96,6 +96,9 @@
     },
     "host_packet": {
       "const": "benchmarks/pr13-host-conformance/workload-v1.json"
+    },
+    "owner_receipt": {
+      "const": "benchmarks/pr12-pr13-owner-acceptance/owner-receipts-v1.json"
     }
   }
 }

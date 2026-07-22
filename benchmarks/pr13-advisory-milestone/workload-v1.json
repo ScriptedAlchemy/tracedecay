@@ -33,5 +33,6 @@
     "github.pagination_cas",
     "proximity.overlap_tiering"
   ],
-  "host_packet": "benchmarks/pr13-host-conformance/workload-v1.json"
+  "host_packet": "benchmarks/pr13-host-conformance/workload-v1.json",
+  "owner_receipt": "benchmarks/pr12-pr13-owner-acceptance/owner-receipts-v1.json"
 }

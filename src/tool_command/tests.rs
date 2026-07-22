@@ -264,6 +264,45 @@ fn explicit_project_lcm_dispatch_allows_first_touch_init() {
     assert!(dispatch.allow_init);
 }
 
+#[test]
+fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
+    let dispatch = DaemonToolDispatch::for_tool(
+        None,
+        "tracedecay_lcm_preflight",
+        &json!({
+            "provider": "hermes",
+            "session_id": "stock-check-session",
+            "storage_scope": "user",
+            "transcript_projection": true,
+            "messages": [],
+        }),
+    );
+
+    assert_eq!(dispatch.project_path, None);
+    assert!(!dispatch.allow_init);
+}
+
+#[test]
+fn user_memory_scope_dispatch_is_projectless() {
+    let dispatch = DaemonToolDispatch::for_tool(
+        None,
+        "tracedecay_fact_store",
+        &json!({
+            "action": "list",
+            "memory_scope": "user",
+        }),
+    );
+
+    assert_eq!(dispatch.project_path, None);
+}
+
+#[test]
+fn filesystem_root_path_is_never_accepted_as_discovered_project() {
+    assert!(is_filesystem_root(std::path::Path::new("/")));
+    assert!(!is_filesystem_root(std::path::Path::new("/tmp/project")));
+    assert!(!is_filesystem_root(std::path::Path::new(".")));
+}
+
 // --- Validation gate and corrective-error contract ---
 
 #[test]

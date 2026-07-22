@@ -261,7 +261,11 @@ pub enum Commands {
         local: bool,
     },
     /// Dry-run, apply, or restore the direct host feedback-route rollback switch
-    #[command(name = "feedback-rollback")]
+    #[command(
+        name = "feedback-rollback",
+        long_about = FEEDBACK_ROLLBACK_LONG_ABOUT,
+        after_help = FEEDBACK_ROLLBACK_AFTER_HELP
+    )]
     FeedbackRollback {
         #[command(subcommand)]
         action: FeedbackRollbackAction,

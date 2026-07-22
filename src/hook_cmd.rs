@@ -257,7 +257,7 @@ mod tests {
                 .iter()
                 .filter(|(_, input)| *input == HookInput::Stdin)
                 .count(),
-            26
+            29
         );
         for (command, expected) in hooks {
             assert_eq!(hook_input(&command), Some(expected));

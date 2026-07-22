@@ -17,7 +17,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 110;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 121;
 
 mod admin;
 mod analysis;

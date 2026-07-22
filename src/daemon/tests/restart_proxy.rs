@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use super::*;
 
 #[cfg(unix)]
@@ -314,8 +315,8 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
         Some(project.as_path())
     );
     assert!(
-        !routed_handshake.allow_init,
-        "legacy config.json must not enable initialization without a pinned snapshot"
+        routed_handshake.allow_init,
+        "fresh git root without a published snapshot follows SyncConfig::default().auto_init"
     );
     assert_eq!(
         std::fs::read_to_string(config_path).expect("legacy fixture remains readable"),

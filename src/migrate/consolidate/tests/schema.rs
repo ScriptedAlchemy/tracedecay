@@ -85,7 +85,21 @@ fn graph_table_disposition(table: &str) -> Option<&'static str> {
         | "memory_v2_legacy_quarantine"
         | "memory_v2_compatibility_operation_receipts"
         | "retrieval_anchors"
-        | "retrieval_anchor_aliases" => Some("merged"),
+        | "retrieval_anchor_aliases"
+        | "retrieval_anchor_derivative_tombstones"
+        | "retrieval_anchor_dispositions"
+        | "retrieval_anchor_reverse_lineage"
+        // Plan 13 evidence-assembly ledger: payload-free membership/receipt
+        // rows that consolidate with owner-bound retrieval evidence.
+        | "evidence_assembly_receipts"
+        | "evidence_derived_anchors"
+        | "evidence_occurrence_set_members"
+        | "evidence_occurrence_sets"
+        | "evidence_retriever_contributions"
+        | "evidence_source_occurrences"
+        | "evidence_span_members"
+        | "evidence_span_projection_receipts"
+        | "evidence_spans" => Some("merged"),
         // Derived compatibility projections rebuilt from the merged lineage:
         // current_facts is re-derived with deletion terminality, banks are
         // marked dirty, vectors and the assertion-payload FTS shadow rebuild.
