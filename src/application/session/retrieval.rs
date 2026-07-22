@@ -566,10 +566,8 @@ fn map_report(
         if has_partial_coverage || result.next_cursor.is_some() || coverage.visible != 0 {
             return SessionRetrievalOutcome::Unavailable;
         }
-        return SessionRetrievalOutcome::Complete {
-            items: vec![result],
-            freshness,
-        };
+        // Authorized empty roots are searchable zero-hit results, not unavailable.
+        return SessionRetrievalOutcome::CompleteZero { freshness };
     }
     if !freshness_policy.accepts(freshness) {
         return SessionRetrievalOutcome::Stale { freshness };
@@ -599,9 +597,10 @@ fn map_execution_error(
         SessionTemporalExecutionError::Redacted => SessionRetrievalOutcome::Redacted,
         SessionTemporalExecutionError::Deleted => SessionRetrievalOutcome::Deleted,
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
-        SessionTemporalExecutionError::Unavailable | SessionTemporalExecutionError::Empty => {
-            SessionRetrievalOutcome::Unavailable
-        }
+        SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
+        SessionTemporalExecutionError::Empty => SessionRetrievalOutcome::CompleteZero {
+            freshness: SessionDataFreshness::Fresh,
+        },
         SessionTemporalExecutionError::BudgetExhausted => SessionRetrievalOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
@@ -626,8 +625,10 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 SessionRetrievalOutcome::BudgetExhausted
             }
             TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
-            TemporalPortError::EmptyParticipantManifest
-            | TemporalPortError::InvalidBinding { .. }
+            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::CompleteZero {
+                freshness: SessionDataFreshness::Fresh,
+            },
+            TemporalPortError::InvalidBinding { .. }
             | TemporalPortError::DuplicateParticipant
             | TemporalPortError::ZeroGeneration
             | TemporalPortError::ZeroVersion { .. }

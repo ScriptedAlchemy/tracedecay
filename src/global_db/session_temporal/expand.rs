@@ -4,7 +4,7 @@ use libsql::params;
 use tracedecay_domain::{
     DerivedEvidenceIdV1, DerivedEvidenceKindV1, DerivedEvidenceMemberRoleV1, MessageOccurrenceIdV1,
     SessionCursorKeyIdV1, SessionCursorVersionV1, SessionProjectionGenerationV1,
-    SignedCursorKeyRefV1, TemporalCoverageCountsV1, UtcMicros,
+    SignedCursorKeyRefV1, TemporalCoverageCountsV1,
 };
 use tracedecay_store::{
     DerivedEvidenceMemberPageItemV1, DerivedEvidenceMemberPageV1,
@@ -14,7 +14,7 @@ use tracedecay_store::{
     SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 
-use super::query::{storage, storage_message};
+use super::query::{now_micros, storage, storage_message};
 use crate::global_db::GlobalDb;
 
 const EXPAND_OPERATION: &str = "expand session derived evidence members";
@@ -49,6 +49,17 @@ impl GlobalDb {
                     "active session temporal generation is missing",
                 )
             })?;
+        // libsql row values are statement-cursor backed: own them before any
+        // further Rows::next(), which advances the shared statement and would
+        // make later get()/String reads observe NullValue.
+        let generation = decode_generation_i64(
+            row.get(0)
+                .map_err(|error| storage(FREEZE_OPERATION, error))?,
+            FREEZE_OPERATION,
+        )?;
+        let encoded: Option<String> = row
+            .get(1)
+            .map_err(|error| storage(FREEZE_OPERATION, error))?;
         if rows
             .next()
             .await
@@ -60,25 +71,20 @@ impl GlobalDb {
                 "active session temporal generation is not unique",
             ));
         }
-        let generation: i64 = row
-            .get(0)
-            .map_err(|error| storage(FREEZE_OPERATION, error))?;
-        let encoded: String = row
-            .get(1)
-            .map_err(|error| storage(FREEZE_OPERATION, error))?;
-        let watermarks = decode_frozen_watermarks(&encoded)?;
-        if i64::try_from(watermarks.active_generation().value())
-            .map_err(|error| storage(FREEZE_OPERATION, error))?
-            != generation
-        {
-            return Err(storage_message(
+        let encoded = encoded.ok_or_else(|| {
+            storage_message(
                 FREEZE_OPERATION,
-                "active generation disagrees with frozen watermarks",
-            ));
-        }
+                "active generation is missing frozen watermarks",
+            )
+        })?;
+        // Durable JSON may pin the candidate-begin active_generation. The
+        // generation column is authoritative after activation (same rule as
+        // freeze_participants / activation receipts).
+        let watermarks = decode_frozen_watermarks(&encoded, generation)?;
+        let frozen_at = now_micros(FREEZE_OPERATION)?;
         Ok(SessionTemporalSnapshotV1::new(
             request.session_id().clone(),
-            UtcMicros(0),
+            frozen_at,
             watermarks,
             SessionTemporalCapabilitiesV1::new([
                 SessionTemporalCapabilityV1::FrozenWatermarks,
@@ -244,12 +250,29 @@ impl GlobalDb {
     }
 }
 
-fn decode_frozen_watermarks(encoded: &str) -> SessionStoreResult<SessionFrozenWatermarksV1> {
+fn decode_generation_i64(
+    value: i64,
+    operation: &'static str,
+) -> SessionStoreResult<SessionProjectionGenerationV1> {
+    let generation = u64::try_from(value).map_err(|error| storage(operation, error))?;
+    SessionProjectionGenerationV1::new(generation).map_err(SessionStoreError::from)
+}
+
+fn decode_frozen_watermarks(
+    encoded: &str,
+    active_generation: SessionProjectionGenerationV1,
+) -> SessionStoreResult<SessionFrozenWatermarksV1> {
     let value: serde_json::Value =
         serde_json::from_str(encoded).map_err(|error| storage(FREEZE_OPERATION, error))?;
-    let generation = value["active_generation"]
+    let json_generation = value["active_generation"]
         .as_u64()
         .ok_or_else(|| storage_message(FREEZE_OPERATION, "active_generation is invalid"))?;
+    if json_generation > active_generation.value() {
+        return Err(storage_message(
+            FREEZE_OPERATION,
+            "frozen watermarks active_generation exceeds the active generation column",
+        ));
+    }
     let source = value["source_frontier"]
         .as_u64()
         .ok_or_else(|| storage_message(FREEZE_OPERATION, "source_frontier is invalid"))?;
@@ -259,12 +282,8 @@ fn decode_frozen_watermarks(encoded: &str) -> SessionStoreResult<SessionFrozenWa
     let summary = value["summary_frontier"]
         .as_u64()
         .ok_or_else(|| storage_message(FREEZE_OPERATION, "summary_frontier is invalid"))?;
-    let mut watermarks = SessionFrozenWatermarksV1::new(
-        SessionProjectionGenerationV1::new(generation)?,
-        source,
-        projection,
-        summary,
-    );
+    let mut watermarks =
+        SessionFrozenWatermarksV1::new(active_generation, source, projection, summary);
     if let Some(cursor) = value.get("cursor_key").filter(|value| !value.is_null()) {
         let key_id = cursor["key_id"]
             .as_str()

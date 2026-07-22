@@ -89,8 +89,8 @@ pub(crate) fn observation(
         session_id,
         ordinal,
         text,
-        &format!("message.temporal.{ordinal}"),
-        (ordinal > 0).then(|| format!("message.temporal.{}", ordinal - 1)),
+        &format!("message.temporal.{}.{}", session_id.as_str(), ordinal),
+        (ordinal > 0).then(|| format!("message.temporal.{}.{}", session_id.as_str(), ordinal - 1)),
     )
 }
 
@@ -101,11 +101,19 @@ pub(crate) fn observation_with_message_ids(
     message_id: &str,
     parent_message_id: Option<String>,
 ) -> DurableObservationV1 {
-    let provider = ProviderId::new(format!("temporal-test-{ordinal}")).unwrap();
+    // Namespace provider/record/receipt by session so multi-session suites do not
+    // collide on global sanitization-receipt identity.
+    let provider =
+        ProviderId::new(format!("temporal-test.{}.{}", session_id.as_str(), ordinal)).unwrap();
     let source =
         ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
     let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).unwrap();
-    let record_id = ObservationId::new(format!("record.temporal.{ordinal}")).unwrap();
+    let record_id = ObservationId::new(format!(
+        "record.temporal.{}.{}",
+        session_id.as_str(),
+        ordinal
+    ))
+    .unwrap();
     let mut relations = CanonicalObservationRelationsV1::new(session_id.clone())
         .with_thread_id(ObservationId::new("thread.temporal").unwrap())
         .with_turn_id(ObservationId::new("turn.temporal").unwrap())
@@ -141,7 +149,10 @@ pub(crate) fn observation_with_message_ids(
     .unwrap();
     DurableObservationV1::new(
         identity,
-        receipt(&format!("receipt.temporal.{ordinal}"), &payload),
+        receipt(
+            &format!("receipt.temporal.{}.{}", session_id.as_str(), ordinal),
+            &payload,
+        ),
         RetentionClass::new("retention.temporal-test").unwrap(),
         payload,
     )
@@ -301,7 +312,8 @@ pub(crate) fn occurrence(
         "turn_id": "turn.temporal",
         "turn_grouping": {"kind": "provider_native"},
         "message_id": format!(
-            "message.temporal.{}",
+            "message.temporal.{}.{}",
+            session_id.as_str(),
             observation.identity().position().start()
         ),
         "agent_id": "agent.temporal",

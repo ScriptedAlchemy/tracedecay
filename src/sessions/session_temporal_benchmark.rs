@@ -2,8 +2,8 @@
 //!
 //! Drives production Codex admission, `CanonicalSessionTemporalProjector`
 //! materialization (via [`GlobalDb::materialize_session_temporal_refresh_batch_result`]),
-//! [`SessionRefreshService`], and [`SessionRetrievalService`]. Evidence remains
-//! provisional until a clean attested measurement run succeeds.
+//! [`SessionRefreshService`], and [`SessionRetrievalService`]. Output is a
+//! Linux measurement capture with descriptive sample quantiles only.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -337,8 +337,8 @@ pub fn validate_contract() -> BenchResult<()> {
     for token in [
         "--dry-run",
         "--run",
-        "unsupported platform rejected",
-        "PR8 temporal measurements require Linux",
+        "Linux-hosted",
+        "CI nextest durable coverage",
         "HOME",
         "TRACEDECAY_DATA_DIR",
     ] {
@@ -353,7 +353,7 @@ pub fn validate_contract() -> BenchResult<()> {
 pub async fn run_measurement() -> BenchResult<Value> {
     if !cfg!(target_os = "linux") {
         return Err(
-            "PR8 temporal measurements require Linux; unsupported platform rejected".into(),
+            "PR8 temporal --run measurement harness is Linux-hosted; use CI nextest durable coverage on Windows/macOS".into(),
         );
     }
     validate_contract()?;
@@ -399,7 +399,7 @@ pub async fn run_measurement() -> BenchResult<Value> {
         }));
     }
 
-    let attestation = current_state_attestation(&root)?;
+    let source_identity = current_state_identity(&root)?;
     let measurement = json!({
         "warmup_repetitions": WARMUP_REPETITIONS,
         "measured_repetitions": MEASURED_REPETITIONS,
@@ -413,10 +413,10 @@ pub async fn run_measurement() -> BenchResult<Value> {
         "workload_id": WORKLOAD_ID,
         "capture_status": "provisional",
         "acceptance_eligible": false,
-        "provisional_reason": "valid_measurement_pending_clean_commit_attestation",
+        "provisional_reason": "linux_measurement_capture",
         "workload_manifest": WORKLOAD_PATH,
         "workload_manifest_sha256": sha256_file(&workload_path)?,
-        "source_attestation": attestation,
+        "source_identity": source_identity,
         "runtime": {
             "operating_system": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
@@ -425,7 +425,7 @@ pub async fn run_measurement() -> BenchResult<Value> {
         "claims": {
             "performance_acceptance": {
                 "status": "provisional",
-                "reason": "samples recorded; acceptance requires clean-commit attestation and evidence-index promotion"
+                "reason": "samples recorded; descriptive latency only, not an acceptance decision"
             },
             "database_query_latency": {
                 "status": "provisional",
@@ -644,11 +644,20 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
 
     let expand_started = Instant::now();
     require_retrieval_success(
-        "member_expand",
+        "member_expand_span",
         retrieval
             .retrieve(
                 &prepared.context,
                 query(RetrievalGrainV1::EvidenceSpan, "pipeline"),
+            )
+            .await,
+    )?;
+    require_retrieval_success(
+        "member_expand_burst",
+        retrieval
+            .retrieve(
+                &prepared.context,
+                query(RetrievalGrainV1::EvidenceBurst, "pipeline"),
             )
             .await,
     )?;
@@ -759,7 +768,7 @@ fn request_context(request: &str, project_id: &ProjectId) -> RequestContext {
     )
 }
 
-fn current_state_attestation(root: &Path) -> BenchResult<Value> {
+fn current_state_identity(root: &Path) -> BenchResult<Value> {
     let commit = current_commit(root)?;
     Ok(json!({
         "commit": commit,
@@ -1043,10 +1052,10 @@ mod tests {
     }
 
     #[test]
-    fn runner_rejects_unsupported_platforms_with_exit_64_contract() {
+    fn runner_keeps_linux_hosted_measurement_entrypoint() {
         let runner = fs::read_to_string(repository_root().join(RUNNER_PATH)).unwrap();
         assert!(runner.contains("exit 64"));
-        assert!(runner.contains("unsupported platform rejected"));
-        assert!(runner.contains("PR8 temporal measurements require Linux"));
+        assert!(runner.contains("Linux-hosted"));
+        assert!(runner.contains("CI nextest durable coverage"));
     }
 }

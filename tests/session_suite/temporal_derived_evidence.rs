@@ -19,7 +19,7 @@ use tracedecay_store::{
 use crate::common::{isolated_lcm_db_path, open_lcm_db};
 use crate::temporal_projection::{
     assertion, batch, begin_candidate, generation, occurrence, parent_message_copy,
-    persist_observation, persist_observation_with_lineage, rows, session, snapshot,
+    persist_observation, persist_observation_with_lineage, rows, scalar, session, snapshot,
 };
 
 async fn derived_identity_rows(path: &Path, session_id: &str, generation: u64) -> Vec<String> {
@@ -27,7 +27,7 @@ async fn derived_identity_rows(path: &Path, session_id: &str, generation: u64) -
         path,
         &format!(
             "SELECT evidence_kind || '|' || evidence_id || '|' || member_digest || '|' ||
-                    configuration_digest || '|' || retrieval_anchor_id
+                    configuration_digest || '|' || COALESCE(retrieval_anchor_id, '')
              FROM session_derived_evidence
              WHERE session_id = '{session_id}' AND generation = {generation}
              ORDER BY evidence_kind, evidence_id"
@@ -66,12 +66,21 @@ async fn project_and_activate(
         .await,
     );
     let store = GlobalDbSessionTemporalStore::new(db);
-    begin_candidate(&store, &session_id, candidate_generation, 2).await;
+    // Observation sequences are DB-global; pin the frontier to the current max
+    // so later sessions in the same DB are not rejected as watermark mismatches.
+    let source_frontier =
+        u64::try_from(scalar(path, "SELECT COALESCE(MAX(sequence), 0) FROM observations").await)
+            .expect("observation frontier fits u64");
+    assert!(
+        source_frontier > 0,
+        "projected sessions must have durable observation sequences"
+    );
+    begin_candidate(&store, &session_id, candidate_generation, source_frontier).await;
     store
         .persist_session_temporal_projection_batch(batch(
             &session_id,
             candidate_generation,
-            2,
+            source_frontier,
             vec![first.clone(), second.clone()],
             vec![parent_message_copy(&second, &first)],
             vec![assertion(&second, &first)],
@@ -83,7 +92,11 @@ async fn project_and_activate(
             SessionGenerationActivationRequestV1::new(
                 session_id.clone(),
                 generation(candidate_generation),
-                snapshot(&session_id, candidate_generation.saturating_sub(1).max(1), 2),
+                snapshot(
+                    &session_id,
+                    candidate_generation.saturating_sub(1).max(1),
+                    source_frontier,
+                ),
             )
             .unwrap(),
         )
@@ -93,6 +106,15 @@ async fn project_and_activate(
     assert!(
         !derived.is_empty(),
         "expected generation-bound span/burst rows after activation"
+    );
+    let kinds = derived
+        .iter()
+        .filter_map(|row| row.split('|').next())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        kinds,
+        BTreeSet::from(["burst", "span"]),
+        "projection must materialize both derived evidence kinds"
     );
     (session_id, derived, first, second)
 }
@@ -192,9 +214,7 @@ async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
     let reopened = GlobalDb::open_at(&path).await.expect("reopen");
     let store = GlobalDbSessionTemporalStore::new(&reopened);
     let snapshot = store
-        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(
-            session_id.clone(),
-        ))
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(session_id.clone()))
         .await
         .unwrap();
     assert_eq!(snapshot.watermarks().active_generation().value(), 3);
@@ -211,9 +231,7 @@ async fn paged_member_expand_reconstructs_every_occurrence() {
         project_and_activate(&db, &path, "session.temporal.derived.expand", 2).await;
     let store = GlobalDbSessionTemporalStore::new(&db);
     let snapshot = store
-        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(
-            session_id.clone(),
-        ))
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(session_id.clone()))
         .await
         .unwrap();
 
@@ -314,9 +332,7 @@ async fn temporal_modes_keep_generation_bound_derived_surface() {
         project_and_activate(&db, &path, "session.temporal.derived.modes", 2).await;
     let store = GlobalDbSessionTemporalStore::new(&db);
     let snapshot = store
-        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(
-            session_id.clone(),
-        ))
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(session_id.clone()))
         .await
         .unwrap();
 

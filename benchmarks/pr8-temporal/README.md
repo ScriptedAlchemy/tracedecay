@@ -1,18 +1,27 @@
 # PR8 session-temporal benchmark
 
-Workload schema 2 for the PR8 temporal retrieval resource harness.
+Linux measurement harness for PR8 temporal retrieval latency phases.
+This directory records descriptive sample quantiles and directly executed
+behavioral test outcomes only.
 
 ## Fixtures
 
 Provider-native Codex captures reused from
 `tests/fixtures/provider_normalization/codex/`:
 
-- `session_meta.input.json` and `agent_message.input.json` (same inputs as the
-  PR5/PR6 `codex_production_observation_pipeline_v1` baseline)
+- `session_meta.input.json` and `agent_message.input.json`
 
-Provenance is recorded in
-[`fixtures/codex-sanitization-receipt.json`](fixtures/codex-sanitization-receipt.json).
-Do not substitute golden lookalikes or invent protocol fields.
+Runtime sanitizer provenance for those fixtures is in
+[`fixtures/codex-sanitization-receipt.json`](fixtures/codex-sanitization-receipt.json)
+(observation sanitization provenance only). Do not substitute golden lookalikes.
+
+## Artifacts
+
+| Path | Role |
+|---|---|
+| [workload-v1.json](workload-v1.json) | Versioned workload/config pin |
+| [evidence-index.json](evidence-index.json) | Points at provisional measurement file (`current_acceptance` always null here) |
+| [result-provisional.json](result-provisional.json) | Linux measurement + observed focused-test outcomes |
 
 ## Commands
 
@@ -22,16 +31,16 @@ scripts/run-pr8-temporal-benchmark.sh --run   # Linux only; exit 64 elsewhere
 cargo bench --bench session_temporal --all-features -- --run
 ```
 
-Dry-run is Cargo-free and must not mutate the checkout. `--run` isolates
-`HOME` and `TRACEDECAY_DATA_DIR`, enforces the optimized `[profile.bench]`, and
-drives production Codex admit → CanonicalSessionTemporalProjector materialize →
-`SessionRefreshService` / `SessionRetrievalService` phases:
+Dry-run is Cargo-free. `--run` isolates `HOME` and `TRACEDECAY_DATA_DIR` and
+measures: `rebuild_activate`, `exact_replay`, `compact_rank`, `late_hydrate`,
+`member_expand`.
 
-`rebuild_activate`, `exact_replay`, `compact_rank`, `late_hydrate`, `member_expand`.
+## Observed focused tests
 
-## Evidence
+Recorded only when executed in the same capture window:
 
-[`result-provisional.json`](result-provisional.json) stays provisional until a
-valid Linux measurement is attested and promoted through
-[`evidence-index.json`](evidence-index.json). Quantiles are descriptive
-nearest-rank sample labels, not inferential claims.
+```bash
+cargo test --test session_suite --all-features temporal_derived_evidence:: -- --test-threads=1
+```
+
+Quantiles are descriptive nearest-rank sample labels, not inferential claims.

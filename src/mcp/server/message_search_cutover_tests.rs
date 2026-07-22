@@ -506,14 +506,20 @@ async fn unavailable_project_worker_rejects_before_expensive_reads() {
 }
 
 #[tokio::test]
-async fn fresh_direct_root_does_not_create_session_storage() {
+async fn fresh_direct_root_reuses_configuration_session_storage() {
     let (cg, _dir, _pin) = indexed_project().await;
     let sessions_db_path = cg.store_layout().sessions_db_path.clone();
+    // Configuration authority opens sessions.db during project init.
+    assert!(
+        sessions_db_path.exists(),
+        "init must open configuration authority sessions.db"
+    );
     let server = McpServer::new(cg, None).await;
 
-    assert!(server.session_db.is_none());
-    assert!(server.project_session_retrieval_service.is_none());
-    assert!(!sessions_db_path.exists());
+    // Direct roots reuse the existing configuration sessions.db handle and
+    // wire temporal retrieval from that retained authority.
+    assert!(server.session_db.is_some());
+    assert!(server.project_session_retrieval_service.is_some());
     server.shutdown().await;
 }
 

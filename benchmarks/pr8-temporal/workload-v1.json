@@ -4,11 +4,11 @@
   "status": "harness_ready",
   "implementation": {
     "path": "src/sessions/session_temporal_benchmark.rs",
-    "sha256": "5384fdd1bd5bc6fd670e47f6fc52eac1f3fabfc167e689ed643fc4f90610a5f6"
+    "sha256": "243a6f7414c08560e959b6c5cd427798feb65bcd1abb8b48b7e73ad49b8b02b9"
   },
   "runner": {
     "path": "scripts/run-pr8-temporal-benchmark.sh",
-    "sha256": "4cfa5945f9c5f621d91a4bd9bd45c5f773b4d229bd8b75c8e80013b5193eda4a"
+    "sha256": "c05eaf2812f895f8b385a6f18bade7c5f9952719415f30a21f954c77a1d3907e"
   },
   "profile": {
     "manifest_path": "Cargo.toml",
@@ -84,7 +84,7 @@
       },
       {
         "phase": "member_expand",
-        "path": "SessionRetrievalService::retrieve Summary"
+        "path": "SessionRetrievalService::retrieve EvidenceSpan then EvidenceBurst"
       }
     ]
   },
@@ -95,11 +95,11 @@
     },
     {
       "path": "src/sessions/session_temporal_benchmark.rs",
-      "sha256": "5384fdd1bd5bc6fd670e47f6fc52eac1f3fabfc167e689ed643fc4f90610a5f6"
+      "sha256": "243a6f7414c08560e959b6c5cd427798feb65bcd1abb8b48b7e73ad49b8b02b9"
     },
     {
       "path": "scripts/run-pr8-temporal-benchmark.sh",
-      "sha256": "4cfa5945f9c5f621d91a4bd9bd45c5f773b4d229bd8b75c8e80013b5193eda4a"
+      "sha256": "c05eaf2812f895f8b385a6f18bade7c5f9952719415f30a21f954c77a1d3907e"
     },
     {
       "path": "Cargo.toml",
@@ -107,7 +107,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "60edac6e66c8300e2b0fb00dbeadbc818179cd274474deef8df6397f409dc7aa"
+      "sha256": "6df6c2bf98a5dd4cdc23f74a84879506596dc45f18c5d5d5fffaff81a038e4cb"
     },
     {
       "path": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
@@ -127,7 +127,7 @@
     },
     {
       "path": "benchmarks/pr8-temporal/README.md",
-      "sha256": "d07fe0ebd65bf861399b0ceb9c6686398a533ee6164d4a576ddc72a10142a36b"
+      "sha256": "37572012c111caa7cfa790c480f7f657144304393a8b5e3f5a4f9e4f9e594ba9"
     }
   ],
   "command": "scripts/run-pr8-temporal-benchmark.sh --run"

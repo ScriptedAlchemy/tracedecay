@@ -7,9 +7,10 @@ Usage: scripts/run-pr8-temporal-benchmark.sh --dry-run|--run
 
   --dry-run  Read-only, Cargo-free validation of harness artifacts and
              Codex fixture provenance. Does not mutate the checkout.
-  --run      Linux-only measurement through the optimized bench profile.
+  --run      Measurement through the optimized bench profile (Linux preferred).
              Isolates HOME and TRACEDECAY_DATA_DIR for the child process.
-             Non-Linux hosts exit 64 (unsupported platform rejected).
+             Windows/macOS CI prove temporal durability via nextest; this
+             measurement entrypoint remains Linux-hosted for bench tooling.
 EOF
 }
 
@@ -115,6 +116,12 @@ require(result.get("capture_status") == "provisional", "result must be provision
 require(result.get("acceptance_eligible") is False, "result must be ineligible")
 require(result.get("workload_manifest_sha256") == sha256(workload_path),
         "result workload hash mismatch")
+require("source_attestation" not in result, "deleted source_attestation field is forbidden")
+require(isinstance(result.get("source_identity"), dict), "source identity is required")
+require("attestation" not in json.dumps(result).lower(),
+        "deleted attestation terminology remains in result")
+require("attestation" not in json.dumps(workload).lower(),
+        "deleted attestation terminology remains in workload")
 
 with (root / "Cargo.toml").open("rb") as handle:
     cargo = tomllib.load(handle)
@@ -149,7 +156,7 @@ case "$1" in
     ;;
   --run)
     if [[ "$(uname -s)" != "Linux" ]]; then
-      printf '%s\n' "PR8 temporal measurements require Linux; unsupported platform rejected" >&2
+      printf '%s\n' "PR8 temporal --run measurement harness is Linux-hosted; use CI nextest durable coverage on Windows/macOS" >&2
       exit 64
     fi
     isolation_root="$(mktemp -d "${TMPDIR:-/tmp}/pr8-temporal-bench.XXXXXX")"
