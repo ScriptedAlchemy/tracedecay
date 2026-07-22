@@ -2469,6 +2469,11 @@ async fn portable_project_server(
     .map_err(|_| TraceDecayError::Config {
         message: "semantic runtime resource ceilings are invalid".to_owned(),
     })?;
+    let semantic_config = &cg.configuration_runtime().configuration().config.semantic;
+    let _ = crate::semantic_code::apply_config_and_queue_startup(
+        semantic_config.selected_model.as_deref(),
+        semantic_config.auto_download,
+    );
     let existing = {
         let mut servers = store_administration.project_servers().lock().await;
         let existing = servers.get(&key).cloned();

@@ -462,8 +462,10 @@ impl SemanticRuntimeStateV1 {
                 model_id,
                 artifact_digest,
             } => {
+                // Acquisition states are valid before a configuration pin exists
+                // so offline Doctor/status can report SelectedNotDownloaded.
                 validate_model_identity(model_id, artifact_digest)?;
-                require_configuration(configuration)?;
+                let _ = configuration;
                 Ok(())
             }
             Self::Downloading {
@@ -476,7 +478,7 @@ impl SemanticRuntimeStateV1 {
                 if *bytes_total == 0 || bytes_received > bytes_total {
                     return Err(SemanticRuntimeContractErrorV1::InvalidProgress);
                 }
-                require_configuration(configuration)?;
+                let _ = configuration;
                 Ok(())
             }
             Self::Indexing {
@@ -528,7 +530,7 @@ impl SemanticRuntimeStateV1 {
                 if detail.trim().is_empty() {
                     return Err(SemanticRuntimeContractErrorV1::InvalidRuntimeStatus);
                 }
-                require_configuration(configuration)?;
+                let _ = configuration;
                 Ok(())
             }
         }
