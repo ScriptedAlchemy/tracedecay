@@ -1,159 +1,121 @@
-# PR8: Session/LCM temporal retrieval
+# PR12/PR13: production integration and incremental indexing
 
 **Status:** active execution slice.
 
-This file points contributors at the current implementation slice. It is
-documentation only: TraceDecay never parses, imports, schedules, or executes
-`NEXT.md`, and product task/work graphs never infer state from it.
+PR8 is complete. PR9 and PR10 have callable code-index, lexical/graph, vector-
+generation, FastEmbed, exact-flat, calibration, and fallback implementations,
+but their locked quality/resource acceptance remains open. PR11's application,
+policy, catalog, configuration, Git, and feedback-cycle core is implemented.
+The current delivery slice closes PR12/PR13 production reachability, host
+delivery, all-feature distribution, and the incremental indexing behavior
+required to keep those surfaces fast while repositories and worktrees change.
 
-PR6 is complete with clean benchmark acceptance at `05da230e`. PR7 is complete
-with memory, facts, provenance, migration, hardening, and dogfood evidence.
-PR8 now implements the temporally correct Session/LCM retrieval path defined by
-[Plan 23](23-session-lcm-temporal-retrieval-and-evaluation.md) under the shared
-execution boundary in [Plan 05](05-query-crate.md).
+This file is contributor guidance only. TraceDecay never parses, imports,
+schedules, or executes roadmap documents.
 
-Names retained from completed foundation work are historical evidence, not
-instructions to restore an old type, file layout, fixture, milestone, or gate.
-Audits map retained behavior, migration, and recovery requirements to current
-canonical owners and direct regressions before declaring a gap; renamed or
-deleted machinery alone is not missing product behavior.
+## Current outcome
 
-## Product slice
+Ship one production path in which:
 
-Replace fragmented message search and LCM lookup with one bounded temporal
-retrieval kernel for messages, Turns, sessions, threads, agents, occurrences,
-logical copies, and summary-DAG nodes. Preserve exact retained evidence,
-history, provenance, privacy, stable anchors, and truthful coverage while
-returning the smallest useful context.
+- CLI, MCP, HTTP, SSE, LSP, and supported host adapters reach the same
+  application/catalog owners;
+- post-edit diagnostics, impact, affected tests, GitHub review ingestion, CI
+  localization, and agent proximity remain generation-bound and read-only;
+- saved edits trigger bounded background code-index and semantic projection
+  work without delaying project open or exact/lexical/graph search;
+- only complete immutable generations become current through atomic
+  publication; and
+- release and beta distributions build, test, package, install, and execute
+  with the default feature set equal to `--all-features`, including FastEmbed
+  and bundled ORT.
 
-PR8 operates on explicitly resolved current-project/single-root scope. It must
-not guess another root or fall back to CWD. All retained later capabilities are
-mapped in [the authoritative roadmap](00-plan-set-index.md).
+PR14 remains blocked until PR12/PR13 production contracts and aggregate gates
+are stable.
 
-The active path is:
+## Worktree-aware incremental indexing contract
 
-```text
-sanitized PR5/PR6 observations plus PR7 anchors
-  -> occurrence/copy/Turn/session/thread/agent and summary-lineage projections
-  -> one typed temporal request and read-only store/projector ports
-  -> current | as_of | evolution | forensic evaluation
-  -> deterministic candidate merge, hydration, coverage, and pagination
-  -> compact anchored context or a typed partial/unavailable result
-```
-
-## Production boundary
-
-Plan 23 owns temporal truth, occurrence/copy semantics, summary lineage,
-context assembly, freshness, and PR8 acceptance using Plan 05's typed scope,
-budget, cancellation, cursor, watermark, deterministic-merge, coverage, and
-explanation primitives. Plan 09 owns authorized application orchestration.
-
-The temporal kernel remains in root-package modules while it has one consumer;
-physical extraction requires measured reuse and compilation evidence. CLI/MCP
-compatibility bindings translate and delegate without private search,
-freshness, hydration, pagination, or repair behavior. The daemon/store path is
-the sole mutable authority, reads are side-effect free, and explicit refresh is
-a separate durable operation.
-
-## Required behavior
-
-- Model every retained provider message as an immutable occurrence with source
-  identity, order, ingest time, valid time when known, scope, and sanitization
-  receipt.
-- Represent logical copies through evidence-backed relations. Hashes,
-  timestamps, titles, or embeddings alone never collapse messages.
-- Make Turns and threads first-class retrieval grains; preserve provider-native
-  Session and agent identity without inferring missing IDs.
-- Support explicit `current`, `as_of`, `evolution`, and `forensic` modes.
-  Corrections and supersession append assertions and never rewrite history.
-- Publish summary-DAG nodes with exact source anchors, source horizon,
-  model/config route, watermark, sanitizer receipt, and successor/stale
-  lineage. A summary never replaces or hides exact evidence.
-- Use one temporal kernel behind `message_search`, `lcm_grep`, load, describe,
-  expand, and expand-query compatibility bindings.
-- Pin request scope, temporal mode, store/projection/configuration watermarks,
-  ordering, cursor identity, privacy decision, and coverage.
-- Preserve exact identifiers, quoted phrases, errors, paths, symbols, and
-  commands before approximate or configured semantic candidates.
-- Hydrate only selected authorized evidence. Empty, stale, partial, wrong
-  scope, redacted, retained, locked, and unavailable remain distinct.
-- Return bounded context with exact supporting Turns/evidence, summary lineage,
-  conflicts, omissions, and continuation anchors rather than transcript dumps.
-- Keep LCM payloads and summary nodes authoritative only for session-linked
-  narrative/tool-output context. GitHub, CI, diagnostics, Git snapshots, and
-  workflow/effect receipts resolve through Plan 13 anchors and their owning
-  stores.
-- Keep transport `rh_` handles and collection cursors out of durable evidence
-  identity.
-- Make refresh explicit, daemon-owned, joinable by source frontier/target
-  watermark, restart-safe, idempotent, cancellable, and receipt-backed.
+1. Resolve exact project, repository, checkout, worktree, ref, index, and
+   captured-content identity before indexing. Paths and branch labels locate
+   candidates but never provide identity or authorize cross-worktree reuse.
+2. Use `gix` status/index/tree primitives to classify committed, staged,
+   unstaged, untracked, deleted, and renamed paths. Filesystem events are hints,
+   not truth. `notify-debouncer-full` with its recommended file-ID cache
+   coalesces bursts and rename pairs; overflow or dropped events trigger one
+   bounded `gix` reconciliation instead of a guessed incremental update.
+3. Cold discovery uses the existing ignore-aware parallel walker. Warm edits
+   compare content and descriptor digests before parsing, so duplicate
+   notifications and save-without-change perform zero parse, graph, lexical,
+   or embedding work.
+4. Retain the prior Tree-sitter tree for an admitted saved-file snapshot.
+   Apply `InputEdit`, parse with the prior tree, and use `changed_ranges` to
+   narrow extraction. Tree reuse is an optimization only: canonical content,
+   descriptor, sanitizer, and chunk digests remain product identity.
+5. Rebuild only changed symbol chunks, enclosing structural ancestors,
+   affected file-level chunks, and dependency/test-attribution closures whose
+   evidence changed. Deletions produce tombstones. Rename/move reuse requires
+   matching content and extraction inputs and still records explicit lineage
+   evidence.
+6. Keep immutable generations per exact worktree snapshot. Content-addressed
+   parse/chunk/projection artifacts may be physically shared across worktrees
+   only when repository content, descriptor, sanitizer, privacy domain, key
+   epoch, and projection keys match. Shared bytes never merge worktree,
+   occurrence, generation, authorization, or lineage identity.
+7. Batch only added/changed semantic chunks through FastEmbed's local
+   user-defined model API. A no-op performs zero inference; a projection-key
+   change replays retained eligible chunks without reparsing. Semantic work is
+   asynchronous, cancellable, resource-bounded, and lower priority than
+   interactive exact/lexical/graph requests.
+8. While code or semantic indexing is pending, ordinary search uses the latest
+   compatible complete generation and reports freshness/coverage. The semantic
+   lane is omitted until a complete compatible vector generation is atomically
+   current. Partial, stale, failed, cancelled, or incompatible generations
+   never affect ranking, caps, cursors, or fallback bytes.
+9. Coalesce superseded edit batches by exact worktree and content frontier.
+   Bound queue depth, bytes, parser workers, embedding sessions, and publication
+   concurrency. Preserve fair progress across active worktrees and cancel work
+   whose snapshot can no longer publish.
 
 ## Active implementation order
 
-1. Complete the domain contracts for occurrences, logical copies, temporal
-   assertions, Turns/threads/agents, summary nodes, lineage, modes, requests,
-   results, coverage, and cursors.
-2. Complete store migrations/repositories and rebuildable projections without
-   introducing a second writer or repairing during reads.
-3. Implement the root-package temporal kernel behind typed read-only ports,
-   with deterministic ordering, pagination, hydration, abstention, and
-   cancellation.
-4. Route existing message/LCM application and compatibility surfaces through
-   that kernel and make freshness an explicit operation.
-5. Close migration, restart, concurrency, privacy, deletion, performance, and
-   compatibility acceptance with direct product tests.
+1. Clear root and SQLite runtime compile blockers without weakening contracts.
+2. Finish PR12 application, transport, LSP, cancellation, streaming, and
+   distribution reachability.
+3. Finish PR13 Hook V2, Context Scout, advisory authorities, host lifecycle,
+   Cursor extension, and daemon project-open registration.
+4. Mount incremental code and FastEmbed workers behind daemon-owned bounded
+   scheduling while keeping project open and ordinary search non-blocking.
+5. Add worktree/edit/no-op/rename/delete/overflow/cancellation/restart
+   regressions and current/10x performance evidence.
+6. Run focused crate tests, all-feature workspace gates, release builds,
+   package/install checks, platform checks, and the aggregate distribution gate.
 
 ## Direct verification
 
-- copied prompts collapse only with origin evidence; independent repetition
-  remains distinct;
-- current/as-of/evolution/forensic fixtures preserve corrections, conflicts,
-  supersession, and exact historical occurrences;
-- summary publication and successor lineage are atomic, restart-stable, and
-  drill down to exact retained anchors;
-- punctuation, CJK, emoji, provider filters, quoted technical strings, and
-  exact identifiers retain deterministic inclusion and ordering;
-- reads create no rows, files, cursors, repairs, or writable connections;
-- concurrent equivalent refreshes share one operation and terminal receipt;
-- pagination rejects changed-watermark or wrong-scope cursors;
-- authorization, prompt-injection, secret-canary, redaction, retention,
-  deletion, unavailable-source, and partial-coverage cases fail closed;
-- single-root scope never switches through CWD, linked worktree, or another
-  active project;
-- migration/replay is idempotent and projector rebuild preserves anchors,
-  history, ordering, and coverage;
-- focused PR8 benchmarks record corpus/watermarks, p50/p95, candidate counts,
-  allocations, peak RSS, store opens, and exact no-op behavior; and
-- stock format, focused tests, all-feature checks/tests, and relevant
-  cross-platform gates pass before PR8 completion.
-
-## Later work
-
-Do not pull later product journeys into PR8. Their complete retained features,
-semantic ownership, and PR assignments are in
-[00-plan-set-index.md](00-plan-set-index.md).
-
-## Prohibited scope
-
-- no parsing or execution of this file or any V2 roadmap document;
-- no task/work graph filtering, Kanban behavior, plan execution, or workflow
-  runtime;
-- no later lexical/semantic code index, policy/transport convergence, or
-  multi-root federation;
-- no universal query AST, task/board query language, Search Quality Lab, or
-  benchmark bureaucracy;
-- no writable read path, implicit ingest/repair, fallback store, or direct
-  client database access; and
-- no GitHub write, autonomous Git mutation, or authority inferred from CWD,
-  branch names, response handles, or summary prose.
+- duplicate filesystem events and save-without-change cause zero durable or
+  projection work;
+- a one-symbol edit reparses one file and changes only the symbol, enclosing
+  file chunks, and evidenced dependency/test closures;
+- rename, deletion, branch switch, rebase, index-only edit, and dropped watcher
+  events reconcile to the same manifest as a clean scan;
+- two worktrees with shared blobs reuse physical parse/chunk/vector bytes but
+  retain distinct snapshot, occurrence, generation, authorization, and
+  publication identity;
+- unsaved LSP overlays remain client-local and create no durable generation;
+- project open and exact/lexical/graph search complete while FastEmbed loads or
+  indexes, with semantic results absent until atomic activation;
+- cancellation, crash, or incompatible inputs leave the prior compatible
+  generation current and expose no partial state;
+- measurements report event-to-ready p50/p95/p99, queue delay, files hashed and
+  parsed, changed ranges, chunks reused/changed/deleted, invalidation fan-out,
+  embedding batches/chunks, CPU, peak RSS, read/write amplification, and full-
+  rebuild reasons; and
+- default and explicit all-feature release artifacts pass build, test, package,
+  install, host-bundle, LSP, PR12/PR13 surface, and FastEmbed smoke checks.
 
 ## Done
 
-PR8 is complete when one root-package temporal kernel serves all message,
-Turn, session, thread, agent, and LCM context; raw evidence and summary lineage
-remain recoverable and temporally correct; every read is side-effect free;
-refresh is explicit and daemon-owned; results are anchored, scoped,
-coverage-aware, stable across restart, and compact; compatibility bindings
-delegate without private behavior; focused performance evidence is recorded;
-and the direct correctness, privacy, concurrency, migration, cross-platform,
-and aggregate gates pass.
+This slice is complete when PR12/PR13 are production-reachable across supported
+surfaces, incremental worktree indexing is bounded and measurably avoids
+unrelated work, ordinary search remains available during indexing, only
+complete compatible generations publish, and the all-feature distribution and
+aggregate acceptance gates pass from a clean commit.

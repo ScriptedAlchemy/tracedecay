@@ -2,15 +2,15 @@
 
 ## Status / Role
 
-- Status: contract authority for the active PR8 temporal-kernel delivery. PR8
-  remains in progress until its current behavioral requirements and direct
-  acceptance gates pass. PR9 lexical/code retrieval and PR10 semantic
-  retrieval remain unfinished under their delivery plans.
+- Status: shared query-contract authority. PR8 temporal-kernel delivery is
+  complete. PR9 lexical/code and PR10 semantic implementations are callable;
+  their locked quality/resource acceptance remains active under Plans 25, 31,
+  and 15.
 - PR5 added only the observation read/replay needed by its capture vertical in
   existing store and application modules. Extract `tracedecay-query` only when
   PR8-or-later reuse, dependency isolation, or compile-time savings justify the
   boundary.
-- Active PR8 work must establish the temporal kernel's behavior and ownership contract:
+- PR8 established the temporal kernel's behavior and ownership contract:
   typed domain requests, read-only storage/projector boundaries, and no
   SQL/transport/policy authority in the kernel. Its proposed module layout,
   type spellings, suite spine, fixture names, and benchmark paths describe how
@@ -27,10 +27,9 @@
   through CLI, MCP, HTTP, LSP, export, and live non-dashboard adapters.
   PR14 first ships dashboard binding and dashboard parity.
 - Plan 05 owns the shared execution semantics. Plan 23 remains the current
-  owner of temporal retrieval semantics; Plans 25 and 31 own the unfinished
-  PR9 lexical/code and PR10 semantic deliveries. Plans 09/10/11/12/14 and Plan
-  24 are later consumers and may depend on behavior after PR8 acceptance, not
-  a superseded implementation shape.
+  owner of temporal retrieval semantics; Plans 25 and 31 own active PR9
+  lexical/code and PR10 semantic acceptance. Plans 09/10/11/12/14 and Plan 24
+  consume the accepted PR8 behavior, not a superseded implementation shape.
 - The task/work delivery journey reuses these shared scope, budget,
   cancellation, cursor, watermark, merge, and coverage primitives to execute
   Plan 24 requests. Plan 24 owns those typed requests, graph

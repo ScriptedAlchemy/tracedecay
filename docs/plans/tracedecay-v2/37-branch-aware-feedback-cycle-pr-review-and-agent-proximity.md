@@ -66,6 +66,13 @@ supported, through LSP or native diagnostics. Results are bounded and
 expandable, never auto-applied, and never cause a GitHub write, CI rerun, task
 mutation, or agent continuation.
 
+Feedback never waits for repository or FastEmbed reindexing. A cycle freezes
+the latest complete compatible generation already available for its exact
+worktree and reports indexing/stale/partial coverage separately. Exact,
+lexical, graph, Git, diagnostics, test, GitHub, CI, and proximity evidence
+remain independently usable; semantic evidence is omitted until its complete
+compatible vector generation atomically publishes.
+
 ## End-to-end production journeys
 
 ### One-shot edit and stop feedback
@@ -77,7 +84,9 @@ mutation, or agent continuation.
    budgets.
 2. The daemon classifies new versus pre-existing diagnostics and composes
    semantic, graph-impact, affected-test, branch/diff, GitHub, CI, and
-   proximity evidence.
+   proximity evidence. It does not join background parse, graph, lexical, or
+   vector jobs. A newer saved-content frontier may schedule a later generation
+   while this bounded cycle continues against the frozen ready generation.
 3. Plan 22 may select one inert suggested next action from the same evidence.
 4. The cycle terminates once with exactly one reason: clean,
    duplicate-no-op, blocked, incomplete coverage, stale/replan required,

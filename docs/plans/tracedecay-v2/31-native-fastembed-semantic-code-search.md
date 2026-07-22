@@ -1,12 +1,12 @@
 # PR10: Native FastEmbed semantic code search
 
-**Status:** planned PR10 implementation authority. PR8 temporal delivery is
-active and remains an in-progress prerequisite. PR9 remains unfinished and
-must ship and accept the exact lexical/graph fallback and exact-tier evidence
-before PR10 begins its locked semantic work. Those PR9 results become
-immutable runtime prerequisites only after PR9 acceptance. All implementation,
-evaluation, activation, rollback, and direct-acceptance work below remains
-required for PR10.
+**Status:** active PR10 implementation and acceptance authority. The current
+checkout contains callable FastEmbed, exact-flat, vector-generation,
+calibration, fallback, and runtime-routing artifacts, but PR10 remains
+unfinished until the locked Plan 15 comparison and every parent acceptance
+gate pass. PR9 must still ship and accept the exact/lexical/graph fallback and
+exact-tier evidence before PR10 can activate semantics. Those PR9 results
+become immutable runtime prerequisites only after PR9 acceptance.
 
 Plan 31 owns the PR10 semantic adapter, projection/runtime, and direct
 acceptance. Plan 15 owns quality promotion, while Plan 25 owns the PR9 code
@@ -35,9 +35,10 @@ Exact results remain authoritative without a model; similarity alone never prove
   fusion, contribution, diversity, rerank, hydration, cursor, fallback,
   explanation, and redundancy contracts to be shipped in PR9. PR10 adds one semantic
   adapter; it does not create a parallel code-search kernel.
-- Plan 20 owns signed model/reranker profile definitions, trust roots,
-  configuration precedence, and atomic active/rollback profile pointers. This
-  plan owns the root-private artifact verifier, FastEmbed runtime adapter,
+- Plan 20 owns versioned model/reranker profile selection, configuration
+  precedence, and atomic active/rollback profile pointers. This plan owns the
+  root-private versioned artifact manifest and SHA-256 integrity verifier,
+  FastEmbed runtime adapter,
   bounded sessions, semantic generation service, and their typed ports. PR11's
   Plan 09 application layer later composes those accepted ports; it does not
   retroactively own PR10's model implementation.
@@ -73,9 +74,9 @@ The original PR10 design proposed these files:
   in PR9's `crates/tracedecay-domain/src/retrieval.rs`.
   Semantic projection uses Plan 25's `CodeChunkProjectionReceiptV1` and
   `ProjectionBatchReceiptV1`; no semantic-specific receipt authority exists.
-- `src/semantic_code/artifacts.rs`: canonical manifest parsing, signature/trust
-  verification, import staging, atomic install, inventory, retention, and
-  quarantine.
+- `src/semantic_code/artifacts.rs`: versioned manifest parsing, SHA-256 member
+  integrity verification, import staging, atomic install, inventory, retention,
+  and quarantine.
 - `src/semantic_code/manifest.rs`: model/runtime/projection and capability
   manifest validation.
 - `src/semantic_code/projector.rs`: changed-chunk batching, receipt production,
@@ -92,7 +93,7 @@ The original PR10 design proposed these files:
   artifact/runtime admission, projection generation, shadow execution, and
   activation/rollback. It exposes typed ports consumed by the PR11 application
   layer and contains no transport binding.
-- `src/config/retrieval.rs`: Plan-20-owned signed profile definitions and atomic
+- `src/config/retrieval.rs`: Plan-20-owned versioned profile definitions and atomic
   active/rollback profile pointers.
 - `src/store/vector_generations.rs`: Plan-02-owned implementation of the
   semantic projection read/write ports. Query and semantic modules do not
@@ -191,9 +192,36 @@ projection generation by replaying retained canonical chunks without reparsing
 unchanged source. Old retained projections remain immutable and addressable by
 their exact key; partial receipt sets never activate.
 
+### Worktree-aware projection scheduling
+
+- Consume Plan 25's reconciled `ChangedCodeChunkSetV1`; do not watch files,
+  rescan repositories, invoke Git status, or infer changes inside the semantic
+  runtime.
+- Batch only added/changed eligible chunks through FastEmbed
+  `TextEmbedding::embed`. Construct the model through
+  `try_new_from_user_defined` from explicitly installed local ONNX/tokenizer/
+  config bytes. Query and projection paths never invoke the hub, discover an
+  ambient model cache, or download artifacts.
+- A no-op changed set performs zero model calls. Deletions produce tombstones
+  without inference. A projection-key change replays retained eligible chunks
+  without parser/extractor work; a search-index-key-only change rebuilds only
+  the derived exact-flat/search structure.
+- Reuse vector bytes across worktrees only when canonical chunk content,
+  projection key, privacy domain, and key epoch match. Every projection row,
+  receipt, vector generation, and active pointer remains bound to its exact
+  source worktree snapshot and code generation.
+- Coalesce superseded projection batches by exact worktree and source
+  generation. Bound queued bytes, batch size, session count, model memory, and
+  publication concurrency. Interactive exact/lexical/graph queries have
+  priority; semantic query admission is fail-fast and never enters the
+  projection waiter queue.
+- Keep a prior semantic generation queryable only when its complete projection
+  key and source compatibility still match the frozen code request. Otherwise
+  omit semantics until the new complete generation atomically publishes.
+
 ## Model and offline lifecycle
 
-Configuration selects an installed signed embedding profile and, independently,
+Configuration selects an installed versioned embedding profile and, independently,
 an optional reranker profile. Manifests pin actual model/tokenizer/config bytes,
 licenses, runtime/build identity, dimensions, normalization, metric, device,
 threads, batching, and resource ceilings. Implementation selects maintained
@@ -205,31 +233,31 @@ Install/import verifies artifacts before activation. Queries never download a
 model or open an ambient cache. Offline startup remains healthy and
 PR9-baseline-complete. Compatible warmed sessions are pooled under bounded memory,
 concurrency, idle, and cancellation policy. Load failure, OOM, corruption,
-revocation, or incompatible pins disables the affected semantic stage without
+missing bytes, or incompatible pins disables the affected semantic stage without
 silently selecting another model.
 
 Artifact handling is explicit:
 
-- A canonical manifest lists profile kind, model/tokenizer/config file digests,
+- A versioned canonical manifest lists profile kind, model/tokenizer/config file digests,
   byte lengths, licenses, upstream source metadata, runtime compatibility,
-  projection inputs, and the complete resource ceiling. The detached signature
-  covers the canonical manifest bytes; Plan 20 configuration identifies the
-  admitted trust-root ID and rotation epoch. Trust roots are never fetched from
-  the artifact being verified.
+  projection inputs, and the complete resource ceiling. The manifest and each
+  declared member are identified by SHA-256 solely to detect drift, corruption,
+  or incomplete installation. These versioned manifests and integrity checks
+  are the complete artifact-verification contract.
 - Import accepts an explicit local path or an explicitly configured HTTPS
   source in a separate user action. It stages bytes under a random local
-  directory, streams length and SHA-256 verification, verifies the manifest
-  signature and every member before rename, fsyncs files/directories, and then
+  directory, streams length and SHA-256 verification for every declared member
+  before rename, fsyncs files/directories, and then
   atomically publishes an inventory record. Query/runtime paths perform no
-  download, import, extraction, or trust decision.
+  download, import, extraction, source discovery, or network inference.
 - Interrupted imports are resumable only when the source supplies immutable
   length, digest, and range identity; otherwise staging is discarded. Archive
   traversal, symlink/hardlink entries, absolute paths, duplicate members,
   undeclared members, size expansion beyond the manifest, and digest mismatch
   quarantine the import without exposing it to runtime discovery.
-- Installed artifacts live in one Plan-02-owned user store keyed by signed
-  artifact digest, never an ambient Hugging Face/ORT/FastEmbed cache. Inventory
-  records distinguish `staged | verified | installed | revoked | quarantined |
+- Installed artifacts live in one Plan-02-owned user store keyed by versioned
+  manifest digest, never an ambient Hugging Face/ORT/FastEmbed cache. Inventory
+  records distinguish `staged | verified | installed | quarantined |
   retained_for_rollback`. Garbage collection may remove only unreferenced
   non-active/non-rollback artifacts after a daemon lease and append-only
   receipt.
@@ -265,6 +293,15 @@ logits, margins, or fused scores are not confidence; calibrated abstention
 requires a versioned cohort/generation-bound profile and reports invalid or
 shifted calibration explicitly. Strict semantic requests return a typed
 unavailable result.
+
+Semantic projection and indexing run asynchronously. Existing exact, lexical,
+and graph operations remain callable and return without joining, polling, or
+waiting for semantic work. The semantic lane is omitted until one complete
+compatible immutable vector generation becomes current through a single atomic
+publication. Staged, partial, indexing, stale, failed, cancelled, or
+incompatible generations contribute no candidates, score, cap pressure,
+cursor bytes, or rank effects. A request for strict semantic alone may return
+typed unavailable; it may not delay or replace the normal PR9 path.
 
 `code.redundancy` reuses the same active generation. It canonicalizes pairs,
 removes self/overlapping chunks, and reports `exact_clone`,
@@ -334,7 +371,7 @@ measurements.
   before or during a multi-read discards the complete hydrated hit and returns
   a typed denial with no source text or neighbor payload.
 - All caches are local and privacy-domain/key-epoch separated. Model artifacts
-  key by signed artifact digest; sessions by embedding projection key; vectors
+  key by versioned manifest digest; sessions by embedding projection key; vectors
   and checkpoints by projection key plus source generation/chunk digest.
   Result caches additionally key by authorization receipt/epoch, authorized
   scope and query digests, fusion/rerank/request revisions, and pagination.
@@ -360,7 +397,7 @@ measurements.
   Operational receipts contain opaque identities, revisions, outcomes, counts,
   and digests only. Only sanitized fixtures and aggregate Plan 15 reports may
   enter Git.
-- Semantic errors, timeout, cancellation, OOM, corruption, or revocation cannot
+- Semantic errors, timeout, cancellation, OOM, corruption, or missing artifacts cannot
   broaden scope. When the selected profile permits fallback, the lexical/graph
   lane outcomes and Plan 15's named PR9 fallback subpayload are byte-identical.
   The enclosing response may add only a typed semantic/rerank outcome outside
@@ -378,7 +415,7 @@ CPU/RSS, model/vector/cache bytes, cancellation, and offline behavior.
 Plan 15 owns this corpus's partition/label policy, metrics, uncertainty method,
 protected strata, practical margins, stopping rule, thresholds, and promotion
 decision. PR10 owns reproducible execution and immutable result anchors.
-Activation requires Plan 15's signed locked report showing no scope/privacy or
+Activation requires Plan 15's digest-locked accepted report showing no scope/privacy or
 protected exact/no-answer/wrong-scope/worst-stratum regression, demonstrated
 semantic gain, and declared current/10x resource budgets. Sensitive or
 ineligible bytes never enter documents, artifacts, metrics, explanations, or
@@ -395,6 +432,60 @@ Legacy vectors are never trusted or republished. Migration records
 `rebuild_from_retained_eligible_code | drop_with_receipt | quarantine_unreadable`
 and proves every active generation was rebuilt from canonical documents.
 
+## Current delivered-artifact audit
+
+The audit below separates callable delivery from locked acceptance. A present
+source file or type name is not acceptance by itself; the cited direct
+regressions invoke the relevant boundary. The checked-in PR10 packet validates
+these bindings statically, while its result remains non-promoting and pending
+the parent executions.
+
+- **Library-first FastEmbed:** delivered. The root manifest keeps
+  `fastembed` optional with upstream defaults disabled, the
+  `semantic-fastembed` feature selects the native runtime, and
+  `FastEmbedEmbeddingRuntime::open_session` uses FastEmbed's user-defined local
+  byte constructor. Native model execution and resource evidence remain
+  pending.
+- **Default equals all features:** delivered in the root feature manifest. The
+  packet validator compares the declared root feature set with `default`
+  structurally rather than searching for a feature name. The aggregate build
+  gate remains a parent execution.
+- **Local verified model bytes only:** delivered at the runtime boundary.
+  Model, tokenizer, and config bytes come from the installed manifest members;
+  runtime construction has no hub, ambient-cache, download, external-process,
+  or network-inference path. The packet validates the callable constructor and
+  integrity reads; native-platform execution remains pending.
+- **Exact-flat semantic baseline:** delivered by
+  `SemanticCodeRetriever`/`SemanticVectorReadPort::scan_exact_flat`, with direct
+  deterministic ordering, provenance, generation, and coverage regression in
+  `exact_flat_scan_is_deterministic_and_emits_generic_semantic_evidence`.
+- **Immutable generations and atomic publication:** delivered by the staged
+  vector-generation store. Direct regressions
+  `indexing_and_cancellation_leave_only_the_compatible_prior_generation_queryable`
+  and `checkpoint_and_active_pointer_publish_atomically` prove staged work is
+  not queryable, cancellation preserves the current generation, and a failed
+  publication cannot expose half of a swap.
+- **Asynchronous, non-blocking indexing:** delivered at the projection,
+  generation-selection, runtime-routing, and bounded-session boundaries.
+  `only_a_current_receipt_routes_to_semantic_search` routes indexing, degraded,
+  unavailable, and rollback states to the frozen PR9 fallback, while
+  `saturated_runtime_omits_semantics_without_entering_the_waiter_queue` proves
+  query work does not wait for semantic capacity.
+- **Calibrated abstention:** delivered. Missing or shifted calibration invokes
+  no semantic authority and preserves fallback; distance and margin rejection
+  are versioned and generation-bound. Strict semantic returns typed unavailable.
+  Locked threshold selection remains pending.
+- **Byte-stable PR9 fallback:** delivered at the semantic service boundary.
+  Direct regressions retain the caller-owned validated fallback object through
+  augmentation and every tested abstention path. The frozen accepted PR9 bytes
+  and parent fallback digest remain pending PR9 acceptance.
+- **Locked evidence before activation:** not yet accepted. Current runtime
+  routing requires an observed current activation receipt and rejects an
+  indexing receipt, but the Plan 15 accepted report, promotion-evidence
+  consumption, current/10x measurements, native-platform runs, and rollback
+  drill are still absent. `result-pending.json` therefore keeps activation
+  false and records no report, fallback, promotion, or gate receipt.
+
 ## Planned behavioral delivery and direct verification
 
 PR10 remains unfinished. The checkpoints below are behavioral delivery gates.
@@ -410,24 +501,29 @@ and Plan 15's locked result.
    independence.
 2. **Artifact and runtime foundation:** implement one root-private artifact
    verifier, manifest validator, FastEmbed adapter, and bounded session pool.
-   Direct regressions cover signature/trust-root verification, local and explicit HTTPS import,
+   Direct regressions cover versioned manifest and SHA-256 member verification,
+   local and explicit HTTPS import,
    traversal/expansion rejection, interrupted staging, atomic install,
-   revocation/quarantine/GC, cold and warm sessions, OOM, cancellation,
+   quarantine/GC, cold and warm sessions, OOM, cancellation,
    offline startup, no ambient cache, and Linux/Windows native-runtime
    compatibility.
 3. **Incremental vector projection:** implement the projector and vector-generation
    store against Plan 04 projection/checkpoint semantics, Plan 02
    receipt/publication authority, and PR10 runtime ports. Daemon/service
-   orchestration owns scheduling; do not assign it to Plan 04. Direct
-   regressions cover projection, model-key replay, atomic publication, and
-   offline lifecycle.
+   orchestration owns asynchronous worktree-fair bounded scheduling; do not
+   assign it to Plan 04. Direct regressions cover changed-chunk batching,
+   deletion without inference, no-op zero inference, cross-worktree physical
+   reuse without identity reuse, superseded-batch cancellation, model-key
+   replay, search while indexing without waiting, omission of incomplete/
+   incompatible generations, atomic publication, cancellation/failure
+   isolation, and offline lifecycle.
 4. **Exact-flat semantic retrieval and shadow composition:** implement one
    independent semantic outcome and compose it with frozen PR9 lane outputs
    through the shared fusion/diversity/cursor behavior. Direct regressions
    cover lane isolation, contribution provenance, protected exact results,
    diversity/pagination, and byte-identical fallback.
 5. **Late hydration, privacy, and rollback:** reuse PR9 hydration with semantic
-   profile admission, generation checks, authorization recheck, revocation,
+   profile admission, generation checks, authorization recheck,
    domain-keyed caches, payload-safe receipts, active/rollback pointer CAS, and
    cold offline rollback. Direct regressions cover hydration, authorization,
    privacy-domain isolation, activation, and rollback.
@@ -456,6 +552,13 @@ semantic oracle. End-to-end performance work consumes these production
 measurements, while Plan 15 owns quality/resource trade-off and promotion
 policy.
 
+The query workload also overlaps queries with a blocked projection worker and
+with staged, partial, failed, cancelled, stale, and incompatible generations.
+It records exact/lexical/graph completion independently, requires zero wait on
+the semantic worker, compares the visible PR9 fallback bytes and rank before
+and during indexing, and observes semantic candidates only after the complete
+compatible generation and active pointer become visible in one atomic step.
+
 Each workload manifest pins corpus/query digests, exact file/chunk/query counts,
 language/source strata, seed, model/projection/fusion revisions, hardware and
 runtime manifest, cache state, and concurrency. The 10x workload contains
@@ -475,7 +578,8 @@ Historical artifact-name parity is not part of this barrier. No activation
 occurs unless Plan 15 returns
 `accepted`, authorization/scope leakage is zero, protected exact results are
 unchanged, the PR9 fallback subpayload is byte-identical, generation
-compatibility holds, all
+compatibility holds, search-during-indexing leaves PR9 bytes and rank
+unchanged, incomplete or stale generations contribute nothing, all
 resource ceilings pass, and cold offline rollback succeeds.
 
 A `blocked`, `inconclusive`, `rejected`, `invalid_run`, or
@@ -503,7 +607,11 @@ semantic similarity as identity, impact, lineage, or equivalence.
   Plan 25's canonical rebuild path.
 - Receipt fixtures reject missing, duplicate, extra, wrong-generation, wrong-
   digest, and wrong-key entries; crash/cancellation leaves the previous active
-  pointer unchanged and no partial projection queryable.
+  pointer unchanged and no partial projection queryable. Queries issued while
+  projection is blocked complete through exact/lexical/graph without waiting
+  and match the frozen PR9 fallback bytes and rank. Only a complete compatible
+  generation published with its active pointer in one atomic step may add the
+  semantic lane.
 - The semantic adapter emits a separately inspectable generic
   `RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>`; PR9 exact,
   lexical, and graph outcomes are unchanged. Disabling or failing semantic
@@ -535,8 +643,8 @@ semantic similarity as identity, impact, lineage, or equivalence.
 - Split-adapter conformance produces identical results when lexical postings,
   graph evidence, vectors, receipts, and hydration payloads use separate stores,
   proving embeddings and no single physical table are authority.
-- Artifact fixtures reject unknown trust roots, bad/revoked signatures,
-  undeclared or duplicate members, path traversal, links, size expansion,
+- Artifact fixtures reject malformed versioned manifests, undeclared or
+  duplicate members, path traversal, links, size expansion,
   digest/length mismatch, incompatible runtime/platform pins, interrupted
   publication, and deletion of active/rollback artifacts. Query execution
   performs zero network/import/cache-discovery operations.

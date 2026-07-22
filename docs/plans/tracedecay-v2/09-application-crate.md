@@ -44,6 +44,14 @@ timed-out/failed/partial states. A provider can enrich evidence but cannot
 replace stable graph identity, prove test execution or delivery, or turn
 unavailable evidence into a clean empty result.
 
+Application search and feedback handlers never join repository parsing,
+lexical projection, or FastEmbed work. They freeze the latest complete
+compatible generation for the exact worktree, return exact/lexical/graph and
+other ready evidence immediately, and omit semantic contribution while it is
+indexing, stale, failed, cancelled, or incompatible. The result retains the
+selected generation plus provider freshness and coverage so every transport
+can render the same partial-but-usable outcome.
+
 ## PR14 Doctor implementation slice
 
 Plan 09 is the implementation and use-case composition authority for the one

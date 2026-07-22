@@ -116,6 +116,20 @@ behavior, or unavailable state is reduced or deferred by this framing.
   cancellation; analyzer startup, restart, and indexing/degraded state; cache
   reuse and overlay freshness; diagnostic add and clear; provider conflicts;
   host delivery path; partial coverage and drops; and bridge reconnect.
+- Plans 25/31 emit bounded incremental-index observations for exact worktree
+  identity classes without paths: event-to-reconcile and event-to-ready
+  latency; debounced/raw event counts; overflow/rescan reason; candidate,
+  hashed, parsed, and no-op file counts; Tree-sitter changed-range bytes;
+  chunks added/changed/deleted/reused; relation/test invalidation fan-out;
+  projection batches/chunks; physical cross-worktree reuse count; queue depth/
+  bytes; cancellation/supersession; full-rebuild reason; and publication
+  outcome. Parse, graph, lexical, vector, and publication stages remain
+  separately timed.
+- Retrieval observations distinguish serving a current generation, serving a
+  prior complete compatible generation while a newer one indexes, omitting
+  semantic results, and strict-semantic unavailable. Indexing time never counts
+  as query latency, and absence of semantic candidates during indexing never
+  becomes a zero-match quality result.
 - LSP telemetry contains no paths, source, symbols, or diagnostic messages.
 - [Plan 36](36-git-aware-change-context-and-index-transactions.md) telemetry may
   identify the operation kind and outcome only. Patch content,

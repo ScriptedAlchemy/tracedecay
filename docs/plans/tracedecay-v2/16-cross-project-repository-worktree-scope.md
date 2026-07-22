@@ -29,6 +29,34 @@ Every result identifies its owning project and code snapshot. The user never
 has to change CWD, know a store location, or trust a display name to reach the
 right data.
 
+## Worktree index identity and reuse
+
+Plan 16 composes the incremental index delivered by Plans 25/31; it does not
+create a second watcher, parser, chunker, vector store, or scheduler.
+
+- Every linked worktree has an exact typed identity, fenced snapshot frontier,
+  immutable code generation, freshness, and coverage. A shared Git common
+  directory, object ID, branch name, path, or identical bytes never merges
+  worktree or generation authority.
+- Native `gix` worktree/index/tree reconciliation is the changed-path
+  authority. Debounced filesystem events only wake that reconciliation.
+  Dropped-event, rebase, checkout, reset, index-only, detached-head, and
+  worktree-removal cases advance state only after a complete bounded
+  reconciliation.
+- Content-addressed parse, chunk, lexical, and vector artifacts may be reused
+  across authorized worktrees when every content/descriptor/sanitizer/privacy/
+  projection input matches. Logical occurrence, lineage, publication,
+  authorization, cursor, and active-generation identities remain per
+  worktree snapshot.
+- One worktree's edit invalidates no other worktree. Query fans out over the
+  latest complete compatible generation per selected root and reports roots
+  that are indexing, stale, unavailable, or conservatively rebuilding.
+  Semantic projection never blocks exact/lexical/graph results from ready
+  roots.
+- Scheduling is bounded and fair by worktree: interactive roots and queries
+  receive priority without starving background roots, superseded snapshots are
+  cancelled before publication, and queue/resource coverage remains explicit.
+
 ## End-to-end production journey
 
 1. The user supplies explicit typed project, repository, worktree, ref, or

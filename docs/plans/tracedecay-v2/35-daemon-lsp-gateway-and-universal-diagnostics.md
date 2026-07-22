@@ -43,11 +43,19 @@ emulating LSP.
    protocol, catalog, analyzer, and configuration revisions, then accepts
    document content.
 3. Incremental open/change/save/close events maintain a versioned document
-   snapshot. Unsaved overlays are isolated per client; saved content rejoins
-   the clean-generation pipeline only after exact content identity matches.
+   snapshot. For supported languages the overlay keeps its prior Tree-sitter
+   tree, applies `InputEdit`, reparses with that tree, and uses
+   `changed_ranges` to bound overlay extraction. Unsaved overlays are isolated
+   per client and never create durable code/vector generations. Saved content
+   rejoins the Plan 25 clean-generation pipeline only after exact content
+   identity matches; duplicate save/change notifications become a no-op.
 4. The broker routes each supported method to an explicitly configured
    upstream analyzer and/or current TraceDecay graph provider. Requests carry
    deadlines and cancellation; stale or superseded results cannot publish.
+   Provider state may be `indexing`, but navigation, exact/lexical/graph
+   results, and analyzer diagnostics use the latest complete compatible
+   generation without waiting for background indexing. Semantic results are
+   omitted until their complete compatible generation atomically publishes.
 5. Provider results are normalized to canonical files and UTF-16 positions,
    retain provenance/freshness/coverage, and enter the Plan 09
    semantic-evidence contract. Exact compatible clean results may be cached;

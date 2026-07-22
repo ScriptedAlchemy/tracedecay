@@ -63,6 +63,13 @@ The implementation ranks compact authorized candidates before hydrating payloads
   model-call, and deadline budgets. It receives only the approximate prefix after
   source-level dedupe, temporal resolution, fusion, and diversity. Failure returns the
   exact pre-rerank order with a typed visible reason.
+- Semantic projection and indexing are asynchronous optional work. Exact, lexical, and
+  graph operations remain callable and complete without waiting for a projector,
+  generation build, model session, or semantic capacity. Semantic candidates are omitted
+  until a complete compatible immutable generation is atomically current. Partial,
+  indexing, stale, failed, cancelled, and incompatible generations have zero influence
+  on rank, caps, pages, cursors, explanations, caches, and visible timing class. Strict
+  semantic alone may return typed unavailable.
 - TraceDecay will not create one monolithic embeddings table or a cross-authority vector
   store. Vectors are derived, source-local projections keyed by stable anchor, privacy
   domain, source generation, projection digest, model revision, dimensions,
@@ -418,6 +425,13 @@ external inference process, or separate model service. Models load once and reus
 sessions. Document embeddings batch during indexing; unchanged source occurrences reuse
 vectors only when every compatibility key matches.
 
+FastEmbed is library-first: the shipped default feature set equals the complete root
+feature set, and FastEmbed is available in both default and all-feature builds.
+FastEmbed's model-hub defaults remain disabled. Runtime construction accepts only
+locally installed model/tokenizer/config bytes whose lengths and SHA-256 values match a
+versioned manifest; it performs no hub lookup, ambient-cache discovery, download,
+network inference, or unmeasured model substitution.
+
 The currently supported Jina code model, one general FastEmbed comparator, and
 `BGERerankerV2M3` are reproducible candidates, not predetermined winners. One current
 compatible code-specialized challenger may enter only with pinned license, artifact
@@ -454,7 +468,7 @@ acceptance criteria.
   evidence role, validity interval, supersession relation, logical-copy group,
   forbidden-anchor IDs, abstention oracle, task oracle, labeler provenance, adjudication,
   and correction/supersession lineage.
-- Locked-judgment metadata contains only the signed sealed
+- Locked-judgment metadata contains only the versioned sealed
   holdout digest, authorized-store locator, access policy, and reveal audit contract.
   Locked labels are not checked in or readable during tuning.
 - Temporal-event fixtures contain stable event ID, valid
@@ -487,7 +501,7 @@ duplicates, forks, generated copies, repeated issue families, and repository-fam
 clusters cannot cross development, locked chronological, repository-disjoint, or
 forward-confirmation partitions unnoticed.
 
-The harness signs and freezes the run manifest before the locked-label access capability is
+The harness content-locks and freezes the versioned run manifest before the locked-label access capability is
 granted. The reveal produces an audited access receipt bound to the run digest. Any
 pre-freeze access, digest mismatch, unrecorded reveal, or reuse of revealed labels for
 selection makes the run `invalid_run`. Forward confirmation uses a separately sealed
@@ -669,7 +683,10 @@ prefixes under execution-order and timing jitter, partial outcomes, cancellation
 rank-before-hydrate, and hydration authorization recheck. PR10 additionally covers model
 installation and offline reuse, batching, incremental vector reuse, incompatibility and
 rebuild, privacy isolation, bounded reranking, model corruption/refusal/timeout,
-configuration pinning, and byte-identical fallback.
+configuration pinning, byte-identical fallback, search while semantic indexing is
+blocked, zero wait by exact/lexical/graph operations, omission of every non-current
+generation state, and atomic visibility of the complete compatible generation plus its
+active pointer.
 
 ## Rollout, rollback, and failure handling
 
@@ -684,6 +701,12 @@ stopping rule come from the locked report; there is no universal rollout count.
 Running queries and cursors stay pinned to their starting profile and freshness vector.
 Runtime safety ceilings may equal or exceed the promoted profile budgets but may not bind
 below them; otherwise activation fails because the evaluated profile cannot execute.
+
+Projection workers never enter the request dependency chain. During indexing, status may
+report bounded progress, but normal search routes immediately through the frozen PR9
+exact/lexical/graph fallback. Atomic activation is the first point at which a compatible
+semantic lane may appear; any failure before that point preserves the prior route and
+rank bytes.
 
 Authorization leakage, exact-tier demotion, temporal-invariant failure, or scope leakage
 prevents activation and immediately disables the candidate profile. A frozen operational
@@ -729,6 +752,13 @@ evaluated profile budget.
   and protected strata. No aggregate score hides a failed invariant or worst stratum.
 - Semantic vectors are source-local derived projections; no monolithic embeddings table,
   second corpus database, or cross-privacy-domain vector authority exists.
+- Search during semantic indexing returns the frozen exact/lexical/graph behavior without
+  waiting. Partial, indexing, stale, failed, cancelled, and incompatible generations never
+  affect rank, and semantic candidates appear only after atomic activation of a complete
+  compatible generation.
+- FastEmbed is built library-first in default and all-feature configurations and consumes
+  only locally installed, versioned-manifest, SHA-256-verified bytes without ambient hub,
+  cache, download, or network inference.
 - No fixed RRF constant, fusion weight, quality threshold, diversity quota, ANN choice,
   model, or reranker is promoted without locked TraceDecay evidence.
 - Hermetic validation, locked comparison requiring `accepted`, focused direct

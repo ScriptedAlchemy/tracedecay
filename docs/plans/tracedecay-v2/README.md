@@ -1,12 +1,13 @@
 # TraceDecay V2 rewrite
 
-Status: active product rewrite. PR7 is complete, PR8 implementation is active,
-and PR #421 remains open.
+Status: active product rewrite. PR8 is complete. PR9/PR10 acceptance and
+PR12/PR13 production integration are active, and PR #421 remains open.
 
 The authoritative delivery order is [00-plan-set-index.md](00-plan-set-index.md).
-The active PR8 execution slice is [NEXT.md](NEXT.md). These are contributor
-documents only and never product runtime input. Numbered plans define component
-requirements and boundaries, not separate crate-first work queues.
+The active production-integration and incremental-indexing slice is
+[NEXT.md](NEXT.md). These are contributor documents only and never product
+runtime input. Numbered plans define component requirements and boundaries,
+not separate crate-first work queues.
 
 ## Current product foundation
 

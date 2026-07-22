@@ -22,11 +22,16 @@ path as working product behavior.
 1. A real host edit or stop event wakes `tracedecayd`; the hook performs no
    retrieval or model work.
 2. The daemon coalesces events by exact project, session, thread, turn, agent,
-   message, and saved-content identity and cancels superseded work.
+   message, worktree, and saved-content identity and cancels superseded work.
+   The same event may wake Plan 25 indexing, but Scout neither joins that work
+   nor starts its own parser/indexer.
 3. It retrieves a bounded evidence set from canonical query, LCM, diagnostics,
-   and semantic-provider operations. Plan 37's post-edit, read-only GitHub,
-   CI-localization, and proximity findings enter through the same evidence
-   path.
+   and semantic-provider operations using the latest complete compatible
+   generation already ready for that worktree. `indexing` is a source-
+   availability/coverage state, not a reason to wait. Exact/lexical/graph and
+   non-code evidence remain usable while semantic results are omitted. Plan
+   37's post-edit, read-only GitHub, CI-localization, and proximity findings
+   enter through the same evidence path.
 4. Deterministic policy always remains available. When explicitly configured
    and authorized, the owned model gateway may propose or refine a structured
    candidate using only the approved evidence and current budgets.
@@ -58,6 +63,10 @@ and treats historical narrative as quoted evidence, never active instruction.
   superseded work, and commit at most one ready suggestion for an eligibility
   window. Claim, revalidation, display receipt, and feedback update remain
   atomic or idempotent across restart.
+- A saved edit may make newer code evidence pending without invalidating the
+  prior complete compatible generation. Scout records the selected generation
+  and freshness, never waits for parsing or FastEmbed, and suppresses only the
+  stale-sensitive suggestion when no compatible ready evidence exists.
 - Permit bounded semantic capsules for hover, signature, exact target,
   diagnostics, implementations, and references where Plan 35 can answer with
   exact generation, provenance, and coverage. Capsules dedupe against other

@@ -94,14 +94,20 @@ context extension without turning LSP into a generic tool proxy.
 3. Canonical feedback diagnostics, impact, affected-test, test-result,
    get/list, and exact-expansion reads return real typed results. CLI, MCP, and
    HTTP bind the applicable readers in PR12; no advertised PR12 route delegates
-   to a placeholder or permanent unavailable handler.
+   to a placeholder or permanent unavailable handler. Indexing is never a
+   transport-level wait condition: operations use the latest complete
+   compatible generation, preserve exact/lexical/graph behavior, and return
+   typed provider freshness/coverage. Semantic results are omitted while their
+   generation is indexing rather than delaying or failing the whole operation.
 4. Plan 35 projects standard diagnostics and serves its versioned TraceDecay
    context extension over ordinary LSP/JSON-RPC framing after explicit
    experimental capability negotiation. Compact responses retain exact scope,
    content/graph generation, provider and coverage state, omissions, and
    opaque expansion handles; expansion reauthorizes against the canonical
    read. The gateway neither forwards arbitrary methods/payloads nor owns the
-   underlying feedback, test, graph, or evidence data.
+   underlying feedback, test, graph, or evidence data. CLI/MCP/HTTP/LSP parity
+   includes the same non-blocking indexing semantics and selected-generation
+   identity.
 5. Each adapter renders the canonical result for its protocol. HTTP feedback
    parity is part of PR12. Dashboard binding and dashboard parity begin in
    PR14, not PR12.

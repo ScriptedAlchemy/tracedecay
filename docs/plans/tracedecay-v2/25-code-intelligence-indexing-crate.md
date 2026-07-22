@@ -2,9 +2,11 @@
 
 ## Status / role
 
-Status: planned PR9 implementation authority. PR9 is not complete until the
+Status: active PR9 implementation and acceptance authority. The current
+checkout contains callable deterministic indexing, chunk/lineage, Git/impact,
+diagnostic/test, exact, lexical, and graph paths. PR9 is not complete until the
 direct behavioral and locked quality gates in this plan and Plan 15 pass.
-PR9 must deliver one complete single-root vertical:
+PR9 must accept one complete single-root vertical:
 deterministic code indexing, immutable generations, generation-bound Git/
 diagnostic/test evidence, and accepted exact/lexical/graph retrieval. Start as
 a focused module; extract `tracedecay-code-index` only when independent reuse,
@@ -312,10 +314,32 @@ pub struct ProjectionBatchReceiptV1 {
 ### Generations and incremental reuse
 
 - Build one immutable logical generation from one fenced snapshot.
+- Treat filesystem notifications as wake-up hints, never as the changed-file
+  authority. Use `notify-debouncer-full` with its recommended file-ID cache to
+  coalesce bursts and rename pairs. Reconcile every emitted batch against
+  native `gix` index/worktree/tree status; dropped-event or overflow signals
+  trigger one bounded reconciliation before generation planning.
+- Use the existing ignore-aware parallel walker for cold discovery. Warm
+  batches hash only reconciled candidate paths and reject duplicate event or
+  save-without-change work by content plus descriptor digest before parsing.
+- Retain the admitted prior Tree-sitter tree for each saved-file content
+  identity. Apply `InputEdit`, parse with the old tree, and use
+  `changed_ranges` to bound extraction. Re-fetch canonical nodes after parsing;
+  Tree-sitter object identity and shared internal nodes are never lineage or
+  product identity.
 - Reparse only changed sanitized content or descriptor inputs. Reuse file and
   symbol results only when content, grammar, extractor, identity, and sanitizer
   inputs match; recompute relation and attribution rows only for dependency
   closures invalidated by versioned evidence.
+- Keep generation identity exact per repository/worktree/ref/snapshot.
+  Content-addressed parse and chunk artifacts may be physically reused across
+  worktrees only when source content, language descriptor, extractor,
+  sanitizer, privacy domain, and key epoch match. Reuse never merges worktree,
+  occurrence, authorization, generation, or lineage identity.
+- Coalesce superseded batches by exact worktree and content frontier. Bound
+  queue depth/bytes and parser/publication concurrency, preserve fair progress
+  across active worktrees, and cancel a build whose fenced snapshot can no
+  longer publish.
 - Report parse work, resolution work, invalidation fan-out, extracted-row
   reuse, and conservative full-rebuild fallback separately. Tree-sitter node
   reuse is performance evidence, never product identity or lineage.
@@ -457,9 +481,11 @@ locked Plan 15 outcome.
    for locked quality or resource evidence.
 4. **Generations, incrementality, and lineage:** implement immutable planning,
    sealing, incremental change classification, and evidence-backed lineage.
-   Direct regressions cover no-op, one-symbol and preamble edits, rename, move,
-   deletion, split/merge, ambiguity/abstention, chunker/grammar/privacy
-   invalidation, sealing, and mixed-snapshot rejection.
+   Direct regressions cover duplicate watcher events, save-without-change,
+   dropped-event reconciliation, staged-only and worktree-only edits, no-op,
+   one-symbol and preamble edits, rename, move, deletion, split/merge,
+   ambiguity/abstention, cross-worktree content reuse without identity reuse,
+   chunker/grammar/privacy invalidation, sealing, and mixed-snapshot rejection.
 5. **Git, diagnostics, and test joins:** implement generation-exact joins with
    independent provenance. Direct regressions cover working/staged/range
    hunks, mismatch/binary/rename/deletion cases, current/stale/cleared
@@ -531,6 +557,14 @@ locked Plan 15 outcome.
   recompute only evidence-invalidated relation/attribution closures; reports
   separate parse work, resolution work, invalidation fan-out, reuse, and any
   conservative full rebuild without changing unchanged occurrence identities.
+- A burst containing duplicate create/modify/save events produces the same
+  manifest as one clean reconciliation. Rename pairs are stitched when the
+  platform supplies stable file identity, and watcher overflow falls back to
+  bounded `gix` reconciliation rather than a full rebuild or guessed deletion.
+- Two linked worktrees sharing unchanged blobs may reuse physical parse/chunk
+  artifacts, but publish different snapshot/generation/occurrence identities.
+  An edit in one worktree invalidates no generation or cache entry in the
+  other.
 - Rename, move, split, merge, ambiguous-lineage, parse-error, deletion, and unsupported-language fixtures remain truthful.
 - Fixtures prove Tree-sitter reuse never becomes lineage, parse/extraction caps
   remain partial, every graph path preserves its weakest edge authority and
