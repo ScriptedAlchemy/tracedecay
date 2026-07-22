@@ -535,7 +535,9 @@ async fn multi_batch_refresh_progress_survives_restart_under_guard() {
     match recovery.restart_state() {
         SessionRefreshRestartStateV1::ResumeProjection { .. }
         | SessionRefreshRestartStateV1::ReadyToComplete => {}
-        other => panic!("unexpected restart state after first batch: {other:?}"),
+        state @ SessionRefreshRestartStateV1::BeginProjection => {
+            panic!("unexpected restart state after first batch: {state:?}")
+        }
     }
     if let Some((progress, batch)) = db
         .materialize_session_temporal_refresh_batch_result(&recovery)

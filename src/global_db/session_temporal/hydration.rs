@@ -1331,8 +1331,12 @@ mod tests {
     }
 
     fn hash(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
         let digest = Sha256::digest(bytes);
-        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+        digest.iter().fold(String::new(), |mut output, byte| {
+            let _ = write!(output, "{byte:02x}");
+            output
+        })
     }
 
     fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
