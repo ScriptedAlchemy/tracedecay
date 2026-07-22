@@ -1137,10 +1137,7 @@ mod cutover_tests {
     }
 
     impl SessionRetrievalServicePort for RecordingService {
-        fn execute(
-            &self,
-            command: SessionRetrievalCommand,
-        ) -> SessionRetrievalServiceFuture<'_> {
+        fn execute(&self, command: SessionRetrievalCommand) -> SessionRetrievalServiceFuture<'_> {
             self.commands.lock().unwrap().push(command);
             let outcome = self.outcome.lock().unwrap().clone().unwrap_or(
                 SessionRetrievalServiceOutcome::CompleteZero {

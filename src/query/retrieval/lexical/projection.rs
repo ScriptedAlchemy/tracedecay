@@ -3,10 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
-    FixedPointScore,
-    FreshnessCompatibilityV1, LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
-    SourceOccurrenceId,
+    FixedPointScore, FreshnessCompatibilityV1, LogicalEvidenceId, RepositoryId, RetrievalAnchorId,
+    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId,
+    SourceFreshness, SourceOccurrenceId,
 };
 
 use super::{

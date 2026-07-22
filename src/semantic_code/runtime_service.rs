@@ -305,10 +305,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
             };
 
             {
-                let mut state = handle
-                    .state
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
                 if state.sequence != sequence || cancellation.cancelled() || state.committing {
                     return;
                 }
@@ -316,10 +313,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
             }
 
             let committed = prepared.commit().await;
-            let mut state = handle
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.sequence != sequence {
                 state.committing = false;
                 return;
@@ -582,15 +576,11 @@ where
     }
 
     fn read_active(&self) -> RwLockReadGuard<'_, ActiveRuntime<R>> {
-        self.active
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.active.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn write_active(&self) -> RwLockWriteGuard<'_, ActiveRuntime<R>> {
-        self.active
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.active.write().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

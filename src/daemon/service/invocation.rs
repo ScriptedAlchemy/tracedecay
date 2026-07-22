@@ -1299,19 +1299,19 @@ async fn execute_primitive(
             DaemonInvocationProblem::InvalidRequest,
         );
     };
-    let Ok(Some(operation)) = tracedecay_application::feedback::feedback_surface_operation(
-        surface_operation.as_str(),
-    )
-    .and_then(|operation| {
-        operation.map_or_else(
-            || {
-                tracedecay_application::retrieval::catalog::primitive_read_operation(
-                    surface_operation.as_str(),
+    let Ok(Some(operation)) =
+        tracedecay_application::feedback::feedback_surface_operation(surface_operation.as_str())
+            .and_then(|operation| {
+                operation.map_or_else(
+                    || {
+                        tracedecay_application::retrieval::catalog::primitive_read_operation(
+                            surface_operation.as_str(),
+                        )
+                    },
+                    |operation| Ok(Some(operation)),
                 )
-            },
-            |operation| Ok(Some(operation)),
-        )
-    }) else {
+            })
+    else {
         return DaemonInvocationResponse::problem(
             wire_request_id,
             DaemonInvocationProblem::InvalidRequest,

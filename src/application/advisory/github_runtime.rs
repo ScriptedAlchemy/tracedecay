@@ -745,21 +745,18 @@ where
             match outcome {
                 GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
                 | GitHubReviewRefreshStoreCommitOutcomeV1::Duplicate => {
-                    let deleted_items = next
-                        .last_complete
-                        .as_ref()
-                        .map_or(0, |generation| {
-                            generation
-                                .response
-                                .ingress
-                                .items
-                                .iter()
-                                .filter(|item| {
-                                    item.lifecycle
-                                        == tracedecay_domain::feedback::GitHubReviewLifecycleV1::Deleted
-                                })
-                                .count() as u64
-                        });
+                    let deleted_items = next.last_complete.as_ref().map_or(0, |generation| {
+                        generation
+                            .response
+                            .ingress
+                            .items
+                            .iter()
+                            .filter(|item| {
+                                item.lifecycle
+                                    == tracedecay_domain::feedback::GitHubReviewLifecycleV1::Deleted
+                            })
+                            .count() as u64
+                    });
                     GitHubReviewRefreshOutcomeV1::Stored(Box::new(GitHubReviewRefreshReceiptV1 {
                         state: next,
                         deleted_items,

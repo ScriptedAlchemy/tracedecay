@@ -29,8 +29,7 @@ use tracedecay_store::{
     CompatibilityFactAddAliasV1, CompatibilityFactCurationOperationV1,
     CompatibilityFactCurationReceiptV1, CompatibilityFactMappingV1,
     CompatibilityFactMergeEntitiesV1, CompatibilityFactTargetV1, CompatibilityLegacyEntityTargetV1,
-    CompatibilityMemoryRepairStatsV1,
-    FactCompatibilityResult, FactStoreError, FactStoreResult,
+    CompatibilityMemoryRepairStatsV1, FactCompatibilityResult, FactStoreError, FactStoreResult,
 };
 async fn compatibility_owner_entity_tx(
     transaction: &Transaction,

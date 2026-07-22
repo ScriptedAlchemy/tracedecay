@@ -36,14 +36,14 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, CommitId, ComponentVersion, ContentDigest, FileOccurrenceId,
-    LanguageDescriptorRevision, LanguageId, ManifestDigest, ProviderId, RetrievalAnchorId,
-    ShardId, UtcMicros, VectorWatermark, canonical_sha256,
+    LanguageDescriptorRevision, LanguageId, ManifestDigest, ProviderId, RetrievalAnchorId, ShardId,
+    UtcMicros, VectorWatermark, canonical_sha256,
 };
+use tracedecay_policy::TruthSourceStateV1;
 use tracedecay_policy::analyzer::{
     AnalyzerAdmissionInputV1, AnalyzerAvailabilityV1, AnalyzerCandidateV1,
     AnalyzerExecutionLocationV1,
 };
-use tracedecay_policy::TruthSourceStateV1;
 use tracedecay_tool_catalog::CapabilityId;
 
 use super::cycle_runtime::{Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput};
@@ -251,11 +251,12 @@ fn managed_rust_analyzer_candidate(
             field: "project-open provider file",
         }
     })?;
-    let content_digest = ContentDigest::new(configuration_digest.as_str().to_owned()).map_err(
-        |_| ApplicationContractError::Inconsistent {
-            field: "project-open provider content digest",
-        },
-    )?;
+    let content_digest =
+        ContentDigest::new(configuration_digest.as_str().to_owned()).map_err(|_| {
+            ApplicationContractError::Inconsistent {
+                field: "project-open provider content digest",
+            }
+        })?;
     let policy = PolicyDecisionRef::new(
         "policy.decision.project-open.analyzer",
         POLICY_REVISION_V1,
@@ -537,10 +538,11 @@ fn daemon_request_context(
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.tracedecay-daemon.project-open.cycle".to_owned())?,
         1,
-        canonical_sha256(&("tracedecay.project-open.grant.v1", requester, scope))
-            .map_err(|_| ApplicationContractError::Inconsistent {
+        canonical_sha256(&("tracedecay.project-open.grant.v1", requester, scope)).map_err(
+            |_| ApplicationContractError::Inconsistent {
                 field: "project-open grant digest",
-            })?,
+            },
+        )?,
         ActorId::new("actor.tracedecay-daemon.project-open".to_owned())?,
         observed_at,
         grant_expires_at,
@@ -553,10 +555,7 @@ fn daemon_request_context(
         requester.clone(),
         scope.clone(),
         grant,
-        RequestId::new(format!(
-            "request.project-open.cycle.{}",
-            observed_at.0
-        ))?,
+        RequestId::new(format!("request.project-open.cycle.{}", observed_at.0))?,
         Deadline::new(grant_expires_at)?,
         CancellationContext::active(format!("cancel.project-open.cycle.{}", observed_at.0))?,
     )

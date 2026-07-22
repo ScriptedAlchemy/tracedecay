@@ -282,7 +282,9 @@ fn prepare_candidates(
 fn copy_metadata(candidate: &mut RankingCandidate, metadata: &RankingCandidate) {
     candidate.anchor_id = metadata.anchor_id.clone();
     candidate.knowledge_at_micros = metadata.knowledge_at_micros;
-    candidate.logical_message.clone_from(&metadata.logical_message);
+    candidate
+        .logical_message
+        .clone_from(&metadata.logical_message);
     candidate.turn.clone_from(&metadata.turn);
     candidate.session.clone_from(&metadata.session);
     candidate.source.clone_from(&metadata.source);
@@ -334,7 +336,9 @@ fn option_conflicts(left: Option<&str>, right: Option<&str>) -> bool {
 
 fn fill_missing_metadata(existing: &mut RankingCandidate, candidate: &RankingCandidate) {
     if existing.logical_message.is_none() {
-        existing.logical_message.clone_from(&candidate.logical_message);
+        existing
+            .logical_message
+            .clone_from(&candidate.logical_message);
     }
     if existing.turn.is_none() {
         existing.turn.clone_from(&candidate.turn);

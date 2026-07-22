@@ -143,7 +143,9 @@ fn now_observed() -> UtcMicros {
     use std::time::{SystemTime, UNIX_EPOCH};
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_micros().min(i64::MAX as u128) as i64);
+        .map_or(0, |duration| {
+            duration.as_micros().min(i64::MAX as u128) as i64
+        });
     UtcMicros(micros)
 }
 

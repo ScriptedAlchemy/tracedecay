@@ -3779,13 +3779,9 @@ mod tests {
                 ),
             ] {
                 let mut state = TemporalRecordReadState::new(limits);
-                let Err(error) = pull_temporal_record_page(
-                    &UnreachableReadPort,
-                    &snapshot,
-                    &[],
-                    &mut state,
-                )
-                .await
+                let Err(error) =
+                    pull_temporal_record_page(&UnreachableReadPort, &snapshot, &[], &mut state)
+                        .await
                 else {
                     panic!("looser record state must fail before producer entry");
                 };

@@ -924,17 +924,11 @@ impl DaemonSessionRetrievalService {
 }
 
 impl SessionRetrievalServicePort for DaemonSessionRetrievalService {
-    fn execute(
-        &self,
-        command: SessionRetrievalCommand,
-    ) -> SessionRetrievalServiceFuture<'_> {
+    fn execute(&self, command: SessionRetrievalCommand) -> SessionRetrievalServiceFuture<'_> {
         Box::pin(async move { self.execute_command(command).await })
     }
 
-    fn describe_lcm(
-        &self,
-        command: LcmDescribeServiceCommand,
-    ) -> LcmDescribeServiceFuture<'_> {
+    fn describe_lcm(&self, command: LcmDescribeServiceCommand) -> LcmDescribeServiceFuture<'_> {
         Box::pin(async move { self.execute_lcm_describe(command).await })
     }
 

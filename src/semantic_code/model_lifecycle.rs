@@ -669,10 +669,7 @@ impl SemanticModelLifecycleOwnerV1 {
     }
 
     fn spawn_acquire(&self) -> bool {
-        let mut worker = self
-            .worker
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut worker = self.worker.lock().unwrap_or_else(PoisonError::into_inner);
         if worker.as_ref().is_some_and(|handle| !handle.is_finished()) {
             return false;
         }

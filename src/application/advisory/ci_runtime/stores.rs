@@ -13,11 +13,11 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{CanonicalObservationIdV1, RetrievalAnchorId};
 
+use super::GitHubCiProviderRecordV1;
 use super::production::{
     CiCodeAnchorStoreV1, CiExactCodeEvidenceV1, CiRetainedProviderObservationAuthorityV1,
     CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
 };
-use super::GitHubCiProviderRecordV1;
 use crate::application::advisory::context_allows_feedback_operation;
 use crate::db::Database;
 use crate::tracedecay::TraceDecay;

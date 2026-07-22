@@ -732,9 +732,10 @@ fn insert_lcm_expand_query_status(
         .get("status")
         .and_then(Value::as_str)
         .filter(|status| !status.is_empty())
-        .map_or_else(|| "partial".to_string(), |status| {
-            truncate_chars(status, max_chars).0
-        });
+        .map_or_else(
+            || "partial".to_string(),
+            |status| truncate_chars(status, max_chars).0,
+        );
     object.insert("status".to_string(), json!(status));
 }
 

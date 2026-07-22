@@ -1346,8 +1346,7 @@ impl ModelArtifactStore {
                 Ok(meta) if meta.schema == STAGING_SCHEMA_V1 => meta,
                 Ok(_) | Err(_) => continue,
             };
-            let Ok(binding) =
-                self.verify_manifest_binding(&meta.manifest, meta.verified_at_unix)
+            let Ok(binding) = self.verify_manifest_binding(&meta.manifest, meta.verified_at_unix)
             else {
                 continue;
             };

@@ -135,10 +135,7 @@ impl ExactAdmissionValidator for FixtureAuthority {
         if candidate_bytes == b"authority-rejected" {
             return Ok(None);
         }
-        let canonical_bytes: Vec<u8> = candidate_bytes
-            .iter()
-            .map(u8::to_ascii_lowercase)
-            .collect();
+        let canonical_bytes: Vec<u8> = candidate_bytes.iter().map(u8::to_ascii_lowercase).collect();
         let normalization_steps = if canonical_bytes == candidate_bytes {
             Vec::new()
         } else {

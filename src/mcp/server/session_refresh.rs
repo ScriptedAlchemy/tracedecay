@@ -136,10 +136,7 @@ impl DaemonSessionRefreshService {
         digest.update(handle.join_digest().as_bytes());
         digest.update(handle.caller_idempotency_digest().as_bytes());
         let token = format!("srh_{}", hex::encode(digest.finalize()));
-        let mut handles = self
-            .handles
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut handles = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
         if handles.len() >= MAX_SESSION_REFRESH_HANDLES
             && !handles.contains_key(&token)
             && let Some(evicted) = handles.keys().next().cloned()

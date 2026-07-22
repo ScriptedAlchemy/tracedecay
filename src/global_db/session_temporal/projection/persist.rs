@@ -384,12 +384,24 @@ pub(super) async fn persist_occurrence(
                 occurrence.source_observation_id.as_str(),
                 i64::from(occurrence.projection_output_ordinal.value()),
                 occurrence.retrieval_anchor_id.as_str(),
-                occurrence.thread_id.as_ref().map(tracedecay_domain::ThreadId::as_str),
+                occurrence
+                    .thread_id
+                    .as_ref()
+                    .map(tracedecay_domain::ThreadId::as_str),
                 thread_grouping,
-                occurrence.turn_id.as_ref().map(tracedecay_domain::TurnId::as_str),
+                occurrence
+                    .turn_id
+                    .as_ref()
+                    .map(tracedecay_domain::TurnId::as_str),
                 turn_grouping,
-                occurrence.message_id.as_ref().map(tracedecay_domain::MessageId::as_str),
-                occurrence.agent_id.as_ref().map(tracedecay_domain::AgentInstanceId::as_str),
+                occurrence
+                    .message_id
+                    .as_ref()
+                    .map(tracedecay_domain::MessageId::as_str),
+                occurrence
+                    .agent_id
+                    .as_ref()
+                    .map(tracedecay_domain::AgentInstanceId::as_str),
                 role,
                 occurrence.knowledge_at.0,
                 valid_time,

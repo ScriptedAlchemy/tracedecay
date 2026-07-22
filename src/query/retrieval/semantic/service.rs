@@ -226,10 +226,9 @@ where
             Ok(evidence) => evidence,
             Err(abstention) => return self.abstain(mode, abstention, fallback),
         };
-        let Ok(semantic_lane) = CompositionLaneInput::new(
-            RetrieverKind::Semantic,
-            RetrieverOutcome::Complete(batch),
-        ) else {
+        let Ok(semantic_lane) =
+            CompositionLaneInput::new(RetrieverKind::Semantic, RetrieverOutcome::Complete(batch))
+        else {
             return self.abstain(mode, SemanticAbstentionV1::LaneFailure, fallback);
         };
         Ok(SemanticQueryServiceOutcomeV1::Augmented {

@@ -135,9 +135,9 @@ impl TemporalReadPort for FakeReadPort {
 }
 
 fn page_start(request: &PageRequest) -> usize {
-    request
-        .keyset()
-        .map_or(0, |key| key.as_str().parse::<usize>().expect("numeric page key"))
+    request.keyset().map_or(0, |key| {
+        key.as_str().parse::<usize>().expect("numeric page key")
+    })
 }
 
 fn clone_temporal_record(record: &TemporalRecord) -> TemporalRecord {

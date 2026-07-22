@@ -182,7 +182,11 @@ fn project_open_mounts_concrete_cycle_lsp_advisory_and_hook_owners() {
     assert_eq!(cycle.len(), 1, "feedback cycle must register once");
     assert_eq!(lsp.len(), 1, "LSP owner must register once");
     assert_eq!(advisory.len(), 1, "advisory production must register once");
-    assert_eq!(hooks.len(), 1, "hook host-delivery sink must be constructed");
+    assert_eq!(
+        hooks.len(),
+        1,
+        "hook host-delivery sink must be constructed"
+    );
 }
 
 #[test]

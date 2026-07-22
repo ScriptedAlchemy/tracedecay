@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tracedecay_application::feedback::{
     FeedbackPortFuture, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
 };
-use tracedecay_application::{RequestContext, RequestAdmission};
+use tracedecay_application::{RequestAdmission, RequestContext};
 use tracedecay_domain::feedback::{
     FeedbackAuthoritativeRuntimeStateV1, FeedbackCycleRuntimeSnapshotV1, FeedbackEvaluationInputV1,
 };
@@ -70,15 +70,15 @@ impl FeedbackRuntimeStatePort for ProductionFeedbackRuntimeStateV1 {
                 })
                 .unwrap_or_else(|| self.configuration_digest.clone());
             let generation_id = match &input.request.content {
-                tracedecay_domain::feedback::FeedbackContentIdentityV1::SavedContent {
-                    ..
-                } => input.target.generation_id.clone().or_else(|| {
-                    CodeGenerationId::new(format!(
-                        "generation.project-open.{}",
-                        watermark.as_str().trim_start_matches("sha256:")
-                    ))
-                    .ok()
-                }),
+                tracedecay_domain::feedback::FeedbackContentIdentityV1::SavedContent { .. } => {
+                    input.target.generation_id.clone().or_else(|| {
+                        CodeGenerationId::new(format!(
+                            "generation.project-open.{}",
+                            watermark.as_str().trim_start_matches("sha256:")
+                        ))
+                        .ok()
+                    })
+                }
                 tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
                     ..
                 } => None,

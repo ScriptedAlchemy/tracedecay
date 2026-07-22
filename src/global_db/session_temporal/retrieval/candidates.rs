@@ -19,9 +19,10 @@ pub(super) fn validate_clause(
     clause: &CandidateClause,
     request: &PageRequest,
 ) -> Result<(), TemporalPortError> {
-    let metadata_cap = request
-        .candidate_field_caps()
-        .map_or(request.max_item_bytes(), CandidateFieldCaps::metadata_field_bytes);
+    let metadata_cap = request.candidate_field_caps().map_or(
+        request.max_item_bytes(),
+        CandidateFieldCaps::metadata_field_bytes,
+    );
     if clause.value.len() > request.max_item_bytes() || clause.value.len() > metadata_cap {
         return Err(TemporalPortError::BudgetExceeded {
             resource: "candidate clause bytes",
@@ -235,16 +236,24 @@ pub(super) async fn query_candidate_clause(
         .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let limit = i64::try_from(limit).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let caps = request.candidate_field_caps();
-    let metadata_cap = caps.map_or(request.max_item_bytes(), CandidateFieldCaps::metadata_field_bytes);
-    let stable_cap = caps.map_or(request.max_item_bytes(), CandidateFieldCaps::stable_id_bytes);
+    let metadata_cap = caps.map_or(
+        request.max_item_bytes(),
+        CandidateFieldCaps::metadata_field_bytes,
+    );
+    let stable_cap = caps.map_or(
+        request.max_item_bytes(),
+        CandidateFieldCaps::stable_id_bytes,
+    );
     let source_stable_cap = stable_cap.min(metadata_cap);
     let source_stable_cap =
         i64::try_from(source_stable_cap).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let stable_cap =
         i64::try_from(stable_cap).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-    let anchor_cap =
-        i64::try_from(caps.map_or(request.max_item_bytes(), CandidateFieldCaps::anchor_id_bytes))
-            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+    let anchor_cap = i64::try_from(caps.map_or(
+        request.max_item_bytes(),
+        CandidateFieldCaps::anchor_id_bytes,
+    ))
+    .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let metadata_cap =
         i64::try_from(metadata_cap).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let item_cap = i64::try_from(request.max_item_bytes())
