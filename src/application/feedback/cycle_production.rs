@@ -165,8 +165,7 @@ fn project_admits_managed_rust_analyzer(project_root: &Path) -> bool {
         && Command::new("rust-analyzer")
             .arg("--version")
             .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|output| output.status.success())
 }
 
 fn feedback_scope_for_project(
@@ -567,8 +566,7 @@ fn now_micros() -> UtcMicros {
         i64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_micros())
-                .unwrap_or(0),
+                .map_or(0, |duration| duration.as_micros()),
         )
         .unwrap_or(i64::MAX),
     )

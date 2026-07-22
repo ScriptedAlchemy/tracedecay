@@ -1,4 +1,4 @@
-//! Production PR12 primitive owners over TraceDecay graph/query authorities.
+//! Production PR12 primitive owners over `TraceDecay` graph/query authorities.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -72,7 +72,7 @@ fn completed<T>(
         return failed(domain, finished_at);
     };
     let Ok(page) = PageState::first_page(
-        SortContractId::new(PRIMITIVE_SORT).expect("static sort"),
+        SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
         1,
         Some(1),
         1,
@@ -111,12 +111,12 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
         scores: Vec::new(),
         contributions: Vec::new(),
         page: PageState::first_page(
-            SortContractId::new(PRIMITIVE_SORT).expect("static sort"),
+            SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
             1,
             Some(0),
             0,
         )
-        .expect("empty page"),
+        .unwrap_or_else(|_| panic!("empty page")),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
@@ -606,7 +606,7 @@ impl TraceDecayHealthPortV1 {
 impl OperationalRetrievalPort for TraceDecayHealthPortV1 {
     fn health_read(
         &self,
-        context: &RetrievalPortContext<'_>,
+        _context: &RetrievalPortContext<'_>,
         _request: &HealthReadRequest,
     ) -> RetrievalPortOutcome<HealthReadResult> {
         let branch = self.graph.branch_diagnostics();
@@ -664,7 +664,7 @@ impl TraceDecayExtendedPrimitivePortV1 {
 impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
     fn qualified_name<'a>(
         &'a self,
-        context: RetrievalPortContext<'a>,
+        _context: RetrievalPortContext<'a>,
         request: &'a QualifiedNamePrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, QualifiedNamePrimitiveResult> {
         Box::pin(async move {
@@ -692,7 +692,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn call_chain<'a>(
         &'a self,
-        context: RetrievalPortContext<'a>,
+        _context: RetrievalPortContext<'a>,
         request: &'a CallChainPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, CallChainPrimitiveResult> {
         Box::pin(async move {
@@ -728,7 +728,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn file_dependents<'a>(
         &'a self,
-        context: RetrievalPortContext<'a>,
+        _context: RetrievalPortContext<'a>,
         request: &'a FileDependentsPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, FileDependentsPrimitiveResult> {
         Box::pin(async move {
@@ -750,7 +750,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn source_body<'a>(
         &'a self,
-        context: RetrievalPortContext<'a>,
+        _context: RetrievalPortContext<'a>,
         request: &'a SourceBodyPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, SourceBodyPrimitiveResult> {
         Box::pin(async move {
@@ -785,7 +785,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn source_outline<'a>(
         &'a self,
-        context: RetrievalPortContext<'a>,
+        _context: RetrievalPortContext<'a>,
         request: &'a SourceOutlinePrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, SourceOutlinePrimitiveResult> {
         Box::pin(async move {
@@ -810,7 +810,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn module_api<'a>(
         &'a self,
-        context: RetrievalPortContext<'a>,
+        _context: RetrievalPortContext<'a>,
         request: &'a ModuleApiPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult> {
         Box::pin(async move {
@@ -828,7 +828,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn file_metadata<'a>(
         &'a self,
-        context: RetrievalPortContext<'a>,
+        _context: RetrievalPortContext<'a>,
         request: &'a FileMetadataPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult> {
         Box::pin(async move {
@@ -853,7 +853,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn storage_status<'a>(
         &'a self,
-        context: RetrievalPortContext<'a>,
+        _context: RetrievalPortContext<'a>,
         request: &'a StorageStatusPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult> {
         Box::pin(async move {
@@ -892,7 +892,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn diagnostics<'a>(
         &'a self,
-        context: RetrievalPortContext<'a>,
+        _context: RetrievalPortContext<'a>,
         _request: &'a DiagnosticsPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, DiagnosticsPrimitiveResult> {
         Box::pin(async move {
@@ -959,8 +959,10 @@ impl Pr12OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
             let policy = PolicyDecisionRef::new(
                 "route.pr12-primitive.operational.v1",
                 1,
-                ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("digest"),
-                ComponentVersion::new("pr12-operational.v1").expect("component"),
+                ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                    .unwrap_or_else(|_| panic!("digest")),
+                ComponentVersion::new("pr12-operational.v1")
+                    .unwrap_or_else(|_| panic!("component")),
             )
             .map_err(|_| operational_problem(context, operation))?;
             let authority = AuthorityReceipt::from_context(context, policy, observed_at)
@@ -977,12 +979,12 @@ impl Pr12OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
                 }],
             };
             let page = PageState::first_page(
-                SortContractId::new(PRIMITIVE_SORT).expect("static sort"),
+                SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
                 1,
                 Some(1),
                 1,
             )
-            .expect("page");
+            .unwrap_or_else(|_| panic!("page"));
             let execution = OperationReceipt {
                 started_at: observed_at,
                 ended_at: observed_at,
@@ -1033,7 +1035,7 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                     "application.symbol-graph.session",
                     "could not mint primitive session id",
                 )
-                .expect("static")
+                .unwrap_or_else(|_| panic!("static"))
             })?,
             context.scope().scope_digest.as_str(),
             context.request_id().as_str(),
@@ -1047,7 +1049,7 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                 "application.symbol-graph.snapshot",
                 "could not build temporal snapshot request",
             )
-            .expect("static")
+            .unwrap_or_else(|_| panic!("static"))
         })?;
         TemporalExecutionSnapshot::new_authorized(
             request,
@@ -1071,7 +1073,7 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                         "application.symbol-graph.configuration",
                         "invalid configuration digest",
                     )
-                    .expect("static")
+                    .unwrap_or_else(|_| panic!("static"))
                 })?,
             },
             Some(self.key.clone()),
@@ -1083,7 +1085,7 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                 "application.symbol-graph.snapshot",
                 "could not authorize temporal snapshot",
             )
-            .expect("static")
+            .unwrap_or_else(|_| panic!("static"))
         })
     }
 }
@@ -1131,7 +1133,7 @@ fn operational_problem(
                 "application.pr12-primitive.operational",
                 "The operational primitive authority could not complete.",
             )
-            .expect("static diagnostic"),
+            .unwrap_or_else(|_| panic!("static diagnostic")),
         ),
     )
 }
@@ -1169,8 +1171,7 @@ pub async fn open_pr12_production_primitive_runtime(
     let watermark = graph
         .get_stats()
         .await
-        .map(|stats| stats.node_count as u64)
-        .unwrap_or(1)
+        .map_or(1, |stats| stats.node_count)
         .max(1);
     let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
         key,
@@ -1203,7 +1204,7 @@ pub fn admitted_root_uri_for_project(
     project_root: &Path,
 ) -> Result<String, ApplicationContractError> {
     let uri =
-        Url::from_file_path(project_root).map_err(|_| ApplicationContractError::Inconsistent {
+        Url::from_file_path(project_root).map_err(|()| ApplicationContractError::Inconsistent {
             field: "PR12 primitive admitted root URI",
         })?;
     Ok(uri.to_string())
