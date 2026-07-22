@@ -268,7 +268,7 @@ async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     assert!(
         registry
-            .mount_worktree(fixture.path(), store.path().to_path_buf())
+            .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
             .await
             .expect("mount daemon-owned scheduler")
     );

@@ -405,12 +405,19 @@ def validate_feature_contract(repository: Path) -> None:
         fail("FastEmbed must be a structured root dependency")
     if fastembed.get("optional") is not True or fastembed.get("default-features") is not False:
         fail("FastEmbed must be optional with upstream default features disabled")
+    hf_hub = dependencies.get("hf-hub")
+    if not isinstance(hf_hub, dict):
+        fail("hf-hub must be a structured root dependency")
+    if hf_hub.get("optional") is not True or hf_hub.get("default-features") is not False:
+        fail("hf-hub acquisition must be optional with upstream default features disabled")
     semantic_feature = features.get("semantic-fastembed")
     if semantic_feature != [
         "dep:fastembed",
+        "dep:hf-hub",
         "fastembed/ort-download-binaries-rustls-tls",
+        "fastembed/hf-hub-rustls-tls",
     ]:
-        fail("semantic-fastembed must select only FastEmbed and the native ORT runtime")
+        fail("semantic-fastembed must select the pinned FastEmbed, acquisition, and native ORT stack")
 
 
 def validate_model_integrity(workload: dict[str, Any], repository: Path) -> None:
@@ -660,7 +667,9 @@ def validate_resource_and_rollback_contract(workload: dict[str, Any]) -> None:
     current = by_scale["current"]
     ten_x = by_scale["10x"]
     for field in ("file_count", "eligible_chunks"):
-        if ten_x.get(field) != current.get(field) * 10:
+        current_value = current.get(field)
+        ten_x_value = ten_x.get(field)
+        if not isinstance(current_value, int) or ten_x_value != current_value * 10:
             fail(f"10x {field} must be exactly ten times current")
     for stratum in strata:
         if stratum.get("warmups") != 5 or stratum.get("measured_repetitions") != 30:

@@ -522,9 +522,19 @@ impl DaemonInvocationState {
         DaemonLspOwnerRegistrar::new(&self.service)
     }
 
-    async fn mount_code_index(&self, project_root: &Path, store_root: PathBuf) -> Result<()> {
+    async fn mount_code_index(
+        &self,
+        project_root: &Path,
+        store_root: PathBuf,
+        semantic_runtime: Option<&crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
+    ) -> Result<()> {
+        let semantic_schedule = semantic_runtime.map(|handle| {
+            crate::application::semantic_runtime::production_saved_generation_schedule_hook(
+                handle.clone(),
+            )
+        });
         self.code_index_schedulers
-            .mount_worktree(project_root, store_root)
+            .mount_worktree(project_root, store_root, semantic_schedule)
             .await
             .map(|_| ())
             .map_err(|error| TraceDecayError::Config {
@@ -1684,7 +1694,11 @@ impl DaemonEngine {
             route_registered.store(false, Ordering::Release);
         } else {
             self.invocation
-                .mount_code_index(&canonical_project_path, code_index_store_root)
+                .mount_code_index(
+                    &canonical_project_path,
+                    code_index_store_root,
+                    Some(&semantic_runtime),
+                )
                 .await?;
             match self
                 .invocation
@@ -2570,7 +2584,11 @@ async fn portable_project_server(
         route_registered.store(false, Ordering::Release);
     } else {
         invocation
-            .mount_code_index(canonical_project_path, code_index_store_root)
+            .mount_code_index(
+                canonical_project_path,
+                code_index_store_root,
+                Some(&semantic_runtime),
+            )
             .await?;
         match invocation
             .semantic_runtime_registrar()

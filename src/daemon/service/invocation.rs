@@ -1876,6 +1876,10 @@ impl DaemonSemanticRuntimeRegistrar {
         if runtimes.contains_key(&project_root) {
             return Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered);
         }
+        crate::application::semantic_runtime::register_project_semantic_runtime(
+            project_root.clone(),
+            handle.clone(),
+        );
         runtimes.insert(project_root, handle);
         Ok(())
     }
@@ -2796,7 +2800,10 @@ impl DaemonInvocationService {
         self.feedback_cycles.lock().await.clear();
         self.primitive_runtimes.lock().await.clear();
         let semantic_runtimes = std::mem::take(&mut *self.semantic_runtimes.lock().await);
-        for handle in semantic_runtimes.into_values() {
+        for (project_root, handle) in semantic_runtimes {
+            crate::application::semantic_runtime::unregister_project_semantic_runtime(
+                &project_root,
+            );
             handle.cancel();
         }
         self.lsp_owners.lock().await.clear();

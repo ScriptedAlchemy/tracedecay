@@ -17,9 +17,8 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use super::{
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, DEFAULT_DEADLINE_MICROS,
     FeedbackSurfaceRequest, HttpCancellationRegistry, HttpDisconnectCancellation,
-    HttpOperationEventState,
-    application_surface_dispatch_input_with_controls, current_micros, http_operation_event_router,
-    parse_application_surface_request, plan26_sse_stream_event,
+    HttpOperationEventState, application_surface_dispatch_input_with_controls, current_micros,
+    http_operation_event_router, parse_application_surface_request, plan26_sse_stream_event,
     resolve_authenticated_http_request_context,
 };
 use crate::application::operation_stream::{

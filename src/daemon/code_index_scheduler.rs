@@ -428,6 +428,8 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     saved_trees: BTreeMap<String, SavedTreeV1>,
     latest_content_identity: Option<ContentDigest>,
     watcher: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
+    /// Optional PR10 hook: schedule FastEmbed projection without joining it.
+    semantic_schedule: Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
@@ -470,9 +472,20 @@ impl CodeIndexWorktreeSchedulerV1 {
             saved_trees: BTreeMap::new(),
             latest_content_identity: None,
             watcher: None,
+            semantic_schedule: None,
         };
         scheduler.mount_watcher()?;
         Ok(scheduler)
+    }
+
+    /// Connect saved code generations to PR10 `schedule_generation`. The hook
+    /// must return immediately; FastEmbed download/indexing never blocks
+    /// exact/lexical/graph search.
+    pub fn set_semantic_schedule_hook(
+        &mut self,
+        hook: crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+    ) {
+        self.semantic_schedule = Some(hook);
     }
 
     fn mount_watcher(&mut self) -> Result<(), CodeIndexSchedulerErrorV1> {
@@ -566,6 +579,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             };
             self.saved_trees = next_trees;
             self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
+
+            // PR10: enqueue FastEmbed projection without waiting on download/index.
+            if let Some(schedule) = &self.semantic_schedule {
+                let _scheduled = schedule(&generation);
+            }
 
             let changes = &generation.projection().request().changes;
             let lane_digest = canonical_sha256(&(
@@ -813,6 +831,9 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
         store_root: PathBuf,
+        semantic_schedule: Option<
+            crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+        >,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
         let mut mounted = self.mounted.lock().await;
@@ -824,10 +845,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler capacity is exhausted".to_owned(),
             ));
         }
-        let scheduler = Arc::new(Mutex::new(self.open_worktree(
+        let mut opened = self.open_worktree(
             &project_root,
             store_root.join(sha256_hex(project_root.to_string_lossy().as_bytes())),
-        )?));
+        )?;
+        if let Some(hook) = semantic_schedule {
+            opened.set_semantic_schedule_hook(hook);
+        }
+        let scheduler = Arc::new(Mutex::new(opened));
         let (wake, shutting_down) = {
             let scheduler = scheduler.lock().expect("code-index scheduler lock");
             (

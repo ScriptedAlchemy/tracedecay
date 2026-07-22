@@ -577,6 +577,11 @@ pub(super) async fn handle_runtime(
             }
         }
     }
+    if let Some(semantic) =
+        crate::application::semantic_runtime::project_semantic_application_status(cg.project_root())
+    {
+        value["semantic_runtime"] = serde_json::to_value(&semantic).unwrap_or_else(|_| json!({}));
+    }
     let text = render::finalize(Some(cg.project_root()), &args, &value, || {
         render::generic_md(&value)
     });

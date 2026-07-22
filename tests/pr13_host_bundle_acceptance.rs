@@ -351,7 +351,9 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
                 expected_host: host,
                 expected_components: expected_components.clone(),
                 explicit_confirmation: true,
-                hermes_profile_bindings: 0,
+                // Hermes binds exactly one user TraceDecay profile; other hosts
+                // must pass zero (not an ambient profile-discovery mechanism).
+                hermes_profile_bindings: u8::from(host == HostKindV1::Hermes),
             },
             operation_id: [operation_id; 16],
         };
