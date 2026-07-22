@@ -256,10 +256,11 @@ fn hermes_update_plugin_succeeds_where_a_config_rewrite_would_refuse() {
     let hermes = get_integration("hermes").unwrap();
     hermes.install(&ctx(home.path(), OLD_BIN)).unwrap();
 
-    // Flow-style `plugins:` mapping — the refuse-don't-rewrite YAML guard
-    // makes install/reinstall error on this shape.
+    // A top-level non-mapping config — the lossless editor supports every
+    // parseable mapping shape (including flow styles), so only a config that
+    // cannot be a profile mapping still makes install/reinstall refuse.
     let config = home.path().join(".hermes/config.yaml");
-    std::fs::write(&config, "plugins: {enabled: [tracedecay]}\n").unwrap();
+    std::fs::write(&config, "- not a profile mapping\n").unwrap();
     let config_before = bytes(&config);
     assert!(
         hermes.install(&ctx(home.path(), NEW_BIN)).is_err(),
@@ -1002,7 +1003,10 @@ fn codex_update_plugin_refreshes_bundle_with_malformed_unrelated_legacy_config()
         .expect("run tracedecay update-plugin");
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Could not inspect legacy Codex MCP config at"));
+    // The atomic update route re-runs the installer, whose legacy sweep
+    // reports the unparseable config without overwriting it.
+    assert!(stderr.contains("Could not inspect"));
+    assert!(stderr.contains("Codex MCP config at"));
     assert!(stderr.contains("failed to parse"));
     assert_eq!(bytes(&config), before);
     assert_codex_bundle_contains_bin(
@@ -1164,7 +1168,6 @@ fn config_only_integrations_report_config_only_and_write_nothing() {
     // config files (MCP entries, hook blocks, prompt rules); update-plugin
     // must not create or modify a single file for them.
     let config_only = [
-        "opencode",
         "gemini",
         "copilot",
         "zed",
@@ -1187,6 +1190,21 @@ fn config_only_integrations_report_config_only_and_write_nothing() {
             "{id} update_plugin wrote files into the home dir"
         );
     }
+}
+
+#[test]
+fn opencode_update_plugin_reports_not_installed_without_a_plugin() {
+    // OpenCode ships a real plugin file since the PR13 host components, so it
+    // is no longer config-only; without an installed plugin the update is a
+    // no-op that must write nothing.
+    let home = TempDir::new().unwrap();
+    let agent = get_integration("opencode").unwrap();
+    let outcome = agent.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
+    assert!(
+        relative_files_under(home.path()).is_empty(),
+        "opencode update_plugin wrote files into the home dir"
+    );
 }
 
 fn staged_host_source(host: &str) -> TempDir {

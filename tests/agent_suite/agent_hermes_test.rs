@@ -1080,7 +1080,7 @@ fn test_hermes_install_matches_two_space_list_item_indent() {
 
     let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
     assert!(
-        config.contains("  enabled:\n  - tracedecay\n  - other\n  - second\n"),
+        config.contains("  enabled:\n  - other\n  - second\n  - tracedecay\n"),
         "tracedecay must be inserted with the existing 2-space item indent:\n{config}"
     );
     assert!(
@@ -1121,7 +1121,7 @@ fn test_hermes_install_removes_two_space_indent_disabled_entry() {
         "tracedecay must be removed from the 2-space disabled list:\n{config}"
     );
     assert!(
-        config.contains("  enabled:\n  - tracedecay\n  - kept\n"),
+        config.contains("  enabled:\n  - kept\n  - tracedecay\n"),
         "tracedecay must be enabled with matching indent:\n{config}"
     );
 }
@@ -1149,13 +1149,16 @@ fn test_hermes_install_accepts_flow_style_empty_disabled_list() {
         "the empty flow-style disabled list must be preserved:\n{config}"
     );
     assert!(
-        config.contains("  enabled:\n    - tracedecay\n    - other\n"),
+        config.contains("  enabled:\n    - other\n    - tracedecay\n"),
         "tracedecay must be added to the enabled list:\n{config}"
     );
 }
 
 #[test]
-fn test_hermes_install_rewrites_flow_style_empty_enabled_list() {
+fn test_hermes_install_fills_flow_style_empty_enabled_list() {
+    // The lossless editor keeps the author's flow style: `enabled: []`
+    // becomes `enabled: [tracedecay]` in place instead of being rewritten
+    // into a block list.
     let home = TempDir::new().unwrap();
     let hermes_dir = home.path().join(".hermes");
     std::fs::create_dir_all(&hermes_dir).unwrap();
@@ -1171,12 +1174,8 @@ fn test_hermes_install_rewrites_flow_style_empty_enabled_list() {
 
     let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
     assert!(
-        config.contains("  enabled:\n    - tracedecay\n"),
-        "`enabled: []` must be rewritten into a block list with tracedecay:\n{config}"
-    );
-    assert!(
-        !config.contains("enabled: []"),
-        "the empty flow-style enabled list must be replaced:\n{config}"
+        config.contains("  enabled: [tracedecay]"),
+        "`enabled: []` must gain tracedecay in place:\n{config}"
     );
     assert!(
         config.contains("  disabled: []"),
@@ -1185,23 +1184,34 @@ fn test_hermes_install_rewrites_flow_style_empty_enabled_list() {
 }
 
 #[test]
-fn test_hermes_install_still_rejects_non_empty_flow_lists() {
+fn test_hermes_install_appends_to_non_empty_flow_lists() {
+    // The lossless editor supports non-empty flow lists in place; the
+    // pre-lossless installer rejected them as unsupported.
     let home = TempDir::new().unwrap();
     let hermes_dir = home.path().join(".hermes");
     std::fs::create_dir_all(&hermes_dir).unwrap();
     let original = "plugins:\n  enabled: [other]\n";
     std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
 
-    let err = HermesIntegration
+    HermesIntegration
         .install(&make_install_ctx(home.path()))
-        .unwrap_err()
-        .to_string();
+        .unwrap();
 
-    assert!(err.contains("unsupported Hermes plugins config"));
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  enabled: [other, tracedecay]"),
+        "tracedecay must be appended to the flow list in place:\n{config}"
+    );
+
+    // Idempotency: a second install must detect the flow entry.
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
     assert_eq!(
-        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
-        original,
-        "non-empty flow lists must not be rewritten"
+        config.matches("tracedecay]").count(),
+        1,
+        "re-install must not duplicate the flow list entry:\n{config}"
     );
 }
 
@@ -1397,23 +1407,27 @@ fn test_hermes_healthcheck_warns_on_stale_plugin() {
 }
 
 #[test]
-fn test_hermes_install_rejects_inline_plugins_config_without_rewrite() {
+fn test_hermes_install_edits_inline_plugins_config_in_place() {
+    // The lossless editor supports the inline flow-mapping form; the
+    // pre-lossless installer rejected it as unsupported.
     let home = TempDir::new().unwrap();
     let hermes_dir = home.path().join(".hermes");
     std::fs::create_dir_all(&hermes_dir).unwrap();
     let original = "theme: dark\nplugins: { enabled: [other] }\n";
     std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
 
-    let err = HermesIntegration
+    HermesIntegration
         .install(&make_install_ctx(home.path()))
-        .unwrap_err()
-        .to_string();
+        .unwrap();
 
-    assert!(err.contains("unsupported Hermes plugins config"));
-    assert_eq!(
-        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
-        original,
-        "unsupported inline plugins config must not be rewritten or duplicated"
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("theme: dark"),
+        "unrelated config must be preserved:\n{config}"
+    );
+    assert!(
+        config.contains("plugins: { enabled: [other, tracedecay] }"),
+        "the inline flow mapping must be edited in place, preserving its style:\n{config}"
     );
 }
 

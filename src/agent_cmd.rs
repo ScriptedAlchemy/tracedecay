@@ -335,7 +335,7 @@ impl CompatibilityAgentRegistrationDelegate {
         operation: tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     ) -> tracedecay::errors::Result<Self> {
         let integration = tracedecay::agents::get_integration(agent_id)?;
-        let registration_path = project_local_registration_path(agent_id, project_path);
+        let registration_path = project_local_registration_path(agent_id, home, project_path);
         Ok(Self {
             integration,
             context: tracedecay::agents::InstallContext {
@@ -359,8 +359,13 @@ impl CompatibilityAgentRegistrationDelegate {
     }
 
     fn registration_error(
-        _error: tracedecay::errors::TraceDecayError,
+        error: tracedecay::errors::TraceDecayError,
     ) -> tracedecay::agents::host_bundle_v2::HostBundleError {
+        // The transaction error vocabulary is fixed, so surface the
+        // integration's own message here before it is collapsed into the
+        // generic storage failure — otherwise the actionable cause (for
+        // example a refused symlinked project config) is lost.
+        eprintln!("{error}");
         tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
     }
 
@@ -738,10 +743,20 @@ fn apply_default_canonical_component_set(
     Ok(true)
 }
 
-fn project_local_registration_path(agent_id: &str, project_path: &Path) -> Option<PathBuf> {
+fn project_local_registration_path(
+    agent_id: &str,
+    home: &Path,
+    project_path: &Path,
+) -> Option<PathBuf> {
     match agent_id {
         "claude" => Some(project_path.join(".claude/CLAUDE.md")),
-        "codex" => Some(project_path.join(".codex/plugins/tracedecay/.codex-plugin/plugin.json")),
+        // `install_local` deploys the Codex repo plugin bundle at the
+        // repository root (`codex_repo_plugin_install_dir`), not under
+        // `.codex/`.
+        "codex" => Some(project_path.join("plugins/tracedecay/.codex-plugin/plugin.json")),
+        // Cursor's project-local install registers the shared home plugin;
+        // the project itself carries only receipt markers.
+        "cursor" => Some(home.join(".cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json")),
         "kimi" => Some(project_path.join(".kimi-code/mcp.json")),
         "opencode" => Some(project_path.join("opencode.json")),
         "roo-code" => Some(project_path.join(".roo/mcp.json")),
@@ -756,7 +771,7 @@ fn apply_project_local_component_set(
     project_path: &Path,
     home: &Path,
 ) -> tracedecay::errors::Result<bool> {
-    if project_local_registration_path(agent_id, project_path).is_none() {
+    if project_local_registration_path(agent_id, home, project_path).is_none() {
         return Ok(false);
     }
     let host = host_kind_for_agent(agent_id)?;
@@ -1718,7 +1733,7 @@ pub(crate) async fn handle_install_command(
             std::env::current_dir().map_err(|e| tracedecay::errors::TraceDecayError::Config {
                 message: format!("could not determine current project directory: {e}"),
             })?;
-        let _ctx = tracedecay::agents::InstallContext {
+        let ctx = tracedecay::agents::InstallContext {
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
@@ -1729,15 +1744,17 @@ pub(crate) async fn handle_install_command(
 
         if let Some(id) = agent {
             let ag = tracedecay::agents::get_integration(&id)?;
+            // Agents with an atomic project-local lifecycle route install
+            // through the receipt-backed component-set transaction; the rest
+            // keep the direct integration path (which itself rejects agents
+            // without project-local support).
             if !apply_project_local_component_set(
                 &id,
                 HostBundleCliOperation::Install,
                 &project_path,
                 &home,
             )? {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: format!("agent {id:?} has no atomic project-local lifecycle route"),
-                });
+                ag.install_local(&ctx, &project_path)?;
             }
             ag.post_install(Some(&project_path)).await;
             if let Some(options) = automation.filter(|_| id == "codex") {
@@ -1756,11 +1773,7 @@ pub(crate) async fn handle_install_command(
                         &project_path,
                         &home,
                     )? {
-                        eprintln!(
-                            "Skipping {}: atomic project-local lifecycle is unavailable",
-                            ag.name()
-                        );
-                        continue;
+                        ag.install_local(&ctx, &project_path)?;
                     }
                     ag.post_install(Some(&project_path)).await;
                     installed_names.push(ag.name().to_string());

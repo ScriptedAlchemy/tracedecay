@@ -335,16 +335,6 @@ pub fn cursor_files() -> Vec<(&'static str, &'static str)> {
     )
 }
 
-/// MCP-free Cursor core. The separately packaged native-diagnostics extension
-/// is an `Agent` host component so the plugin deployment root remains limited
-/// to Cursor plugin assets.
-pub fn cursor_core_files() -> Vec<(&'static str, &'static str)> {
-    cursor_files()
-        .into_iter()
-        .filter(|(relative, _)| *relative != "mcp.json")
-        .collect()
-}
-
 /// Unpacked VS Code/Cursor extension files for the native-diagnostics host
 /// component. Its bundle includes `vscode-languageclient` and leaves only the
 /// host-provided `vscode` module external.
@@ -355,35 +345,13 @@ pub fn cursor_native_extension_files() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// Independently installable Cursor MCP companion inventory.
-pub fn cursor_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
-    CURSOR_MANIFEST_FILES
-        .iter()
-        .filter(|file| file.relative == "mcp.json")
-        .map(|file| (file.relative, file.contents))
-        .collect()
-}
-
 /// Files Codex deploys: manifest + every skill file (all 30 skills incl.
 /// dispatchers, plus any support files). Codex ships no agents/commands/rules.
+/// The host-bundle catalog deploys the rendered variants of this inventory via
+/// `agents::codex::rendered_global_plugin_files` — the raw templates here are
+/// not directly installable (`hooks/hooks.json` is an empty scaffold).
 pub fn codex_files() -> Vec<(&'static str, &'static str)> {
     compose(&[CODEX_MANIFEST_FILES], all_skill_files())
-}
-
-/// MCP-free Codex core and independently installable MCP companion inventory.
-pub fn codex_core_files() -> Vec<(&'static str, &'static str)> {
-    codex_files()
-        .into_iter()
-        .filter(|(relative, _)| *relative != ".mcp.json")
-        .collect()
-}
-
-pub fn codex_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
-    CODEX_MANIFEST_FILES
-        .iter()
-        .filter(|file| file.relative == ".mcp.json")
-        .map(|file| (file.relative, file.contents))
-        .collect()
 }
 
 /// Files Kimi deploys: manifest + README + the shared Claude command Markdown

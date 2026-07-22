@@ -61,7 +61,7 @@ impl AgentIntegration for KimiIntegration {
             .home
             .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
         deploy_kimi_plugin_to(&staged_dir, &ctx.tracedecay_bin)?;
-        run_kimi_plugin_manager(["plugin", "install", staged_dir.to_string_lossy().as_ref()])?;
+        install_kimi_plugin_with_manager_fallback(&code_home, &staged_dir, &ctx.tracedecay_bin)?;
         let managed_dir = kimi_plugin_managed_dir(&code_home);
         migrate_kimi_code_mcp_json(&code_home);
 
@@ -123,7 +123,7 @@ impl AgentIntegration for KimiIntegration {
             .home
             .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
         deploy_kimi_plugin_to(&staged_dir, &ctx.tracedecay_bin)?;
-        run_kimi_plugin_manager(["plugin", "install", staged_dir.to_string_lossy().as_ref()])?;
+        install_kimi_plugin_with_manager_fallback(&code_home, &staged_dir, &ctx.tracedecay_bin)?;
         let managed_dir = kimi_plugin_managed_dir(&code_home);
         Ok(UpdatePluginOutcome::Refreshed(vec![managed_dir]))
     }
@@ -147,7 +147,13 @@ impl AgentIntegration for KimiIntegration {
         uninstall_prompt_rules(&agents_md);
 
         let code_home = kimi_code_home(&ctx.home);
-        run_kimi_plugin_manager(["plugin", "remove", KIMI_PLUGIN_ID])?;
+        if let Err(error) = run_kimi_plugin_manager(["plugin", "remove", KIMI_PLUGIN_ID]) {
+            eprintln!(
+                "  Official Kimi plugin manager unavailable ({error}); \
+                 removing the managed plugin registration directly."
+            );
+            remove_kimi_installed_entry(&code_home);
+        }
         remove_kimi_plugin_dir(&code_home)?;
 
         eprintln!();
@@ -354,6 +360,29 @@ fn deploy_kimi_plugin_to(managed_dir: &Path, tracedecay_bin: &str) -> Result<Pat
         managed_dir.display()
     );
     Ok(managed_dir.to_path_buf())
+}
+
+/// Install the staged plugin through the official Kimi plugin manager when it
+/// is available; otherwise fall back to the direct managed-dir deploy and
+/// registry upsert the pre-manager installer used. Installs must not
+/// hard-depend on the optional external `kimi` binary — offline machines and
+/// CI environments without it still get a working managed plugin.
+fn install_kimi_plugin_with_manager_fallback(
+    code_home: &Path,
+    staged_dir: &Path,
+    tracedecay_bin: &str,
+) -> Result<()> {
+    match run_kimi_plugin_manager(["plugin", "install", staged_dir.to_string_lossy().as_ref()]) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            eprintln!(
+                "  Official Kimi plugin manager unavailable ({error}); \
+                 deploying the managed plugin directly."
+            );
+            deploy_kimi_plugin(code_home, tracedecay_bin)?;
+            upsert_kimi_installed_entry(code_home)
+        }
+    }
 }
 
 fn run_kimi_plugin_manager<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<()> {

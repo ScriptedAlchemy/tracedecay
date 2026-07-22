@@ -387,8 +387,7 @@ fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     // naming tracedecay — so an unrelated dir squatting on the path is never
     // nuked.
     clean_replace_owned_deploy_dir(&deploy_dir)?;
-    for (relative, contents) in claude_embedded_plugin_files() {
-        let rendered = render_plugin_file(relative, contents, tracedecay_bin)?;
+    for (relative, rendered) in rendered_plugin_files(tracedecay_bin)? {
         safe_write_text_file(&deploy_dir.join(relative), &rendered, None)?;
     }
     eprintln!(
@@ -396,6 +395,22 @@ fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
         deploy_dir.display()
     );
     Ok(deploy_dir)
+}
+
+/// Canonical rendered Claude plugin inventory. The legacy installer and the
+/// receipt-backed first-party host-bundle catalog must produce byte-identical
+/// files: the component-set transaction verifies installed artifact digests
+/// after the compatibility registration adapter re-deploys this bundle, so
+/// any rendering drift between the two writers fails installs with
+/// `ArtifactContentMismatch`.
+pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
+    claude_embedded_plugin_files()
+        .into_iter()
+        .map(|(relative, contents)| {
+            render_plugin_file(relative, contents, tracedecay_bin)
+                .map(|rendered| (relative, rendered))
+        })
+        .collect()
 }
 
 /// True when a deployed marketplace dir is tracedecay-owned: its plugin or

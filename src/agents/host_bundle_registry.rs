@@ -263,43 +263,97 @@ fn component_assets(
             });
     }
 
+    // The Cursor plugin directory is also written by the legacy installer the
+    // compatibility registration adapter re-runs during apply, and the
+    // component-set transaction verifies installed digests afterwards. Use the
+    // installer's own rendered inventory (same bin resolution as
+    // `InstallContext::tracedecay_bin`) so both writers produce identical
+    // bytes. The native-extension Agent component keeps the compiled-asset
+    // path below: the legacy installer never writes it.
+    if host == HostKindV1::CursorDesktop
+        && matches!(
+            component,
+            HostBundleComponentV1::Core
+                | HostBundleComponentV1::ContextMcp
+                | HostBundleComponentV1::OperatorMcp
+        )
+    {
+        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let files = super::cursor::rendered_plugin_files(&bin)
+            .map_err(|_| HostBundleRegistryError::Incompatible)?;
+        let mcp_only = component != HostBundleComponentV1::Core;
+        return Ok(files
+            .into_iter()
+            .filter(|(relative, _)| (*relative == "mcp.json") == mcp_only)
+            .map(|(relative, body)| {
+                (
+                    format!(".cursor/plugins/local/tracedecay/{relative}"),
+                    body.into_bytes(),
+                )
+            })
+            .collect());
+    }
+
+    // The Codex registration probe requires the managed lifecycle hooks in
+    // the deployed `hooks/hooks.json`; the raw template is an empty scaffold
+    // rendered only at install time, so deploy the installer's rendered
+    // global inventory here too.
+    if host == HostKindV1::Codex
+        && matches!(
+            component,
+            HostBundleComponentV1::Core
+                | HostBundleComponentV1::ContextMcp
+                | HostBundleComponentV1::OperatorMcp
+        )
+    {
+        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let files = super::codex::rendered_global_plugin_files(&bin)
+            .map_err(|_| HostBundleRegistryError::Incompatible)?;
+        let mcp_only = component != HostBundleComponentV1::Core;
+        return Ok(files
+            .into_iter()
+            .filter(|(relative, _)| (*relative == ".mcp.json") == mcp_only)
+            .map(|(relative, body)| {
+                (
+                    format!(".codex/plugins/tracedecay/{relative}"),
+                    body.into_bytes(),
+                )
+            })
+            .collect());
+    }
+
+    // The Claude marketplace deploy dir is also rewritten by the legacy
+    // installer during the compatibility apply, and installed digests are
+    // verified afterwards — deploy the installer's rendered inventory so both
+    // writers produce identical bytes.
+    if host == HostKindV1::ClaudeCode
+        && matches!(
+            component,
+            HostBundleComponentV1::Core
+                | HostBundleComponentV1::ContextMcp
+                | HostBundleComponentV1::OperatorMcp
+        )
+    {
+        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let files = super::claude::rendered_plugin_files(&bin)
+            .map_err(|_| HostBundleRegistryError::Incompatible)?;
+        let mcp_only = component != HostBundleComponentV1::Core;
+        return Ok(files
+            .into_iter()
+            .filter(|(relative, _)| (*relative == ".mcp.json") == mcp_only)
+            .map(|(relative, body)| {
+                (
+                    format!(".claude/plugins/marketplaces/tracedecay/{relative}"),
+                    body.into_bytes(),
+                )
+            })
+            .collect());
+    }
+
     let (prefix, files) = match (host, component) {
-        (HostKindV1::ClaudeCode, HostBundleComponentV1::Core) => (
-            ".claude/plugins/marketplaces/tracedecay",
-            super::plugin_bundle::claude_core_files(),
-        ),
-        (
-            HostKindV1::ClaudeCode,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp,
-        ) => (
-            ".claude/plugins/marketplaces/tracedecay",
-            super::plugin_bundle::claude_mcp_companion_files(),
-        ),
-        (HostKindV1::CursorDesktop, HostBundleComponentV1::Core) => (
-            ".cursor/plugins/local/tracedecay",
-            super::plugin_bundle::cursor_core_files(),
-        ),
         (HostKindV1::CursorDesktop, HostBundleComponentV1::Agent) => (
             ".cursor/extensions/tracedecay.cursor-native-0.0.0",
             super::plugin_bundle::cursor_native_extension_files(),
-        ),
-        (
-            HostKindV1::CursorDesktop,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp,
-        ) => (
-            ".cursor/plugins/local/tracedecay",
-            super::plugin_bundle::cursor_mcp_companion_files(),
-        ),
-        (HostKindV1::Codex, HostBundleComponentV1::Core) => (
-            ".codex/plugins/tracedecay",
-            super::plugin_bundle::codex_core_files(),
-        ),
-        (
-            HostKindV1::Codex,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp,
-        ) => (
-            ".codex/plugins/tracedecay",
-            super::plugin_bundle::codex_mcp_companion_files(),
         ),
         (HostKindV1::KimiCode, HostBundleComponentV1::Core) => (
             ".kimi-code/plugins/managed/tracedecay",

@@ -63,6 +63,15 @@ impl AgentIntegration for CursorIntegration {
         Ok(())
     }
 
+    /// Cursor's project-local install writes nothing project-local itself —
+    /// the shared home plugin owns every surface and the component-set
+    /// transaction owns the project receipt markers. There is nothing to
+    /// remove here, but the operation must succeed so a failed local install
+    /// can roll back instead of stranding the transaction in recovery.
+    fn uninstall_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
+        Ok(())
+    }
+
     fn post_install<'a>(
         &'a self,
         project_path: Option<&'a Path>,
@@ -393,16 +402,31 @@ fn install_cursor_managed_skill_overlay(home: &Path, install_dir: &Path) -> Resu
 }
 
 fn write_embedded_plugin(install_dir: &Path, tracedecay_bin: &str) -> Result<()> {
-    for (relative, contents) in embedded_plugin_files() {
-        let rendered = match relative {
-            ".cursor-plugin/plugin.json" => cursor_plugin_manifest(contents)?,
-            "mcp.json" => cursor_plugin_mcp(contents, tracedecay_bin)?,
-            "hooks/hooks.json" => cursor_plugin_hooks(contents, tracedecay_bin)?,
-            _ => contents.to_string(),
-        };
+    for (relative, rendered) in rendered_plugin_files(tracedecay_bin)? {
         safe_write_text_file(&install_dir.join(relative), &rendered, None)?;
     }
     Ok(())
+}
+
+/// Canonical rendered Cursor plugin inventory. The legacy installer and the
+/// receipt-backed first-party host-bundle catalog must produce byte-identical
+/// files: the component-set transaction verifies installed artifact digests
+/// after the compatibility registration adapter re-runs this installer, so
+/// any rendering drift between the two writers fails installs with
+/// `ArtifactContentMismatch`.
+pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
+    embedded_plugin_files()
+        .into_iter()
+        .map(|(relative, contents)| {
+            let rendered = match relative {
+                ".cursor-plugin/plugin.json" => cursor_plugin_manifest(contents)?,
+                "mcp.json" => cursor_plugin_mcp(contents, tracedecay_bin)?,
+                "hooks/hooks.json" => cursor_plugin_hooks(contents, tracedecay_bin)?,
+                _ => contents.to_string(),
+            };
+            Ok((relative, rendered))
+        })
+        .collect()
 }
 
 fn cursor_plugin_manifest(raw: &str) -> Result<String> {

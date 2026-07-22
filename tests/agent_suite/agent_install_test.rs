@@ -705,19 +705,9 @@ fn test_cline_install_creates_config() {
     let ctx = make_install_ctx(home);
     ClineIntegration.install(&ctx).unwrap();
 
-    // Cline uses VS Code extension global storage
-    #[cfg(target_os = "macos")]
-    let settings_path = home.join("Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json");
-    #[cfg(target_os = "linux")]
-    let settings_path = home.join(
-        ".config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json",
-    );
-    #[cfg(target_os = "windows")]
-    let settings_path = home.join("AppData/Roaming/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json");
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let settings_path = home.join(
-        ".config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json",
-    );
+    // Cline registers in the current CLI/IDE data dir; the VS Code extension
+    // global-storage path is retained only for legacy migration/removal.
+    let settings_path = home.join(".cline/data/settings/cline_mcp_settings.json");
 
     assert!(
         settings_path.exists(),

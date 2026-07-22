@@ -699,17 +699,44 @@ fn write_codex_plugin_files(
     tracedecay_bin: &str,
     policy: CodexBundlePolicy,
 ) -> Result<()> {
-    for (relative, contents) in codex_embedded_plugin_files() {
-        let rendered = match relative {
-            ".codex-plugin/plugin.json" => codex_plugin_manifest(contents, policy)?,
-            ".mcp.json" => codex_plugin_mcp(contents, tracedecay_bin, policy)?,
-            "hooks/hooks.json" if !policy.include_hooks() => continue,
-            "hooks/hooks.json" => codex_plugin_hooks(contents, tracedecay_bin)?,
-            _ => contents.to_string(),
-        };
+    for (relative, rendered) in rendered_plugin_files(tracedecay_bin, policy)? {
         safe_write_text_file(&install_dir.join(relative), &rendered, None)?;
     }
     Ok(())
+}
+
+/// Canonical rendered global Codex plugin inventory. The registration probe
+/// inspects `.codex/plugins/tracedecay` — the directory the receipt-backed
+/// first-party host-bundle catalog owns — and requires the managed lifecycle
+/// hooks to be present, so the catalog must deploy the same rendered content
+/// the installer produces instead of the raw templates (whose `hooks.json`
+/// is an empty scaffold rendered only at install time).
+pub(crate) fn rendered_global_plugin_files(
+    tracedecay_bin: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    rendered_plugin_files(
+        tracedecay_bin,
+        CodexBundlePolicy::for_scope(InstallScope::Global),
+    )
+}
+
+fn rendered_plugin_files(
+    tracedecay_bin: &str,
+    policy: CodexBundlePolicy,
+) -> Result<Vec<(&'static str, String)>> {
+    codex_embedded_plugin_files()
+        .into_iter()
+        .filter_map(|(relative, contents)| {
+            let rendered = match relative {
+                ".codex-plugin/plugin.json" => codex_plugin_manifest(contents, policy),
+                ".mcp.json" => codex_plugin_mcp(contents, tracedecay_bin, policy),
+                "hooks/hooks.json" if !policy.include_hooks() => return None,
+                "hooks/hooks.json" => codex_plugin_hooks(contents, tracedecay_bin),
+                _ => Ok(contents.to_string()),
+            };
+            Some(rendered.map(|rendered| (relative, rendered)))
+        })
+        .collect()
 }
 
 fn codex_plugin_manifest(raw: &str, policy: CodexBundlePolicy) -> Result<String> {
