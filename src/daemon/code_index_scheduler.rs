@@ -429,7 +429,8 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     latest_content_identity: Option<ContentDigest>,
     watcher: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
     /// Optional PR10 hook: schedule FastEmbed projection without joining it.
-    semantic_schedule: Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
+    semantic_schedule:
+        Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
 }
 
 impl CodeIndexWorktreeSchedulerV1 {

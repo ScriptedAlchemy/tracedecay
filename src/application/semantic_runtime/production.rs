@@ -25,9 +25,8 @@ use crate::semantic_code::projector::PreparedVectorGenerationV1;
 use crate::semantic_code::{
     DaemonSemanticQueryFactoryV1, DaemonSemanticRuntimeHandleV1,
     FastEmbedSemanticGenerationRequestV1, LoadedSemanticArtifactV1,
-    PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1,
-    SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
-    SemanticRuntimeStatusProjectionV1,
+    PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1,
+    SemanticRuntimeScheduleStatusV1, SemanticRuntimeStatusProjectionV1,
 };
 
 use super::ports::{
@@ -65,9 +64,9 @@ pub fn application_status_from_projection(
             reason,
             prior_generation,
         } => SemanticRuntimeStateV1::Degraded {
-            active_generation: prior_generation.clone().or_else(|| {
-                projection.prior_generation.clone()
-            }),
+            active_generation: prior_generation
+                .clone()
+                .or_else(|| projection.prior_generation.clone()),
             reason: match reason {
                 SemanticRuntimeScheduleFailureV1::Artifact => {
                     SemanticFallbackReasonV1::ArtifactUnavailable
@@ -113,9 +112,8 @@ where
         + Send
         + 'static,
     StageProjection: FnOnce(PreparedVectorGenerationV1) -> StageFuture + Send + 'static,
-    StageFuture: Future<
-            Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>,
-        > + Send
+    StageFuture: Future<Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>>
+        + Send
         + 'static,
 {
     let Ok(request) = FastEmbedSemanticGenerationRequestV1::new(
@@ -216,10 +214,8 @@ impl SemanticRuntimeBackendV1 for DaemonSemanticRuntimeBackendV1 {
     fn activate<'a>(
         &'a self,
         command: &'a SemanticActivationCommandV1,
-    ) -> SemanticRuntimeFuture<
-        'a,
-        Result<SemanticActivationReceiptV1, SemanticRuntimeBackendErrorV1>,
-    > {
+    ) -> SemanticRuntimeFuture<'a, Result<SemanticActivationReceiptV1, SemanticRuntimeBackendErrorV1>>
+    {
         Box::pin(async move {
             self.bind_configuration(command.configuration.clone());
             let Some(current) = self.handle.current() else {
@@ -236,10 +232,8 @@ impl SemanticRuntimeBackendV1 for DaemonSemanticRuntimeBackendV1 {
     fn rollback<'a>(
         &'a self,
         command: &'a SemanticRollbackCommandV1,
-    ) -> SemanticRuntimeFuture<
-        'a,
-        Result<SemanticRollbackReceiptV1, SemanticRuntimeBackendErrorV1>,
-    > {
+    ) -> SemanticRuntimeFuture<'a, Result<SemanticRollbackReceiptV1, SemanticRuntimeBackendErrorV1>>
+    {
         Box::pin(async move {
             let _ = command;
             Err(SemanticRuntimeBackendErrorV1::Unavailable)
@@ -257,8 +251,9 @@ fn index_state_from_status(status: SemanticRuntimeScheduleStatusV1) -> SemanticI
 }
 
 fn provisional_vector_generation(source: &CodeGenerationId) -> VectorGenerationIdV1 {
-    let digest = canonical_sha256(&("semantic.indexing.target", source))
-        .unwrap_or_else(|_| ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).expect("digest"));
+    let digest = canonical_sha256(&("semantic.indexing.target", source)).unwrap_or_else(|_| {
+        ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).expect("digest")
+    });
     VectorGenerationIdV1::new(digest)
 }
 
@@ -307,9 +302,7 @@ pub fn unregister_project_semantic_runtime(project_root: &Path) {
 }
 
 /// Application status for a mounted project semantic scheduler, if any.
-pub fn project_semantic_application_status(
-    project_root: &Path,
-) -> Option<SemanticRuntimeStatusV1> {
+pub fn project_semantic_application_status(project_root: &Path) -> Option<SemanticRuntimeStatusV1> {
     let handle = project_semantic_handles()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -337,9 +330,8 @@ where
         + Sync
         + 'static,
     StageProjection: Fn(PreparedVectorGenerationV1) -> StageFuture + Send + Sync + 'static,
-    StageFuture: Future<
-            Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>,
-        > + Send
+    StageFuture: Future<Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>>
+        + Send
         + 'static,
 {
     let load_artifact = Arc::new(load_artifact);
@@ -434,8 +426,7 @@ mod tests {
 
     #[tokio::test]
     async fn saved_edit_schedules_fastembed_without_blocking_exact_search() {
-        let handle =
-            DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
+        let handle = DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let exact_ready = AtomicBool::new(false);
@@ -556,7 +547,10 @@ mod tests {
             other => panic!("expected degraded status, got {other:?}"),
         }
         // Prior generation remains queryable / current for compatible reads.
-        assert_eq!(handle.current().map(|pointer| pointer.generation), Some(prior));
+        assert_eq!(
+            handle.current().map(|pointer| pointer.generation),
+            Some(prior)
+        );
     }
 
     #[tokio::test]
