@@ -192,6 +192,7 @@ pub struct SessionDerivedEvidenceRecordV1 {
 }
 
 impl SessionDerivedEvidenceRecordV1 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         evidence_kind: DerivedEvidenceKindV1,
         retrieval_anchor_id: RetrievalAnchorId,
@@ -211,7 +212,7 @@ impl SessionDerivedEvidenceRecordV1 {
         if members.is_empty() {
             return Err(SessionContractError::DerivedEvidenceMembersRequired);
         }
-        source_horizon.clone().validate()?;
+        source_horizon.validate()?;
         let mut seen = BTreeSetLite::default();
         for (index, member) in members.iter().enumerate() {
             member.validate()?;
@@ -276,7 +277,7 @@ impl SessionDerivedEvidenceRecordV1 {
         if self.member_count as usize != self.members.len() {
             return Err(SessionContractError::DerivedEvidenceMemberDigestMismatch);
         }
-        self.source_horizon.clone().validate()?;
+        self.source_horizon.validate()?;
         let expected_digest = member_digest(
             self.evidence_kind,
             &self.algorithm_version,
@@ -506,7 +507,7 @@ pub fn derive_session_evidence_from_occurrences(
             run.first().and_then(|item| item.thread_id.clone()),
             DerivedEvidenceKindV1::Burst.algorithm_version(),
             configuration_digest.clone(),
-            horizon.clone(),
+            horizon,
             burst_members,
         )?);
 
@@ -561,9 +562,7 @@ fn members_for_run(run: &[DerivedEvidenceOccurrenceRefV1]) -> Vec<DerivedEvidenc
     run.iter()
         .enumerate()
         .map(|(ordinal, item)| {
-            let role = if run.len() == 1 {
-                DerivedEvidenceMemberRoleV1::First
-            } else if ordinal == 0 {
+            let role = if run.len() == 1 || ordinal == 0 {
                 DerivedEvidenceMemberRoleV1::First
             } else if ordinal + 1 == run.len() {
                 DerivedEvidenceMemberRoleV1::Last
