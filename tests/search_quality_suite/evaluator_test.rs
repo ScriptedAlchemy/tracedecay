@@ -30,9 +30,7 @@ fn contract_only_compare_blocks_without_opening_holdout_or_creating_promotion() 
         fixture_root: fixtures::fixture_root(),
         run_manifest: None,
         output_root: temp.path().join("runs"),
-        holdout_accessed_by: None,
-        holdout_profile_root: None,
-        holdout_seal: None,
+        holdout_labels: None,
         saved_candidates: None,
         required_outcome: Some(EvalOutcomeV1::Accepted),
     })
@@ -71,9 +69,7 @@ fn evaluator_rejects_run_ids_that_are_not_single_path_components() {
         fixture_root: fixtures::fixture_root(),
         run_manifest: Some(run_path),
         output_root: temp.path().join("runs"),
-        holdout_accessed_by: None,
-        holdout_profile_root: None,
-        holdout_seal: None,
+        holdout_labels: None,
         saved_candidates: None,
         required_outcome: Some(EvalOutcomeV1::Accepted),
     })
@@ -120,9 +116,7 @@ fn compare_reports_each_lane_ablation_from_saved_candidate_bytes() {
         fixture_root: fixtures::fixture_root(),
         run_manifest: None,
         output_root: temp.path().join("runs"),
-        holdout_accessed_by: None,
-        holdout_profile_root: None,
-        holdout_seal: None,
+        holdout_labels: None,
         saved_candidates: Some(saved_path),
         required_outcome: Some(EvalOutcomeV1::Accepted),
     })
