@@ -1741,6 +1741,15 @@ fn evidence_directory_matches_index_contract() {
 #[tokio::test]
 // The env lock must stay held for the entire benchmark measurement.
 #[allow(clippy::await_holding_lock)]
+// This is a benchmark measurement, not a correctness gate: it runs 30
+// measured repetitions (plus warmups) through the production path and is far
+// too heavy for every CI test job. Gate it behind `--ignored` so the default
+// `cargo test` / `cargo nextest` runs skip it; the benchmark harness invokes
+// it explicitly via
+// `cargo test --release --lib store::memory_benchmark::pr7_memory_baseline -- --exact --ignored --nocapture --test-threads=1`
+// (see benchmarks/pr7-memory/README.md). The manifest/evidence contract tests
+// above stay un-ignored and continue to run in CI.
+#[ignore = "PR7 memory benchmark; run explicitly with -- --ignored (see benchmarks/pr7-memory/README.md)"]
 async fn pr7_memory_baseline() {
     if std::env::consts::OS != "linux" {
         eprintln!("[pr7-benchmark] skipping measurement: the evidence platform contract is Linux");

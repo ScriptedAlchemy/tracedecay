@@ -54,9 +54,11 @@ currently provide that acceptance path, so commit-attested naming
 (`result-<date>-<commithash>.json`) and the `acceptance` evidence status cannot
 be used here.
 
-- The measurement runs as a normal test,
-  `store::memory_benchmark::pr7_memory_baseline`, and rewrites
-  [result-provisional.json](result-provisional.json) on every run on Linux
+- The measurement runs as an `#[ignore]`-gated test,
+  `store::memory_benchmark::pr7_memory_baseline` (skipped by the default
+  `cargo test` / `cargo nextest` runs so CI test jobs do not pay it; run it
+  explicitly by adding `--ignored` as shown above). When run, it rewrites
+  [result-provisional.json](result-provisional.json) on Linux
   (unsupported platforms skip without emitting). The artifact carries
   `"evidence_status": "provisional"`,
   `"provisional_reason": "dirty_worktree_no_commit_attestation"`, an honest
@@ -106,7 +108,7 @@ artifact will attest:
 4. `cargo test --lib application::anchor_resolution::tests::topology_drilldown_preserves_sources_and_reports_stale_or_retargeted -- --exact`
 5. `cargo test --lib application::evidence_assembly::tests::authorized_drilldown_expands_contribution_span_set_and_exact_members -- --exact`
 6. `cargo test --all-features`
-7. `cargo test --release --lib store::memory_benchmark::pr7_memory_baseline -- --exact --nocapture --test-threads=1`
+7. `cargo test --release --lib store::memory_benchmark::pr7_memory_baseline -- --exact --ignored --nocapture --test-threads=1`
 8. `cargo test --lib store::memory_benchmark::workload_manifest_matches_code_contract -- --exact`
 9. `cargo test --lib store::memory_benchmark::evidence_directory_matches_index_contract -- --exact`
 
@@ -117,11 +119,13 @@ the embedded workload and harness digests against the compiler inputs. No such
 PR7 acceptance artifact has been generated yet. Until all of those conditions
 hold, the index remains pending with `current_acceptance: null`.
 
-Any `cargo test --lib store::memory_benchmark` invocation re-executes the
-measurement and re-emits the provisional artifact; the manifest and evidence
-directory validators run in the same module and hold an inter-process file
-lock plus atomic rename so concurrent test processes never read a partial
-artifact.
+Any `cargo test --lib store::memory_benchmark -- --ignored` invocation
+re-executes the measurement and re-emits the provisional artifact (the
+measurement is `#[ignore]`-gated, so a bare `cargo test --lib
+store::memory_benchmark` now runs only the un-ignored manifest and evidence
+directory validators). Those validators run in the same module and hold an
+inter-process file lock plus atomic rename so concurrent test processes never
+read a partial artifact.
 
 ## Provisional measurement snapshot
 
