@@ -17,7 +17,7 @@
     "install_contracts",
     "platform_contracts",
     "red_gaps",
-    "owner_receipt"
+    "ci_gate_status"
   ],
   "properties": {
     "schema_version": { "const": 1 },
@@ -93,14 +93,15 @@
       "additionalProperties": false,
       "required": ["linux", "windows", "macos"],
       "properties": {
-        "linux": { "const": "parent_runtime_required" },
-        "windows": { "const": "external_runner_required" },
-        "macos": { "const": "external_runner_required" }
+        "linux": { "const": "ci_matrix_required" },
+        "windows": { "const": "ci_matrix_required" },
+        "macos": { "const": "ci_matrix_required" }
       }
     },
     "red_gaps": {
       "type": "array",
-      "maxItems": 14,
+      "minItems": 0,
+      "maxItems": 8,
       "uniqueItems": true,
       "items": {
         "enum": [
@@ -111,21 +112,74 @@
           "cursor_cloud.edit",
           "cursor_cloud.stop",
           "cline_family.edit",
-          "cline_family.stop",
-          "daemon.runtime_journey",
-          "pr11.project_open_runtime",
-          "pr12.transport_runtime_parity",
-          "platform.windows_lifecycle",
-          "platform.macos_lifecycle",
-          "cursor.native_extension_install"
+          "cline_family.stop"
         ]
       }
     },
-    "owner_receipt": {
-      "const": "benchmarks/pr12-pr13-owner-acceptance/owner-receipts-v1.json"
+    "ci_gate_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 24,
+      "maxProperties": 24,
+      "properties": {
+        "pr11_project_open_runtime": { "$ref": "#/definitions/checkedInGateState" },
+        "pr12_git_cli_runtime": { "$ref": "#/definitions/checkedInGateState" },
+        "pr12_git_mcp_runtime": { "$ref": "#/definitions/checkedInGateState" },
+        "pr12_git_http_runtime": { "$ref": "#/definitions/checkedInGateState" },
+        "pr12_http_sse_stream": { "$ref": "#/definitions/checkedInGateState" },
+        "pr12_lsp_gateway_runtime": { "$ref": "#/definitions/checkedInGateState" },
+        "pr12_feedback_handle_bootstrap": { "$ref": "#/definitions/checkedInGateState" },
+        "pr12_primitives_config_parity": { "$ref": "#/definitions/checkedInGateState" },
+        "pr12_cancellation_capacity_resume": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_host_schema": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_host_decoders": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_daemon_runtime_pipeline": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_host_receipt_doctor": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_host_structure": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_host_no_secret": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_lite_grammar_contract": { "$ref": "#/definitions/checkedInGateState" },
+        "cursor_native_extension_check": { "$ref": "#/definitions/checkedInGateState" },
+        "cursor_native_extension_test": { "$ref": "#/definitions/checkedInGateState" },
+        "cursor_native_extension_package": { "$ref": "#/definitions/checkedInGateState" },
+        "cursor_native_extension_receipt": { "$ref": "#/definitions/checkedInGateState" },
+        "cursor_native_extension_runtime": { "$ref": "#/definitions/checkedInGateState" },
+        "platform_linux_lifecycle": { "$ref": "#/definitions/checkedInGateState" },
+        "platform_windows_lifecycle": { "$ref": "#/definitions/checkedInGateState" },
+        "platform_macos_lifecycle": { "$ref": "#/definitions/checkedInGateState" }
+      },
+      "required": [
+        "pr11_project_open_runtime",
+        "pr12_git_cli_runtime",
+        "pr12_git_mcp_runtime",
+        "pr12_git_http_runtime",
+        "pr12_http_sse_stream",
+        "pr12_lsp_gateway_runtime",
+        "pr12_feedback_handle_bootstrap",
+        "pr12_primitives_config_parity",
+        "pr12_cancellation_capacity_resume",
+        "pr13_host_schema",
+        "pr13_host_decoders",
+        "pr13_daemon_runtime_pipeline",
+        "pr13_host_receipt_doctor",
+        "pr13_host_structure",
+        "pr13_host_no_secret",
+        "pr13_lite_grammar_contract",
+        "cursor_native_extension_check",
+        "cursor_native_extension_test",
+        "cursor_native_extension_package",
+        "cursor_native_extension_receipt",
+        "cursor_native_extension_runtime",
+        "platform_linux_lifecycle",
+        "platform_windows_lifecycle",
+        "platform_macos_lifecycle"
+      ]
     }
   },
   "definitions": {
+    "checkedInGateState": {
+      "type": "string",
+      "enum": ["awaiting_ci", "failed"]
+    },
     "event": {
       "oneOf": [
         {

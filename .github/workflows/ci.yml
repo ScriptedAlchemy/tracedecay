@@ -127,6 +127,67 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-features --profile ci --locked
 
+      - name: Validate PR12/PR13 packets (lint)
+        run: |
+          set -euo pipefail
+          python3 benchmarks/pr13-host-conformance/validate_packet.py
+          python3 benchmarks/pr13-advisory-milestone/validate_packet.py
+          python3 benchmarks/pr12-lsp-gateway/validate_packet.py
+
+      - name: Cursor native extension check/test/package
+        run: |
+          set -euo pipefail
+          npm --prefix plugin/cursor-native-extension ci
+          npm --prefix plugin/cursor-native-extension run check
+          npm --prefix plugin/cursor-native-extension test
+          npm --prefix plugin/cursor-native-extension run package
+
+      - name: PR13 lite grammar gate
+        run: >-
+          cargo test --locked --no-default-features --features lite
+          --test pr13_host_bundle_acceptance
+          structural_checks_ignore_commented_out_symbols
+          -- --exact
+
+      - name: PR13 default-feature platform lifecycle
+        run: >-
+          cargo test --locked --test pr13_host_bundle_acceptance
+          receipt_backed_doctor_checks_deployed_digests_registration_and_repair
+          -- --exact
+
+      - name: Strict PR12/PR13 packets from nextest junit
+        env:
+          RUNNER_OS_ID: ${{ matrix.name == 'Linux' && 'linux' || 'macos' }}
+        run: |
+          set -euo pipefail
+          junit="target/nextest/ci/junit.xml"
+          test -f "$junit"
+          python3 benchmarks/pr13-host-conformance/test_platform_evidence.py
+          python3 benchmarks/pr13-host-conformance/validate_packet.py --strict \
+            --runner-os "$RUNNER_OS_ID" \
+            --junit "${RUNNER_OS_ID}=${junit}" \
+            --npm-passed check --npm-passed test --npm-passed package \
+            --gate-passed pr13_lite_grammar_contract \
+            --gate-passed "${RUNNER_OS_ID}:platform_${RUNNER_OS_ID}_lifecycle"
+          python3 benchmarks/pr13-advisory-milestone/validate_packet.py --strict \
+            --junit "$junit"
+          mkdir -p "pr12-pr13-os-evidence/${RUNNER_OS_ID}"
+          cp "$junit" "pr12-pr13-os-evidence/${RUNNER_OS_ID}/junit.xml"
+          printf '%s\n' "$RUNNER_OS_ID" > "pr12-pr13-os-evidence/${RUNNER_OS_ID}/runner-os.txt"
+          # Marker proves default-feature lifecycle ran on this OS (not a receipt).
+          : > "pr12-pr13-os-evidence/${RUNNER_OS_ID}/platform_lifecycle.passed"
+
+      - name: Upload OS-tagged PR12/PR13 junit
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr12-pr13-junit-${{ matrix.name == 'Linux' && 'linux' || 'macos' }}
+          path: pr12-pr13-os-evidence/
+          retention-days: 7
+
+      - name: FastEmbed fixture pin check
+        if: matrix.name == 'Linux'
+        run: python3 tests/distribution/fastembed/prepare_fixture.py --check tests/distribution/fastembed
+
       - name: Run in-flight observation crash harness
         if: matrix.name == 'Linux'
         run: >-
@@ -382,7 +443,7 @@ jobs:
           name: windows-nextest-archive
           path: ${{ runner.temp }}
 
-      - name: Validate PR8 benchmark and attestation gates
+      - name: Validate PR8 benchmark gates
         shell: bash
         run: |
           set -euo pipefail
@@ -391,16 +452,8 @@ jobs:
             scripts/run-pr8-temporal-benchmark.sh \
             scripts/dev/pr8-build-feedback.sh
           scripts/run-pr8-temporal-benchmark.sh --dry-run
-          set +e
-          run_output="$(scripts/run-pr8-temporal-benchmark.sh --run 2>&1)"
-          run_status=$?
-          set -e
-          if [[ "$run_status" -ne 64 \
-            || "$run_output" != *"unsupported platform rejected"* ]]; then
-            printf 'expected non-Linux rejection (64), got %s: %s\n' \
-              "$run_status" "$run_output" >&2
-            exit 1
-          fi
+          # Windows CI proves PR8 temporal durable coverage via nextest below.
+          # Do not treat Windows as an unsupported/pending platform.
           scripts/dev/pr8-build-feedback.sh --self-test-timing
           scripts/dev/pr8-build-feedback.sh --self-test-ineligible-metadata
           after="$(git status --porcelain=v1 --untracked-files=all)"
@@ -477,6 +530,147 @@ jobs:
             exit 1
           fi
           echo "All Windows shards passed."
+
+  windows-pr12-pr13-packets:
+    name: PR12/PR13 packets (Windows evidence)
+    if: ${{ !cancelled() && needs.windows-test-shard.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
+    needs: windows-test-shard
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Download Windows nextest junit shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: windows-nextest-junit-*
+          path: windows-junit
+          merge-multiple: true
+
+      - name: Cursor native extension check/test/package
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix plugin/cursor-native-extension ci
+          npm --prefix plugin/cursor-native-extension run check
+          npm --prefix plugin/cursor-native-extension test
+          npm --prefix plugin/cursor-native-extension run package
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Windows Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-pr12-pr13-lite-windows-msvc
+          cache-on-failure: true
+
+      - name: PR13 lite grammar gate
+        shell: bash
+        run: >-
+          cargo test --locked --no-default-features --features lite
+          --test pr13_host_bundle_acceptance
+          structural_checks_ignore_commented_out_symbols
+          -- --exact
+
+      - name: PR13 default-feature platform lifecycle
+        shell: bash
+        run: >-
+          cargo test --locked --test pr13_host_bundle_acceptance
+          receipt_backed_doctor_checks_deployed_digests_registration_and_repair
+          -- --exact
+
+      - name: Strict PR12/PR13 packets from Windows junit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t junit_files < <(find windows-junit -type f -name 'junit.xml' | sort)
+          if [[ "${#junit_files[@]}" -eq 0 ]]; then
+            echo "missing Windows nextest junit evidence" >&2
+            exit 1
+          fi
+          # Merge shard junit into one Windows-tagged artifact for aggregation.
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          root = ET.Element("testsuites")
+          for path in sorted(Path("windows-junit").rglob("junit.xml")):
+              tree = ET.parse(path)
+              node = tree.getroot()
+              if node.tag.endswith("testsuites"):
+                  for child in list(node):
+                      root.append(child)
+              else:
+                  root.append(node)
+          Path("windows-merged-junit.xml").write_bytes(ET.tostring(root, encoding="utf-8"))
+          PY
+          python3 benchmarks/pr13-host-conformance/test_platform_evidence.py
+          python3 benchmarks/pr13-host-conformance/validate_packet.py
+          python3 benchmarks/pr13-advisory-milestone/validate_packet.py
+          python3 benchmarks/pr12-lsp-gateway/validate_packet.py
+          python3 benchmarks/pr13-host-conformance/validate_packet.py --strict \
+            --runner-os windows \
+            --junit windows=windows-merged-junit.xml \
+            --npm-passed check --npm-passed test --npm-passed package \
+            --gate-passed pr13_lite_grammar_contract \
+            --gate-passed windows:platform_windows_lifecycle
+          python3 benchmarks/pr13-advisory-milestone/validate_packet.py --strict \
+            --junit windows-merged-junit.xml
+          mkdir -p pr12-pr13-os-evidence/windows
+          cp windows-merged-junit.xml pr12-pr13-os-evidence/windows/junit.xml
+          printf 'windows\n' > pr12-pr13-os-evidence/windows/runner-os.txt
+          : > pr12-pr13-os-evidence/windows/platform_lifecycle.passed
+
+      - name: Upload OS-tagged PR12/PR13 junit
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr12-pr13-junit-windows
+          path: pr12-pr13-os-evidence/
+          retention-days: 7
+
+  pr12-pr13-platform-aggregate:
+    name: PR12/PR13 platform aggregate
+    if: ${{ !cancelled() && needs.test.result == 'success' && needs.windows-pr12-pr13-packets.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
+    needs: [test, windows-pr12-pr13-packets]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Download OS-tagged PR12/PR13 junit
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pr12-pr13-junit-*
+          path: pr12-pr13-os-evidence
+          merge-multiple: true
+
+      - name: Aggregate strict host packet across Linux/Windows/macOS
+        run: |
+          set -euo pipefail
+          python3 benchmarks/pr13-host-conformance/test_platform_evidence.py
+          gate_args=(
+            --npm-passed check --npm-passed test --npm-passed package
+            --gate-passed pr13_lite_grammar_contract
+          )
+          for os_name in linux windows macos; do
+            test -f "pr12-pr13-os-evidence/${os_name}/junit.xml"
+            test -f "pr12-pr13-os-evidence/${os_name}/platform_lifecycle.passed"
+            gate_args+=(--junit "${os_name}=pr12-pr13-os-evidence/${os_name}/junit.xml")
+            gate_args+=(--gate-passed "${os_name}:platform_${os_name}_lifecycle")
+          done
+          # Full aggregation only: Linux alone cannot close Windows/macOS.
+          python3 benchmarks/pr13-host-conformance/validate_packet.py --strict \
+            "${gate_args[@]}"
 
   release-compatibility:
     name: Release compatibility

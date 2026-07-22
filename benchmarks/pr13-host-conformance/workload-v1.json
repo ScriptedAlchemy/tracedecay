@@ -178,7 +178,10 @@
     "kiro": {
       "cli_version": "2.13.0",
       "config_validation": "passed",
-      "supported_hooks": ["write", "stop"],
+      "supported_hooks": [
+        "write",
+        "stop"
+      ],
       "auth": "whoami_not_logged_in_and_no_KIRO_API_KEY"
     },
     "kimi": {
@@ -215,7 +218,12 @@
       "built_javascript": "plugin/cursor-native-extension/dist/extension.js",
       "vsix": "plugin/cursor-native-extension/dist/tracedecay-cursor-native.vsix",
       "installed_path": ".cursor/extensions/tracedecay.cursor-native-0.0.0",
-      "lsp_command": ["tracedecay", "lsp", "bridge", "--stdio"],
+      "lsp_command": [
+        "tracedecay",
+        "lsp",
+        "bridge",
+        "--stdio"
+      ],
       "capability": "supported",
       "diagnostic_limit": 100,
       "message_byte_limit": 512,
@@ -243,15 +251,20 @@
       "rules": "AGENTS_and_config_instructions",
       "independent_prompt_component": "absent",
       "plugin_capture": "crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json",
-      "custom_lsp_command": ["tracedecay", "lsp", "bridge", "--stdio"],
+      "custom_lsp_command": [
+        "tracedecay",
+        "lsp",
+        "bridge",
+        "--stdio"
+      ],
       "duplicate_analyzer": "must_not_start_or_claim_second_language_analyzer",
       "activation": "after_official_dogfood"
     }
   },
   "platform_contracts": {
-    "linux": "parent_runtime_required",
-    "windows": "external_runner_required",
-    "macos": "external_runner_required"
+    "linux": "ci_matrix_required",
+    "windows": "ci_matrix_required",
+    "macos": "ci_matrix_required"
   },
   "red_gaps": [
     "codex.edit",
@@ -261,13 +274,32 @@
     "cursor_cloud.edit",
     "cursor_cloud.stop",
     "cline_family.edit",
-    "cline_family.stop",
-    "daemon.runtime_journey",
-    "pr11.project_open_runtime",
-    "pr12.transport_runtime_parity",
-    "platform.windows_lifecycle",
-    "platform.macos_lifecycle",
-    "cursor.native_extension_install"
+    "cline_family.stop"
   ],
-  "owner_receipt": "benchmarks/pr12-pr13-owner-acceptance/owner-receipts-v1.json"
+  "ci_gate_status": {
+    "pr11_project_open_runtime": "awaiting_ci",
+    "pr12_git_cli_runtime": "awaiting_ci",
+    "pr12_git_mcp_runtime": "awaiting_ci",
+    "pr12_git_http_runtime": "awaiting_ci",
+    "pr12_http_sse_stream": "awaiting_ci",
+    "pr12_lsp_gateway_runtime": "awaiting_ci",
+    "pr12_feedback_handle_bootstrap": "awaiting_ci",
+    "pr12_primitives_config_parity": "awaiting_ci",
+    "pr12_cancellation_capacity_resume": "awaiting_ci",
+    "pr13_host_schema": "awaiting_ci",
+    "pr13_host_decoders": "awaiting_ci",
+    "pr13_daemon_runtime_pipeline": "awaiting_ci",
+    "pr13_host_receipt_doctor": "awaiting_ci",
+    "pr13_host_structure": "awaiting_ci",
+    "pr13_host_no_secret": "awaiting_ci",
+    "pr13_lite_grammar_contract": "awaiting_ci",
+    "cursor_native_extension_check": "awaiting_ci",
+    "cursor_native_extension_test": "awaiting_ci",
+    "cursor_native_extension_package": "awaiting_ci",
+    "cursor_native_extension_receipt": "awaiting_ci",
+    "cursor_native_extension_runtime": "awaiting_ci",
+    "platform_linux_lifecycle": "awaiting_ci",
+    "platform_windows_lifecycle": "awaiting_ci",
+    "platform_macos_lifecycle": "awaiting_ci"
+  }
 }

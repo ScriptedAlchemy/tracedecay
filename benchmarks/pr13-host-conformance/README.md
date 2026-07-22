@@ -5,41 +5,51 @@ Draft-07 `schema-v1.json`. Authentic event payloads stay in the Hook V2 fixture
 tree and are decoded by production typed decoders in
 `tests/pr13_host_bundle_acceptance.rs`.
 
-Packet lint runs only fixed, allowlisted static checks with timeouts:
+Packet lint:
 
 ```sh
 python3 benchmarks/pr13-host-conformance/validate_packet.py
 ```
 
-Strict milestone acceptance is separate and intentionally fails only while
-required host lanes remain unavailable:
+Platform evidence tests (cross-OS rejection + aggregation):
 
 ```sh
-python3 benchmarks/pr13-host-conformance/validate_packet.py --strict
+python3 benchmarks/pr13-host-conformance/test_platform_evidence.py
 ```
 
-The packet stores CI gate IDs, never command arguments. CI resolves those IDs
-to the Draft-07 schema test, production decoder test, AST structural test,
-shared minimal no-secret kernel test, real PR12 transport/SSE parity test, and
-no-default-features lite grammar contract. This static preparation does not run
-Cargo.
+Strict acceptance requires:
 
-Parent-run gate commands are allowlisted in `validate_packet.py`. The PR12
-runtime gates target real Git preview/apply CLI, MCP, and HTTP paths, the Axum
-SSE response stream, and the LSP gateway. The PR13 gates target Draft-07
-schemas, production host decoders, AST structure, the shared no-secret kernel,
-receipt-backed Doctor inspection, and the lite grammar build. Cursor-native
-extension gates run its TypeScript check, package tests, and VSIX build; the
-static gate binds the language-client command, bounded one-root forwarding,
-gateway no-echo merge, reconnect/clear/teardown behavior, receipt-backed
-install and Doctor registration, and supported capability declaration.
+1. `red_gaps` only lists unavailable host-capture lanes already marked
+   `unavailable` in `hosts[]`.
+2. Shared `ci_gate_id`s pass via OS-tagged nextest/cargo junit and/or executed
+   allowlisted commands.
+3. `platform_{linux,windows,macos}_lifecycle` are **default-feature** product
+   lifecycle gates. Each requires OS-tagged proof
+   (`linux:platform_linux_lifecycle`, etc.). Linux evidence alone leaves
+   Windows/macOS unresolved until those CI artifacts arrive.
 
-First-party host bundles are binary-embedded only. Their contract covers
-manifest schema/version/capability, digest corruption, ownership, explicit
-confirmation, receipts, backup, interrupted recovery, and rollback. External
-or third-party bundle loading is rejected.
+Checked-in `ci_gate_status` may only be `awaiting_ci` or `failed`. `passed` is
+never checked in.
 
-Capture paths are platform-neutral only where the provider wire schema is
-platform-neutral. Installed-path and lifecycle claims remain explicit in the
-host install contracts. Installing the generated VSIX into an external Cursor
-desktop process remains an explicit strict gap.
+```sh
+# Local honesty: strict fails while gates remain awaiting_ci
+python3 benchmarks/pr13-host-conformance/validate_packet.py --strict
+
+# One CI runner (does not close other OS platform gates):
+python3 benchmarks/pr13-host-conformance/validate_packet.py --strict \
+  --runner-os linux \
+  --junit linux=target/nextest/ci/junit.xml \
+  --npm-passed check --npm-passed test --npm-passed package \
+  --gate-passed pr13_lite_grammar_contract \
+  --gate-passed linux:platform_linux_lifecycle
+
+# Full aggregation after Linux + Windows + macOS artifacts exist:
+python3 benchmarks/pr13-host-conformance/validate_packet.py --strict \
+  --junit linux=.../linux/junit.xml \
+  --junit windows=.../windows/junit.xml \
+  --junit macos=.../macos/junit.xml \
+  --gate-passed linux:platform_linux_lifecycle \
+  --gate-passed windows:platform_windows_lifecycle \
+  --gate-passed macos:platform_macos_lifecycle \
+  ...
+```

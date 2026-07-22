@@ -99,7 +99,8 @@ assert_required_assets() {
     "src/query/retrieval/semantic/service.rs"
     "src/query/retrieval/semantic/tests.rs"
     "src/semantic_code/fastembed_adapter.rs"
-    # Always-compiled benchmark/harness modules embed these via include_str!.
+    # Packaged fixture/workload pins (PR5 harness embeds its workload via
+    # include_str!; PR7 keeps a workload pin for distribution completeness).
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
     "tests/fixtures/provider_normalization/codex/agent_message.input.json"
     "tests/fixtures/analytics/codex_skill_prose.txt"

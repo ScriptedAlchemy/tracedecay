@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - "plugin/**"
+      - "plugin/cursor-native-extension/**"
       - "tests/fixtures/cursor-schemas/**"
       - "tests/agent_suite/*plugin*"
       - "tests/agent_suite/*skill*"

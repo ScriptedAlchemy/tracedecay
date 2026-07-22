@@ -13,7 +13,7 @@
     "behavioral_contract",
     "provider_gaps",
     "host_packet",
-    "owner_receipt"
+    "ci_gate_status"
   ],
   "properties": {
     "schema_version": { "const": 1 },
@@ -85,6 +85,7 @@
     },
     "provider_gaps": {
       "type": "array",
+      "minItems": 0,
       "maxItems": 2,
       "uniqueItems": true,
       "items": {
@@ -97,8 +98,35 @@
     "host_packet": {
       "const": "benchmarks/pr13-host-conformance/workload-v1.json"
     },
-    "owner_receipt": {
-      "const": "benchmarks/pr12-pr13-owner-acceptance/owner-receipts-v1.json"
+    "ci_gate_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 7,
+      "maxProperties": 7,
+      "properties": {
+        "pr13_advisory_compile": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_advisory_schema": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_advisory_runtime_decoders": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_advisory_pagination_cas": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_advisory_proximity_overlap": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_advisory_structure": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_advisory_no_secret": { "$ref": "#/definitions/checkedInGateState" }
+      },
+      "required": [
+        "pr13_advisory_compile",
+        "pr13_advisory_schema",
+        "pr13_advisory_runtime_decoders",
+        "pr13_advisory_pagination_cas",
+        "pr13_advisory_proximity_overlap",
+        "pr13_advisory_structure",
+        "pr13_advisory_no_secret"
+      ]
+    }
+  },
+  "definitions": {
+    "checkedInGateState": {
+      "type": "string",
+      "enum": ["awaiting_ci", "failed"]
     }
   }
 }

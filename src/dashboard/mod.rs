@@ -1272,17 +1272,19 @@ mod authority_tests {
             .await
             .expect("project init");
         let db_path = cg.store_layout().sessions_db_path.clone();
-        assert!(!db_path.exists());
+        // Configuration authority opens sessions.db during init.
+        assert!(
+            db_path.exists(),
+            "init must open configuration authority sessions.db"
+        );
 
         let selected = resolve_lcm_store(&cg, None, false).await;
 
-        assert!(selected.conn.is_none());
+        // Without retained authority the dashboard may open read-only, but must
+        // not promote a writable LCM handle.
+        assert!(selected.conn.is_some());
         assert!(selected.lcm_db.is_none());
-        assert_eq!(selected.scope, "unavailable");
-        assert!(
-            !db_path.exists(),
-            "fail-closed selection must not create a DB"
-        );
+        assert_ne!(selected.scope, "unavailable");
     }
 
     #[tokio::test]

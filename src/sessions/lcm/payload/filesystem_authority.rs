@@ -1297,10 +1297,10 @@ mod windows_tests {
             .arg(&outside)
             .status()
             .is_ok_and(|status| status.success());
-        if !junction_created && let Err(error) = symlink_dir(&outside, &link) {
-            if error.raw_os_error() == Some(1314) {
-                return;
-            }
+        if !junction_created
+            && let Err(error) = symlink_dir(&outside, &link)
+            && error.raw_os_error() != Some(1314)
+        {
             panic!("failed to create Windows directory reparse point: {error}");
         }
 

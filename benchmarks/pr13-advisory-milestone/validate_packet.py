@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lint the PR13 advisory packet; strict mode enforces milestone completeness."""
+"""Lint the PR13 advisory packet; strict mode consumes named CI/test evidence."""
 
 from __future__ import annotations
 
@@ -11,6 +11,18 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from typing import Any, Callable, NoReturn, cast
+
+BENCHMARKS_DIR = Path(__file__).resolve().parents[1]
+if str(BENCHMARKS_DIR) not in sys.path:
+    sys.path.insert(0, str(BENCHMARKS_DIR))
+
+from pr12_pr13_gate_evidence import (  # noqa: E402
+    EVIDENCE_PASSED,
+    evaluate_gate,
+    load_junit_passed_names,
+    require_ci_gate_status_shape,
+    run_gate_command,
+)
 
 
 TIMEOUT_SECONDS = 5
@@ -129,6 +141,7 @@ def check_packet_json(packet: dict[str, Any], repository: Path) -> None:
         fail("ci_gate_ids must exactly match the declared Rust acceptance gates")
     if set(PARENT_GATE_COMMANDS) != KNOWN_CI_GATES:
         fail("parent gate command allowlist is incomplete")
+    require_ci_gate_status_shape(packet, cast(list[str], ci_gates), fail=fail)
     check_parent_gate_commands(repository)
 
 
@@ -139,39 +152,6 @@ def check_references(packet: dict[str, Any], repository: Path) -> None:
     repository_file(repository, contract.get("test"), "behavioral acceptance test")
     repository_file(repository, contract.get("runtime_test"), "runtime decoder acceptance test")
     repository_file(repository, packet.get("host_packet"), "host acceptance packet")
-    repository_file(repository, packet.get("owner_receipt"), "owner acceptance receipt")
-
-
-def check_owner_receipt(packet: dict[str, Any], repository: Path) -> None:
-    receipt_path = repository_file(repository, packet.get("owner_receipt"), "owner acceptance receipt")
-    receipt = load_object(receipt_path)
-    if receipt.get("receipt_kind") != "owner_acceptance_v1":
-        fail("owner receipt kind must be owner_acceptance_v1")
-    if receipt.get("signature") != "none_content_addressed_sha256_only":
-        fail("owner receipt must remain content-addressed without custom signatures")
-    if not isinstance(receipt.get("commit"), str) or len(receipt["commit"]) != 40:
-        fail("owner receipt requires an exact 40-character commit")
-    toolchain = receipt.get("toolchain")
-    if not isinstance(toolchain, dict) or not all(
-        isinstance(toolchain.get(key), str) and toolchain[key]
-        for key in ("rustc", "cargo", "host", "os")
-    ):
-        fail("owner receipt requires rustc/cargo/host/os toolchain metadata")
-    gates = receipt.get("gates")
-    if not isinstance(gates, dict):
-        fail("owner receipt gates must be an object")
-    for gate_id in packet.get("ci_gate_ids", []):
-        entry = gates.get(gate_id)
-        if not isinstance(entry, dict):
-            # Receipt may still be filling; lint allows missing until strict mode.
-            continue
-        state = entry.get("state")
-        if state not in {"executed_passed", "pending_unsupported_host", "blocked", "pending_parent_gate"}:
-            fail(f"owner receipt gate {gate_id} has invalid state {state!r}")
-        if state == "executed_passed":
-            digest = entry.get("stdout_sha256")
-            if not isinstance(digest, str) or not digest.startswith("sha256:"):
-                fail(f"owner receipt gate {gate_id} requires stdout_sha256")
 
 
 STATIC_GATES: dict[str, Callable[[dict[str, Any], Path], None]] = {
@@ -214,21 +194,60 @@ def assert_unknown_gate_rejected() -> None:
     fail("unknown static gate self-test unexpectedly passed")
 
 
-def strict_acceptance(packet: dict[str, Any], repository: Path) -> None:
+def strict_acceptance(
+    packet: dict[str, Any],
+    repository: Path,
+    *,
+    junit_paths: list[Path],
+    run_gates: bool,
+) -> None:
     gaps = packet.get("provider_gaps")
     if not isinstance(gaps, list):
         fail("provider_gaps must be an array")
     if gaps:
-        fail("strict acceptance incomplete: " + ", ".join(str(gap) for gap in gaps))
-    check_owner_receipt(packet, repository)
-    receipt = load_object(
-        repository_file(repository, packet.get("owner_receipt"), "owner acceptance receipt")
-    )
-    gates = cast(dict[str, Any], receipt.get("gates", {}))
-    for gate_id in packet.get("ci_gate_ids", []):
-        entry = gates.get(gate_id)
-        if not isinstance(entry, dict) or entry.get("state") != "executed_passed":
-            fail(f"strict owner receipt missing executed_passed for {gate_id}")
+        fail(
+            "strict provider gaps must be empty once product journeys exist; "
+            "remaining work is CI evidence, not packet gaps: "
+            + ", ".join(str(gap) for gap in gaps)
+        )
+
+    ci_gates = cast(list[str], packet["ci_gate_ids"])
+    checked_in = require_ci_gate_status_shape(packet, ci_gates, fail=fail)
+    junit_passed: set[str] = set()
+    for path in junit_paths:
+        junit_passed.update(load_junit_passed_names(path))
+    executed_passed: set[str] = set()
+    if run_gates:
+        for gate_id in ci_gates:
+            if run_gate_command(repository, gate_id, PARENT_GATE_COMMANDS[gate_id]):
+                executed_passed.add(gate_id)
+            else:
+                fail(f"strict local gate command failed: {gate_id}")
+
+    unresolved: list[str] = []
+    for gate_id in ci_gates:
+        # Compile-only gate: accept when the runtime suite has any passing
+        # evidence or when --run-gates compiled it.
+        if gate_id in COMPILE_ONLY_GATES and (
+            gate_id in executed_passed
+            or any("pr13_advisory_runtime_acceptance" in name for name in junit_passed)
+        ):
+            continue
+        state = evaluate_gate(
+            gate_id=gate_id,
+            command=PARENT_GATE_COMMANDS[gate_id],
+            checked_in_state=checked_in[gate_id],
+            junit_passed=junit_passed,
+            npm_markers=set(),
+            executed_passed=executed_passed,
+        )
+        if state != EVIDENCE_PASSED:
+            unresolved.append(f"{gate_id}={state}")
+    if unresolved:
+        fail(
+            "strict acceptance awaiting direct CI/test evidence: "
+            + ", ".join(unresolved)
+        )
 
 
 def main() -> int:
@@ -236,7 +255,19 @@ def main() -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="enforce milestone completeness; lint mode is the default",
+        help="require empty provider_gaps plus direct CI/junit/command evidence",
+    )
+    parser.add_argument(
+        "--junit",
+        action="append",
+        default=[],
+        type=Path,
+        help="Ephemeral nextest/cargo junit.xml evidence (never checked in)",
+    )
+    parser.add_argument(
+        "--run-gates",
+        action="store_true",
+        help="Execute allowlisted parent gate commands and require exit 0",
     )
     parser.add_argument(
         "--list-parent-gates",
@@ -249,13 +280,34 @@ def main() -> int:
     packet = load_object(directory / "workload-v1.json")
     assert_unknown_gate_rejected()
     run_static_gates(packet, repository)
-    check_owner_receipt(packet, repository)
     if args.strict:
-        strict_acceptance(packet, repository)
+        junit_paths = [
+            path if path.is_absolute() else repository / path for path in args.junit
+        ]
+        for path in junit_paths:
+            if not path.is_file():
+                fail(f"junit evidence missing: {path}")
+        strict_acceptance(
+            packet,
+            repository,
+            junit_paths=junit_paths,
+            run_gates=args.run_gates,
+        )
     gaps = packet.get("provider_gaps", [])
-    print(f"valid PR13 advisory packet lint; strict gaps={len(gaps)}")
+    status = packet.get("ci_gate_status", {})
+    awaiting = sorted(
+        gate_id
+        for gate_id, state in cast(dict[str, Any], status).items()
+        if state == "awaiting_ci"
+    )
+    print(
+        f"valid PR13 advisory packet lint; provider_gaps={len(gaps)} "
+        f"awaiting_ci={len(awaiting)}"
+    )
     if gaps:
-        print("unavailable: " + ", ".join(str(gap) for gap in gaps))
+        print("provider gaps: " + ", ".join(str(gap) for gap in gaps))
+    if awaiting and not args.strict:
+        print("awaiting_ci: " + ", ".join(awaiting))
     if args.list_parent_gates:
         for gate_id in sorted(PARENT_GATE_COMMANDS):
             print(f"{gate_id}: {PARENT_GATE_COMMANDS[gate_id]}")

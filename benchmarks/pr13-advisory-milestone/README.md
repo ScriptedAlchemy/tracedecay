@@ -12,14 +12,16 @@ Run packet lint:
 python3 benchmarks/pr13-advisory-milestone/validate_packet.py
 ```
 
-Strict advisory acceptance is separate. Authentic GitHub and CI responses are
-decoded, but real competing-store pagination/CAS and file-overlap proximity
-tiering journeys remain explicit gaps:
+Strict advisory acceptance requires empty `provider_gaps` plus direct
+nextest/cargo junit (or `--run-gates`) evidence for every `ci_gate_id`.
+Checked-in `ci_gate_status` may only be `awaiting_ci` or `failed` — never a
+fabricated `passed` snapshot.
 
 ```sh
 python3 benchmarks/pr13-advisory-milestone/validate_packet.py --strict
+python3 benchmarks/pr13-advisory-milestone/validate_packet.py --strict \
+  --junit target/nextest/ci/junit.xml
 ```
 
-The packet contains fixed CI gate IDs rather than command arguments. Schema,
-AST structure, runtime decoder, and shared minimal no-secret checks run in Rust
-CI; this static preparation does not run Cargo.
+Pagination/CAS and proximity tiering are product journeys covered by named
+Rust tests; completion is green CI evidence, not owner receipts.
