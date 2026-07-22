@@ -371,6 +371,7 @@ async fn cold_doctor_runtime_value_for_paths(
         "reason": "session_store_unavailable",
     });
     value["cursor_session_placeholder_paths"] = json!([]);
+    value["semantic_runtime"] = doctor_semantic_runtime_status();
     value
 }
 

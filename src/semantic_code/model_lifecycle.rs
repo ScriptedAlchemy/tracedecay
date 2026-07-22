@@ -988,33 +988,23 @@ pub fn lifecycle_to_runtime_state(
             artifact_digest: artifact_digest.clone(),
         },
         SemanticModelLifecycleStateV1::Indexing {
-            completed_units,
-            total_units,
+            model_id,
             artifact_digest,
             ..
-        } => {
-            // Generation id is not owned by acquisition; surface progress with a
-            // digest-derived placeholder that still routes as lexical fallback.
-            let digest = tracedecay_domain::ManifestDigest::new(format!(
-                "sha256:{artifact_digest}"
-            ))
-            .unwrap_or_else(|_| {
-                tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-                    .expect("zero digest")
-            });
-            Runtime::Indexing {
-                target_generation: tracedecay_domain::VectorGenerationIdV1::new(digest),
-                completed_units: *completed_units,
-                total_units: *total_units,
-            }
-        }
+        } => Runtime::Loading {
+            // Vector-generation Indexing requires a configuration pin +
+            // generation id. Acquisition-phase indexing is reported as Loading
+            // until the semantic owner publishes an activation receipt.
+            model_id: model_id.clone(),
+            artifact_digest: artifact_digest.clone(),
+        },
         SemanticModelLifecycleStateV1::Ready {
             model_id,
             artifact_digest,
             ..
         } => Runtime::Installed {
-            // Ready without an activation receipt still cannot route semantic
-            // search; Doctor treats Installed/Ready install as loaded package.
+            // Lifecycle Ready means the package is locally complete. Semantic
+            // search influence still requires a Current activation receipt.
             model_id: model_id.clone(),
             artifact_digest: artifact_digest.clone(),
         },

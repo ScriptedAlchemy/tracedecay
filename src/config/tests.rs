@@ -265,6 +265,11 @@ fn sync_config_defaults_round_trip() {
 fn semantic_config_defaults_to_offline_healthy_baseline() {
     let config = TraceDecayConfig::default();
     assert_eq!(config.semantic, super::SemanticConfig::default());
+    assert_eq!(
+        config.semantic.selected_model.as_deref(),
+        Some(super::DEFAULT_FASTEMBED_MODEL_ID)
+    );
+    assert!(config.semantic.auto_download);
     assert!(config.semantic.active_profile.is_none());
     assert!(config.semantic.rollback_profile.is_none());
     assert!(config.semantic.validate().is_ok());
@@ -272,6 +277,15 @@ fn semantic_config_defaults_to_offline_healthy_baseline() {
     let json = serde_json::to_string(&config).unwrap();
     let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.semantic, config.semantic);
+}
+
+#[test]
+fn semantic_config_rejects_uncataloged_model_ids() {
+    let mut semantic = super::SemanticConfig::default();
+    semantic.selected_model = Some("NotInCatalog".to_owned());
+    assert!(semantic.validate().is_err());
+    semantic.selected_model = None;
+    assert!(semantic.validate().is_ok());
 }
 
 #[test]

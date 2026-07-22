@@ -2,7 +2,9 @@
 
 This directory pins the real production/default code-search model,
 FastEmbed `EmbeddingModel::JinaEmbeddingsV2BaseCode`, to immutable upstream
-bytes. The 641 MB model is intentionally not checked into Git.
+bytes. The same pins are embedded in
+`src/semantic_code/model_catalog.rs` for daemon-owned background acquisition.
+The 641 MB model is intentionally not checked into Git.
 
 `fixture.json` records the exact Hugging Face commit, Apache-2.0 provenance,
 member lengths, and SHA-256 digests for:
