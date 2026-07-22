@@ -134,7 +134,7 @@ impl RegisteredProjectLspAuthority {
             .canonicalize()
             .map_err(|_| LspRuntimeFailure::new("registered-project-root-unavailable"))?;
         let root_uri = Url::from_directory_path(&project_root)
-            .map_err(|_| LspRuntimeFailure::new("registered-project-root-invalid"))?;
+            .map_err(|()| LspRuntimeFailure::new("registered-project-root-invalid"))?;
         let project_dir = Dir::open_ambient_dir(&project_root, ambient_authority())
             .map_err(|_| LspRuntimeFailure::new("registered-project-root-unavailable"))?;
         let path_handle = Handle::from_path(&project_root)
@@ -168,7 +168,7 @@ impl RegisteredProjectLspAuthority {
         let path = strict_file_url(root.uri())
             .and_then(|url| {
                 url.to_file_path()
-                    .map_err(|_| LspRuntimeFailure::new("registered-project-root-mismatch"))
+                    .map_err(|()| LspRuntimeFailure::new("registered-project-root-mismatch"))
             })
             .map_err(|_| LspRuntimeFailure::new("registered-project-root-mismatch"))?;
         let same_root = same_file::is_same_file(path, &self.project_root).unwrap_or(false);
@@ -810,15 +810,13 @@ impl ConcretePr12FeedbackLspSource {
                 ));
             }
         };
-        let (complete, evidence) =
-            match canonical_feedback_value(record.canonical_operation, invocation) {
-                Ok(value) => value,
-                Err(()) => {
-                    return ContextExpansionOutcome::Failed {
-                        reason: "context-expansion-kind-mismatch".to_owned(),
-                    };
-                }
+        let Ok((complete, evidence)) =
+            canonical_feedback_value(record.canonical_operation, invocation)
+        else {
+            return ContextExpansionOutcome::Failed {
+                reason: "context-expansion-kind-mismatch".to_owned(),
             };
+        };
         ContextExpansionOutcome::Ready(context_expansion_envelope(
             record,
             if complete {
@@ -1366,8 +1364,7 @@ fn strict_file_url(uri: &str) -> Result<Url, LspRuntimeFailure> {
     let raw_path = if let Some(authority_and_path) = after_scheme.strip_prefix("//") {
         authority_and_path
             .find('/')
-            .map(|path_start| &authority_and_path[path_start..])
-            .unwrap_or("")
+            .map_or("", |path_start| &authority_and_path[path_start..])
     } else {
         after_scheme
     };
@@ -1468,7 +1465,7 @@ fn validated_document_path(
 
     let path = url
         .to_file_path()
-        .map_err(|_| LspRuntimeFailure::new("document-uri-invalid"))?;
+        .map_err(|()| LspRuntimeFailure::new("document-uri-invalid"))?;
     let relative = path
         .strip_prefix(project_root)
         .map_err(|_| LspRuntimeFailure::new("document-outside-registered-root"))?;

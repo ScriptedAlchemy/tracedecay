@@ -87,13 +87,12 @@ where
         request: &'a SymbolSearchPrimitiveRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let results = match self
+            let Ok(results) = self
                 .graph
                 .search(request.query.as_str(), MAX_COMPATIBILITY_RESULTS)
                 .await
-            {
-                Ok(results) => results,
-                Err(_) => return failed(context, "canonical symbol search failed"),
+            else {
+                return failed(context, "canonical symbol search failed");
             };
             let records = results
                 .into_iter()
@@ -129,9 +128,8 @@ where
         request: &'a ExactSymbolRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let nodes = match self.graph.get_nodes_by_name(&request.name).await {
-                Ok(nodes) => nodes,
-                Err(_) => return failed(context, "exact symbol lookup failed"),
+            let Ok(nodes) = self.graph.get_nodes_by_name(&request.name).await else {
+                return failed(context, "exact symbol lookup failed");
             };
             let records = nodes
                 .into_iter()
@@ -167,13 +165,11 @@ where
         request: &'a SignatureSearchRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let functions = match self.graph.db().get_nodes_by_kind(NodeKind::Function).await {
-                Ok(nodes) => nodes,
-                Err(_) => return failed(context, "signature function lookup failed"),
+            let Ok(functions) = self.graph.db().get_nodes_by_kind(NodeKind::Function).await else {
+                return failed(context, "signature function lookup failed");
             };
-            let methods = match self.graph.db().get_nodes_by_kind(NodeKind::Method).await {
-                Ok(nodes) => nodes,
-                Err(_) => return failed(context, "signature method lookup failed"),
+            let Ok(methods) = self.graph.db().get_nodes_by_kind(NodeKind::Method).await else {
+                return failed(context, "signature method lookup failed");
             };
 
             let mut records = Vec::new();
@@ -212,9 +208,8 @@ where
                     }
                 }
                 ImplementationSelector::Method { name } => {
-                    let nodes = match self.graph.get_nodes_by_name(name).await {
-                        Ok(nodes) => nodes,
-                        Err(_) => return failed(context, "method implementation lookup failed"),
+                    let Ok(nodes) = self.graph.get_nodes_by_name(name).await else {
+                        return failed(context, "method implementation lookup failed");
                     };
                     nodes
                         .into_iter()
@@ -279,9 +274,8 @@ where
                 if depth >= request.maximum_depth || records.len() >= MAX_COMPATIBILITY_RESULTS {
                     continue;
                 }
-                let edges = match self.graph.get_incoming_edges(&parent_id).await {
-                    Ok(edges) => edges,
-                    Err(_) => return failed(context, "type hierarchy traversal failed"),
+                let Ok(edges) = self.graph.get_incoming_edges(&parent_id).await else {
+                    return failed(context, "type hierarchy traversal failed");
                 };
                 for edge in edges
                     .into_iter()
@@ -326,13 +320,12 @@ where
         request: &'a GraphRelationRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
-            let values = match self
+            let Ok(values) = self
                 .graph
                 .get_callers(&request.node_id, request.maximum_depth as usize)
                 .await
-            {
-                Ok(values) => values,
-                Err(_) => return failed(context, "caller traversal failed"),
+            else {
+                return failed(context, "caller traversal failed");
             };
             let records = values
                 .into_iter()
@@ -358,13 +351,12 @@ where
         request: &'a GraphRelationRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
-            let values = match self
+            let Ok(values) = self
                 .graph
                 .get_callees(&request.node_id, request.maximum_depth as usize)
                 .await
-            {
-                Ok(values) => values,
-                Err(_) => return failed(context, "callee traversal failed"),
+            else {
+                return failed(context, "callee traversal failed");
             };
             let mut seen = HashSet::new();
             let mut records = Vec::new();
@@ -382,9 +374,8 @@ where
 
             if request.resolve_trait_dispatch {
                 for callee in callee_nodes {
-                    let targets = match self.graph.get_trait_dispatch_targets(&callee).await {
-                        Ok(targets) => targets,
-                        Err(_) => return failed(context, "trait dispatch resolution failed"),
+                    let Ok(targets) = self.graph.get_trait_dispatch_targets(&callee).await else {
+                        return failed(context, "trait dispatch resolution failed");
                     };
                     for target in targets {
                         if !in_scope(&target, &request.scope) || !seen.insert(target.id.clone()) {
@@ -424,13 +415,12 @@ where
         request: &'a GraphImpactPrimitiveRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let subgraph = match self
+            let Ok(subgraph) = self
                 .graph
                 .get_impact_radius(&request.node_id, request.maximum_depth as usize)
                 .await
-            {
-                Ok(subgraph) => subgraph,
-                Err(_) => return failed(context, "impact traversal failed"),
+            else {
+                return failed(context, "impact traversal failed");
             };
             let edge_count = subgraph.edges.len() as u64;
             let records = subgraph
@@ -666,7 +656,8 @@ fn primitive_failure(
     code: &'static str,
     message: &'static str,
 ) -> PrimitiveFailure {
-    PrimitiveFailure::new(kind, code, message).expect("static primitive failure is valid")
+    PrimitiveFailure::new(kind, code, message)
+        .unwrap_or_else(|_| panic!("static primitive failure is valid"))
 }
 
 fn support_gap(
@@ -679,5 +670,5 @@ fn support_gap(
         language.map(str::to_owned),
         reason,
     )
-    .expect("static support gap is valid")
+    .unwrap_or_else(|_| panic!("static support gap is valid"))
 }

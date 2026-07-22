@@ -25,7 +25,7 @@ pub enum ProjectSourceAccessDenial {
 /// Resolution result for one daemon-authenticated project source route.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectSourceAccessOutcome {
-    Allowed(ProjectSourceAccessSnapshot),
+    Allowed(Box<ProjectSourceAccessSnapshot>),
     Denied(ProjectSourceAccessDenial),
 }
 
@@ -155,7 +155,7 @@ pub async fn project_source_access_snapshot_for_request(
         return denied();
     };
 
-    ProjectSourceAccessOutcome::Allowed(ProjectSourceAccessSnapshot {
+    ProjectSourceAccessOutcome::Allowed(Box::new(ProjectSourceAccessSnapshot {
         scope: request.context.scope().clone(),
         requester: request.context.actor().clone(),
         binding,
@@ -164,7 +164,7 @@ pub async fn project_source_access_snapshot_for_request(
         configuration_provenance_digest: current.snapshot.resolution_provenance_digest,
         effective_capabilities,
         grant_expires_at: request.context.grant().expires_at,
-    })
+    }))
 }
 
 fn denied() -> ProjectSourceAccessOutcome {

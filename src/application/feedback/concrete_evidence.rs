@@ -45,14 +45,13 @@ pub(super) fn complete<T>(
     } else {
         1
     };
-    let coverage = match EvidenceCoverage::complete(
+    let Ok(coverage) = EvidenceCoverage::complete(
         domains.clone(),
         coverage_returned,
         coverage_returned,
         coverage_returned,
-    ) {
-        Ok(coverage) => coverage,
-        Err(_) => return unavailable(finished_at, domains),
+    ) else {
+        return unavailable(finished_at, domains);
     };
     let page = match page {
         Some((total, cursor)) => PageState {
@@ -197,16 +196,19 @@ fn evidence_authority(publication: &FeedbackCompletedPublicationV1) -> EvidenceA
             "feedback-publication.{}",
             publication.result.result_id.as_str()
         ))
-        .expect("validated feedback result id yields a valid evidence identity"),
+        .unwrap_or_else(|_| {
+            panic!("validated feedback result id yields a valid evidence identity")
+        }),
         source_kind: "canonical_feedback_publication".to_owned(),
         producer: "feedback_cycle".to_owned(),
         scope: publication.authorized_scope.clone(),
         revision: ComponentVersion::new("feedback.read.v1")
-            .expect("static feedback reader revision is valid"),
+            .unwrap_or_else(|_| panic!("static feedback reader revision is valid")),
         horizon: Some(publication.authority.revalidated_at),
     }
 }
 
 fn feedback_sort_contract() -> SortContractId {
-    SortContractId::new(FEEDBACK_SORT_CONTRACT_ID).expect("static feedback sort contract is valid")
+    SortContractId::new(FEEDBACK_SORT_CONTRACT_ID)
+        .unwrap_or_else(|_| panic!("static feedback sort contract is valid"))
 }

@@ -44,16 +44,13 @@ where
         let Ok(configuration) = self.configuration_pin().await else {
             return unavailable_status(SemanticFallbackReasonV1::ConfigurationUnavailable);
         };
-        let state = match self.runtime.status(&configuration).await {
-            Ok(state) => state,
-            Err(_) => {
-                return SemanticRuntimeStatusV1::new(
-                    Some(configuration),
-                    SemanticRuntimeStateV1::Unavailable {
-                        reason: SemanticFallbackReasonV1::RuntimeUnavailable,
-                    },
-                );
-            }
+        let Ok(state) = self.runtime.status(&configuration).await else {
+            return SemanticRuntimeStatusV1::new(
+                Some(configuration),
+                SemanticRuntimeStateV1::Unavailable {
+                    reason: SemanticFallbackReasonV1::RuntimeUnavailable,
+                },
+            );
         };
         let status = SemanticRuntimeStatusV1::new(Some(configuration.clone()), state);
         if status.validate().is_err() {

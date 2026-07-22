@@ -569,31 +569,30 @@ fn normalize_refresh_attempt(
         items.insert(item.comment_id.as_str().to_owned(), item);
     }
 
-    if latest.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Complete {
-        if let Some(previous_complete) = previous
+    if latest.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Complete
+        && let Some(previous_complete) = previous
             .and_then(|state| state.last_complete.as_ref())
             .map(|generation| &generation.response)
             .filter(|response| response.ingress.operation == latest.ingress.operation)
-        {
-            for prior in &previous_complete.ingress.items {
-                match items.get_mut(prior.comment_id.as_str()) {
-                    Some(current)
-                        if current.lifecycle
-                            != tracedecay_domain::feedback::GitHubReviewLifecycleV1::Resolved
-                            && current.body_digest != prior.body_digest =>
-                    {
-                        current.lifecycle =
-                            tracedecay_domain::feedback::GitHubReviewLifecycleV1::Edited;
-                    }
-                    Some(_) => {}
-                    None => {
-                        let mut deleted = prior.clone();
-                        deleted.lifecycle =
-                            tracedecay_domain::feedback::GitHubReviewLifecycleV1::Deleted;
-                        deleted.provider_outcome = GitHubReviewIngressProviderOutcomeV1::Complete;
-                        deleted.observed_at = latest.ingress.fetched_at;
-                        items.insert(deleted.comment_id.as_str().to_owned(), deleted);
-                    }
+    {
+        for prior in &previous_complete.ingress.items {
+            match items.get_mut(prior.comment_id.as_str()) {
+                Some(current)
+                    if current.lifecycle
+                        != tracedecay_domain::feedback::GitHubReviewLifecycleV1::Resolved
+                        && current.body_digest != prior.body_digest =>
+                {
+                    current.lifecycle =
+                        tracedecay_domain::feedback::GitHubReviewLifecycleV1::Edited;
+                }
+                Some(_) => {}
+                None => {
+                    let mut deleted = prior.clone();
+                    deleted.lifecycle =
+                        tracedecay_domain::feedback::GitHubReviewLifecycleV1::Deleted;
+                    deleted.provider_outcome = GitHubReviewIngressProviderOutcomeV1::Complete;
+                    deleted.observed_at = latest.ingress.fetched_at;
+                    items.insert(deleted.comment_id.as_str().to_owned(), deleted);
                 }
             }
         }

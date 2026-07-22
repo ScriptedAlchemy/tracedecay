@@ -64,7 +64,7 @@ pub type AutomationSessionRetrievalFuture<'a> =
 pub trait AutomationSessionRetrieval: Send + Sync {
     fn anchor_session_id(&self) -> &SessionId;
 
-    fn retrieve<'a>(&'a self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'a>;
+    fn retrieve(&self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'_>;
 }
 
 impl<'a, A, P, E> AuthorizedAutomationSessionRetrieval<'a, A, P, E> {
@@ -91,7 +91,7 @@ where
         &self.anchor_session_id
     }
 
-    fn retrieve<'a>(&'a self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'a> {
+    fn retrieve(&self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'_> {
         Box::pin(async move {
             accept_automation_temporal_outcome(self.service.retrieve(self.context, query).await)
         })
@@ -209,19 +209,16 @@ impl AutomationSessionRetrieval for ProductionAutomationSessionRetrieval {
         &self.anchor_session_id
     }
 
-    fn retrieve<'a>(&'a self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'a> {
+    fn retrieve(&self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'_> {
         Box::pin(async move {
             let Some(context) = self.request_context(query.provider()) else {
                 return AutomationTemporalRetrieval::Rejected("session_evidence_unavailable");
             };
-            let configuration = match SessionRetrievalConfiguration::new(
+            let Ok(configuration) = SessionRetrievalConfiguration::new(
                 AUTOMATION_SESSION_SCHEMA_VERSION,
                 AUTOMATION_SESSION_RANKING_VERSION,
-            ) {
-                Ok(configuration) => configuration,
-                Err(_) => {
-                    return AutomationTemporalRetrieval::Rejected("session_evidence_unavailable");
-                }
+            ) else {
+                return AutomationTemporalRetrieval::Rejected("session_evidence_unavailable");
             };
             let grant_id = match self.store_scope {
                 AutomationRetrievalStoreScope::Project => {
@@ -253,10 +250,7 @@ impl AutomationSessionRetrieval for UnavailableAutomationSessionRetrieval {
         &self.anchor_session_id
     }
 
-    fn retrieve<'a>(
-        &'a self,
-        _query: SessionTemporalQuery,
-    ) -> AutomationSessionRetrievalFuture<'a> {
+    fn retrieve(&self, _query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'_> {
         Box::pin(async move { AutomationTemporalRetrieval::Rejected(self.reason) })
     }
 }
@@ -445,10 +439,10 @@ pub(super) fn accept_automation_temporal_outcome(
             }
         }
         SessionRetrievalOutcome::CompleteZero { freshness } => {
-            if !SessionFreshnessPolicy::RequireFresh.accepts(freshness) {
-                AutomationTemporalRetrieval::Rejected("session_evidence_stale")
-            } else {
+            if SessionFreshnessPolicy::RequireFresh.accepts(freshness) {
                 AutomationTemporalRetrieval::CompleteZero
+            } else {
+                AutomationTemporalRetrieval::Rejected("session_evidence_stale")
             }
         }
         SessionRetrievalOutcome::Stale { .. } => {

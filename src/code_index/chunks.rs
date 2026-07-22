@@ -262,17 +262,16 @@ impl CodeFileChunksV1 {
             chunk.anchor.generation_id = generation_id.clone();
             chunk.anchor.file_occurrence_id = file_occurrence_id.clone();
             if let Some(prior_occurrence) = chunk.anchor.symbol_occurrence_id.clone() {
-                let current_occurrence = match occurrences.get(&prior_occurrence) {
-                    Some(current) => current.clone(),
-                    None => {
-                        let current = rematerialized_symbol_occurrence_id(
-                            &generation_id,
-                            &file_occurrence_id,
-                            &prior_occurrence,
-                        )?;
-                        occurrences.insert(prior_occurrence, current.clone());
-                        current
-                    }
+                let current_occurrence = if let Some(current) = occurrences.get(&prior_occurrence) {
+                    current.clone()
+                } else {
+                    let current = rematerialized_symbol_occurrence_id(
+                        &generation_id,
+                        &file_occurrence_id,
+                        &prior_occurrence,
+                    )?;
+                    occurrences.insert(prior_occurrence, current.clone());
+                    current
                 };
                 chunk.anchor.symbol_occurrence_id = Some(current_occurrence);
             }
@@ -496,6 +495,7 @@ impl DeterministicCodeChunker {
     }
 
     /// Pin the sensitivity level recorded on every chunk of this generation.
+    #[must_use]
     pub fn with_sensitivity_level(mut self, level: SensitivityLevelV1) -> Self {
         self.sensitivity_level = level;
         self
@@ -1730,8 +1730,7 @@ fn offsets_line_end(source: &str, start: u64) -> u64 {
     start
         + rest
             .find('\n')
-            .map(|index| index as u64)
-            .unwrap_or(rest.len() as u64)
+            .map_or(rest.len() as u64, |index| index as u64)
 }
 
 /// Emit pinned fallback windows over one unowned gap as `FileWindow` chunks.
@@ -2084,9 +2083,10 @@ mod tests {
 
     #[test]
     fn oversized_body_splits_on_pinned_fallback_windows() {
+        use std::fmt::Write as _;
         let mut source = String::from("pub fn huge() {\n");
         for index in 0..9000 {
-            source.push_str(&format!("    let value_{index} = {index}usize;\n"));
+            writeln!(source, "    let value_{index} = {index}usize;").unwrap();
         }
         source.push_str("}\n");
         assert!(source.len() > MAX_CHUNK_TEXT_BYTES);
@@ -2141,9 +2141,10 @@ mod tests {
 
     #[test]
     fn oversized_impl_splits_on_member_boundaries() {
+        use std::fmt::Write as _;
         let mut source = String::from("pub struct Big;\n\nimpl Big {\n");
         for index in 0..300 {
-            source.push_str(&format!("    pub fn method_{index}() -> usize {{\n"));
+            writeln!(source, "    pub fn method_{index}() -> usize {{").unwrap();
             source.push_str("        ");
             source.push_str(&"1 + ".repeat(300));
             source.push_str("1\n    }\n");

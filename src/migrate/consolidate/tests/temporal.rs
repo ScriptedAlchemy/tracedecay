@@ -486,13 +486,23 @@ async fn temporal_observation_effect_rebinds_to_destination_sequence() {
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(&target, target_observation, None).await;
+    Box::pin(persist_migration_observation(
+        &target,
+        target_observation,
+        None,
+    ))
+    .await;
     target.checkpoint().await;
     target.close();
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
         .await
         .unwrap();
-    persist_migration_observation(&source, source_observation, None).await;
+    Box::pin(persist_migration_observation(
+        &source,
+        source_observation,
+        None,
+    ))
+    .await;
     source
         .writer_connection()
         .await
@@ -739,7 +749,7 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
         })
         .await
     );
-    persist_migration_observation(&db, observation, None).await;
+    Box::pin(persist_migration_observation(&db, observation, None)).await;
     assert_eq!(project_all_migration_observations(&db).await, 1);
 
     // Projection materializes lcm_raw_messages + provenance; forward-migrate
@@ -957,7 +967,7 @@ async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
         })
         .await
     );
-    persist_migration_observation(&db, observation, None).await;
+    Box::pin(persist_migration_observation(&db, observation, None)).await;
     assert_eq!(project_all_migration_observations(&db).await, 1);
     let mut rows = db
         .read_connection()
@@ -1197,13 +1207,13 @@ async fn temporal_forward_migrate_preserves_multi_output_ordinals() {
         })
         .await
     );
-    persist_migration_observation(&db, first, None).await;
+    Box::pin(persist_migration_observation(&db, first, None)).await;
     assert_eq!(project_all_migration_observations(&db).await, 1);
-    persist_migration_observation(
+    Box::pin(persist_migration_observation(
         &db,
         second,
         Some(migration_cursor_for("session.multi.output", 10)),
-    )
+    ))
     .await;
     assert_eq!(project_all_migration_observations(&db).await, 1);
 
@@ -1295,7 +1305,6 @@ async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
              SET state = 'active', activated_at = 3
              WHERE session_id = '{session_id}' AND generation = 1;",
             session_id = session_id,
-            watermarks = watermarks,
         )
     };
 
@@ -1354,7 +1363,7 @@ async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
         })
         .await
     );
-    persist_migration_observation(&db, observation, None).await;
+    Box::pin(persist_migration_observation(&db, observation, None)).await;
     assert_eq!(project_all_migration_observations(&db).await, 1);
     db.checkpoint().await;
     db.close();

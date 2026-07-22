@@ -224,7 +224,7 @@ pub struct GitPreviewSurfaceRequest {
 
 fn pending_git_preview_id() -> GitIndexPreviewId {
     GitIndexPreviewId::new("preview.pending")
-        .expect("the compatibility preview identifier is static")
+        .unwrap_or_else(|_| panic!("the compatibility preview identifier is static"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -309,22 +309,20 @@ async fn application_http_context(
     next: Next,
 ) -> Response {
     let sequence = NEXT_HTTP_APPLICATION_REQUEST.fetch_add(1, Ordering::Relaxed);
-    let request_id = match RequestId::new(format!(
+    let Ok(request_id) = RequestId::new(format!(
         "request.http.{}.{}",
         crate::tracedecay::current_timestamp(),
         sequence
-    )) {
-        Ok(request_id) => request_id,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    )) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let cancellation =
-        match CancellationSignal::active(format!("cancellation.http.{}", request_id.as_str())) {
-            Ok(cancellation) => cancellation,
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        };
-    let observed_at = match current_micros() {
-        Ok(observed_at) => observed_at,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(cancellation) =
+        CancellationSignal::active(format!("cancellation.http.{}", request_id.as_str()))
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Ok(observed_at) = current_micros() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let default_expires_at = observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS);
     let caller_expires_at = request
@@ -333,9 +331,8 @@ async fn application_http_context(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(default_expires_at);
-    let deadline = match Deadline::new(UtcMicros(caller_expires_at.min(default_expires_at))) {
-        Ok(deadline) => deadline,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(deadline) = Deadline::new(UtcMicros(caller_expires_at.min(default_expires_at))) else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
     request.extensions_mut().insert(request_id.clone());
     request.extensions_mut().insert(cancellation.clone());
@@ -552,24 +549,20 @@ async fn http_operation_events(
     Query(query): Query<HttpOperationEventQuery>,
 ) -> Response {
     let observation_subject = sse_observation_subject(&request_id, &operation_id);
-    let operation_id = match RequestId::new(operation_id) {
-        Ok(operation_id) => OperationId::from_request(operation_id),
-        Err(_) => {
-            emit_http_plan26_observation(
-                &state,
-                observation_subject.as_ref(),
-                current_micros().unwrap_or(UtcMicros(1)),
-                Plan26FeedbackSourceEventV1::ArgumentRejected {
-                    operation: Plan26FeedbackOperationV1::SseStream,
-                    outcome: Plan26FeedbackOutcomeV1::Rejected,
-                },
-            )
-            .await;
-            return operation_event_problem(
-                &request_id,
-                OperationEventError::NotFoundOrNotAuthorized,
-            );
-        }
+    let operation_id = if let Ok(operation_id) = RequestId::new(operation_id) {
+        OperationId::from_request(operation_id)
+    } else {
+        emit_http_plan26_observation(
+            &state,
+            observation_subject.as_ref(),
+            current_micros().unwrap_or(UtcMicros(1)),
+            Plan26FeedbackSourceEventV1::ArgumentRejected {
+                operation: Plan26FeedbackOperationV1::SseStream,
+                outcome: Plan26FeedbackOutcomeV1::Rejected,
+            },
+        )
+        .await;
+        return operation_event_problem(&request_id, OperationEventError::NotFoundOrNotAuthorized);
     };
     let observed_at = match current_micros() {
         Ok(observed_at) => observed_at,
@@ -725,24 +718,20 @@ async fn http_operation_cancel(
     Extension(cancellation): Extension<CancellationSignal>,
 ) -> Response {
     let observation_subject = sse_observation_subject(&request_id, &operation_id);
-    let operation_id = match RequestId::new(operation_id) {
-        Ok(operation_id) => OperationId::from_request(operation_id),
-        Err(_) => {
-            emit_http_plan26_observation(
-                &state,
-                observation_subject.as_ref(),
-                current_micros().unwrap_or(UtcMicros(1)),
-                Plan26FeedbackSourceEventV1::ArgumentRejected {
-                    operation: Plan26FeedbackOperationV1::SseStream,
-                    outcome: Plan26FeedbackOutcomeV1::Rejected,
-                },
-            )
-            .await;
-            return operation_event_problem(
-                &request_id,
-                OperationEventError::NotFoundOrNotAuthorized,
-            );
-        }
+    let operation_id = if let Ok(operation_id) = RequestId::new(operation_id) {
+        OperationId::from_request(operation_id)
+    } else {
+        emit_http_plan26_observation(
+            &state,
+            observation_subject.as_ref(),
+            current_micros().unwrap_or(UtcMicros(1)),
+            Plan26FeedbackSourceEventV1::ArgumentRejected {
+                operation: Plan26FeedbackOperationV1::SseStream,
+                outcome: Plan26FeedbackOutcomeV1::Rejected,
+            },
+        )
+        .await;
+        return operation_event_problem(&request_id, OperationEventError::NotFoundOrNotAuthorized);
     };
     let observed_at = match current_micros() {
         Ok(observed_at) => observed_at,
@@ -922,16 +911,16 @@ fn operation_event_problem(request_id: &RequestId, error: OperationEventError) -
     };
     let contract = ResultContractRef::new(
         SchemaId::new("schema.tracedecay.operation-event.problem.v1")
-            .expect("the operation-event problem schema id is static"),
+            .unwrap_or_else(|_| panic!("the operation-event problem schema id is static")),
         1,
     )
-    .expect("the operation-event problem contract is static");
+    .unwrap_or_else(|_| panic!("the operation-event problem contract is static"));
     let envelope = ApplicationProblemEnvelope::new(contract, request_id.clone(), problem)
         .with_owning_layer(ProblemOwningLayer::Runtime);
     let envelope = if envelope.problem.kind() == ApplicationProblemKind::Saturated {
         envelope
             .with_retry_after_millis(Some(250))
-            .expect("the operation-event retry delay is bounded")
+            .unwrap_or_else(|_| panic!("the operation-event retry delay is bounded"))
     } else {
         envelope
     };
@@ -1370,15 +1359,8 @@ pub async fn execute_application_surface(
                 effect.into_application_result()?,
             ))
         }
-        crate::daemon::DaemonInvocationOutcome::Feedback { scope, result } => {
-            Ok(ApplicationEnvelope::evidence(
-                result_contract.clone(),
-                request_id.clone(),
-                scope,
-                result.into_application(),
-            ))
-        }
-        crate::daemon::DaemonInvocationOutcome::Primitive { scope, result } => {
+        crate::daemon::DaemonInvocationOutcome::Feedback { scope, result }
+        | crate::daemon::DaemonInvocationOutcome::Primitive { scope, result } => {
             Ok(ApplicationEnvelope::evidence(
                 result_contract.clone(),
                 request_id.clone(),
@@ -1605,7 +1587,9 @@ async fn invoke_http_application_request(
     let operation = application_operation_for_http(request.operation);
     let resolver = CatalogBindingResolver::new(catalog);
     let binding = resolve_application_binding(&resolver, BindingSurface::Http, operation)
-        .expect("HTTP bindings are validated before the application router is mounted");
+        .unwrap_or_else(|| {
+            panic!("HTTP bindings are validated before the application router is mounted")
+        });
     let binding_id = binding.binding_id;
     let result_contract = ResultContractRef::from_schema(&binding.result_schema);
     let request_id = request.request_id;

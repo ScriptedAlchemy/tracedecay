@@ -447,22 +447,22 @@ pub fn load_pr13_source_backed_composite_fixture_v1()
         "GitHub Actions check-suite identity",
     )?;
     require_eq(
-        ci_provider_record.workflow_job.status.clone(),
+        ci_provider_record.workflow_job.status,
         GitHubActionsStatusV1::Completed,
         "workflow job status",
     )?;
     require_eq(
-        ci_provider_record.workflow_job.conclusion.clone(),
+        ci_provider_record.workflow_job.conclusion,
         Some(GitHubActionsConclusionV1::Failure),
         "workflow job conclusion",
     )?;
     require_eq(
-        ci_provider_record.check_run.status.clone(),
+        ci_provider_record.check_run.status,
         GitHubActionsStatusV1::Completed,
         "check-run status",
     )?;
     require_eq(
-        ci_provider_record.check_run.conclusion.clone(),
+        ci_provider_record.check_run.conclusion,
         Some(GitHubActionsConclusionV1::Failure),
         "check-run conclusion",
     )?;

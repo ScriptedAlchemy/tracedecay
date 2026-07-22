@@ -503,9 +503,7 @@ fn recent_session_slices_from_temporal(
                 .map(|item| item.ordinal)
                 .collect::<Option<Vec<_>>>()?;
             let total_messages = messages
-                .iter()
-                .filter_map(|item| item.session_total_messages)
-                .next()
+                .iter().find_map(|item| item.session_total_messages)
                 .or_else(|| {
                     let max = ordinals.iter().copied().max()?;
                     u64::try_from(max).ok()
@@ -818,7 +816,7 @@ pub(super) async fn build_skill_writer_evidence(
         && recent_session_slices
             .as_ref()
             .and_then(|slices| slices.pointer("/sessions").and_then(Value::as_array))
-            .is_none_or(|sessions| sessions.is_empty())
+            .is_none_or(std::vec::Vec::is_empty)
     {
         return Ok(SkillWriterEvidenceOutcome::Skipped {
             reason: "no_skill_writer_evidence",

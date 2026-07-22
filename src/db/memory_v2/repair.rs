@@ -326,22 +326,19 @@ async fn repair_legacy_feedback_history_item(
         )
         .await;
     };
-    let fact_id = match FactId::new(mapped_fact_id) {
-        Ok(fact_id) => fact_id,
-        Err(_) => {
-            return insert_quarantine(
-                conn,
-                owner_key,
-                source_store_id,
-                "memory_feedback_events",
-                item.event_id,
-                "feedback_mapping_invalid",
-                progress.started_at,
-            )
-            .await;
-        }
+    let Ok(fact_id) = FactId::new(mapped_fact_id) else {
+        return insert_quarantine(
+            conn,
+            owner_key,
+            source_store_id,
+            "memory_feedback_events",
+            item.event_id,
+            "feedback_mapping_invalid",
+            progress.started_at,
+        )
+        .await;
     };
-    let event = match FactLineageEventV1::new(
+    let Ok(event) = FactLineageEventV1::new(
         fact_id.clone(),
         owner.clone(),
         FactLineageEventKindV1::TrustChanged {
@@ -351,20 +348,17 @@ async fn repair_legacy_feedback_history_item(
         },
         occurred_at,
         None,
-    ) {
-        Ok(event) => event,
-        Err(_) => {
-            return insert_quarantine(
-                conn,
-                owner_key,
-                source_store_id,
-                "memory_feedback_events",
-                item.event_id,
-                "feedback_lineage_unavailable",
-                progress.started_at,
-            )
-            .await;
-        }
+    ) else {
+        return insert_quarantine(
+            conn,
+            owner_key,
+            source_store_id,
+            "memory_feedback_events",
+            item.event_id,
+            "feedback_lineage_unavailable",
+            progress.started_at,
+        )
+        .await;
     };
     if !row_exists(
         conn,

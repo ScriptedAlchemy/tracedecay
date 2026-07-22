@@ -300,7 +300,8 @@ fn primitive_failure(
     code: &'static str,
     message: &'static str,
 ) -> PrimitiveFailure {
-    PrimitiveFailure::new(kind, code, message).expect("static primitive failure is valid")
+    PrimitiveFailure::new(kind, code, message)
+        .unwrap_or_else(|_| panic!("static primitive failure is valid"))
 }
 
 #[cfg(test)]

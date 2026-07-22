@@ -877,7 +877,7 @@ mod tests {
         let store = Store {
             current: ConfigurationCurrentStateV1 {
                 revision_id: revision_id.clone(),
-                snapshot: ConfigurationSnapshotV1::new(Default::default(), Default::default())
+                snapshot: ConfigurationSnapshotV1::new(BTreeMap::default(), BTreeMap::default())
                     .unwrap(),
             },
             saved: Mutex::new(None),

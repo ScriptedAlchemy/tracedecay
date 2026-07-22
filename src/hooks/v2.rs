@@ -231,17 +231,16 @@ async fn dispatch_decoded(
     let subscriber =
         HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(config_path));
     let now = now_utc();
-    let snapshot = match subscriber.load_current(host, now) {
-        HookConfigurationReadOutcomeV1::Bound(snapshot) => snapshot,
-        _ => return unavailable(),
+    let HookConfigurationReadOutcomeV1::Bound(snapshot) = subscriber.load_current(host, now) else {
+        return unavailable();
     };
     let binding = &snapshot.binding;
     let material = native_material(event_json, decoded.family(), now);
-    let envelope =
-        match decode_bound_native_hook_event(host, event_json.as_bytes(), binding, material) {
-            Ok(envelope) => envelope,
-            Err(_) => return unavailable(),
-        };
+    let Ok(envelope) =
+        decode_bound_native_hook_event(host, event_json.as_bytes(), binding, material)
+    else {
+        return unavailable();
+    };
 
     let started = Instant::now();
     let port = DaemonAdmissionPort { project_root };

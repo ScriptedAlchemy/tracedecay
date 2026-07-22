@@ -337,18 +337,8 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
     // locked run carrying private saved candidates and a reveal capability.
     // Development runs still stop before touching label-bearing artifacts.
     let (outcome, rationale, blocked_on, accepted_evidence) = if run.authority
-        != FixtureAuthorityV1::LockedQuality
+        == FixtureAuthorityV1::LockedQuality
     {
-        (
-            EvalOutcomeV1::Blocked,
-            "authoritative locked-quality labels are unavailable; the checked-in contract-only packet cannot produce a quality conclusion"
-                .to_string(),
-            vec![required_holdout_artifact(
-                &fixtures.bundle.manifest.holdout_seal,
-            )],
-            None,
-        )
-    } else {
         let saved_candidates = loaded_saved_candidates.as_ref().ok_or_else(|| {
             SearchEvalError::InvalidRun(
                 "locked-quality comparison requires frozen PR9 saved candidates".to_string(),
@@ -379,6 +369,16 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
             evaluation.rationale,
             Vec::new(),
             evaluation.accepted_evidence,
+        )
+    } else {
+        (
+            EvalOutcomeV1::Blocked,
+            "authoritative locked-quality labels are unavailable; the checked-in contract-only packet cannot produce a quality conclusion"
+                .to_string(),
+            vec![required_holdout_artifact(
+                &fixtures.bundle.manifest.holdout_seal,
+            )],
+            None,
         )
     };
 

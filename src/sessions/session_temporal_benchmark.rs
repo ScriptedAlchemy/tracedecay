@@ -1,6 +1,6 @@
 //! PR8 session-temporal benchmark harness.
 //!
-//! Drives production Codex admission, CanonicalSessionTemporalProjector
+//! Drives production Codex admission, `CanonicalSessionTemporalProjector`
 //! materialization (via [`GlobalDb::materialize_session_temporal_refresh_batch_result`]),
 //! [`SessionRefreshService`], and [`SessionRetrievalService`]. Evidence remains
 //! provisional until a clean attested measurement run succeeds.

@@ -284,7 +284,7 @@ where
         {
             return SessionRetrievalOutcome::Cancelled;
         }
-        let authorization = match SessionScopeAuthorizationRequest::new(
+        let Ok(authorization) = SessionScopeAuthorizationRequest::new(
             context.actor_id().clone(),
             context.identity().clone(),
             query.session_id.clone(),
@@ -293,10 +293,8 @@ where
             query.grain,
             SessionAccess::Hydrate,
         )
-        .map(|request| request.with_retrieval_scope(query.retrieval_scope.clone()))
-        {
-            Ok(request) => request,
-            Err(_) => return SessionRetrievalOutcome::Unavailable,
+        .map(|request| request.with_retrieval_scope(query.retrieval_scope.clone())) else {
+            return SessionRetrievalOutcome::Unavailable;
         };
         let grant = match self.authorizer.authorize(context, &authorization) {
             Ok(grant) => grant,
@@ -408,14 +406,13 @@ where
             None => execution,
         };
         let expected_execution = execution.clone();
-        let result = match context
+        let Ok(result) = context
             .run_interruptible(self.execution.execute(execution, &self.estimator), || {
-                cancellation_control.cancel()
+                cancellation_control.cancel();
             })
             .await
-        {
-            Ok(result) => result,
-            Err(_) => return SessionRetrievalOutcome::Cancelled,
+        else {
+            return SessionRetrievalOutcome::Cancelled;
         };
         match result {
             Ok(report) if expected_execution.validates_report(&report) => {
@@ -601,8 +598,9 @@ fn map_execution_error(
         SessionTemporalExecutionError::Redacted => SessionRetrievalOutcome::Redacted,
         SessionTemporalExecutionError::Deleted => SessionRetrievalOutcome::Deleted,
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
-        SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
-        SessionTemporalExecutionError::Empty => SessionRetrievalOutcome::Unavailable,
+        SessionTemporalExecutionError::Unavailable | SessionTemporalExecutionError::Empty => {
+            SessionRetrievalOutcome::Unavailable
+        }
         SessionTemporalExecutionError::BudgetExhausted => SessionRetrievalOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
@@ -627,8 +625,8 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 SessionRetrievalOutcome::BudgetExhausted
             }
             TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
-            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::Unavailable,
-            TemporalPortError::InvalidBinding { .. }
+            TemporalPortError::EmptyParticipantManifest
+            | TemporalPortError::InvalidBinding { .. }
             | TemporalPortError::DuplicateParticipant
             | TemporalPortError::ZeroGeneration
             | TemporalPortError::ZeroVersion { .. }
@@ -706,7 +704,9 @@ fn digest_root(identity: &ResolvedSessionIdentity) -> String {
     let route = identity.git_route();
     sha256_json(&RootBinding {
         profile_id: identity.profile_id().as_str(),
-        project_id: identity.project_id().map(|value| value.as_str()),
+        project_id: identity
+            .project_id()
+            .map(tracedecay_domain::ProjectId::as_str),
         store_id: identity.store_id().as_str(),
         root_id: identity.root_id().as_str(),
         repository_id: route.map(|value| value.repository_id().as_str()),

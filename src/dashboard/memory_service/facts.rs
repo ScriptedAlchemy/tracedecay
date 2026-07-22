@@ -73,10 +73,7 @@ pub(super) fn fact_summary_json(summary: &CompatibilityDashboardFactSummaryV1) -
         "last_recalled_at".into(),
         json!(telemetry.last_recalled_at().map(|value| value.0)),
     );
-    row.insert(
-        "has_hrr".into(),
-        json!(if summary.has_hrr_vector { 1_i64 } else { 0_i64 }),
-    );
+    row.insert("has_hrr".into(), json!(i64::from(summary.has_hrr_vector)));
     if let Some(content) = fact.content() {
         row.insert("content".into(), json!(content));
     }

@@ -214,7 +214,7 @@ impl OperationEventError {
                     "operation_event.resume_expired",
                     "The operation-event resume frontier has expired",
                 )
-                .expect("operation-event diagnostics are static"),
+                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
             },
@@ -223,7 +223,7 @@ impl OperationEventError {
                     "operation_event.invalid_frontier",
                     "The requested operation-event frontier is invalid",
                 )
-                .expect("operation-event diagnostics are static"),
+                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
             },
@@ -233,7 +233,7 @@ impl OperationEventError {
                     "operation_event.saturated",
                     "Operation-event capacity is temporarily saturated",
                 )
-                .expect("operation-event diagnostics are static"),
+                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
                 retry: RetryDirective::AfterDelay,
                 legal_actions: vec![LegalAction::Retry],
             },
@@ -249,21 +249,21 @@ impl OperationEventError {
                     "operation_event.unavailable",
                     "The operation-event service is unavailable",
                 )
-                .expect("operation-event diagnostics are static"),
+                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
             ),
         };
         let contract = ResultContractRef::new(
             SchemaId::new("schema.tracedecay.operation-event.problem.v1")
-                .expect("the operation-event problem schema id is static"),
+                .unwrap_or_else(|_| panic!("the operation-event problem schema id is static")),
             1,
         )
-        .expect("the operation-event problem contract is static");
+        .unwrap_or_else(|_| panic!("the operation-event problem contract is static"));
         let envelope = ApplicationProblemEnvelope::new(contract, request_id, problem)
             .with_owning_layer(ProblemOwningLayer::Runtime);
         if saturated {
             envelope
                 .with_retry_after_millis(Some(250))
-                .expect("the operation-event retry delay is bounded")
+                .unwrap_or_else(|_| panic!("the operation-event retry delay is bounded"))
         } else {
             envelope
         }
@@ -397,7 +397,7 @@ impl OperationResumeAuthority {
 impl Default for OperationEventAuthority {
     fn default() -> Self {
         Self::new(OperationStreamConfig::default())
-            .expect("the default operation event authority is valid")
+            .unwrap_or_else(|_| panic!("the default operation event authority is valid"))
     }
 }
 
@@ -761,10 +761,10 @@ impl OperationEventAuthority {
                 .filter(|event| event.sequence >= requested_next_sequence)
                 .cloned(),
         );
-        if replay.is_empty() {
-            if let Some(terminal) = &record.terminal {
-                replay.push_back(terminal.clone());
-            }
+        if replay.is_empty()
+            && let Some(terminal) = &record.terminal
+        {
+            replay.push_back(terminal.clone());
         }
 
         Ok(OperationEventSubscription {
@@ -925,7 +925,7 @@ impl OperationEventAuthority {
     ) -> Result<(), OperationEventError> {
         while state.operations.len() >= self.inner.config.max_operations {
             let Some(position) = state.insertion_order.iter().position(|operation_id| {
-                state.operations.get(operation_id).map_or(true, |record| {
+                state.operations.get(operation_id).is_none_or(|record| {
                     record.terminal.is_some() && record.subscribers.load(Ordering::Acquire) == 0
                 })
             }) else {
@@ -1045,9 +1045,7 @@ impl Stream for OperationEventStream {
 
         loop {
             match Pin::new(&mut stream.live).poll_next(context) {
-                Poll::Ready(Some(Ok(event))) if event.sequence < stream.expected_sequence => {
-                    continue;
-                }
+                Poll::Ready(Some(Ok(event))) if event.sequence < stream.expected_sequence => {}
                 Poll::Ready(Some(Ok(event))) if event.sequence > stream.expected_sequence => {
                     let gap = stream.gap(stream.expected_sequence, event.sequence - 1);
                     stream.expected_sequence = event.sequence;

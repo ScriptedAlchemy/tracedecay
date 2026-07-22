@@ -390,9 +390,7 @@ where
                     admitted: 0,
                 },
             );
-            return self
-                .finish_cycle(context, request.feedback, contributions)
-                .await;
+            return Box::pin(self.finish_cycle(context, request.feedback, contributions)).await;
         }
         self.observations.observe_source_event(
             &request.feedback.input,
@@ -431,7 +429,7 @@ where
                     contributions.capture(
                         Pr13AdvisoryProviderV1::GitHub,
                         ingress.advisory_findings(request.validity),
-                    )
+                    );
                 }
                 GitHubReviewRefreshOutcomeV1::Denied => {
                     self.observe_github_terminal(
@@ -441,7 +439,7 @@ where
                     contributions.set_state(
                         Pr13AdvisoryProviderV1::GitHub,
                         ProviderEvaluationStateV1::Unavailable,
-                    )
+                    );
                 }
                 GitHubReviewRefreshOutcomeV1::Unavailable => {
                     self.observe_github_terminal(
@@ -451,7 +449,7 @@ where
                     contributions.set_state(
                         Pr13AdvisoryProviderV1::GitHub,
                         ProviderEvaluationStateV1::Unavailable,
-                    )
+                    );
                 }
                 GitHubReviewRefreshOutcomeV1::Stale => {
                     self.observations.observe_source_event(
@@ -461,7 +459,7 @@ where
                     contributions.set_state(
                         Pr13AdvisoryProviderV1::GitHub,
                         ProviderEvaluationStateV1::Stale,
-                    )
+                    );
                 }
             }
         }
@@ -503,7 +501,7 @@ where
                     contributions.set_state(
                         Pr13AdvisoryProviderV1::Ci,
                         ProviderEvaluationStateV1::Unavailable,
-                    )
+                    );
                 }
                 CiFailureLocalizationPortOutcomeV1::Unavailable => {
                     self.observations.observe_source_event(
@@ -521,7 +519,7 @@ where
                     contributions.set_state(
                         Pr13AdvisoryProviderV1::Ci,
                         ProviderEvaluationStateV1::Unavailable,
-                    )
+                    );
                 }
             }
         }
@@ -548,7 +546,7 @@ where
                     contributions.capture(
                         Pr13AdvisoryProviderV1::Proximity,
                         contributor.advisory_findings(request.validity),
-                    )
+                    );
                 }
                 Pr13ProximityRuntimeOutcomeV1::Denied
                 | Pr13ProximityRuntimeOutcomeV1::Unavailable => contributions.set_state(
@@ -579,8 +577,7 @@ where
                 contributions,
             ));
         }
-        self.finish_cycle(context, request.feedback, contributions)
-            .await
+        Box::pin(self.finish_cycle(context, request.feedback, contributions)).await
     }
 
     fn finish_interruption(
@@ -907,8 +904,8 @@ async fn await_provider<T>(
     tokio::pin!(deadline);
     tokio::select! {
         biased;
-        _ = &mut cancelled => Err(Pr13AdvisoryInterruptionV1::Cancelled),
-        _ = &mut deadline => Err(Pr13AdvisoryInterruptionV1::TimedOut),
+        () = &mut cancelled => Err(Pr13AdvisoryInterruptionV1::Cancelled),
+        () = &mut deadline => Err(Pr13AdvisoryInterruptionV1::TimedOut),
         outcome = &mut future => Ok(outcome),
     }
 }

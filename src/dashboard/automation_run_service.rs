@@ -53,7 +53,10 @@ pub(crate) async fn memory_curator_run_payload_with_run_id(
     run_id: Option<String>,
 ) -> Result<Value, String> {
     execute_dashboard_automation_run(state, move |state| async move {
-        memory_curator_run_payload_with_run_id_direct(&state, request, run_id).await
+        Box::pin(memory_curator_run_payload_with_run_id_direct(
+            &state, request, run_id,
+        ))
+        .await
     })
     .await
 }
@@ -288,7 +291,10 @@ pub(crate) async fn session_reflection_run_payload_with_run_id(
     run_id: Option<String>,
 ) -> Result<Value, String> {
     execute_dashboard_automation_run(state, move |state| async move {
-        session_reflection_run_payload_with_run_id_direct(&state, request, run_id).await
+        Box::pin(session_reflection_run_payload_with_run_id_direct(
+            &state, request, run_id,
+        ))
+        .await
     })
     .await
 }
@@ -398,7 +404,10 @@ pub(crate) async fn skill_writing_run_payload_with_run_id(
     run_id: Option<String>,
 ) -> Result<Value, String> {
     execute_dashboard_automation_run(state, move |state| async move {
-        skill_writing_run_payload_with_run_id_direct(&state, request, run_id).await
+        Box::pin(skill_writing_run_payload_with_run_id_direct(
+            &state, request, run_id,
+        ))
+        .await
     })
     .await
 }

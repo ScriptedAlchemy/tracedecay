@@ -12,7 +12,7 @@ use super::{
     MemoryStore, db_error, db_message, relation_from_row, relations_conflict, to_json_string,
 };
 
-impl<'a> MemoryStore<'a> {
+impl MemoryStore<'_> {
     pub async fn upsert_fact_relation(
         &self,
         source_fact_id: i64,

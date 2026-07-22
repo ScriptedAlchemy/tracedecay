@@ -581,15 +581,14 @@ impl OwnedPr12PrimitiveRuntime {
         observed_at: UtcMicros,
     ) -> Pr12PrimitiveDispatchFuture<'_> {
         Box::pin(async move {
-            match admission_problem(
+            if let Some(problem) = admission_problem(
                 &self.scope,
                 &self.access,
                 &context,
                 &invocation.operation,
                 observed_at,
             ) {
-                Some(problem) => return Err(problem),
-                None => {}
+                return Err(problem);
             }
             let Some(_permit) = self.capacity.try_acquire() else {
                 return saturated(&context, &invocation.operation);
@@ -1619,7 +1618,7 @@ fn evidence_result(
         .map_err(|_| contract_problem(context, operation))?;
     let mut page = PageState::first_page(
         SortContractId::new("sort.application.pr12-primitive.v1")
-            .expect("static primitive sort contract is valid"),
+            .unwrap_or_else(|_| panic!("static primitive sort contract is valid")),
         1,
         eligible,
         coverage.returned,
@@ -1684,7 +1683,7 @@ async fn recent_test_results(
                         "application.pr12-primitive.test-results-expired",
                         "No retained managed test result is available.",
                     )
-                    .expect("static diagnostic is valid"),
+                    .unwrap_or_else(|_| panic!("static diagnostic is valid")),
                 ),
             );
         }
@@ -1745,7 +1744,7 @@ fn authority_receipt(
         1,
         access.configuration_provenance_digest.clone(),
         ComponentVersion::new("project-source-access.v1")
-            .expect("static component version is valid"),
+            .unwrap_or_else(|_| panic!("static component version is valid")),
     )
     .map_err(|_| contract_problem(context, operation))?;
     AuthorityReceipt::from_context(context, policy, observed_at)
@@ -1854,7 +1853,7 @@ fn unavailable<T>(
                 "application.pr12-primitive.unavailable",
                 "The admitted primitive authority is unavailable.",
             )
-            .expect("static diagnostic is valid"),
+            .unwrap_or_else(|_| panic!("static diagnostic is valid")),
         ),
     )
 }
@@ -1871,7 +1870,7 @@ fn saturated<T>(
                 "application.pr12-primitive.saturated",
                 "The admitted primitive authority has reached its bounded capacity.",
             )
-            .expect("static diagnostic is valid"),
+            .unwrap_or_else(|_| panic!("static diagnostic is valid")),
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
         },
@@ -1902,7 +1901,7 @@ fn contract_problem(
                 "application.pr12-primitive.contract",
                 "The primitive authority returned an invalid result.",
             )
-            .expect("static diagnostic is valid"),
+            .unwrap_or_else(|_| panic!("static diagnostic is valid")),
         ),
     )
 }

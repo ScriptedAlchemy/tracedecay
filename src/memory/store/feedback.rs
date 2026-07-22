@@ -9,7 +9,7 @@ use crate::tracedecay::current_timestamp;
 
 use super::{MemoryStore, db_error, db_message, feedback_action_str, parse_feedback_action};
 
-impl<'a> MemoryStore<'a> {
+impl MemoryStore<'_> {
     /// Public oplog hook for mutation flows that live outside this store
     /// (e.g. dashboard curation apply).
     pub async fn record_oplog(

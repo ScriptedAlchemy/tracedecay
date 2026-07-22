@@ -55,7 +55,7 @@ pub(super) fn set_temporal_merge_fault_phase(phase: &str) {
 
 #[cfg(test)]
 fn inject_temporal_merge_fault(phase: TemporalMergeFaultPhase) -> Result<()> {
-    if TEMPORAL_MERGE_FAULT_PHASE.with(|flag| flag.get()) == phase {
+    if TEMPORAL_MERGE_FAULT_PHASE.with(std::cell::Cell::get) == phase {
         return Err(db_message(
             "merge_temporal_authority",
             match phase {
@@ -518,7 +518,7 @@ async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
     if columns.is_empty() {
         return Err(db_message(
             "preflight_temporal_authority",
-            format!("{} table is missing", table),
+            format!("{table} table is missing"),
         ));
     }
     Ok(columns)

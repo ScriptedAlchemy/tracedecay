@@ -787,7 +787,8 @@ mod validate_contract_tests {
         SemanticConfigurationPinV1::from_current(&ConfigurationCurrentStateV1 {
             revision_id: ConfigurationRevisionId::try_from("configuration.revision.1".to_owned())
                 .unwrap(),
-            snapshot: ConfigurationSnapshotV1::new(Default::default(), Default::default()).unwrap(),
+            snapshot: ConfigurationSnapshotV1::new(BTreeMap::default(), BTreeMap::default())
+                .unwrap(),
         })
         .unwrap()
     }

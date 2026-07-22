@@ -320,8 +320,8 @@ pub(in crate::db::memory_v2) async fn insert_feedback_history(
             .get::<String>(6)
             .map_err(|error| db_error(OPERATION, error))?;
         if existing_action != action
-            || existing_old_trust != old_trust.as_f64()
-            || existing_new_trust != new_trust.as_f64()
+            || existing_old_trust.to_bits() != old_trust.as_f64().to_bits()
+            || existing_new_trust.to_bits() != new_trust.as_f64().to_bits()
             || existing_occurred_at != occurred_at.0
         {
             return Err(db_message(OPERATION, "feedback history identity collision"));
@@ -449,7 +449,7 @@ pub(in crate::db::memory_v2) async fn insert_assertion(
                 json_text(&payload_reference)?,
                 json_text(assertion.payload().receipt())?,
                 assertion.asserted_at().0,
-                assertion.actor_id().map(|actor| actor.as_str())
+                assertion.actor_id().map(tracedecay_domain::ActorId::as_str)
             ],
         )
         .await

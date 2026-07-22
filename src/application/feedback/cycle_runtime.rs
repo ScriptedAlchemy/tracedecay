@@ -305,7 +305,7 @@ impl FeedbackCycleRuntimePort for Pr12FeedbackCycleRuntime {
                 return Err(LspRuntimeFailure::new("feedback-cycle-trigger-mismatch"));
             }
             let input = invocation.request.input.clone();
-            let result = runtime.run_once(invocation).await;
+            let result = Box::pin(runtime.run_once(invocation)).await;
             runtime.source_observations.observe_source_event(
                 &input,
                 Plan26FeedbackSourceEventV1::Delivery {
@@ -412,9 +412,8 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
             let Some(symbol) = request.input.target.symbol.clone() else {
                 return FeedbackImpactPortOutcome::Unavailable;
             };
-            let subgraph = match self.graph.get_impact_radius(symbol.as_str(), 3).await {
-                Ok(subgraph) => subgraph,
-                Err(_) => return FeedbackImpactPortOutcome::Unavailable,
+            let Ok(subgraph) = self.graph.get_impact_radius(symbol.as_str(), 3).await else {
+                return FeedbackImpactPortOutcome::Unavailable;
             };
             match context.admission_at(request.input.observed_at) {
                 RequestAdmission::Admitted => {}
@@ -439,7 +438,8 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
             affected_callers.dedup();
 
             let meta = RetrievalRequestMeta::current(
-                PageRequest::first(100).expect("static feedback page size is valid"),
+                PageRequest::first(100)
+                    .unwrap_or_else(|_| panic!("static feedback page size is valid")),
                 ResultProjection::ReferencesOnly,
                 RetrievalOrder::StableIdentity,
             );

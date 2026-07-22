@@ -244,7 +244,7 @@ impl GitTopologyAnchorApplicationV1 {
         parts.target = RetrievalAnchorTargetV2::GitTopology(Box::new(self.target.clone()));
         parts.source_generation =
             AnchorSourceGenerationV2::GitTopology(self.source_generation.clone());
-        parts.source_anchors = self.source_anchors.clone();
+        parts.source_anchors.clone_from(&self.source_anchors);
         Ok(parts)
     }
 }

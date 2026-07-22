@@ -571,7 +571,7 @@ impl StdioLspClient {
         let deadline = tokio::time::Instant::now() + timeouts.refresh;
         loop {
             let message = tokio::select! {
-                _ = cancellation.cancelled() => {
+                () = cancellation.cancelled() => {
                     let _ = self.cancel_request(request_id, timeouts).await;
                     return Err(LspSemanticRequestError::Cancelled);
                 }

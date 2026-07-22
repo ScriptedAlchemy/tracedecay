@@ -656,7 +656,7 @@ impl BoundedPlan26FeedbackObservationQueue {
     pub fn take_next(&self) -> Option<FeedbackObservationEnvelopeV1> {
         self.receiver
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()?
             .try_recv()
             .ok()
@@ -674,7 +674,7 @@ impl BoundedPlan26FeedbackObservationQueue {
         let mut replay_window = self
             .replay_window
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if replay_window.replay_identities.contains(&identity) {
             return FeedbackObservationSinkOutcome::Duplicate;
         }

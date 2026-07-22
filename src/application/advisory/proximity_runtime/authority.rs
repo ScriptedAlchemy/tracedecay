@@ -222,7 +222,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
             let agents = selected
                 .iter()
                 .filter_map(|observation| observation.envelope.relations().agent_id())
-                .map(|agent| agent.as_str())
+                .map(tracedecay_domain::ObservationId::as_str)
                 .collect::<BTreeSet<_>>();
             if selected.len() < 2 || agents.len() < 2 {
                 partial = true;

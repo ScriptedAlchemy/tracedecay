@@ -240,7 +240,7 @@ impl LspSemanticRequestAuthority for DatabaseGraphSemanticAuthority {
         let operations = self.operations.clone();
         Box::pin(async move {
             let outcome = tokio::select! {
-                _ = cancellation.cancelled() => LspSemanticOperationOutcome::Partial {
+                () = cancellation.cancelled() => LspSemanticOperationOutcome::Partial {
                     value: Value::Null,
                     coverage: "graph-cancelled".to_owned(),
                 },

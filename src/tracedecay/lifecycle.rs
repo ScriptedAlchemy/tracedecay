@@ -1356,7 +1356,7 @@ fn count_tree_files(root: &Path) -> u64 {
 
 /// Whether a `PRAGMA quick_check` problem row describes damage confined to the
 /// graph's FTS5 index (e.g. "malformed inverted index for FTS5 table
-/// main.nodes_fts"). Such damage is fully derivable from the content table via
+/// `main.nodes_fts`"). Such damage is fully derivable from the content table via
 /// [`crate::db::Database::rebuild_fts`] and never requires offline recovery.
 pub(crate) fn is_fts_only_corruption(problem: &str) -> bool {
     problem.contains("malformed inverted index for FTS5 table main.nodes_fts")

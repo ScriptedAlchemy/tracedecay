@@ -270,7 +270,7 @@ pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value
             "op": "merge",
             "winner_id": winner_id,
             "content_updated": outcome.content_updated(),
-            "deleted_loser_ids": outcome.deleted_losers().iter().filter_map(|fact| fact.legacy_fact_id()).collect::<Vec<_>>(),
+            "deleted_loser_ids": outcome.deleted_losers().iter().filter_map(tracedecay_store::CompatibilityFactMappingV1::legacy_fact_id).collect::<Vec<_>>(),
             "failed_losers": [],
             "status": "merged",
         }),

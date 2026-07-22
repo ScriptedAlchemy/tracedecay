@@ -96,7 +96,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                     );
                     return Ok(stats);
                 }
-                ConvergeStep::Continue => continue,
+                ConvergeStep::Continue => {}
             }
         }
     }

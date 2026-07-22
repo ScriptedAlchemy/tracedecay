@@ -246,7 +246,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
         let inner = Arc::clone(&self.inner);
         Box::pin(async move {
             let outcome = tokio::select! {
-                _ = cancellation.cancelled() => {
+                () = cancellation.cancelled() => {
                     LspSemanticOperationOutcome::Partial {
                         value: serde_json::Value::Null,
                         coverage: "semantic-cancelled".to_owned(),
@@ -254,18 +254,15 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                 }
                 slot = inner.client.lock() => {
                     let mut slot = slot;
-                    let client = match slot.take() {
-                        Some(client) => Ok(Some(client)),
-                        None => tokio::select! {
-                            _ = cancellation.cancelled() => Ok(None),
-                            client = StdioLspClient::start_with_timeouts(
-                                &inner.command,
-                                &inner.args,
-                                &inner.project_root,
-                                inner.timeouts,
-                            ) => client.map(Some),
-                        },
-                    };
+                    let client = if let Some(client) = slot.take() { Ok(Some(client)) } else { tokio::select! {
+                        () = cancellation.cancelled() => Ok(None),
+                        client = StdioLspClient::start_with_timeouts(
+                            &inner.command,
+                            &inner.args,
+                            &inner.project_root,
+                            inner.timeouts,
+                        ) => client.map(Some),
+                    } };
                     match client {
                         Ok(Some(mut client)) => {
                             let result = client

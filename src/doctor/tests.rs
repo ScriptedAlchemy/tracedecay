@@ -983,7 +983,7 @@ fn semantic_status(
     let current = crate::application::configuration::ConfigurationCurrentStateV1 {
         revision_id: ConfigurationRevisionId::try_from("configuration.revision.doctor".to_owned())
             .unwrap(),
-        snapshot: ConfigurationSnapshotV1::new(Default::default(), Default::default()).unwrap(),
+        snapshot: ConfigurationSnapshotV1::new(BTreeMap::default(), BTreeMap::default()).unwrap(),
     };
     let pin =
         crate::application::semantic_runtime::SemanticConfigurationPinV1::from_current(&current)

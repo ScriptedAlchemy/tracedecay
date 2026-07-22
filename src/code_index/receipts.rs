@@ -256,14 +256,13 @@ pub fn verify_batch_receipt(
         || batch.source_manifest_digest != request.changes.manifest_digest
     {
         return Err(ProjectionReceiptErrorV1::CrossGenerationReceipt(
-            batch
-                .receipts
-                .first()
-                .map(|receipt| receipt.chunk_id.clone())
-                .unwrap_or_else(|| {
+            batch.receipts.first().map_or_else(
+                || {
                     CodeSearchChunkId::new("chunk.v1.empty-batch")
                         .expect("canonical chunk identity")
-                }),
+                },
+                |receipt| receipt.chunk_id.clone(),
+            ),
         ));
     }
     if batch

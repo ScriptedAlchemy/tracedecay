@@ -260,15 +260,14 @@ where
             Err(outcome) => return outcome,
         };
         let digests = refresh_digests(context, &target, &grant, &self.configuration);
-        let source_id = match SessionSourceIdV1::new(format!(
+        let Ok(source_id) = SessionSourceIdV1::new(format!(
             "{}:{}",
             target.session_id().as_str(),
             target.source_scope().unwrap_or("all")
-        )) {
-            Ok(source_id) => source_id,
-            Err(_) => return SessionRefreshOutcome::Unavailable,
+        )) else {
+            return SessionRefreshOutcome::Unavailable;
         };
-        let refresh_key = match SessionRefreshKeyV1::new(
+        let Ok(refresh_key) = SessionRefreshKeyV1::new(
             grant.scope().identity().root_id().as_str(),
             target.session_id().clone(),
             vec![match SessionRefreshSourceTargetV1::new(
@@ -281,9 +280,8 @@ where
             }],
             self.configuration.projector_version(),
             format!("sha256:{}", hex::encode(digests.join.as_bytes())),
-        ) {
-            Ok(refresh_key) => refresh_key,
-            Err(_) => return SessionRefreshOutcome::Unavailable,
+        ) else {
+            return SessionRefreshOutcome::Unavailable;
         };
         let request = SessionRefreshBeginOrJoinRequestV1::new(
             target.session_id().clone(),

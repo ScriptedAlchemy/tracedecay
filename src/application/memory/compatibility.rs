@@ -1027,7 +1027,7 @@ fn validate_compatibility_inspection(
             }
             Ok(())
         }
-        _ => Ok(()),
+        CompatibilityFactTargetV1::Canonical(_) => Ok(()),
     }
 }
 

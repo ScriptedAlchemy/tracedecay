@@ -64,7 +64,7 @@ fn application_default_profile(
 ) -> Result<ProfileDefinition, CatalogCompositionError> {
     let capabilities: Vec<_> = contributions
         .iter()
-        .flat_map(|contribution| contribution.capabilities())
+        .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
         .filter(|capability| capability.availability().is_callable())
         .collect();
     let capability_ids = capabilities
@@ -115,7 +115,7 @@ fn application_default_profile(
     .filter(|surface| {
         contributions
             .iter()
-            .flat_map(|contribution| contribution.bindings())
+            .flat_map(tracedecay_tool_catalog::CatalogContributionV1::bindings)
             .any(|binding| binding.surface() == *surface)
     })
     .collect();

@@ -82,7 +82,7 @@ const STATE_CLEARED: &str = "cleared";
 /// clearing) update only the `record_state`/`state_generation` columns so the
 /// full historical chain stays queryable while active publication reads only
 /// current rows (Plan 35: "Stale and historical diagnostics remain queryable
-/// through TraceDecay application APIs but are excluded from active
+/// through `TraceDecay` application APIs but are excluded from active
 /// publication").
 pub struct DiagnosticsStore<'a> {
     conn: &'a Connection,
@@ -552,12 +552,24 @@ impl<'a> DiagnosticsStore<'a> {
                     record.diagnostic_anchor.as_str(),
                     record.generation_id.as_str(),
                     record.repository.as_str(),
-                    record.worktree.as_ref().map(|id| id.as_str()),
-                    record.reference.as_ref().map(|id| id.as_str()),
-                    record.source_revision.as_ref().map(|id| id.as_str()),
+                    record
+                        .worktree
+                        .as_ref()
+                        .map(tracedecay_domain::WorktreeId::as_str),
+                    record
+                        .reference
+                        .as_ref()
+                        .map(tracedecay_domain::RefId::as_str),
+                    record
+                        .source_revision
+                        .as_ref()
+                        .map(tracedecay_domain::CommitId::as_str),
                     record.file_occurrence_id.as_str(),
                     record.content_digest.as_str(),
-                    record.symbol_occurrence_id.as_ref().map(|id| id.as_str()),
+                    record
+                        .symbol_occurrence_id
+                        .as_ref()
+                        .map(tracedecay_domain::SymbolOccurrenceId::as_str),
                     record.span.start_byte as i64,
                     record.span.end_byte as i64,
                     record.code.as_str(),
@@ -572,7 +584,7 @@ impl<'a> DiagnosticsStore<'a> {
                         .provenance
                         .sanitization_receipt
                         .as_ref()
-                        .map(|id| id.as_str()),
+                        .map(tracedecay_domain::SanitizationReceiptId::as_str),
                     evidence_class_str(record.evidence_class),
                     record.collected_at.0,
                     state,
@@ -919,8 +931,7 @@ impl DirtyDiagnosticOverlay {
     pub fn records_for(&self, client_id: &str, document_uri: &str) -> &[OverlayDiagnostic] {
         self.entries
             .get(&(client_id.to_owned(), document_uri.to_owned()))
-            .map(|document| document.records.as_slice())
-            .unwrap_or(&[])
+            .map_or(&[], |document| document.records.as_slice())
     }
 
     /// Every overlay entry across all client documents, in deterministic key

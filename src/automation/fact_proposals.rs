@@ -265,20 +265,16 @@ pub async fn import_legacy_fact_proposals<A: FactCompatibilityStore>(
             // cannot be truthfully reconstructed into a fact assertion.
             continue;
         };
-        let command = match legacy_proposal_add_command(
+        let Ok(command) = legacy_proposal_add_command(
             memory.owner().clone(),
             sidecar_digest.clone(),
             legacy_proposal_id,
             request,
-        ) {
-            Ok(command) => command,
-            // Privacy-rejected or malformed legacy payloads remain archived,
-            // never transformed into invented canonical content.
-            Err(_) => continue,
+        ) else {
+            continue;
         };
-        let command = match with_automation_run_id(command, &legacy.run_id) {
-            Ok(command) => command,
-            Err(_) => continue,
+        let Ok(command) = with_automation_run_id(command, &legacy.run_id) else {
+            continue;
         };
         let record = CompatibilityFactProposalLegacyRecordV1::new(
             legacy_proposal_id,
@@ -392,39 +388,33 @@ pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
                     config_error(format!("invalid accepted fact add_fact_request: {error}"))
                 })
             });
-        let request = match request {
-            Ok(request) => request,
-            Err(_) => {
-                records.push(rejected_projection(
-                    &proposal_id,
-                    run_id,
-                    evidence_hash.as_deref(),
-                    FactProposalState::Quarantined,
-                    "automation proposal could not be reconstructed",
-                    observed_at,
-                ));
-                continue;
-            }
+        let Ok(request) = request else {
+            records.push(rejected_projection(
+                &proposal_id,
+                run_id,
+                evidence_hash.as_deref(),
+                FactProposalState::Quarantined,
+                "automation proposal could not be reconstructed",
+                observed_at,
+            ));
+            continue;
         };
-        let command = match automation_fact_proposal_add_command(
+        let Ok(command) = automation_fact_proposal_add_command(
             memory.owner().clone(),
             request,
             run_id,
             &proposal_id,
             Some(submitter.clone()),
-        ) {
-            Ok(command) => command,
-            Err(_) => {
-                records.push(rejected_projection(
-                    &proposal_id,
-                    run_id,
-                    evidence_hash.as_deref(),
-                    FactProposalState::Quarantined,
-                    "automation proposal was rejected by memory privacy validation",
-                    observed_at,
-                ));
-                continue;
-            }
+        ) else {
+            records.push(rejected_projection(
+                &proposal_id,
+                run_id,
+                evidence_hash.as_deref(),
+                FactProposalState::Quarantined,
+                "automation proposal was rejected by memory privacy validation",
+                observed_at,
+            ));
+            continue;
         };
         let semantic_key = (
             command.category(),
@@ -643,13 +633,15 @@ pub async fn apply_fact_proposal_with_result<A: FactCompatibilityStore>(
         },
     )
     .await
-    .map(|mut record| {
-        if display_reviewer.is_some() {
-            record.reviewer = display_reviewer;
-        }
-        record
-    })
-    .unwrap_or_else(|_| render_authority_record_sync(proposal));
+    .map_or_else(
+        |_| render_authority_record_sync(proposal),
+        |mut record| {
+            if display_reviewer.is_some() {
+                record.reviewer = display_reviewer;
+            }
+            record
+        },
+    );
     Ok(FactProposalApplyResult {
         record,
         newly_promoted: matches!(
@@ -700,13 +692,15 @@ pub async fn reject_fact_proposal<A: FactCompatibilityStore>(
         },
     )
     .await
-    .map(|mut record| {
-        if display_reviewer.is_some() {
-            record.reviewer = display_reviewer;
-        }
-        record
-    })
-    .unwrap_or_else(|_| render_authority_record_sync(&proposal));
+    .map_or_else(
+        |_| render_authority_record_sync(&proposal),
+        |mut record| {
+            if display_reviewer.is_some() {
+                record.reviewer = display_reviewer;
+            }
+            record
+        },
+    );
     Ok(record)
 }
 

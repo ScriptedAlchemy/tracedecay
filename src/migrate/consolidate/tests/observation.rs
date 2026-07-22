@@ -15,7 +15,7 @@ async fn observation_authority_merge_is_lossless_idempotent_and_replayable() {
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(&target, first.clone(), None).await;
+    Box::pin(persist_migration_observation(&target, first.clone(), None)).await;
     assert_eq!(project_all_migration_observations(&target).await, 1);
     target.checkpoint().await;
     target.close();
@@ -23,8 +23,13 @@ async fn observation_authority_merge_is_lossless_idempotent_and_replayable() {
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
         .await
         .unwrap();
-    persist_migration_observation(&source, first, None).await;
-    persist_migration_observation(&source, second, Some(migration_cursor(10))).await;
+    Box::pin(persist_migration_observation(&source, first, None)).await;
+    Box::pin(persist_migration_observation(
+        &source,
+        second,
+        Some(migration_cursor(10)),
+    ))
+    .await;
     assert_eq!(project_all_migration_observations(&source).await, 2);
     source.checkpoint().await;
     source.close();
@@ -106,7 +111,12 @@ async fn observation_projection_remap_survives_drain_and_rebuild_to_zero() {
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(&target, target_observation, None).await;
+    Box::pin(persist_migration_observation(
+        &target,
+        target_observation,
+        None,
+    ))
+    .await;
     assert_eq!(project_all_migration_observations(&target).await, 1);
     target.checkpoint().await;
     target.close();
@@ -114,7 +124,12 @@ async fn observation_projection_remap_survives_drain_and_rebuild_to_zero() {
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
         .await
         .unwrap();
-    persist_migration_observation(&source, source_observation, None).await;
+    Box::pin(persist_migration_observation(
+        &source,
+        source_observation,
+        None,
+    ))
+    .await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
     source.checkpoint().await;
     source.close();
@@ -207,7 +222,7 @@ async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(&target, shared.clone(), None).await;
+    Box::pin(persist_migration_observation(&target, shared.clone(), None)).await;
     assert_eq!(project_all_migration_observations(&target).await, 1);
     set_migration_cursor(&target, session_id, 18, 0).await;
     target.checkpoint().await;
@@ -216,13 +231,13 @@ async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
         .await
         .unwrap();
-    persist_migration_observation(&source, shared, None).await;
+    Box::pin(persist_migration_observation(&source, shared, None)).await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
-    persist_migration_observation(
+    Box::pin(persist_migration_observation(
         &source,
         newer,
         Some(migration_cursor_generation_for(session_id, 17, 10)),
-    )
+    ))
     .await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
     assert_projection_ownership(&source_path, message_id, 1, 1).await;
@@ -333,14 +348,19 @@ async fn pending_target_observation_does_not_suppress_source_projection_claim() 
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(&target, observation.clone(), None).await;
+    Box::pin(persist_migration_observation(
+        &target,
+        observation.clone(),
+        None,
+    ))
+    .await;
     target.checkpoint().await;
     target.close();
 
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
         .await
         .unwrap();
-    persist_migration_observation(&source, observation, None).await;
+    Box::pin(persist_migration_observation(&source, observation, None)).await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
     insert_projection_alias(
         &source,
@@ -404,7 +424,12 @@ async fn another_projector_claim_does_not_suppress_source_projection_claim() {
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(&target, observation.clone(), None).await;
+    Box::pin(persist_migration_observation(
+        &target,
+        observation.clone(),
+        None,
+    ))
+    .await;
     assert_eq!(project_all_migration_observations(&target).await, 1);
     target
         .writer_connection()
@@ -423,7 +448,7 @@ async fn another_projector_claim_does_not_suppress_source_projection_claim() {
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
         .await
         .unwrap();
-    persist_migration_observation(&source, observation, None).await;
+    Box::pin(persist_migration_observation(&source, observation, None)).await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
     insert_projection_alias(
         &source,
@@ -489,7 +514,7 @@ async fn observation_authority_collision_fails_before_session_merge_mutation() {
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(
+    Box::pin(persist_migration_observation(
         &target,
         migration_observation_for(
             "session.migration.preflight-target",
@@ -498,7 +523,7 @@ async fn observation_authority_collision_fails_before_session_merge_mutation() {
             "target receipt payload",
         ),
         None,
-    )
+    ))
     .await;
     target.checkpoint().await;
     target.close();
@@ -506,7 +531,7 @@ async fn observation_authority_collision_fails_before_session_merge_mutation() {
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
         .await
         .unwrap();
-    persist_migration_observation(
+    Box::pin(persist_migration_observation(
         &source,
         migration_observation_for(
             "session.migration.preflight-source",
@@ -515,7 +540,7 @@ async fn observation_authority_collision_fails_before_session_merge_mutation() {
             "source receipt payload",
         ),
         None,
-    )
+    ))
     .await;
     source.checkpoint().await;
     source.close();
@@ -581,7 +606,12 @@ async fn typed_duplicate_authority_repairs_noncanonical_target_json() {
         let db = GlobalDb::open_at_without_structured_backfill(path)
             .await
             .unwrap();
-        persist_migration_observation(&db, observation.clone(), None).await;
+        Box::pin(persist_migration_observation(
+            &db,
+            observation.clone(),
+            None,
+        ))
+        .await;
         db.checkpoint().await;
         db.close();
     }
@@ -856,7 +886,7 @@ async fn post_merge_projection_verification_rolls_back_transaction() {
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(
+    Box::pin(persist_migration_observation(
         &target,
         migration_observation_for(
             "session.migration.rollback",
@@ -865,7 +895,7 @@ async fn post_merge_projection_verification_rolls_back_transaction() {
             "rollback body",
         ),
         None,
-    )
+    ))
     .await;
     assert_eq!(project_all_migration_observations(&target).await, 1);
     let mut rows = target
@@ -958,11 +988,11 @@ async fn malformed_target_only_cursor_fails_before_consolidation_mutation() {
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(
+    Box::pin(persist_migration_observation(
         &target,
         migration_observation(0, 10, "receipt.migration.target", "target-message"),
         None,
-    )
+    ))
     .await;
     let wrong_cursor = migration_cursor_for("session.migration.wrong", 10);
     let wrong_cursor_json = serde_json::to_string(&wrong_cursor).unwrap();
@@ -1059,7 +1089,12 @@ async fn projection_alias_represents_source_output_collision() {
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(&target, target_observation, None).await;
+    Box::pin(persist_migration_observation(
+        &target,
+        target_observation,
+        None,
+    ))
+    .await;
     assert_eq!(project_all_migration_observations(&target).await, 1);
     target.checkpoint().await;
     target.close();
@@ -1067,7 +1102,12 @@ async fn projection_alias_represents_source_output_collision() {
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
         .await
         .unwrap();
-    persist_migration_observation(&source, source_observation, None).await;
+    Box::pin(persist_migration_observation(
+        &source,
+        source_observation,
+        None,
+    ))
+    .await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
     insert_projection_alias(
         &source,
@@ -1135,7 +1175,7 @@ async fn inconsistent_projection_alias_fails_authority_preflight_without_target_
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
         .await
         .unwrap();
-    persist_migration_observation(&source, observation, None).await;
+    Box::pin(persist_migration_observation(&source, observation, None)).await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
     source
         .writer_connection()

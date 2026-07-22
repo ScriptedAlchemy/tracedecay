@@ -119,7 +119,7 @@ fn sse_item_maps_to_content_free_delivery_lifecycle() {
 fn dropped_http_request_cancels_the_registered_transport_token() {
     let request_id = RequestId::new("request.http.disconnect").expect("request");
     let cancellation = CancellationSignal::active("cancel.http.disconnect").expect("cancellation");
-    let registry: HttpCancellationRegistry = Default::default();
+    let registry: HttpCancellationRegistry = Arc::default();
     registry
         .lock()
         .expect("registry")
@@ -160,7 +160,7 @@ fn completed_receipt(context: &RequestContext) -> OperationReceipt {
         started_at,
         UtcMicros(started_at.0.saturating_add(1)),
         context.deadline().clone(),
-        Default::default(),
+        OperationBudgetUsage::default(),
     )
     .expect("completed receipt")
 }
@@ -182,7 +182,7 @@ async fn authenticated_context_reuses_exact_scope_and_transport_controls() {
     let state = HttpOperationEventState {
         authority,
         active_project_id: project_id,
-        cancellations: Default::default(),
+        cancellations: Arc::default(),
         client: None,
     };
     let observed_at = current_micros().expect("current time");
@@ -233,7 +233,7 @@ async fn sse_disconnect_does_not_cancel_but_explicit_cancel_does() {
         )
         .await
         .expect("begin operation");
-    let app = http_operation_event_router(authority, project_id, Default::default(), None);
+    let app = http_operation_event_router(authority, project_id, Arc::default(), None);
 
     let response = app
         .clone()
@@ -281,7 +281,7 @@ async fn sse_scope_denial_is_concealed_at_the_active_project_mount() {
     let app = http_operation_event_router(
         authority,
         ProjectId::new("project.other").expect("other project"),
-        Default::default(),
+        Arc::default(),
         None,
     );
 
@@ -314,7 +314,7 @@ async fn resolver_conceals_cross_project_scope_with_one_typed_denial() {
     let state = HttpOperationEventState {
         authority,
         active_project_id: ProjectId::new("project.other").expect("other project"),
-        cancellations: Default::default(),
+        cancellations: Arc::default(),
         client: None,
     };
 
@@ -367,7 +367,7 @@ async fn sse_resume_replays_retained_history_with_one_terminal_receipt() {
         )
         .await
         .expect("begin operation");
-    let app = http_operation_event_router(authority, project_id, Default::default(), None);
+    let app = http_operation_event_router(authority, project_id, Arc::default(), None);
 
     let slow_response = app
         .clone()
@@ -455,8 +455,7 @@ async fn sse_resume_after_memory_restart_returns_canonical_expired_problem() {
         .terminal(completed_receipt(&context))
         .await
         .expect("publish terminal");
-    let live_app =
-        http_operation_event_router(authority, project_id.clone(), Default::default(), None);
+    let live_app = http_operation_event_router(authority, project_id.clone(), Arc::default(), None);
     let initial = live_app
         .oneshot(
             Request::builder()
@@ -471,7 +470,7 @@ async fn sse_resume_after_memory_restart_returns_canonical_expired_problem() {
     let restarted_app = http_operation_event_router(
         OperationEventAuthority::default(),
         project_id,
-        Default::default(),
+        Arc::default(),
         None,
     );
     let expired = restarted_app

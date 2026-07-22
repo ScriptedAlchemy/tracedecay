@@ -691,11 +691,7 @@ mod tests {
                 session_id.clone(),
                 format!("provider {index} message"),
                 format!("hash-{index:02}"),
-                if index.is_multiple_of(2) {
-                    1_i64
-                } else {
-                    0_i64
-                },
+                i64::from(index.is_multiple_of(2)),
                 if index.is_multiple_of(3) {
                     Some(r#"{"ingest_protection":{"lossy":true}}"#.to_string())
                 } else {

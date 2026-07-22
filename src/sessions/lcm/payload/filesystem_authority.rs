@@ -45,6 +45,7 @@ impl fmt::Debug for VerifiedPayloadAuthority {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VerifiedPayloadAuthority")
+            .field("identity", &self.identity)
             .field("content_hash", &self.content_hash)
             .field("byte_count", &self.byte_count)
             .field("char_count", &self.char_count)

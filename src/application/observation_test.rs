@@ -377,7 +377,7 @@ async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
         Some(outcome.receipt().observation().observation_id())
     );
     assert!(matches!(
-        attachment.anchor().map(|anchor| anchor.target()),
+        attachment.anchor().map(tracedecay_domain::RetrievalAnchorRecordV2::target),
         Some(RetrievalAnchorTargetV2::RepositoryCapture { capture_id, .. })
             if capture_id == provenance.capture_id()
     ));

@@ -145,6 +145,7 @@ impl<R: LanguageRegistry> SanitizedCodeIntake<R> {
 
     /// Pin a staleness bound: snapshots captured more than
     /// `max_age_micros` before the reference time are rejected as stale.
+    #[must_use]
     pub fn with_max_snapshot_age_micros(mut self, max_age_micros: i64) -> Self {
         self.max_snapshot_age_micros = Some(max_age_micros);
         self
