@@ -59,6 +59,7 @@ impl ApplicationOperation {
 
     /// Evaluates this exact callable catalog/application operation through the
     /// retained capability-routing evaluator.
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluate_policy_route(
         &self,
         composition: &PolicyEvaluatorCompositionV1,
@@ -266,6 +267,7 @@ pub fn application_handler_descriptors()
 -> Result<ApplicationHandlerDescriptors, ApplicationContractError> {
     let mut descriptors = vec![crate::retrieval::catalog::symbol_search_handler_descriptor()?];
     descriptors.extend(crate::retrieval::catalog::primitive_read_handler_descriptors()?);
+    descriptors.extend(crate::retrieval::callable_code_handler_descriptors()?);
     descriptors.extend(crate::git::git_index_handler_descriptors()?);
     descriptors.extend(crate::git::git_surface_handler_descriptors()?);
     descriptors.extend(crate::configuration::configuration_surface_handler_descriptors()?);

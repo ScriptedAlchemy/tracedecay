@@ -467,10 +467,10 @@ fn valid_list(
             .findings
             .windows(2)
             .all(|pair| pair[0].finding.finding_id < pair[1].finding.finding_id)
-        && match (&evidence.page.cursor, evidence.page.expires_at) {
-            (Some(_), Some(_)) | (None, None) => true,
-            _ => false,
-        }
+        && matches!(
+            (&evidence.page.cursor, evidence.page.expires_at),
+            (Some(_), Some(_)) | (None, None)
+        )
         && evidence.page.total.is_none_or(|total| count <= total)
 }
 

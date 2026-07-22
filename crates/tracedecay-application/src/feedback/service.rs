@@ -222,7 +222,7 @@ enum FeedbackCycleFinishPath {
 enum FeedbackCycleStep {
     Continue(FeedbackCycleStage),
     Terminal(FeedbackCycleTerminal),
-    Complete(FeedbackCycleExecutionResult),
+    Complete(Box<FeedbackCycleExecutionResult>),
 }
 
 /// One terminal application result. It contains references to authoritative
@@ -327,7 +327,7 @@ where
                         .finish_terminal(context, &request, Some(&progress), terminal)
                         .await;
                 }
-                FeedbackCycleStep::Complete(result) => return Ok(result),
+                FeedbackCycleStep::Complete(result) => return Ok(*result),
             }
         }
     }
@@ -907,7 +907,7 @@ where
                 &progress.completed_stages,
             )
             .await?;
-        Ok(FeedbackCycleStep::Complete(result))
+        Ok(FeedbackCycleStep::Complete(Box::new(result)))
     }
 
     async fn finish_terminal(

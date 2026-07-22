@@ -208,7 +208,9 @@ impl ApplicationProblemRecord {
 pub struct ApplicationProblemEnvelope {
     pub contract: ResultContractRef,
     pub request_id: RequestId,
-    pub problem: ApplicationProblemRecord,
+    // Boxed: the problem record dominates the envelope's size, and this
+    // envelope is the Err variant of every application result.
+    pub problem: Box<ApplicationProblemRecord>,
 }
 
 impl ApplicationProblemEnvelope {
@@ -221,7 +223,7 @@ impl ApplicationProblemEnvelope {
         Self {
             contract,
             request_id,
-            problem: record,
+            problem: Box::new(record),
         }
     }
 
