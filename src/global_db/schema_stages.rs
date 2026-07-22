@@ -306,8 +306,14 @@ pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors
     let transaction = db.begin_write_transaction().await.map_err(|error| {
         global_db_operation_error("begin observation authority validation", error)
     })?;
+    // No second validate_authority_schema_contract here: the contract was
+    // validated after schema installation above, and this transaction only
+    // seeds rows and re-installs triggers from the same constant definitions,
+    // so the table/index/trigger shape cannot have changed. The full
+    // introspection pass costs ~50ms on every first open (each non-daemon
+    // CLI/hook process pays it), and every open still validates fail-closed
+    // once above.
     ensure_authority_invariants(&transaction, force_exhaustive).await?;
-    validate_authority_schema_contract(&transaction).await?;
     transaction.commit().await.map_err(|error| {
         global_db_operation_error("commit observation authority validation", error)
     })
