@@ -469,7 +469,7 @@ acceptance criteria.
   forbidden-anchor IDs, abstention oracle, task oracle, labeler provenance, adjudication,
   and correction/supersession lineage.
 - Locked-judgment metadata contains only the versioned sealed
-  holdout digest, authorized-store locator, access policy, and reveal audit contract.
+  holdout digest, authorized-store locator, and access policy.
   Locked labels are not checked in or readable during tuning.
 - Temporal-event fixtures contain stable event ID, valid
   time, observed/ingest time, arrival sequence, source generation, source and projection
@@ -489,7 +489,7 @@ acceptance criteria.
   context budgets; cache state; randomized execution order; sample-size rationale;
   measurement tools; statistical procedures; output schema; and one executable terminal
   decision expression. Any post-lock change creates a new append-only run revision and
-  cannot reuse revealed locked outcomes for selection.
+  cannot reuse accessed locked outcomes for selection.
 - Promotion evidence records the accepted profile, prior
   accepted rollback profile, report digest, approvals, activation stage, and atomic
   rollback instruction. It is created only for an `accepted` run.
@@ -501,11 +501,11 @@ duplicates, forks, generated copies, repeated issue families, and repository-fam
 clusters cannot cross development, locked chronological, repository-disjoint, or
 forward-confirmation partitions unnoticed.
 
-The harness content-locks and freezes the versioned run manifest before the locked-label access capability is
-granted. The reveal produces an audited access receipt bound to the run digest. Any
-pre-freeze access, digest mismatch, unrecorded reveal, or reuse of revealed labels for
+The harness content-locks and freezes the versioned run manifest before locked-label
+bytes may be read. Access records a digest-bound access receipt for the run. Any
+pre-freeze access, digest mismatch, unrecorded access, or reuse of accessed labels for
 selection makes the run `invalid_run`. Forward confirmation uses a separately sealed
-label set and access receipt.
+label set and access receipt. Authority is versioned JSON plus SHA-256 digests only.
 
 The fixture corpus includes exact errors, symbols, flags, paths, IDs, false-exact hard
 negatives, paraphrases,
@@ -655,7 +655,7 @@ other retriever.
 
 Locked comparison inputs and accepted fallback bytes are immutable. A later
 change creates a new append-only fixture, run, report, and promotion revision;
-it cannot reinterpret an already revealed result or redefine the accepted
+it cannot reinterpret an already accessed locked result or redefine the accepted
 lexical fallback.
 
 ## Behavioral tests and gates

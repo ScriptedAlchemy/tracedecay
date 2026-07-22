@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workload_id": "pr10-locked-semantic-search-v1",
   "outcome": "pending",
-  "rationale": "Linux static/contract audits and semantic_search_suite fallback/non-ready checks executed. Locked acceptance remains disabled. Remaining blockers: PR12 production.rs compile errors, absent locked PR9/holdout reports, and Windows native runtime evidence.",
+  "rationale": "Static/contract audits and semantic_search_suite fallback/non-ready checks executed. Locked acceptance remains disabled. Remaining blockers: PR12 production.rs compile errors and absent locked PR9/holdout reports.",
   "acceptance_authority": false,
   "semantic_activation_disabled": true,
   "measured_results": null,
@@ -62,12 +62,6 @@
       "id": "library_first_default_all_features",
       "state": "executed_contract",
       "detail": "validate_packet.py feature contract: default features equal all-features",
-      "recorded_at_unix": 1784709623
-    },
-    {
-      "id": "linux_and_windows_native_runtime",
-      "state": "pending_unsupported_platform",
-      "detail": "Linux contract evidence present; Windows native FastEmbed runtime unavailable on this host",
       "recorded_at_unix": 1784709623
     },
     {
@@ -134,7 +128,6 @@
     "calibration_and_abstention",
     "cold_offline_rollback",
     "current_and_10x_resources",
-    "linux_and_windows_native_runtime",
     "plan15_locked_holdout_decision",
     "saved_candidate_ablation_evidence"
   ]

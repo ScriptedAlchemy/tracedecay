@@ -80,7 +80,6 @@ impl<'a> HarnessRetriever<'a> {
             scope: EvalRunScopeV1::Development,
             workload_digest: workload.digest.clone(),
             candidate_lists,
-            holdout_receipts: Vec::new(),
             digest: EvidenceBatchDigest::new(ZERO_DIGEST).unwrap(),
         };
         batch.digest = batch.compute_digest().expect("batch digest computable");

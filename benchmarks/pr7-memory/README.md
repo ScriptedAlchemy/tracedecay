@@ -1,49 +1,29 @@
-# PR7 memory, fact, anchor, and migration benchmark
+# PR7 memory, fact, anchor, and migration evidence
 
-Delivery-focused owner acceptance for the PR7 memory/fact/provenance slice.
-Evidence is canonical JSON plus SHA-256 digests of the source commit/tree,
-workload/config/toolchain pins, and executed gate receipts. This directory does
-not recreate the removed measurement scaffold (`src/store/memory_benchmark.rs`).
+Direct behavioral coverage for the PR7 memory/fact/provenance slice. There is
+no measurement harness, owner receipt, gate manifest, content-addressed
+acceptance snapshot, signature, trust root, or attestation in this directory.
 
 ## Artifacts
 
 | Path | Role |
 |---|---|
-| [workload-v1.json](workload-v1.json) | Versioned workload/config pin |
-| [gate-manifest-v1.json](gate-manifest-v1.json) | Predeclared exact/no-op/migration/restart/privacy/anchor gates |
-| [issue_receipt.py](issue_receipt.py) | Serial gate runner + canonical owner receipt writer |
-| [owner-receipts-v1.json](owner-receipts-v1.json) | Content-addressed executed receipts |
-| [evidence-index.json](evidence-index.json) | `current_acceptance` pointer or explicit blockers |
-| [result-provisional.json](result-provisional.json) | Historical local measurement snapshot only |
+| [workload-v1.json](workload-v1.json) | Versioned phase/workload pin (historical measurement shape) |
+| [evidence-index.json](evidence-index.json) | Status pointer (`pending`; `current_acceptance` null) |
+| [result-provisional.json](result-provisional.json) | Historical local timings only — not accepted evidence |
 
-## Gates (serial)
+## Status: pending
 
-1. `exact` — production evidence-assembly exact member drilldown
-2. `no_op` — checked-in provider fixtures through the production exact no-op path
-3. `migration` — PR7 `user_version` 18→latest memory schema migration contract
-4. `restart` — retrieval-anchor disposition replay survives restart
-5. `privacy` — concrete secret redaction + project/worktree isolation
-6. `anchor` — Git-topology retrieval-anchor contract on checked-in domain fixtures
+Product behavior is accepted through the cargo tests below. Performance
+numbers in `result-provisional.json` are diagnostic leftovers from a removed
+harness and must not be quoted as accepted PR7 evidence.
 
-## Owner evidence rule
+## Direct behavioral tests
 
-`current_acceptance` is set **only** when every predeclared gate is
-`executed_passed` against one stable content-addressed source snapshot. The
-snapshot hashes every tracked and untracked input while excluding only the
-receipt, evidence index, and gate logs written by the runner. A dirty checkout
-is therefore identified exactly instead of being rejected merely for being
-dirty. If any input changes while gates run, the index keeps
-`current_acceptance: null` and records `source_snapshot_changed`.
-
-```bash
-python3 benchmarks/pr7-memory/issue_receipt.py \
-  --manifest benchmarks/pr7-memory/gate-manifest-v1.json \
-  --out benchmarks/pr7-memory/owner-receipts-v1.json \
-  --log-dir benchmarks/pr7-memory/logs \
-  --evidence-index benchmarks/pr7-memory/evidence-index.json \
-  --workload benchmarks/pr7-memory/workload-v1.json \
-  --wait-aggregate
-```
-
-Use `--wait-aggregate` so focused Cargo gates never overlap an aggregate
-admission lane.
+1. `cargo test --lib application::evidence_assembly::tests::authorized_drilldown_expands_contribution_span_set_and_exact_members -- --exact`
+2. `cargo test --lib sessions::claude_observation_benchmark::tests::every_provider_executes_a_production_path_and_exact_no_op -- --exact`
+3. `cargo test --test storage_suite migration_test::memory_v2_v19_v23::test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_to_v22_contracts -- --exact`
+4. `cargo test --lib db::retrieval_anchor_authority::tests::disposition_replay_survives_restart_without_resurrection -- --exact`
+5. `cargo test --lib privacy::tests::provider_neutral_workflow_fact_redaction_leaks_no_raw_secret -- --exact`
+6. `cargo test --test host_event_fixture_test canonical_and_linked_worktree_events_share_retained_project_authority -- --exact`
+7. `cargo test -p tracedecay-domain --test git_topology_anchor_contract`

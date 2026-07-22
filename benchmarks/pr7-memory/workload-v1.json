@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "workload_id": "pr7-memory-baseline-v1",
-  "implementation": "src/store/memory_benchmark.rs",
+  "implementation": "direct_behavioral_cargo_tests",
   "platform": {
     "operating_system": "linux",
     "procfs_mount": "/proc",
@@ -130,10 +130,8 @@
   "evidence": {
     "artifact": "result-provisional.json",
     "evidence_status": "provisional",
-    "provisional_reason": "dirty_worktree_no_clean_logical_snapshot",
-    "owner_receipt": "owner-receipts-v1.json",
-    "index": "evidence-index.json",
-    "evidence_contract": "canonical_json_sha256_executed_receipts_only"
+    "acceptance_status": "pending",
+    "index": "evidence-index.json"
   },
-  "command": "python3 benchmarks/pr7-memory/issue_receipt.py --manifest benchmarks/pr7-memory/gate-manifest-v1.json --out benchmarks/pr7-memory/owner-receipts-v1.json --log-dir benchmarks/pr7-memory/logs --evidence-index benchmarks/pr7-memory/evidence-index.json --workload benchmarks/pr7-memory/workload-v1.json --wait-aggregate"
+  "command": "cargo test --lib application::evidence_assembly::tests::authorized_drilldown_expands_contribution_span_set_and_exact_members -- --exact"
 }

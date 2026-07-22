@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use crate::evaluation::{EvalPartitionV1, FixtureAuthorityV1};
 use crate::fixtures;
-use crate::holdout::{self, HoldoutAccessGate, HoldoutSealStatus};
+use crate::holdout::{self, HoldoutSealStatus};
 
 #[test]
 fn manifest_loads_and_validates() {
@@ -110,17 +110,6 @@ fn holdout_seal_is_committed_and_verified_without_reading_labels() {
     }
 }
 
-#[test]
-fn holdout_access_is_not_granted_by_this_harness_revision() {
-    let manifest = fixtures::load_manifest();
-    let seal = fixtures::load_holdout_seal(&manifest);
-    let result = HoldoutAccessGate::request(
-        &seal,
-        &crate::evaluation::RunId::new("run.fixtures.probe").unwrap(),
-        &crate::evaluation::DecisionOwnerId::new("owner-search-quality-lead").unwrap(),
-    );
-    assert!(result.is_err(), "this packet ships no holdout access grant");
-}
 
 #[test]
 fn plan15_fixture_bundle_cross_validates_real_checkpoint_artifacts() {

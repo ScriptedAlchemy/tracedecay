@@ -38,7 +38,7 @@ PR5 delivered:
 - deterministic projection into the existing searchable V1 session/message view;
 - bounded replay, restart, duplicate, collision, partial-input, cancellation,
   stale-authority, migration, consolidation, and crash/retry coverage;
-- a clean-commit production benchmark with 30 measured repetitions and a
+- a checked-in executed production benchmark with 30 measured repetitions and a
   verified exact no-op replay that performs no writes or durable work.
 
 PR6 delivered:
@@ -54,8 +54,9 @@ PR6 delivered:
   evidence recorded by commit `05da230e`.
 
 PR7 delivered the canonical project/profile memory and fact path, evidence and
-provenance, corrections and trust, curation, migration, deletion lineage,
-dogfood hardening, and accepted aggregate evidence. PR8 delivered the shared
+provenance, corrections and trust, curation, migration, deletion lineage, and
+dogfood hardening, retained by direct behavioral cargo tests (performance
+baseline remains provisional/pending). PR8 delivered the shared
 Session/LCM temporal-retrieval kernel, explicit refresh, stable temporal
 pagination, summary lineage, and compatibility delegation. The active slice is
 documented in [NEXT.md](NEXT.md).

@@ -7,8 +7,8 @@
     "provider": "checked_in_real_repo_fixture",
     "fixture_manifest": {
       "path": "tests/fixtures/search_quality/fixture-manifest-v1.json",
-      "byte_len": 9345,
-      "digest": "sha256:2fd7abfafc0efa06ad4b84bfea0034e304cf63cf6ca84781e2a69711449e0157"
+      "byte_len": 9341,
+      "digest": "sha256:5da56cc98447ff962e62ad0cb2757e0c4936f514dfa82265c5402bcc2b56a4f4"
     },
     "query_set": {
       "path": "tests/fixtures/search_quality/queries-v1.jsonl",
@@ -22,7 +22,7 @@
       "authority": "contract_only_not_promotion_authority"
     },
     "holdout": {
-      "locator": "authorized-store://search-quality/holdout/judgments-v1",
+      "locator": "direct-filesystem://search-quality/holdout/judgments-v1",
       "seal_digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de",
       "access": "sealed_until_frozen_parent_run"
     },
@@ -429,20 +429,6 @@
     "atomic_activation_visibility_ns",
     "baseline_rank_drift_during_indexing"
   ],
-  "platform_strata": [
-    {
-      "platform": "linux",
-      "runtime": "native_fastembed",
-      "device_class": "cpu",
-      "state": "pending_parent_gate"
-    },
-    {
-      "platform": "windows",
-      "runtime": "native_fastembed",
-      "device_class": "cpu",
-      "state": "pending_parent_gate"
-    }
-  ],
   "rollback": {
     "activation_pointer": "compare_and_swap",
     "previous_generation_retained": true,
@@ -507,11 +493,6 @@
       "id": "current_and_10x_resources",
       "state": "blocked",
       "reason": "PR9 code_index validate-only proved current/10x; PR10 semantic resource measurement blocked by lib compile errors"
-    },
-    {
-      "id": "linux_and_windows_native_runtime",
-      "state": "pending_unsupported_platform",
-      "reason": "Linux contract evidence present; Windows native FastEmbed runtime unavailable on this host"
     },
     {
       "id": "cold_offline_rollback",

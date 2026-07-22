@@ -1,0 +1,741 @@
+{
+  "candidate_is_not_label_authority": true,
+  "corpus": [
+    {
+      "document_id": "time",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/time.rs",
+      "scope": "research"
+    },
+    {
+      "document_id": "watermark",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs",
+      "scope": "research"
+    },
+    {
+      "document_id": "canonical",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/canonical.rs",
+      "scope": "research"
+    },
+    {
+      "document_id": "error",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/error.rs",
+      "scope": "research"
+    },
+    {
+      "document_id": "repository",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/repository.rs",
+      "scope": "project"
+    },
+    {
+      "document_id": "integration",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/integration.rs",
+      "scope": "project"
+    },
+    {
+      "document_id": "session",
+      "eligibility": "scope_guarded",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs",
+      "scope": "session_private"
+    },
+    {
+      "document_id": "auth_login",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/context_eval_project/src/auth/login.rs",
+      "scope": "context_eval"
+    },
+    {
+      "document_id": "config_store",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/context_eval_project/src/storage/config_store.rs",
+      "scope": "context_eval"
+    },
+    {
+      "document_id": "dockerfile",
+      "eligibility": "searchable",
+      "language": "dockerfile",
+      "path": "tests/fixtures/sample.dockerfile",
+      "scope": "container_fixture"
+    },
+    {
+      "document_id": "generated_lock",
+      "eligibility": "excluded_generated_vendor_noise",
+      "language": "generated_metadata",
+      "path": "Cargo.lock",
+      "scope": "project"
+    },
+    {
+      "document_id": "unsupported_cargo_slot",
+      "eligibility": "unsupported",
+      "language": "unsupported_fixture_extension",
+      "path": "tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture",
+      "scope": "cargo_slot"
+    }
+  ],
+  "decision_policy": {
+    "required_cancellation": "bounded_typed_cancelled",
+    "required_fallback_byte_stability": true,
+    "required_offline": "no_network_and_pr9_fallback_available"
+  },
+  "profile_matrix": [
+    {
+      "calibration_threshold_ppm": 0,
+      "graph_weight_ppm": 250000,
+      "lexical_weight_ppm": 1000000,
+      "profile_id": "pr9-fallback",
+      "rerank_weight_ppm": 0,
+      "semantic_weight_ppm": 0
+    },
+    {
+      "calibration_threshold_ppm": 700000,
+      "graph_weight_ppm": 250000,
+      "lexical_weight_ppm": 1000000,
+      "profile_id": "hybrid-conservative",
+      "rerank_weight_ppm": 0,
+      "semantic_weight_ppm": 250000
+    },
+    {
+      "calibration_threshold_ppm": 700000,
+      "graph_weight_ppm": 250000,
+      "lexical_weight_ppm": 1000000,
+      "profile_id": "hybrid-reranked",
+      "rerank_weight_ppm": 125000,
+      "semantic_weight_ppm": 250000
+    }
+  ],
+  "queries": [
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time::UtcMicros"
+        ],
+        "document_id": "time",
+        "literal": "pub struct UtcMicros"
+      },
+      "partition": "train",
+      "query": "UtcMicros",
+      "query_id": "train-001",
+      "strata": [
+        "exact_symbol"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "watermark::VectorWatermark::merge_max"
+        ],
+        "document_id": "watermark",
+        "literal": "pub fn merge_max"
+      },
+      "partition": "train",
+      "query": "VectorWatermark::merge_max",
+      "query_id": "train-002",
+      "strata": [
+        "qualified_name",
+        "exact_symbol"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time"
+        ],
+        "document_id": "time",
+        "literal": "pub struct TimeInterval"
+      },
+      "partition": "train",
+      "query": "crates/tracedecay-domain/src/research/time.rs",
+      "query_id": "train-003",
+      "strata": [
+        "exact_path"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::InvalidTimeInterval"
+        ],
+        "document_id": "error",
+        "literal": "time interval start must not be after its end"
+      },
+      "partition": "train",
+      "query": "time interval start must not be after its end",
+      "query_id": "train-004",
+      "strata": [
+        "exact_error"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "label": {
+        "anchors": [
+          "dockerfile::APP_PORT"
+        ],
+        "document_id": "dockerfile",
+        "literal": "ENV APP_PORT=8080"
+      },
+      "partition": "train",
+      "query": "APP_PORT",
+      "query_id": "train-005",
+      "strata": [
+        "config_key"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "label": {
+        "anchors": [
+          "dockerfile::--port"
+        ],
+        "document_id": "dockerfile",
+        "literal": "CMD [\"--port\", \"8080\"]"
+      },
+      "partition": "train",
+      "query": "--port",
+      "query_id": "train-006",
+      "strata": [
+        "exact_flag"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "canonical::canonical_sha256"
+        ],
+        "document_id": "canonical",
+        "literal": "pub fn canonical_sha256"
+      },
+      "partition": "train",
+      "query": "how are canonical digests computed for manifests",
+      "query_id": "train-007",
+      "strata": [
+        "natural_language"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time::TimeInterval::validate"
+        ],
+        "document_id": "time",
+        "literal": "pub fn validate"
+      },
+      "partition": "train",
+      "query": "validate",
+      "query_id": "train-008",
+      "strata": [
+        "same_name_cross_scope"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "absence_literal": "zzqxv_owner_train_absent_9347",
+        "anchors": []
+      },
+      "partition": "train",
+      "query": "zzqxv_owner_train_absent_9347",
+      "query_id": "train-009",
+      "strata": [
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [],
+        "forbidden_documents": [
+          "generated_lock"
+        ]
+      },
+      "partition": "train",
+      "query": "checksum package registry metadata",
+      "query_id": "train-010",
+      "strata": [
+        "generated_vendor_noise",
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "cargo_slot"
+      ],
+      "label": {
+        "anchors": [],
+        "forbidden_documents": [
+          "unsupported_cargo_slot"
+        ]
+      },
+      "partition": "train",
+      "query": "tmpfs_scratch_path",
+      "query_id": "train-011",
+      "strata": [
+        "unsupported_language",
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "session_public"
+      ],
+      "label": {
+        "anchors": [
+          "git:5b81ceeb45647b6b2425cf4c4925f9f8df110f80:crates/tracedecay-domain/src/session.rs::ClosedUtcIntervalV1"
+        ],
+        "git_commit": "5b81ceeb45647b6b2425cf4c4925f9f8df110f80",
+        "git_path": "crates/tracedecay-domain/src/session.rs",
+        "literal": "pub struct ClosedUtcIntervalV1"
+      },
+      "partition": "train",
+      "query": "ClosedUtcIntervalV1",
+      "query_id": "train-012",
+      "strata": [
+        "incremental_edit"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "watermark::VectorWatermark"
+        ],
+        "document_id": "watermark",
+        "literal": "pub struct VectorWatermark"
+      },
+      "partition": "validation",
+      "query": "VectorWatermark",
+      "query_id": "validation-001",
+      "strata": [
+        "exact_symbol"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time::TimeInterval::validate"
+        ],
+        "document_id": "time",
+        "literal": "pub fn validate"
+      },
+      "partition": "validation",
+      "query": "TimeInterval::validate",
+      "query_id": "validation-002",
+      "strata": [
+        "qualified_name"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "watermark"
+        ],
+        "document_id": "watermark",
+        "literal": "pub struct ShardWatermark"
+      },
+      "partition": "validation",
+      "query": "crates/tracedecay-domain/src/research/watermark.rs",
+      "query_id": "validation-003",
+      "strata": [
+        "exact_path"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "label": {
+        "anchors": [
+          "dockerfile::LOG_LEVEL"
+        ],
+        "document_id": "dockerfile",
+        "literal": "ENV LOG_LEVEL=info"
+      },
+      "partition": "validation",
+      "query": "LOG_LEVEL",
+      "query_id": "validation-004",
+      "strata": [
+        "config_key"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "label": {
+        "anchors": [
+          "dockerfile::--interval"
+        ],
+        "document_id": "dockerfile",
+        "literal": "HEALTHCHECK --interval=30s"
+      },
+      "partition": "validation",
+      "query": "--interval",
+      "query_id": "validation-005",
+      "strata": [
+        "exact_flag"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "repository::RepositoryDirtyStateV1"
+        ],
+        "document_id": "repository",
+        "literal": "pub enum RepositoryDirtyStateV1"
+      },
+      "partition": "validation",
+      "query": "repository dirty state and remote identity evidence",
+      "query_id": "validation-006",
+      "strata": [
+        "natural_language"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time::UtcMicros"
+        ],
+        "document_id": "time",
+        "literal": "pub struct UtcMicros"
+      },
+      "partition": "validation",
+      "query": "new",
+      "query_id": "validation-007",
+      "strata": [
+        "same_name_cross_scope"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "absence_literal": "qzxw_owner_validation_absent_551",
+        "anchors": []
+      },
+      "partition": "validation",
+      "query": "qzxw_owner_validation_absent_551",
+      "query_id": "validation-008",
+      "strata": [
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [],
+        "forbidden_documents": [
+          "session"
+        ]
+      },
+      "partition": "validation",
+      "query": "SessionEvidenceMetadataV1",
+      "query_id": "validation-009",
+      "strata": [
+        "wrong_scope",
+        "privacy_canary",
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "cargo_slot"
+      ],
+      "label": {
+        "anchors": [
+          "tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture::tmpfs_scratch_path"
+        ],
+        "document_id": "unsupported_cargo_slot",
+        "forbidden_anchors": [
+          "tests/fixtures/search_quality/corpus/cargo-slot/src/main.rs::tmpfs_scratch_path"
+        ],
+        "literal": "tmpfs_scratch_path"
+      },
+      "partition": "validation",
+      "query": "tmpfs_scratch_path file history",
+      "query_id": "validation-010",
+      "strata": [
+        "renamed_moved_symbol",
+        "incremental_delete",
+        "incremental_rename"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [],
+        "forbidden_documents": [
+          "generated_lock"
+        ]
+      },
+      "partition": "validation",
+      "query": "Cargo.lock",
+      "query_id": "validation-011",
+      "strata": [
+        "generated_vendor_noise"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "label": {
+        "anchors": [
+          "config_store::ConfigStore::write_config"
+        ],
+        "document_id": "config_store",
+        "literal": "pub fn write_config"
+      },
+      "partition": "validation",
+      "query": "who writes to the config file",
+      "query_id": "validation-012",
+      "strata": [
+        "natural_language"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "partition": "sealed_holdout",
+      "query": "TimeInterval",
+      "query_id": "holdout-001",
+      "strata": [
+        "exact_symbol"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "partition": "sealed_holdout",
+      "query": "ShardWatermark::outbox_sequence",
+      "query_id": "holdout-002",
+      "strata": [
+        "qualified_name",
+        "exact_symbol"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "project"
+      ],
+      "partition": "sealed_holdout",
+      "query": "crates/tracedecay-domain/src/integration.rs",
+      "query_id": "holdout-003",
+      "strata": [
+        "exact_path"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "partition": "sealed_holdout",
+      "query": "time interval start must not be after its end",
+      "query_id": "holdout-004",
+      "strata": [
+        "exact_error"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "partition": "sealed_holdout",
+      "query": "APP_VERSION",
+      "query_id": "holdout-005",
+      "strata": [
+        "config_key"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "partition": "sealed_holdout",
+      "query": "--timeout",
+      "query_id": "holdout-006",
+      "strata": [
+        "exact_flag"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "partition": "sealed_holdout",
+      "query": "validation failures for pure research domain values",
+      "query_id": "holdout-007",
+      "strata": [
+        "natural_language"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "partition": "sealed_holdout",
+      "query": "validate",
+      "query_id": "holdout-008",
+      "strata": [
+        "same_name_cross_scope"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "partition": "sealed_holdout",
+      "query": "holdout_absent_token_c3f9b6",
+      "query_id": "holdout-009",
+      "strata": [
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "project"
+      ],
+      "partition": "sealed_holdout",
+      "query": "registry checksum source replacement",
+      "query_id": "holdout-010",
+      "strata": [
+        "generated_vendor_noise",
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "cargo_slot"
+      ],
+      "partition": "sealed_holdout",
+      "query": "tmpfs_scratch_path",
+      "query_id": "holdout-011",
+      "strata": [
+        "unsupported_language",
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "cargo_slot"
+      ],
+      "partition": "sealed_holdout",
+      "query": "where was tmpfs_scratch_path moved",
+      "query_id": "holdout-012",
+      "strata": [
+        "renamed_moved_symbol",
+        "incremental_delete",
+        "incremental_rename"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "session_public"
+      ],
+      "partition": "sealed_holdout",
+      "query": "ClosedUtcIntervalV1",
+      "query_id": "holdout-013",
+      "strata": [
+        "incremental_edit"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "partition": "sealed_holdout",
+      "query": "SessionEvidenceMetadataV1",
+      "query_id": "holdout-014",
+      "strata": [
+        "wrong_scope",
+        "privacy_canary",
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "partition": "sealed_holdout",
+      "query": "what checks whether a session token is still valid",
+      "query_id": "holdout-015",
+      "strata": [
+        "natural_language"
+      ]
+    }
+  ],
+  "resource_budgets": {
+    "10x": {
+      "maximum_p99_latency_us": 10000000,
+      "maximum_peak_rss_bytes": 4294967296
+    },
+    "current": {
+      "maximum_p99_latency_us": 5000000,
+      "maximum_peak_rss_bytes": 2147483648
+    }
+  },
+  "schema_version": 1,
+  "source_repository_commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
+  "source_repository_tree": "3d8de57a843244229c3b19995c9d0b9e00081769",
+  "workload_id": "pr9-pr10-production-candidate-workload-v1"
+}

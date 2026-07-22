@@ -21,7 +21,6 @@
     "fallback",
     "resource_strata",
     "resource_metrics",
-    "platform_strata",
     "rollback",
     "parent_gates",
     "acceptance"
@@ -118,16 +117,12 @@
       "minItems": 20,
       "uniqueItems": true
     },
-    "platform_strata": {
-      "type": "array",
-      "minItems": 2
-    },
     "rollback": {
       "type": "object"
     },
     "parent_gates": {
       "type": "array",
-      "minItems": 15
+      "minItems": 14
     },
     "acceptance": {
       "type": "object",

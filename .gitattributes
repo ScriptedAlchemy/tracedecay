@@ -18,6 +18,5 @@ src/agents/hermes/templates/** text eol=lf
 src/sessions/claude_observation_benchmark.rs text eol=lf
 src/sessions/claude_observation_benchmark/** text eol=lf
 benchmarks/pr5-observation/** text eol=lf
-# PR7 benchmark evidence attests the embedded harness and manifest byte-for-byte.
-src/store/memory_benchmark.rs text eol=lf
+# PR7 workload/evidence JSON stays LF for portable checkout digests.
 benchmarks/pr7-memory/** text eol=lf

@@ -28,7 +28,7 @@ not separate crate-first work queues.
   typed receipts, durable cursors, and deterministic searchable projections.
 - Observation, receipt, cursor, enqueue, projection effects, and checkpoints
   preserve atomic restart/retry behavior; exact no-op replay performs no writes.
-- The committed PR5 workload and clean-commit acceptance artifact record the
+- The committed PR5 workload and checked-in executed benchmark result record the
   production parse/sanitize/commit/project/replay baseline for PR20.
 - PR6 extends that path across the supported Claude, Codex, Cursor, Hermes,
   Kiro, and Cline-family sources through one host-neutral catalog and provider

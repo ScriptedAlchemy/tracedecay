@@ -2,22 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::{
-    AgentAdjudicatedLabelProvenanceV1, AgentAdjudicationStateV1, AgentJudgmentProvenanceV1,
-    CandidateListV1, DecisionOwnerId, EvalCandidateAnchorV1, EvalCandidateV1, EvalOutcomeV1,
+    CandidateListV1, EvalCandidateAnchorV1, EvalCandidateV1, EvalOutcomeV1,
     EvalPartitionV1, EvalQueryV1, EvalRunScopeV1, EvaluationFixtureBundleV1, EvidenceIndexV1,
-    FixtureAuthorityV1, FixtureContentDigest, FixtureManifestV1, HoldoutAccessReceiptV1,
-    HoldoutLabelAuthorityV1, JudgmentId, LabelSetDigest, LabelSetId, LabelSetV1, QueryWorkloadV1,
-    RelevanceJudgmentV1, RetrieverLaneId, RunManifestV1, SavedCandidateSetDigest,
-    SavedCandidateSetV1, WorkloadDigest,
+    FixtureAuthorityV1, FixtureContentDigest, FixtureManifestV1, HoldoutLabelAuthorityV1,
+    LabelSetDigest, LabelSetId, LabelSetV1, QueryWorkloadV1, RelevanceJudgmentV1, RetrieverLaneId,
+    RunManifestV1, SavedCandidateSetDigest, SavedCandidateSetV1, WorkloadDigest,
 };
 
 const ZERO_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-const ONE_DIGEST: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
-const TWO_DIGEST: &str = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
-const THREE_DIGEST: &str =
-    "sha256:3333333333333333333333333333333333333333333333333333333333333333";
-const FOUR_DIGEST: &str = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
-const FIVE_DIGEST: &str = "sha256:5555555555555555555555555555555555555555555555555555555555555555";
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/search_quality")
@@ -113,86 +105,6 @@ fn pre_holdout_access_validation_rejects_contract_only_authority() {
     assert!(error.to_string().contains("locked-quality"));
 }
 
-#[test]
-fn holdout_access_receipt_binds_locator_seal_and_frozen_run_digest() {
-    let mut manifest: FixtureManifestV1 = read_json("fixture-manifest-v1.json");
-    manifest.authority = FixtureAuthorityV1::LockedQuality;
-    manifest.holdout_seal.labels_content_digest =
-        Some(FixtureContentDigest::new(ZERO_DIGEST).unwrap());
-    manifest.holdout_seal.label_authority = Some(HoldoutLabelAuthorityV1::Deterministic);
-    let workload = workload();
-    let run = locked_manifest(&manifest, &workload);
-    run.validate_pre_holdout_access(&manifest, &workload)
-        .unwrap();
-
-    let receipt = HoldoutAccessReceiptV1::issue_for_run(
-        &run,
-        &manifest.holdout_seal,
-        &manifest.decision_owners,
-        manifest.decision_owners[0].clone(),
-        150,
-    )
-    .unwrap();
-    assert_eq!(receipt.run_id, run.run_id);
-    assert_eq!(receipt.run_manifest_digest, run.digest);
-    assert_eq!(receipt.seal_digest, manifest.holdout_seal.seal_digest);
-    assert_eq!(
-        receipt.labels_content_digest,
-        manifest.holdout_seal.labels_content_digest.clone().unwrap()
-    );
-
-    let mut wrong_run = run.clone();
-    wrong_run.candidate_revision.push_str("-changed-after-lock");
-    wrong_run.digest = wrong_run.compute_digest().unwrap();
-    assert!(
-        receipt
-            .validate_for_run(
-                &wrong_run,
-                &manifest.holdout_seal,
-                &manifest.decision_owners,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("run/seal binding")
-    );
-}
-
-#[test]
-fn owner_decision_requires_canonical_identities_and_terminal_outcomes() {
-    use tracedecay_domain::{EvidenceIndexDigest, OwnerDecisionDigest, OwnerDecisionEvidenceV1};
-    let mut decision = OwnerDecisionEvidenceV1 {
-        schema_version: 1,
-        decision_kind: OwnerDecisionEvidenceV1::DECISION_KIND.to_string(),
-        authority: "owner_delegated_by_user_2026-07-22".to_string(),
-        source_repository_commit: "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66".to_string(),
-        source_repository_tree: "3d8de57a843244229c3b19995c9d0b9e00081769".to_string(),
-        corpus_digest: FixtureContentDigest::new(ONE_DIGEST).unwrap(),
-        partition_digest: FixtureContentDigest::new(TWO_DIGEST).unwrap(),
-        label_digest: FixtureContentDigest::new(THREE_DIGEST).unwrap(),
-        profile_digest: FixtureContentDigest::new(FOUR_DIGEST).unwrap(),
-        toolchain_digest: FixtureContentDigest::new(FIVE_DIGEST).unwrap(),
-        hardware_digest: FixtureContentDigest::new(ONE_DIGEST).unwrap(),
-        report_digest: FixtureContentDigest::new(TWO_DIGEST).unwrap(),
-        evidence_index_digest: EvidenceIndexDigest::new(THREE_DIGEST).unwrap(),
-        outcome: EvalOutcomeV1::Inconclusive,
-        decided_by: DecisionOwnerId::new("owner-search-quality-lead").unwrap(),
-        rationale: "low support pending production evidence".to_string(),
-        gate_receipt_digests: vec![FixtureContentDigest::new(FOUR_DIGEST).unwrap()],
-        digest: OwnerDecisionDigest::new(ZERO_DIGEST).unwrap(),
-    };
-    decision.digest = decision.compute_digest().unwrap();
-    decision.validate().unwrap();
-
-    decision.outcome = EvalOutcomeV1::Blocked;
-    decision.digest = decision.compute_digest().unwrap();
-    assert!(
-        decision
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("accepted, rejected, or inconclusive")
-    );
-}
 
 #[test]
 fn saved_candidate_ablations_filter_frozen_lists_without_mutating_them() {
@@ -313,136 +225,11 @@ fn domain_exposes_structure_checks_not_receipt_authority_injection() {
     assert!(source.contains("validate_structure_for_run"));
 }
 
-fn agent_judgment(
-    id: &str,
-    instance: &str,
-    timestamp: u64,
-    artifact_digest: &str,
-    label_set_digest: &str,
-) -> AgentJudgmentProvenanceV1 {
-    AgentJudgmentProvenanceV1 {
-        independent_judgment_id: JudgmentId::new(id).unwrap(),
-        adjudicator_instance_id: instance.to_string(),
-        adjudicator_model: "sol".to_string(),
-        adjudicator_version: "gpt-5.6-sol".to_string(),
-        judged_at_unix: timestamp,
-        blinded_packet_digest: FixtureContentDigest::new(ONE_DIGEST).unwrap(),
-        immutable_judgment_artifact_digest: FixtureContentDigest::new(artifact_digest).unwrap(),
-        label_set_digest: LabelSetDigest::new(label_set_digest).unwrap(),
-    }
-}
 
-fn agent_provenance(state: AgentAdjudicationStateV1) -> AgentAdjudicatedLabelProvenanceV1 {
-    AgentAdjudicatedLabelProvenanceV1 {
-        delegated_by: DecisionOwnerId::new("owner-search-quality-lead").unwrap(),
-        owner_delegation_digest: FixtureContentDigest::new(TWO_DIGEST).unwrap(),
-        blinded_packet_digest: FixtureContentDigest::new(ONE_DIGEST).unwrap(),
-        final_label_set_digest: Some(LabelSetDigest::new(FIVE_DIGEST).unwrap()),
-        state,
-        independent_judgments: vec![
-            agent_judgment(
-                "judgment-opaque-a",
-                "sol-instance-a",
-                100,
-                THREE_DIGEST,
-                FIVE_DIGEST,
-            ),
-            agent_judgment(
-                "judgment-opaque-b",
-                "sol-instance-b",
-                101,
-                FOUR_DIGEST,
-                FIVE_DIGEST,
-            ),
-        ],
-        separate_adjudication: None,
-    }
-}
 
-#[test]
-fn agent_authority_requires_two_independent_blinded_judgments() {
-    let provenance = agent_provenance(AgentAdjudicationStateV1::Agreement);
-    assert!(provenance.is_sealable().unwrap());
 
-    let mut incomplete = provenance;
-    incomplete.independent_judgments.pop();
-    assert!(incomplete.is_sealable().is_err());
-}
 
-#[test]
-fn disagreement_requires_a_distinct_separate_adjudicator() {
-    let mut pending = agent_provenance(AgentAdjudicationStateV1::DisagreementPendingAdjudication);
-    pending.independent_judgments[1].label_set_digest = LabelSetDigest::new(FOUR_DIGEST).unwrap();
-    pending.final_label_set_digest = None;
-    assert!(!pending.is_sealable().unwrap());
 
-    let mut adjudicated = pending;
-    adjudicated.state = AgentAdjudicationStateV1::SeparatelyAdjudicated;
-    adjudicated.final_label_set_digest = Some(LabelSetDigest::new(FIVE_DIGEST).unwrap());
-    adjudicated.separate_adjudication = Some(agent_judgment(
-        "judgment-opaque-c",
-        "sol-instance-c",
-        102,
-        "sha256:6666666666666666666666666666666666666666666666666666666666666666",
-        FIVE_DIGEST,
-    ));
-    assert!(adjudicated.is_sealable().unwrap());
-
-    adjudicated.separate_adjudication = Some(agent_judgment(
-        "judgment-opaque-c",
-        "sol-instance-a",
-        102,
-        "sha256:6666666666666666666666666666666666666666666666666666666666666666",
-        FIVE_DIGEST,
-    ));
-    assert!(adjudicated.is_sealable().is_err());
-}
-
-#[test]
-fn adjudication_state_is_derived_from_exactly_two_results() {
-    let mut agreement = agent_provenance(AgentAdjudicationStateV1::Agreement);
-    agreement.independent_judgments.push(agent_judgment(
-        "judgment-opaque-extra",
-        "sol-instance-extra",
-        103,
-        "sha256:7777777777777777777777777777777777777777777777777777777777777777",
-        FIVE_DIGEST,
-    ));
-    assert!(agreement.validate().is_err());
-
-    let mut false_agreement = agent_provenance(AgentAdjudicationStateV1::Agreement);
-    false_agreement.independent_judgments[1].label_set_digest =
-        LabelSetDigest::new(FOUR_DIGEST).unwrap();
-    assert!(false_agreement.validate().is_err());
-
-    let mut false_disagreement =
-        agent_provenance(AgentAdjudicationStateV1::DisagreementPendingAdjudication);
-    false_disagreement.final_label_set_digest = None;
-    assert!(false_disagreement.validate().is_err());
-}
-
-#[test]
-fn agent_provenance_rejects_placeholder_reused_and_mismatched_digests() {
-    let mut placeholder = agent_provenance(AgentAdjudicationStateV1::Agreement);
-    placeholder.owner_delegation_digest = FixtureContentDigest::new(ZERO_DIGEST).unwrap();
-    assert!(placeholder.validate().is_err());
-
-    let mut mismatched_packet = agent_provenance(AgentAdjudicationStateV1::Agreement);
-    mismatched_packet.independent_judgments[0].blinded_packet_digest =
-        FixtureContentDigest::new(TWO_DIGEST).unwrap();
-    assert!(mismatched_packet.validate().is_err());
-
-    let mut reused_artifact = agent_provenance(AgentAdjudicationStateV1::Agreement);
-    reused_artifact.independent_judgments[1].immutable_judgment_artifact_digest = reused_artifact
-        .independent_judgments[0]
-        .immutable_judgment_artifact_digest
-        .clone();
-    assert!(reused_artifact.validate().is_err());
-
-    let mut mismatched_final = agent_provenance(AgentAdjudicationStateV1::Agreement);
-    mismatched_final.final_label_set_digest = Some(LabelSetDigest::new(FOUR_DIGEST).unwrap());
-    assert!(mismatched_final.validate().is_err());
-}
 
 #[test]
 fn contamination_membership_is_bidirectional() {

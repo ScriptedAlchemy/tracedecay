@@ -118,4 +118,4 @@ This slice is complete when PR12/PR13 are production-reachable across supported
 surfaces, incremental worktree indexing is bounded and measurably avoids
 unrelated work, ordinary search remains available during indexing, only
 complete compatible generations publish, and the all-feature distribution and
-aggregate acceptance gates pass from a clean commit.
+direct executed product/test gates pass with truthful pass/fail/pending status.

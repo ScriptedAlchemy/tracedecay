@@ -1,5 +1,5 @@
 {
-  "adjudication_policy": "These checked-in development labels are single-authored contract fixtures and are not promotion authority. Any locked-quality run requires separately sealed, independently double-labeled, adjudicated labels and an unsigned audited access receipt.",
+  "adjudication_policy": "These checked-in development labels are single-authored contract fixtures and are not promotion authority. Any locked-quality run requires separately prepared direct-filesystem holdout labels with deterministic or human-authoritative authority.",
   "artifact_files": [
     {
       "byte_len": 19325,
@@ -193,8 +193,8 @@
     "Eligible exact anchors cannot be demoted by approximate ranking in a later acceptance run."
   ],
   "holdout_seal": {
-    "access_policy": "sealed_access_requires_receipt",
-    "locator": "authorized-store://search-quality/holdout/judgments-v1",
+    "access_policy": "direct_filesystem",
+    "locator": "direct-filesystem://search-quality/holdout/judgments-v1",
     "schema_revision": 1,
     "seal_digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de"
   },
@@ -244,7 +244,7 @@
   "revision": 1,
   "stopping_rules": [
     "Contract validation stops on any digest, partition, authorization, temporal, or foreign-key violation.",
-    "This contract-only packet emits no quality outcome and cannot authorize profile promotion."
+    "This contract-only fixture emits no quality outcome and cannot authorize profile promotion."
   ],
   "support_floors": [
     {

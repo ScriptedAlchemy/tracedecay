@@ -72,8 +72,8 @@ equivalence was verified table-by-table.
 | P3.7 | Offline consolidation vs daemon auto-respawn contention (offline windows get refilled by host tool calls; operator races the respawn) | Plan 14 / plan 19 — a typed maintenance-window API that hosts respect, replacing ad-hoc stop/kill |
 | P3.8 | Largely unconsumed research-contract surface in `tracedecay-domain` (manifest/catalog/tombstone types beyond current consumers) | Plan 13 — consumers land PR8+/PR13; keep, do not delete; re-audit at PR13 |
 | P3.9 | Redundant v20 named unique indexes (`idx_memory_v2_proposals_owner_*`) vs fresh-path autoindexes — benign divergence | Plan 19 / PR19 — drop during cutover consolidation; harmless until then |
-| P3.10 | Backfill/cutover crash-point replay not exhaustively exercised (structural gating verified; per-stage crash matrix not) | PR7 acceptance follow-up or PR19 migration gates — extend the fault harness over `backfill_memory_v2_batch`/`finalize_memory_v2_cutover` stages |
-| P3.11 | Anchor coverage thin spots: store-path copied-prompt binding; end-to-end project-move re-resolution | Plan 13 acceptance — small additions once PR7 gates are green |
+| P3.10 | Backfill/cutover crash-point replay not exhaustively exercised (structural gating verified; per-stage crash matrix not) | Direct PR19 migration behavioral tests — extend crash-point coverage over `backfill_memory_v2_batch`/`finalize_memory_v2_cutover` stages |
+| P3.11 | Anchor coverage thin spots: store-path copied-prompt binding; end-to-end project-move re-resolution | Plan 13 direct behavioral tests — small additions once PR7 cargo gates are green |
 | P3.12 | `load_digest_targets` silently degrades a corrupt digest manifest to empty via `unwrap_or_default` | Plan 14 — surface as a typed warning through doctor/observability |
 
 ## Explicitly not adopted (reviewed and rejected)

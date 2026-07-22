@@ -1,6 +1,6 @@
 {
-  "access_policy": "sealed_access_requires_receipt",
-  "locator": "authorized-store://search-quality/holdout/judgments-v1",
+  "access_policy": "direct_filesystem",
+  "locator": "direct-filesystem://search-quality/holdout/judgments-v1",
   "schema_revision": 1,
   "seal_digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de"
 }

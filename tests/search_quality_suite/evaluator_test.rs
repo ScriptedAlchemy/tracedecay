@@ -14,11 +14,11 @@ fn canonical_validator_accepts_only_the_frozen_real_fixture_packet() {
     assert_eq!(validation.authority, FixtureAuthorityV1::ContractOnly);
     assert_eq!(
         validation.fixture_manifest_digest.as_str(),
-        "sha256:19a6706c6d360854597c6928ba4da2c35b6c86697628de92cd7775d032c9768d"
+        "sha256:5da56cc98447ff962e62ad0cb2757e0c4936f514dfa82265c5402bcc2b56a4f4"
     );
     assert_eq!(
         validation.run_manifest_digest.as_str(),
-        "sha256:98eecb3d79e9bd9b8ac125ecb0a9ea27f9c55372994a289649738168b4937e04"
+        "sha256:3db745fc343cbfc00e9bbb173979474bdd3d324e5f5bf87c65f2357e803f3fe1"
     );
 }
 
@@ -43,7 +43,7 @@ fn contract_only_compare_blocks_without_opening_holdout_or_creating_promotion() 
     assert_eq!(result.blocked_on.len(), 1);
     assert_eq!(
         result.blocked_on[0].locator,
-        "authorized-store://search-quality/holdout/judgments-v1"
+        "direct-filesystem://search-quality/holdout/judgments-v1"
     );
     assert!(
         !result

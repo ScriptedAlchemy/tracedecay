@@ -32,7 +32,6 @@ EXPECTED_PARENT_GATES = {
     "current_and_10x_resources",
     "fallback_byte_stability",
     "library_first_default_all_features",
-    "linux_and_windows_native_runtime",
     "local_verified_model_bytes",
     "plan15_locked_holdout_decision",
     "production_exact_flat_vector_service",
@@ -683,13 +682,11 @@ def validate_resource_and_rollback_contract(workload: dict[str, Any]) -> None:
         if stratum.get("concurrency") != [1, "declared_saturation"]:
             fail("resource strata must cover concurrency 1 and declared saturation")
 
-    platforms = workload.get("platform_strata")
-    if not isinstance(platforms, list):
-        fail("platform_strata must be an array")
-    if {platform.get("platform") for platform in platforms} != {"linux", "windows"}:
-        fail("native platform strata must cover Linux and Windows")
-    if any(platform.get("runtime") != "native_fastembed" for platform in platforms):
-        fail("platform strata must use native FastEmbed")
+    if "platform_strata" in workload:
+        fail(
+            "eval packets must not declare OS platform strata; "
+            "Linux/Windows/macOS product lifecycle belongs to PR13 host CI"
+        )
 
     metrics = workload.get("resource_metrics")
     if not isinstance(metrics, list) or not {
@@ -712,7 +709,6 @@ ALLOWED_PARENT_GATE_STATES = {
     "pending",
     "executed_contract",
     "blocked",
-    "pending_unsupported_platform",
 }
 
 
@@ -731,7 +727,7 @@ def validate_pending_acceptance(
     if set(gate_states) != EXPECTED_PARENT_GATES:
         fail("parent gate set is incomplete")
     if any(state not in ALLOWED_PARENT_GATE_STATES for state in gate_states.values()):
-        fail("parent gate states must be pending, executed_contract, blocked, or pending_unsupported_platform")
+        fail("parent gate states must be pending, executed_contract, or blocked")
     if any(state == "accepted" for state in gate_states.values()):
         fail("checked-in packet cannot claim a parent gate accepted")
     for gate in gates:
@@ -741,11 +737,13 @@ def validate_pending_acceptance(
         if state == "executed_contract":
             if not isinstance(gate.get("evidence"), str) or not gate["evidence"]:
                 fail(f"{gate.get('id')} executed_contract requires evidence")
-        if state in {"blocked", "pending_unsupported_platform"}:
+        if state == "blocked":
             if not isinstance(gate.get("reason"), str) or not gate["reason"]:
                 fail(f"{gate.get('id')} {state} requires a reason")
-        if state == "pending_unsupported_platform" and gate.get("id") != "linux_and_windows_native_runtime":
-            fail("pending_unsupported_platform is reserved for the native platform gate")
+        if gate.get("id") == "linux_and_windows_native_runtime":
+            fail(
+                "OS native-runtime gates belong to product host CI, not PR10 eval packets"
+            )
 
     acceptance = workload.get("acceptance")
     if not isinstance(acceptance, dict):
@@ -790,7 +788,7 @@ def validate_pending_acceptance(
     remaining = {
         gate_id
         for gate_id, state in gate_states.items()
-        if state in {"pending", "blocked", "pending_unsupported_platform"}
+        if state in {"pending", "blocked"}
     }
     if set(result.get("blocked_on", [])) != remaining:
         fail("blocked_on must exactly list unfinished parent gates")

@@ -16,7 +16,7 @@
 //!
 //! It deliberately asserts NO quality thresholds, tunes NO labels, and
 //! changes NO constants: this packet produces fixtures + harness + schemas
-//! only. Locked-scope runs and the holdout reveal capability land with the
+//! only. Locked-scope runs and digest-bound holdout access land with the
 //! locked-comparison packet.
 
 #[path = "../common/mod.rs"]

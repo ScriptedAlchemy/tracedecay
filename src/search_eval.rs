@@ -1,39 +1,46 @@
 //! Canonical Plan 15 search-quality fixture validator and comparison harness.
 //!
-//! The checked-in PR9 packet is contract-only. This module validates all
-//! fixture bytes and emits a typed `blocked` result when the authorized
-//! locked-quality artifact is unavailable. Sealed holdout labels are never
-//! opened until a locked-quality run manifest has passed every pre-access
-//! check. Authority is canonical digests + owner metadata only.
+//! The checked-in PR9 packet is contract-only. This module validates fixture
+//! bytes and emits a typed `blocked` result until locked-quality evaluation is
+//! supplied with direct local holdout labels and frozen saved candidates.
+//! Tuning never opens holdout labels. Authority is canonical digests only —
+//! no Packet/Seal CLI, owner delegation, judgment import, access receipts,
+//! reveal capabilities, or signature/attestation machinery.
 
+pub mod candidate_output;
 pub mod holdout;
 
-use self::holdout::{HoldoutAuthorityError, HoldoutAuthorityStoreV1, HoldoutRegistryRecordV1};
+pub use self::candidate_output::{
+    CandidateOutputError, GenerateCandidateOutputsOptions, GenerateCandidateOutputsResultV1,
+    generate_candidate_outputs, load_candidate_workload, sealed_holdout_input,
+    write_generate_outputs,
+};
+
+
+use self::holdout::load_direct_holdout_labels;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
-    AcceptedPr9CandidateEvidenceDigest, AcceptedPr9CandidateEvidenceV1,
-    AgentAdjudicatedLabelProvenanceV1, AuthorizationCanaryV1, ContextSpanV1, DecisionRecordDigest,
-    DecisionRecordV1, EvalOutcomeV1, EvalPartitionV1, EvalQueryV1, EvaluationContractError,
-    EvaluationFixtureBundleV1, EvaluationTaskV1, EvidenceBatchDigest, EvidenceBatchId,
-    EvidenceBatchV1, EvidenceClaimId, EvidenceIndexDigest, EvidenceIndexEntryV1, EvidenceIndexId,
-    EvidenceIndexV1, ExactAdmissionOracleV1, FixtureAuthorityV1, FixtureContentDigest,
-    FixtureFileDigestV1, FixtureManifestDigest, FixtureManifestV1, HoldoutAccessReceiptV1,
-    HoldoutLabelAuthorityV1, HoldoutSealDigest, HoldoutSealV1, LabelSetDigest, LabelSetId,
-    LabelSetV1, QueryFamilyV1, QueryWorkloadV1, RelevanceJudgmentV1, RunManifestDigest,
-    RunManifestV1, SavedCandidateSetV1, TemporalEventV1, WorkloadDigest,
+    AcceptedPr9CandidateEvidenceDigest, AcceptedPr9CandidateEvidenceV1, AuthorizationCanaryV1,
+    ContextSpanV1, DecisionRecordDigest, DecisionRecordV1, EvalOutcomeV1, EvalPartitionV1,
+    EvalQueryV1, EvaluationContractError, EvaluationFixtureBundleV1, EvaluationTaskV1,
+    EvidenceBatchDigest, EvidenceBatchId, EvidenceBatchV1, EvidenceClaimId, EvidenceIndexDigest,
+    EvidenceIndexEntryV1, EvidenceIndexId, EvidenceIndexV1, ExactAdmissionOracleV1,
+    FixtureAuthorityV1, FixtureContentDigest, FixtureFileDigestV1, FixtureManifestDigest,
+    FixtureManifestV1, HoldoutLabelAuthorityV1, HoldoutSealDigest, HoldoutSealV1, LabelSetDigest,
+    LabelSetId, LabelSetV1, QueryFamilyV1, QueryWorkloadV1, RelevanceJudgmentV1,
+    RunManifestDigest, RunManifestV1, SavedCandidateSetV1, TemporalEventV1, WorkloadDigest,
 };
 
 const ZERO_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 const REPORT_DIGEST_DOMAIN: &str = "tracedecay.search-quality-report.v1";
-pub const PR9_ACCEPTANCE_DECISION_EXPRESSION: &str = "pr9_candidate_matrix_complete && bound_label_authority in [deterministic,human_authoritative,agent_adjudicated] && durable_run_bound_receipt";
+pub const PR9_ACCEPTANCE_DECISION_EXPRESSION: &str = "pr9_candidate_matrix_complete && bound_label_authority in [deterministic,human_authoritative]";
 
 #[derive(Debug, Error)]
 pub enum SearchEvalError {
@@ -84,30 +91,10 @@ pub struct CompareOptions {
     pub fixture_root: PathBuf,
     pub run_manifest: Option<PathBuf>,
     pub output_root: PathBuf,
-    /// Optional explicit decision owner for locked holdout access. Defaults to
-    /// the first frozen decision owner on the run manifest.
-    pub holdout_accessed_by: Option<tracedecay_domain::DecisionOwnerId>,
-    pub holdout_profile_root: Option<PathBuf>,
-    pub holdout_seal: Option<PathBuf>,
+    /// Direct filesystem path to holdout labels for locked-quality evaluation.
+    pub holdout_labels: Option<PathBuf>,
     pub saved_candidates: Option<PathBuf>,
     pub required_outcome: Option<EvalOutcomeV1>,
-}
-
-#[derive(Clone, Debug)]
-pub struct SealHoldoutOptions {
-    pub fixture_root: PathBuf,
-    pub run_manifest: Option<PathBuf>,
-    pub labels_path: PathBuf,
-    pub profile_root: Option<PathBuf>,
-    pub label_authority: HoldoutLabelAuthorityV1,
-    pub sealed_by: tracedecay_domain::DecisionOwnerId,
-    pub sealed_at_unix: u64,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct SealHoldoutResult {
-    pub labels: HoldoutRegistryRecordV1,
-    pub seal: HoldoutSealV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -221,8 +208,6 @@ struct ValidatedFixtures {
 struct SealedHoldoutLabelSetV1 {
     schema_revision: u32,
     label_authority: HoldoutLabelAuthorityV1,
-    #[serde(default)]
-    agent_adjudication: Option<AgentAdjudicatedLabelProvenanceV1>,
     judgments: Vec<RelevanceJudgmentV1>,
 }
 
@@ -242,58 +227,6 @@ pub fn validate_fixture_root(fixture_root: &Path) -> Result<ValidationSummary, S
     Ok(validation_summary(&fixtures))
 }
 
-pub fn seal_holdout_labels(
-    options: &SealHoldoutOptions,
-) -> Result<SealHoldoutResult, SearchEvalError> {
-    let fixtures = load_validated_fixtures(&options.fixture_root)?;
-    let run = options
-        .run_manifest
-        .as_deref()
-        .map(read_json)
-        .transpose()?
-        .unwrap_or_else(|| fixtures.bundle.run.clone());
-    if !fixtures
-        .bundle
-        .manifest
-        .decision_owners
-        .contains(&options.sealed_by)
-    {
-        return Err(SearchEvalError::InvalidRun(
-            "holdout seal owner is not a frozen decision owner".to_string(),
-        ));
-    }
-    let bytes = fs::read(&options.labels_path).map_err(|source| SearchEvalError::Read {
-        path: options.labels_path.clone(),
-        source,
-    })?;
-    let labels: SealedHoldoutLabelSetV1 =
-        serde_json::from_slice(&bytes).map_err(|source| SearchEvalError::Parse {
-            path: options.labels_path.clone(),
-            source,
-        })?;
-    validate_sealed_holdout_labels(&labels, &options.label_authority, &run, &fixtures)?;
-    let store = match options.profile_root.as_deref() {
-        Some(root) => HoldoutAuthorityStoreV1::open_at(root)?,
-        None => HoldoutAuthorityStoreV1::open_default()?,
-    };
-    if let Some(provenance) = &labels.agent_adjudication {
-        store.verify_agent_adjudication(provenance, options.sealed_at_unix)?;
-    }
-    let labels_record = store.import_sealed_labels(&bytes, options.sealed_at_unix)?;
-    let seal_digest = HoldoutSealDigest::new(sha256_bytes(&bytes))?;
-    Ok(SealHoldoutResult {
-        seal: HoldoutSealV1 {
-            locator: labels_record.locator.clone(),
-            seal_digest,
-            labels_content_digest: Some(labels_record.content_digest.clone()),
-            label_authority: Some(options.label_authority),
-            access_policy: tracedecay_domain::HoldoutAccessPolicyV1::SealedAccessRequiresReceipt,
-            schema_revision: 1,
-        },
-        labels: labels_record,
-    })
-}
-
 pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalError> {
     let fixtures = load_validated_fixtures(&options.fixture_root)?;
     let run = if let Some(path) = &options.run_manifest {
@@ -301,8 +234,7 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
     } else {
         fixtures.bundle.run.clone()
     };
-    let holdout_seal = options.holdout_seal.as_deref().map(read_json).transpose()?;
-    validate_run_bindings_with_seal(&run, &fixtures, holdout_seal.as_ref())?;
+    validate_run_bindings_with_seal(&run, &fixtures, None)?;
     validate_single_path_component(run.run_id.as_str(), "run id")?;
 
     let loaded_saved_candidates = options
@@ -311,9 +243,6 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
         .map(|path| load_saved_candidate_ablations(path, &run, &fixtures.bundle.workload))
         .transpose()?;
 
-    // A checked-in contract-only corpus may be elevated only by an explicitly
-    // locked run carrying private saved candidates and a content-addressed seal.
-    // Development runs still stop before touching label-bearing artifacts.
     let (outcome, rationale, blocked_on, accepted_evidence) = if run.authority
         == FixtureAuthorityV1::LockedQuality
     {
@@ -322,29 +251,18 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
                 "locked-quality comparison requires frozen PR9 saved candidates".to_string(),
             )
         })?;
-        let store = match options.holdout_profile_root.as_deref() {
-            Some(root) => HoldoutAuthorityStoreV1::open_at(root)?,
-            None => HoldoutAuthorityStoreV1::open_default()?,
-        };
-        let accessed_by = options
-            .holdout_accessed_by
-            .clone()
-            .or_else(|| run.decision_owners.first().cloned())
-            .ok_or_else(|| {
-                SearchEvalError::InvalidRun(
-                    "locked-quality run has no decision owner for holdout access".to_string(),
-                )
-            })?;
+        let labels_path = options.holdout_labels.as_deref().ok_or_else(|| {
+            SearchEvalError::InvalidRun(
+                "locked-quality comparison requires --holdout-labels path for direct evaluation"
+                    .to_string(),
+            )
+        })?;
         let evaluation = evaluate_locked_quality(
-            &store,
-            &accessed_by,
+            labels_path,
             &fixtures,
             &run,
             &saved_candidates.saved,
-            holdout_seal
-                .as_ref()
-                .unwrap_or(&fixtures.bundle.manifest.holdout_seal),
-            current_unix_seconds()?,
+            &fixtures.bundle.manifest.holdout_seal,
         )?;
         (
             evaluation.outcome,
@@ -462,13 +380,11 @@ pub fn compare(options: &CompareOptions) -> Result<CompareResult, SearchEvalErro
 }
 
 fn evaluate_locked_quality(
-    store: &HoldoutAuthorityStoreV1,
-    accessed_by: &tracedecay_domain::DecisionOwnerId,
+    labels_path: &Path,
     fixtures: &ValidatedFixtures,
     run: &RunManifestV1,
     saved_candidates: &SavedCandidateSetV1,
     holdout_seal: &HoldoutSealV1,
-    now_unix: u64,
 ) -> Result<LockedQualityEvaluation, SearchEvalError> {
     run.validate_pre_holdout_access(&fixtures.bundle.manifest, &fixtures.bundle.workload)?;
     saved_candidates.validate_pr9_baseline_for_run(run, &fixtures.bundle.workload)?;
@@ -478,39 +394,27 @@ fn evaluate_locked_quality(
                 .to_string(),
         ));
     }
-    let declared_label_authority = holdout_seal.label_authority.ok_or_else(|| {
-        SearchEvalError::InvalidRun(
-            "locked-quality seal has no declared label authority".to_string(),
-        )
-    })?;
-    let (labels, receipt) = store.evaluate_locked_labels(
-        run,
-        holdout_seal,
-        &fixtures.bundle.manifest.decision_owners,
-        accessed_by,
-        now_unix,
-        |bytes| parse_sealed_holdout_labels(bytes, &declared_label_authority, run, fixtures),
-    )?;
-    if let Some(provenance) = &labels.agent_adjudication {
-        store.verify_agent_adjudication(provenance, now_unix)?;
-    }
-
-    let acceptance_rationale = match labels.label_authority {
-        HoldoutLabelAuthorityV1::Deterministic => "owner-bound deterministic sealed labels, a durable access receipt, and frozen exact/lexical/graph candidates validated for this locked run"
-            .to_string(),
-        HoldoutLabelAuthorityV1::HumanAuthoritative => "owner-bound human-authoritative sealed labels, a durable access receipt, and frozen exact/lexical/graph candidates validated for this locked run"
-            .to_string(),
-        HoldoutLabelAuthorityV1::AgentAdjudicated => "owner-bound user-delegated agent-adjudicated sealed labels, two independent blinded judgments or a distinct tie-break adjudication, a durable access receipt, and frozen exact/lexical/graph candidates validated for this locked run"
-            .to_string(),
+    let (labels, _content_digest) = load_direct_holdout_labels(labels_path, Some(holdout_seal))
+        .map_err(SearchEvalError::HoldoutAuthority)?;
+    let sealed = SealedHoldoutLabelSetV1 {
+        schema_revision: labels.schema_revision,
+        label_authority: labels.label_authority,
+        judgments: labels.judgments,
     };
-    let accepted_evidence =
-        build_accepted_pr9_evidence(run, saved_candidates, receipt, &acceptance_rationale)?;
-    store
-        .validate_accepted_pr9_evidence(
-            &accepted_evidence,
+    validate_sealed_holdout_labels(&sealed, &labels.label_authority, run, fixtures)?;
+    let acceptance_rationale = match labels.label_authority {
+        HoldoutLabelAuthorityV1::Deterministic => {
+            "direct deterministic holdout labels and frozen exact/lexical/graph candidates validated for this locked run".to_string()
+        }
+        HoldoutLabelAuthorityV1::HumanAuthoritative => {
+            "direct human-authoritative holdout labels and frozen exact/lexical/graph candidates validated for this locked run".to_string()
+        }
+    };
+    let accepted_evidence = build_accepted_pr9_evidence(run, saved_candidates, &acceptance_rationale)?;
+    accepted_evidence
+        .validate_structure_for_run(
             run,
             &fixtures.bundle.workload,
-            holdout_seal,
             &fixtures.bundle.manifest.decision_owners,
         )
         .map_err(SearchEvalError::Contract)?;
@@ -519,22 +423,6 @@ fn evaluate_locked_quality(
         rationale: acceptance_rationale,
         accepted_evidence: Some(accepted_evidence),
     })
-}
-
-fn parse_sealed_holdout_labels(
-    bytes: &[u8],
-    declared_label_authority: &HoldoutLabelAuthorityV1,
-    run: &RunManifestV1,
-    fixtures: &ValidatedFixtures,
-) -> Result<SealedHoldoutLabelSetV1, HoldoutAuthorityError> {
-    let labels = serde_json::from_slice(bytes).map_err(|error| {
-        HoldoutAuthorityError::InvalidMetadata(format!(
-            "sealed holdout labels are not a valid v1 packet: {error}"
-        ))
-    })?;
-    validate_sealed_holdout_labels(&labels, declared_label_authority, run, fixtures)
-        .map_err(|error| HoldoutAuthorityError::InvalidMetadata(error.to_string()))?;
-    Ok(labels)
 }
 
 fn validate_sealed_holdout_labels(
@@ -558,46 +446,6 @@ fn validate_sealed_holdout_labels(
             field: "sealed holdout label judgments",
         });
     }
-    match labels.label_authority {
-        HoldoutLabelAuthorityV1::AgentAdjudicated => {
-            let provenance = labels.agent_adjudication.as_ref().ok_or_else(|| {
-                EvaluationContractError::CoverageViolation(
-                    "agent-adjudicated labels require bound adjudication provenance".to_string(),
-                )
-            })?;
-            if !provenance.is_sealable()? {
-                return Err(EvaluationContractError::CoverageViolation(
-                    "agent-adjudicated labels are not in a sealable terminal state".to_string(),
-                ));
-            }
-            if !fixtures
-                .bundle
-                .manifest
-                .decision_owners
-                .contains(&provenance.delegated_by)
-            {
-                return Err(EvaluationContractError::HoldoutAccessViolation(
-                    "agent adjudication was not delegated by a frozen decision owner".to_string(),
-                ));
-            }
-            if provenance.final_label_set_digest.as_ref()
-                != Some(&sealed_holdout_label_set_digest(&labels.judgments)?)
-            {
-                return Err(EvaluationContractError::DigestMismatch {
-                    field: "agent-adjudicated final label set",
-                });
-            }
-        }
-        HoldoutLabelAuthorityV1::Deterministic | HoldoutLabelAuthorityV1::HumanAuthoritative => {
-            if labels.agent_adjudication.is_some() {
-                return Err(EvaluationContractError::CoverageViolation(
-                    "non-agent holdout labels cannot carry agent adjudication provenance"
-                        .to_string(),
-                ));
-            }
-        }
-    }
-
     const NO_RESULT_FAMILIES: [QueryFamilyV1; 4] = [
         QueryFamilyV1::ExpectedNoResult,
         QueryFamilyV1::FalseExactHardNegative,
@@ -711,16 +559,17 @@ pub fn sealed_holdout_label_set_digest(
 fn build_accepted_pr9_evidence(
     run: &RunManifestV1,
     saved_candidates: &SavedCandidateSetV1,
-    receipt: HoldoutAccessReceiptV1,
     rationale: &str,
 ) -> Result<AcceptedPr9CandidateEvidenceV1, SearchEvalError> {
+    let decided_by = run.decision_owners.first().cloned().ok_or_else(|| {
+        SearchEvalError::InvalidRun("locked run requires at least one decision owner".to_string())
+    })?;
     let mut batch = EvidenceBatchV1 {
         batch_id: EvidenceBatchId::new(format!("batch-{}-revision-{}", run.run_id, run.revision))?,
         run_id: run.run_id.clone(),
         scope: run.scope,
         workload_digest: saved_candidates.workload_digest.clone(),
         candidate_lists: saved_candidates.candidate_lists.clone(),
-        holdout_receipts: vec![receipt.clone()],
         digest: EvidenceBatchDigest::new(ZERO_DIGEST)?,
     };
     batch.digest = batch.compute_digest()?;
@@ -728,7 +577,7 @@ fn build_accepted_pr9_evidence(
         run_id: run.run_id.clone(),
         outcome: EvalOutcomeV1::Accepted,
         rationale: rationale.to_string(),
-        decided_by: receipt.accessed_by,
+        decided_by,
         saved_candidate_set_digest: Some(saved_candidates.digest.clone()),
         evidence_batches: vec![batch.digest.clone()],
         digest: DecisionRecordDigest::new(ZERO_DIGEST)?,
@@ -975,10 +824,10 @@ fn validate_no_result_labels(bundle: &EvaluationFixtureBundleV1) -> Result<(), S
 
 fn required_holdout_artifact(seal: &HoldoutSealV1) -> RequiredExternalArtifactV1 {
     RequiredExternalArtifactV1 {
-        kind: "sealed_holdout_labels".to_string(),
+        kind: "direct_holdout_labels".to_string(),
         locator: seal.locator.clone(),
         digest: seal.seal_digest.clone(),
-        reason: "an owner-bound locked-quality label artifact with canonical digests and an explicit owner decision is required"
+        reason: "direct filesystem locked-quality holdout labels with canonical digests are required"
             .to_string(),
     }
 }
@@ -1251,24 +1100,15 @@ fn sha256_bytes(bytes: &[u8]) -> String {
     encoded
 }
 
-fn current_unix_seconds() -> Result<u64, SearchEvalError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|error| {
-            SearchEvalError::InvalidRun(format!("system clock precedes epoch: {error}"))
-        })
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn locked_authority_paths_no_longer_require_signatures_or_reveal_capabilities() {
-        // Signing / reveal-capability / trust-root paths were deleted. Locked
-        // acceptance is covered by digest-only holdout store tests and the
-        // owner-decision CLI/validator packet.
-        assert!(PR9_ACCEPTANCE_DECISION_EXPRESSION.contains("durable_run_bound_receipt"),);
+    fn search_eval_paths_use_direct_evaluation_without_packet_seal_or_owner_machinery() {
+        assert!(!PR9_ACCEPTANCE_DECISION_EXPRESSION.contains("durable_run_bound_receipt"));
+        assert!(!PR9_ACCEPTANCE_DECISION_EXPRESSION.contains("agent_adjudicated"));
+        assert!(PR9_ACCEPTANCE_DECISION_EXPRESSION.contains("deterministic"));
     }
 }

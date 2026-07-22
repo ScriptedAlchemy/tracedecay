@@ -9,12 +9,14 @@ locked quality and runtime gates.
 the production FastEmbed and vector-service boundaries, the exact-flat oracle,
 equal-budget hybrid and reranking candidates, cohort/generation-bound
 calibration and abstention, byte-identical PR9 fallback, current/10x resource
-strata, Linux/Windows native-runtime strata, and cold offline rollback. It also
-pins library-first/default-equals-all feature behavior, local
-versioned-manifest SHA-256-verified model bytes, asynchronous semantic
-projection, non-blocking exact/lexical/graph search during indexing, omission
-of every non-current generation, strict-semantic typed unavailability, and
-atomic visibility of a complete compatible generation.
+strata, and cold offline rollback. It also pins library-first/default-equals-all
+feature behavior, local versioned-manifest SHA-256-verified model bytes,
+asynchronous semantic projection, non-blocking exact/lexical/graph search during
+indexing, omission of every non-current generation, strict-semantic typed
+unavailability, and atomic visibility of a complete compatible generation.
+
+OS matrix execution (Linux/Windows/macOS default-feature product lifecycle) is
+owned by PR13 host CI, not this eval packet.
 
 The profile matrix deliberately keeps ANN, late interaction, and quantization
 as evidence-gated research candidates. The exact-flat production scan is the
@@ -23,9 +25,8 @@ activate a candidate.
 
 `result-pending.json` stays non-authoritative: no measured locked samples,
 fallback digest, locked report, or promotion evidence. Parent-gate receipts may
-record truthful `executed_contract`, `blocked`, or
-`pending_unsupported_platform` states, but outcome remains `pending` and
-semantics stay disabled until a locked accepted report exists.
+record truthful `executed_contract` or `blocked` states, but outcome remains
+`pending` and semantics stay disabled until a locked accepted report exists.
 
 Run the local contract without Cargo:
 
@@ -39,17 +40,3 @@ Strict mode is a negative acceptance check:
 ```text
 python3 benchmarks/pr10-semantic-search/validate_packet.py --strict
 ```
-
-The validator parses the root feature manifest, inspects the callable
-production function bodies, and verifies that named direct regressions invoke
-the required search-during-indexing, non-blocking fallback, calibration,
-exact-flat, and atomic-publication behavior. It does not accept source-path or
-symbol-name scaffolding as evidence.
-
-Strict mode exits with status 3 until the parent has executed and anchored all
-library/default-feature, local-model, production FastEmbed/vector,
-search-during-indexing, atomic-activation, saved-candidate, locked-holdout,
-current/10x resource, Linux/Windows native-runtime, byte-stable fallback, cold
-offline rollback, and aggregate gates. This packet must not be edited into an
-`accepted` result; an accepted locked report is a later immutable parent-run
-artifact.

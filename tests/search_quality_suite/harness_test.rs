@@ -50,7 +50,6 @@ async fn development_workload_executes_and_emits_valid_evidence() {
 
     // Typed evidence: scope rules, workload binding, and self-verifying digest.
     assert_eq!(batch.scope, EvalRunScopeV1::Development);
-    assert!(batch.holdout_receipts.is_empty());
     batch
         .validate_against_workload(&workload)
         .expect("evidence batch validates against the workload");

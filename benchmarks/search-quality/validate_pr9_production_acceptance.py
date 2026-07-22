@@ -39,19 +39,9 @@ PARENT_GATE_COMMANDS = {
     "search_quality_contracts": "cargo test --all-features --test search_quality_suite",
     "search_eval_cli_contracts": "cargo test --all-features --test search_eval_cli_test",
     "code_index_benchmark_validation": "cargo bench --bench code_index_chunks -- --validate-only",
-    "platform_linux": "cargo test --all-features --test code_index_suite --test search_quality_suite",
-    "platform_windows": "cargo test --all-features --test code_index_suite --test search_quality_suite",
-    "platform_macos": "cargo test --all-features --test code_index_suite --test search_quality_suite",
-}
-REQUIRED_PLATFORMS = {"linux", "windows", "macos"}
-PLATFORM_STATUS_BY_ID = {
-    "linux": {"pending_parent_gate", "executed_passed"},
-    "windows": {"pending_parent_gate", "pending_unsupported_host", "executed_passed"},
-    "macos": {"pending_parent_gate", "pending_unsupported_host", "executed_passed"},
 }
 ALLOWED_GATE_EXECUTION_STATES = {
     "executed_passed",
-    "pending_unsupported_host",
     "pending_parent_gate",
     "blocked",
 }
@@ -149,32 +139,11 @@ def check_packet_shape(packet: dict[str, Any]) -> None:
         REQUIRED_REQUIREMENTS
     ):
         fail("requirements must exactly cover the PR9 acceptance matrix")
-
-    platforms = packet.get("platforms")
-    if not isinstance(platforms, list):
-        fail("platforms must be an array")
-    platform_ids = {
-        platform.get("id") for platform in platforms if isinstance(platform, dict)
-    }
-    if platform_ids != REQUIRED_PLATFORMS or len(platforms) != len(REQUIRED_PLATFORMS):
-        fail("platforms must exactly cover Linux, Windows, and macOS")
-    for platform in platforms:
-        if not isinstance(platform, dict):
-            fail("each platform entry must be an object")
-        platform_id = platform.get("id")
-        if platform_id not in PLATFORM_STATUS_BY_ID:
-            fail(f"unknown platform id: {platform_id!r}")
-        status = platform.get("status")
-        if status not in PLATFORM_STATUS_BY_ID[str(platform_id)]:
-            fail(
-                f"platform {platform_id} status {status!r} is not allowed; "
-                "pending is reserved for unsupported-host evidence or unrun gates"
-            )
-        gate_id = platform.get("parent_gate_id")
-        if gate_id != f"platform_{platform.get('id')}":
-            fail("each platform must bind its matching parent gate")
-        if status == "pending_unsupported_host" and platform_id == "linux":
-            fail("linux cannot be marked pending_unsupported_host on a Linux host")
+    if "platforms" in packet:
+        fail(
+            "eval packets must not declare OS platform gates; "
+            "Linux/Windows/macOS product lifecycle belongs to PR13 host CI"
+        )
 
 
 def check_real_corpus_integrity(
@@ -396,22 +365,7 @@ def check_parent_gate_execution(packet: dict[str, Any]) -> None:
             if not isinstance(receipt.get("summary"), str) or not receipt["summary"]:
                 fail(f"executed gate {gate_id} needs a non-empty summary")
         if state == "pending_unsupported_host":
-            if gate_id not in {"platform_windows", "platform_macos"}:
-                fail(f"{gate_id} cannot use pending_unsupported_host")
-            if not isinstance(receipt.get("reason"), str) or not receipt["reason"]:
-                fail(f"{gate_id} pending_unsupported_host needs a reason")
-
-    platforms = {
-        platform.get("id"): platform.get("status")
-        for platform in cast(list[dict[str, Any]], packet["platforms"])
-    }
-    if platforms.get("linux") == "executed_passed" and gates["platform_linux"].get("state") != "executed_passed":
-        fail("linux platform executed_passed requires matching gate execution receipt")
-    for host in ("windows", "macos"):
-        if platforms.get(host) == "pending_unsupported_host" and gates[f"platform_{host}"].get(
-            "state"
-        ) != "pending_unsupported_host":
-            fail(f"{host} pending_unsupported_host requires matching gate execution receipt")
+            fail(f"{gate_id} cannot use pending_unsupported_host in eval packets")
 
 
 def validate(packet: dict[str, Any], repository: Path, search_quality_root: Path) -> None:
