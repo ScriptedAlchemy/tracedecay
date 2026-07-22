@@ -4,7 +4,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
-    SessionId, SessionRefreshOperationIdV1, TemporalCoverageCountsV1, UtcMicros,
+    SessionId, SessionRefreshKeyV1, SessionRefreshOperationIdV1, SessionSourceCoverageReceiptV1,
+    SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
 
 use super::common::{
@@ -54,6 +55,8 @@ impl SessionRefreshFrontierV1 {
 pub struct SessionRefreshBeginOrJoinRequestV1 {
     session_id: SessionId,
     target_frontier: SessionRefreshFrontierV1,
+    refresh_key: Option<SessionRefreshKeyV1>,
+    coverage_request: SessionTemporalCoverageRequestV1,
 }
 
 impl SessionRefreshBeginOrJoinRequestV1 {
@@ -61,7 +64,29 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         Self {
             session_id,
             target_frontier,
+            refresh_key: None,
+            coverage_request: SessionTemporalCoverageRequestV1::new(TemporalModeV1::Current),
         }
+    }
+
+    pub fn with_refresh_key(mut self, refresh_key: SessionRefreshKeyV1) -> Self {
+        self.refresh_key = Some(refresh_key);
+        self
+    }
+
+    /// Selects the temporal coverage the refresh must satisfy. The default is
+    /// `Current`; a forensic-mode refresh of the same frontier is a distinct
+    /// durable operation, never join-equivalent to a current-mode refresh.
+    pub fn with_coverage_request(
+        mut self,
+        coverage_request: SessionTemporalCoverageRequestV1,
+    ) -> Self {
+        self.coverage_request = coverage_request;
+        self
+    }
+
+    pub const fn coverage_request(&self) -> &SessionTemporalCoverageRequestV1 {
+        &self.coverage_request
     }
 
     pub fn session_id(&self) -> &SessionId {
@@ -72,9 +97,17 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         self.target_frontier
     }
 
-    /// Join equivalence is exact session plus exact observed/committed target.
+    pub fn refresh_key(&self) -> Option<&SessionRefreshKeyV1> {
+        self.refresh_key.as_ref()
+    }
+
+    /// Join equivalence is exact session plus exact observed/committed target
+    /// plus identical temporal coverage request.
     pub fn is_equivalent_to(&self, other: &Self) -> bool {
-        self.session_id == other.session_id && self.target_frontier == other.target_frontier
+        self.session_id == other.session_id
+            && self.target_frontier == other.target_frontier
+            && self.refresh_key == other.refresh_key
+            && self.coverage_request == other.coverage_request
     }
 }
 
@@ -164,6 +197,7 @@ pub struct SessionRefreshProgressV1 {
     session_id: SessionId,
     frontier: SessionRefreshFrontierV1,
     coverage: TemporalCoverageCountsV1,
+    source_coverage: Option<SessionSourceCoverageReceiptV1>,
     committed_batches: u64,
     committed_records: u64,
     updated_at: UtcMicros,
@@ -185,6 +219,7 @@ impl SessionRefreshProgressV1 {
             session_id,
             frontier,
             coverage,
+            source_coverage: None,
             committed_batches,
             committed_records,
             updated_at,
@@ -205,6 +240,15 @@ impl SessionRefreshProgressV1 {
 
     pub fn coverage(&self) -> &TemporalCoverageCountsV1 {
         &self.coverage
+    }
+
+    pub fn with_source_coverage(mut self, source_coverage: SessionSourceCoverageReceiptV1) -> Self {
+        self.source_coverage = Some(source_coverage);
+        self
+    }
+
+    pub fn source_coverage(&self) -> Option<&SessionSourceCoverageReceiptV1> {
+        self.source_coverage.as_ref()
     }
 
     pub const fn committed_batches(&self) -> u64 {
@@ -236,6 +280,10 @@ impl SessionRefreshProgressV1 {
             || candidate.hidden < current.hidden
             || candidate.unknown < current.unknown
             || candidate.redacted < current.redacted
+            || !source_coverage_is_successor(
+                self.source_coverage.as_ref(),
+                next.source_coverage.as_ref(),
+            )
             || next.updated_at < self.updated_at
         {
             return Err(SessionStoreError::InvalidStateTransition {
@@ -246,6 +294,30 @@ impl SessionRefreshProgressV1 {
     }
 }
 
+fn source_coverage_is_successor(
+    current: Option<&SessionSourceCoverageReceiptV1>,
+    next: Option<&SessionSourceCoverageReceiptV1>,
+) -> bool {
+    match (current, next) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(current), Some(next)) => {
+            current.request() == next.request()
+                && current.sources().len() == next.sources().len()
+                && current
+                    .sources()
+                    .iter()
+                    .zip(next.sources())
+                    .all(|(current, next)| {
+                        current.source_id() == next.source_id()
+                            && current.observed_frontier() == next.observed_frontier()
+                            && current.target_watermark() == next.target_watermark()
+                            && next.committed_frontier() >= current.committed_frontier()
+                    })
+        }
+    }
+}
+
 /// Request to complete a refresh at its fully committed target frontier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRefreshCompletionRequestV1 {
@@ -253,6 +325,7 @@ pub struct SessionRefreshCompletionRequestV1 {
     session_id: SessionId,
     frontier: SessionRefreshFrontierV1,
     coverage: TemporalCoverageCountsV1,
+    source_coverage: Option<SessionSourceCoverageReceiptV1>,
 }
 
 impl SessionRefreshCompletionRequestV1 {
@@ -273,7 +346,13 @@ impl SessionRefreshCompletionRequestV1 {
             session_id,
             frontier,
             coverage,
+            source_coverage: None,
         })
+    }
+
+    pub fn with_source_coverage(mut self, source_coverage: SessionSourceCoverageReceiptV1) -> Self {
+        self.source_coverage = Some(source_coverage);
+        self
     }
 
     pub fn operation_id(&self) -> &SessionRefreshOperationIdV1 {
@@ -290,6 +369,10 @@ impl SessionRefreshCompletionRequestV1 {
 
     pub fn coverage(&self) -> &TemporalCoverageCountsV1 {
         &self.coverage
+    }
+
+    pub fn source_coverage(&self) -> Option<&SessionSourceCoverageReceiptV1> {
+        self.source_coverage.as_ref()
     }
 }
 
@@ -389,6 +472,7 @@ pub struct SessionRefreshFailureRequestV1 {
     session_id: SessionId,
     frontier: SessionRefreshFrontierV1,
     coverage: TemporalCoverageCountsV1,
+    source_coverage: Option<SessionSourceCoverageReceiptV1>,
     failure_code: SessionRefreshFailureCodeV1,
 }
 
@@ -405,8 +489,14 @@ impl SessionRefreshFailureRequestV1 {
             session_id,
             frontier,
             coverage,
+            source_coverage: None,
             failure_code: SessionRefreshFailureCodeV1::new(failure_code)?,
         })
+    }
+
+    pub fn with_source_coverage(mut self, source_coverage: SessionSourceCoverageReceiptV1) -> Self {
+        self.source_coverage = Some(source_coverage);
+        self
     }
 
     pub fn operation_id(&self) -> &SessionRefreshOperationIdV1 {
@@ -423,6 +513,10 @@ impl SessionRefreshFailureRequestV1 {
 
     pub fn coverage(&self) -> &TemporalCoverageCountsV1 {
         &self.coverage
+    }
+
+    pub fn source_coverage(&self) -> Option<&SessionSourceCoverageReceiptV1> {
+        self.source_coverage.as_ref()
     }
 
     pub fn failure_code(&self) -> &SessionRefreshFailureCodeV1 {
@@ -437,6 +531,7 @@ pub struct SessionRefreshCancellationRequestV1 {
     session_id: SessionId,
     frontier: SessionRefreshFrontierV1,
     coverage: TemporalCoverageCountsV1,
+    source_coverage: Option<SessionSourceCoverageReceiptV1>,
 }
 
 impl SessionRefreshCancellationRequestV1 {
@@ -451,7 +546,13 @@ impl SessionRefreshCancellationRequestV1 {
             session_id,
             frontier,
             coverage,
+            source_coverage: None,
         }
+    }
+
+    pub fn with_source_coverage(mut self, source_coverage: SessionSourceCoverageReceiptV1) -> Self {
+        self.source_coverage = Some(source_coverage);
+        self
     }
 
     pub fn operation_id(&self) -> &SessionRefreshOperationIdV1 {
@@ -468,6 +569,10 @@ impl SessionRefreshCancellationRequestV1 {
 
     pub fn coverage(&self) -> &TemporalCoverageCountsV1 {
         &self.coverage
+    }
+
+    pub fn source_coverage(&self) -> Option<&SessionSourceCoverageReceiptV1> {
+        self.source_coverage.as_ref()
     }
 }
 
@@ -486,6 +591,7 @@ pub struct SessionRefreshReceiptV1 {
     session_id: SessionId,
     frontier: SessionRefreshFrontierV1,
     coverage: TemporalCoverageCountsV1,
+    source_coverage: Option<SessionSourceCoverageReceiptV1>,
     state: SessionRefreshTerminalStateV1,
     failure_code: Option<SessionRefreshFailureCodeV1>,
     terminal_at: UtcMicros,
@@ -498,6 +604,7 @@ impl SessionRefreshReceiptV1 {
             session_id: request.session_id,
             frontier: request.frontier,
             coverage: request.coverage,
+            source_coverage: request.source_coverage,
             state: SessionRefreshTerminalStateV1::Complete,
             failure_code: None,
             terminal_at,
@@ -510,6 +617,7 @@ impl SessionRefreshReceiptV1 {
             session_id: request.session_id,
             frontier: request.frontier,
             coverage: request.coverage,
+            source_coverage: request.source_coverage,
             state: SessionRefreshTerminalStateV1::Failed,
             failure_code: Some(request.failure_code),
             terminal_at,
@@ -522,6 +630,7 @@ impl SessionRefreshReceiptV1 {
             session_id: request.session_id,
             frontier: request.frontier,
             coverage: request.coverage,
+            source_coverage: request.source_coverage,
             state: SessionRefreshTerminalStateV1::Cancelled,
             failure_code: None,
             terminal_at,
@@ -542,6 +651,15 @@ impl SessionRefreshReceiptV1 {
 
     pub fn coverage(&self) -> &TemporalCoverageCountsV1 {
         &self.coverage
+    }
+
+    pub fn with_source_coverage(mut self, source_coverage: SessionSourceCoverageReceiptV1) -> Self {
+        self.source_coverage = Some(source_coverage);
+        self
+    }
+
+    pub fn source_coverage(&self) -> Option<&SessionSourceCoverageReceiptV1> {
+        self.source_coverage.as_ref()
     }
 
     pub const fn state(&self) -> SessionRefreshTerminalStateV1 {
@@ -570,6 +688,10 @@ impl SessionRefreshReceiptV1 {
         if self.frontier.observed_through != progress.frontier.observed_through
             || self.frontier.committed_through < progress.frontier.committed_through
             || self.terminal_at < progress.updated_at
+            || !source_coverage_is_successor(
+                progress.source_coverage.as_ref(),
+                self.source_coverage.as_ref(),
+            )
             || (self.state == SessionRefreshTerminalStateV1::Complete
                 && !self.frontier.is_complete())
         {
