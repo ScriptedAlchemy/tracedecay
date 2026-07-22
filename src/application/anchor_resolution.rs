@@ -241,7 +241,7 @@ impl GitTopologyAnchorApplicationV1 {
                 field: "git topology publication owner",
             });
         }
-        parts.target = RetrievalAnchorTargetV2::GitTopology(self.target.clone());
+        parts.target = RetrievalAnchorTargetV2::GitTopology(Box::new(self.target.clone()));
         parts.source_generation =
             AnchorSourceGenerationV2::GitTopology(self.source_generation.clone());
         parts.source_anchors = self.source_anchors.clone();
@@ -443,7 +443,7 @@ impl AuthorizedGitTopologyDrilldownV1 {
                     field: "git topology observed repository",
                 });
             }
-            if observed_target == target {
+            if observed_target == &**target {
                 GitTopologyResolutionStateV1::Current
             } else {
                 GitTopologyResolutionStateV1::Retargeted {
@@ -632,7 +632,7 @@ mod tests {
     ) -> RetrievalAnchorRecordV2 {
         RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
             source_generation: AnchorSourceGenerationV2::GitTopology(target.generation()),
-            target: RetrievalAnchorTargetV2::GitTopology(target),
+            target: RetrievalAnchorTargetV2::GitTopology(Box::new(target)),
             owner: ObservationScopeV1::Project {
                 project_id: ProjectId::new("project.fixture").unwrap(),
             },

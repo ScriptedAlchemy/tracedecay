@@ -123,7 +123,7 @@ pub enum RetrievalAnchorTargetV2 {
         capture_id: RepositoryCaptureId,
         receipt: SanitizationReceiptRefV1,
     },
-    GitTopology(GitTopologyAnchorTargetV1),
+    GitTopology(Box<GitTopologyAnchorTargetV1>),
 }
 
 /// Canonical target type for authoritative retrieval anchors.
@@ -216,7 +216,7 @@ impl<'de> Deserialize<'de> for RetrievalAnchorTargetV2 {
                 capture_id: RepositoryCaptureId,
                 receipt: SanitizationReceiptRefV1,
             },
-            GitTopology(GitTopologyAnchorTargetV1),
+            GitTopology(Box<GitTopologyAnchorTargetV1>),
         }
 
         let target = match Wire::deserialize(deserializer)? {
@@ -639,7 +639,10 @@ pub fn derive_git_topology_anchor_id(
     owner: &ObservationScopeV1,
     target: &GitTopologyAnchorTargetV1,
 ) -> Result<RetrievalAnchorId, DomainError> {
-    derive_anchor_id(owner, &RetrievalAnchorTargetV2::GitTopology(target.clone()))
+    derive_anchor_id(
+        owner,
+        &RetrievalAnchorTargetV2::GitTopology(Box::new(target.clone())),
+    )
 }
 
 impl<'de> Deserialize<'de> for RetrievalAnchorRecordV2 {

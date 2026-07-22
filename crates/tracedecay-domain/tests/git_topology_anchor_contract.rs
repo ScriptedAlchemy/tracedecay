@@ -20,7 +20,7 @@ use tracedecay_domain::{
     RepositoryDirtyStateV1, RepositoryEvidenceV1, RepositoryId, RepositoryIndexSnapshotV1,
     RepositoryIndexStateV1, RepositoryProvenanceV1, RepositoryRemoteIdentityV1,
     RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
-    ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2,
+    ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2,
     RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, ShardId, UtcMicros,
     VectorWatermark, WorktreeCaptureAnchorRefV1, WorktreeId, derive_git_topology_anchor_id,
 };
@@ -125,7 +125,7 @@ fn record(target: GitTopologyAnchorTargetV1) -> RetrievalAnchorRecordV2 {
     };
     RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
         source_generation: AnchorSourceGenerationV2::GitTopology(target.generation()),
-        target: RetrievalAnchorTargetV2::GitTopology(target),
+        target: RetrievalAnchorTargetV2::GitTopology(Box::new(target)),
         owner,
         aliases: vec![],
         occurred_at: None,

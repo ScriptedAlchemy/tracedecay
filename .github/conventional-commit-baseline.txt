@@ -28,6 +28,9 @@ deb256e4276da2c7be8729a4db767e56ebffd4ca # PR #178 subject 86 chars; published b
 9cacc19e3e40eb66e7cfe2a3e1a9306f9f3e93c3 # fix(dashboard): warn instead of silently exhausting derived-memory repair
 ba22dd1dd66d6af1d6cbdf73a7c7842a2c12728d # docs(v2): encode PR7 dogfooding weak points as normative plan requirements
 be423f2c61168cffd4f7d4426341fa6a61647d69 # feat(daemon,store): semantic-runtime registrar, session refresh coverage mode
+aa08e03f351892317c3c15af0cf55d40c0dec08d # feat(application): advisory GitHub runtime, code-index control, feedback composition
+7a33a78f8f60b7d73da02071e26c4f47a57223ca # feat(index): semantic runtime service, code-index production path, vector generations
+8a48437a043c16115744683c6958015952870702 # feat(daemon,transport): scheduler wiring, invocation registrars, host-bundle acceptance updates
 c3090e079fd794993643829c93df5e487d11b271 # fix(storage): let writable open recover hot journals under a dirty sentinel
 c3d041af1fa97ab45ab5ad01628080fd7f994aa4 # fix(projection): rebuild instead of failing when predecessor lineage is unmigratable
 c433c08adcbed8ba568e2fab8311e99ebe412061 # fix(memory): route branch-serving instances to the project-wide fact store
@@ -35,3 +38,6 @@ d05e52a5db8d39c40ed2f52689e6a8aee4141fb3 # refactor(observation): report anchor 
 ddee57411e12653ce6d8679ce260c12af0f8aaee # fix(global-db): stop swallowing storage errors as row skips in registry listing
 e0efef8d24823ce04356adf118de8189a80459f4 # refactor(memory): unify project-memory DB handles into one store-owned authority
 f81d399d6302674788fec5ce217e70c60f5410cd # fix(memory): public explicit-repair entry; align status tests and docs with pure reads
+aa08e03f351892317c3c15af0cf55d40c0dec08d # feat(application): advisory GitHub runtime slice (subject over 72 chars)
+7a33a78f8f60b7d73da02071e26c4f47a57223ca # feat(index): semantic runtime and code-index slice (subject over 72 chars)
+8a48437a043c16115744683c6958015952870702 # feat daemon/transport slice (non-conventional scope, subject over 72 chars)
