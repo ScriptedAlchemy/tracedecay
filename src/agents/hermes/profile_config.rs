@@ -181,24 +181,10 @@ fn enable_normalized(existing: &str) -> std::result::Result<String, String> {
     let text = remove_legacy_project_pin(existing)?;
     let text = remove_seq_item(&text, &["plugins", "disabled"], "tracedecay")?;
     let text = ensure_enabled(&text)?;
-    let text = ensure_scalar(
-        &text,
-        "memory",
-        "provider",
-        "tracedecay",
-        &[],
-        MEMORY_ERR,
-        "Hermes memory provider already configured; refusing to overwrite it",
-    )?;
-    let text = ensure_scalar(
-        &text,
-        "context",
-        "engine",
-        "tracedecay",
-        &["compressor"],
-        CONTEXT_ERR,
-        "Hermes context engine already configured; refusing to overwrite it",
-    )?;
+    let text = ensure_scalar(&text, "memory", "provider", "tracedecay", &[], MEMORY_ERR,
+        "Hermes memory provider already configured; refusing to overwrite it")?;
+    let text = ensure_scalar(&text, "context", "engine", "tracedecay", &["compressor"], CONTEXT_ERR,
+        "Hermes context engine already configured; refusing to overwrite it")?;
     Ok(text)
 }
 
@@ -216,8 +202,8 @@ fn parse_profile(text: &str) -> std::result::Result<Document, String> {
     if text.trim().is_empty() {
         return Ok(Document::new_mapping());
     }
-    let document =
-        Document::from_str(text).map_err(|error| format!("invalid Hermes YAML config: {error}"))?;
+    let document = Document::from_str(text)
+        .map_err(|error| format!("invalid Hermes YAML config: {error}"))?;
     if document.as_mapping().is_none() {
         return Err("unsupported Hermes config; expected a top-level mapping".to_string());
     }
@@ -231,10 +217,7 @@ fn line_start(text: &str, pos: usize) -> usize {
 }
 
 fn line_end_including_newline(text: &str, pos: usize) -> usize {
-    text[pos..]
-        .find('\n')
-        .map(|index| pos + index + 1)
-        .unwrap_or(text.len())
+    text[pos..].find('\n').map(|index| pos + index + 1).unwrap_or(text.len())
 }
 
 fn leading_indent(text: &str, pos: usize) -> String {
@@ -262,8 +245,7 @@ fn value_end(node: &YamlNode) -> Option<usize> {
     } else if let Some(mapping) = node.as_mapping() {
         Some(mapping.byte_range().end as usize)
     } else {
-        node.as_sequence()
-            .map(|sequence| sequence.byte_range().end as usize)
+        node.as_sequence().map(|sequence| sequence.byte_range().end as usize)
     }
 }
 
@@ -271,14 +253,9 @@ fn value_end(node: &YamlNode) -> Option<usize> {
 
 fn ensure_enabled(text: &str) -> std::result::Result<String, String> {
     let document = parse_profile(text)?;
-    let root = document
-        .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+    let root = document.as_mapping().expect("parse_profile guarantees a mapping");
     let Some(plugins_node) = root.get("plugins") else {
-        return Ok(append_root_block(
-            text,
-            "plugins:\n  enabled:\n    - tracedecay",
-        ));
+        return Ok(append_root_block(text, "plugins:\n  enabled:\n    - tracedecay"));
     };
     let Some(plugins) = plugins_node.as_mapping() else {
         return Err(PLUGINS_ERR.to_string());
@@ -286,12 +263,8 @@ fn ensure_enabled(text: &str) -> std::result::Result<String, String> {
     match plugins.get("enabled") {
         None => {
             if plugins.is_flow_style() {
-                Ok(insert_into_flow(
-                    text,
-                    plugins.byte_range().end as usize,
-                    plugins.keys().count() == 0,
-                    "enabled: [tracedecay]",
-                ))
+                Ok(insert_into_flow(text, plugins.byte_range().end as usize,
+                    plugins.keys().count() == 0, "enabled: [tracedecay]"))
             } else {
                 insert_block_child(text, &root, "plugins", "enabled:\n{CHILD}  - tracedecay")
             }
@@ -305,12 +278,8 @@ fn ensure_enabled(text: &str) -> std::result::Result<String, String> {
             }
             let range = enabled.byte_range();
             if enabled.is_flow_style() {
-                Ok(insert_into_flow(
-                    text,
-                    range.end as usize,
-                    enabled.values().count() == 0,
-                    "tracedecay",
-                ))
+                Ok(insert_into_flow(text, range.end as usize,
+                    enabled.values().count() == 0, "tracedecay"))
             } else {
                 let item_indent = leading_indent(text, range.start as usize);
                 let end = range.end as usize;
@@ -320,12 +289,7 @@ fn ensure_enabled(text: &str) -> std::result::Result<String, String> {
                     line_end_including_newline(text, end.saturating_sub(1))
                 };
                 let insertion = format!("{item_indent}- tracedecay\n");
-                Ok(format!(
-                    "{}{}{}",
-                    &text[..insert_at],
-                    insertion,
-                    &text[insert_at..]
-                ))
+                Ok(format!("{}{}{}", &text[..insert_at], insertion, &text[insert_at..]))
             }
         }
     }
@@ -341,26 +305,17 @@ fn ensure_scalar(
     conflict: &str,
 ) -> std::result::Result<String, String> {
     let document = parse_profile(text)?;
-    let root = document
-        .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+    let root = document.as_mapping().expect("parse_profile guarantees a mapping");
     let Some(container_node) = root.get(container) else {
-        return Ok(append_root_block(
-            text,
-            &format!("{container}:\n  {key}: {value}"),
-        ));
+        return Ok(append_root_block(text, &format!("{container}:\n  {key}: {value}")));
     };
     let Some(mapping) = container_node.as_mapping() else {
         return Err(unsupported.to_string());
     };
     if !mapping.contains_key(key) {
         if mapping.is_flow_style() {
-            return Ok(insert_into_flow(
-                text,
-                mapping.byte_range().end as usize,
-                mapping.keys().count() == 0,
-                &format!("{key}: {value}"),
-            ));
+            return Ok(insert_into_flow(text, mapping.byte_range().end as usize,
+                mapping.keys().count() == 0, &format!("{key}: {value}")));
         }
         return insert_block_child(text, &root, container, &format!("{key}: {value}"));
     }
@@ -374,12 +329,7 @@ fn ensure_scalar(
                 .value_node()
                 .and_then(|node| node.as_scalar().map(|scalar| scalar.byte_range()))
                 .ok_or_else(|| unsupported.to_string())?;
-            Ok(format!(
-                "{}{}{}",
-                &text[..range.start as usize],
-                value,
-                &text[range.end as usize..]
-            ))
+            Ok(format!("{}{}{}", &text[..range.start as usize], value, &text[range.end as usize..]))
         }
         Some(_) => Err(conflict.to_string()),
         None => Err(unsupported.to_string()),
@@ -416,10 +366,7 @@ fn insert_block_child(
         .ok_or_else(|| "unsupported Hermes profile config".to_string())?;
     let key_start = entry
         .key_node()
-        .and_then(|node| {
-            node.as_scalar()
-                .map(|scalar| scalar.byte_range().start as usize)
-        })
+        .and_then(|node| node.as_scalar().map(|scalar| scalar.byte_range().start as usize))
         .ok_or_else(|| "unsupported Hermes profile config".to_string())?;
     let child_indent = format!("{}  ", leading_indent(text, key_start));
     let child = child_template.replace("{CHILD}", &child_indent);
@@ -433,13 +380,7 @@ fn insert_block_child(
             line_end_including_newline(text, end.saturating_sub(1))
         }
     };
-    Ok(format!(
-        "{}{}{}\n{}",
-        &text[..insert_at],
-        child_indent,
-        child,
-        &text[insert_at..]
-    ))
+    Ok(format!("{}{}{}\n{}", &text[..insert_at], child_indent, child, &text[insert_at..]))
 }
 
 // ---- removals ----
@@ -448,18 +389,11 @@ fn insert_block_child(
 /// otherwise-empty `tracedecay` mapping when it carries no comments/anchors.
 fn remove_legacy_project_pin(text: &str) -> std::result::Result<String, String> {
     let document = parse_profile(text)?;
-    let root = document
-        .as_mapping()
-        .expect("parse_profile guarantees a mapping");
-    let Some(plugins) = root
-        .get("plugins")
-        .and_then(|node| node.as_mapping().cloned())
-    else {
+    let root = document.as_mapping().expect("parse_profile guarantees a mapping");
+    let Some(plugins) = root.get("plugins").and_then(|node| node.as_mapping().cloned()) else {
         return Ok(text.to_string());
     };
-    let Some(tracedecay) = plugins
-        .get("tracedecay")
-        .and_then(|node| node.as_mapping().cloned())
+    let Some(tracedecay) = plugins.get("tracedecay").and_then(|node| node.as_mapping().cloned())
     else {
         return Ok(text.to_string());
     };
@@ -470,13 +404,8 @@ fn remove_legacy_project_pin(text: &str) -> std::result::Result<String, String> 
 
     // Collapse an emptied `tracedecay:` mapping unless it carries comments/anchors.
     let document = parse_profile(&after)?;
-    let root = document
-        .as_mapping()
-        .expect("parse_profile guarantees a mapping");
-    if let Some(plugins) = root
-        .get("plugins")
-        .and_then(|node| node.as_mapping().cloned())
-    {
+    let root = document.as_mapping().expect("parse_profile guarantees a mapping");
+    if let Some(plugins) = root.get("plugins").and_then(|node| node.as_mapping().cloned()) {
         if let Some(entry) = plugins.find_entry_by_key("tracedecay") {
             if entry_mapping_is_collapsible(&after, &entry) {
                 return remove_map_entry(&after, &plugins, "tracedecay");
@@ -486,11 +415,13 @@ fn remove_legacy_project_pin(text: &str) -> std::result::Result<String, String> 
     Ok(after)
 }
 
-fn remove_seq_item(text: &str, path: &[&str], value: &str) -> std::result::Result<String, String> {
+fn remove_seq_item(
+    text: &str,
+    path: &[&str],
+    value: &str,
+) -> std::result::Result<String, String> {
     let document = parse_profile(text)?;
-    let root = document
-        .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+    let root = document.as_mapping().expect("parse_profile guarantees a mapping");
     let mut current = root.clone();
     for (index, key) in path.iter().enumerate() {
         let Some(node) = current.get(*key) else {
@@ -518,10 +449,10 @@ fn remove_one_seq_item(
     sequence: &Sequence,
     value: &str,
 ) -> std::result::Result<String, String> {
-    let Some(item) = sequence.values().find(|node| {
-        node.as_scalar()
-            .is_some_and(|scalar| scalar.as_string() == value)
-    }) else {
+    let Some(item) = sequence
+        .values()
+        .find(|node| node.as_scalar().is_some_and(|scalar| scalar.as_string() == value))
+    else {
         return Ok(text.to_string());
     };
     let range = item
@@ -549,10 +480,7 @@ fn remove_map_entry(
     };
     let key_start = entry
         .key_node()
-        .and_then(|node| {
-            node.as_scalar()
-                .map(|scalar| scalar.byte_range().start as usize)
-        })
+        .and_then(|node| node.as_scalar().map(|scalar| scalar.byte_range().start as usize))
         .ok_or_else(|| PLUGINS_ERR.to_string())?;
     let value_end = entry
         .value_node()
@@ -588,15 +516,14 @@ fn expand_over_flow_separator(text: &str, start: usize, mut end: usize) -> (usiz
     (start, end)
 }
 
-fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result<String, String> {
+fn disable_scalar(
+    text: &str,
+    container: &str,
+    key: &str,
+) -> std::result::Result<String, String> {
     let document = parse_profile(text)?;
-    let root = document
-        .as_mapping()
-        .expect("parse_profile guarantees a mapping");
-    let Some(mapping) = root
-        .get(container)
-        .and_then(|node| node.as_mapping().cloned())
-    else {
+    let root = document.as_mapping().expect("parse_profile guarantees a mapping");
+    let Some(mapping) = root.get(container).and_then(|node| node.as_mapping().cloned()) else {
         return Ok(text.to_string());
     };
     if string_value(&mapping, key).as_deref() != Some("tracedecay") {
@@ -606,9 +533,7 @@ fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result
 
     // Drop an emptied container unless it carries comments/anchors.
     let document = parse_profile(&after)?;
-    let root = document
-        .as_mapping()
-        .expect("parse_profile guarantees a mapping");
+    let root = document.as_mapping().expect("parse_profile guarantees a mapping");
     if let Some(entry) = root.find_entry_by_key(container) {
         if entry_mapping_is_collapsible(&after, &entry) {
             return remove_map_entry(&after, &root, container);
@@ -620,19 +545,15 @@ fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result
 /// True when the entry's value is an empty mapping that carries no comments,
 /// anchors or aliases (so it is safe to drop entirely).
 fn entry_mapping_is_collapsible(text: &str, entry: &yaml_edit::MappingEntry) -> bool {
-    let Some(mapping) = entry
-        .value_node()
-        .and_then(|node| node.as_mapping().cloned())
-    else {
+    let Some(mapping) = entry.value_node().and_then(|node| node.as_mapping().cloned()) else {
         return false;
     };
     if mapping.keys().count() != 0 {
         return false;
     }
-    let key_start = entry.key_node().and_then(|node| {
-        node.as_scalar()
-            .map(|scalar| scalar.byte_range().start as usize)
-    });
+    let key_start = entry
+        .key_node()
+        .and_then(|node| node.as_scalar().map(|scalar| scalar.byte_range().start as usize));
     let end = mapping.byte_range().end as usize;
     let Some(start) = key_start else {
         return false;
