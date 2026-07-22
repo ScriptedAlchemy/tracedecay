@@ -42,10 +42,12 @@ pub(crate) mod session_pool;
 mod trust_roots;
 
 #[cfg(test)]
-pub(crate) use model_catalog::{
-    CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1, production_fastembed_catalog,
-};
-#[cfg(test)]
+pub(crate) use model_catalog::production_fastembed_catalog;
+// The only in-crate consumers of these are the feature-gated scheduler
+// tests, so the test re-exports carry the same feature bound.
+#[cfg(all(test, feature = "semantic-fastembed"))]
+pub(crate) use model_catalog::{CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1};
+#[cfg(all(test, feature = "semantic-fastembed"))]
 pub(crate) use model_lifecycle::{ModelLifecycleErrorV1, ModelMemberSourceV1};
 pub(crate) use model_lifecycle::{
     SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1, apply_config_and_queue_startup,

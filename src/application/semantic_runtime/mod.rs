@@ -18,7 +18,9 @@ pub use ports::{
     SemanticRuntimeRouteV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
 pub use production::compose_project_application_semantic_search;
-#[cfg(test)]
+// The only in-crate consumers are the feature-gated scheduler tests, so this
+// test re-export carries the same feature bound.
+#[cfg(all(test, feature = "semantic-fastembed"))]
 pub(crate) use production::{ProductionSemanticRuntimeV1, current_query_factory};
 pub(crate) use production::{
     SavedCodeGenerationScheduleHookV1, production_saved_generation_schedule_hook,

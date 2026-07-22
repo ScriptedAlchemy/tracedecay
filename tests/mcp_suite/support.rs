@@ -244,6 +244,10 @@ pub(crate) async fn handle_tool_call(
         obj.entry("format".to_string())
             .or_insert_with(|| serde_json::json!("json"));
     }
+    // The project-session server path needs the test-transport feature (the
+    // in-process MCP harness and the for-test server constructor live behind
+    // it); without the feature these tools take the generic path below.
+    #[cfg(feature = "test-transport")]
     if matches!(
         tool_name,
         "tracedecay_message_search"

@@ -251,7 +251,8 @@ impl VerifiedEmbeddingArtifactV1 {
         self.resident_byte_ceiling
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    // Feature-independent: reads member bytes through the store/lifecycle
+    // pins only; the adapter's tests exercise it in every feature profile.
     fn required_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
         if let Some(artifact) = self.artifact.as_ref() {
             return artifact.read_member_bytes(role).map_err(|_| {
