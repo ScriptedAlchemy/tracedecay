@@ -1,8 +1,8 @@
 # TraceDecay V2 roadmap
 
-Status: active product rewrite. PR8 is complete. PR9/PR10 locked acceptance
+Status: active product rewrite. PR8 is complete. PR9/PR10 retrieval delivery
 and PR12/PR13 production integration are active; PR14 remains blocked until the
-PR12/PR13 contracts and aggregate gates are stable.
+PR12/PR13 product contracts, direct tests, and normal CI are stable.
 
 This file owns delivery order. The master and numbered plans define product
 requirements and component boundaries; they are not independent queues and do
@@ -50,8 +50,8 @@ PR6 delivered:
 - atomic projection with staged bounded rebuild, provider-native identity and
   relation preservation, typed hook telemetry, and executable native host
   fixtures;
-- an executable multi-provider benchmark harness and clean acceptance
-  evidence recorded by commit `05da230e`.
+- an executable multi-provider benchmark harness and historical Linux
+  measurement recorded by commit `05da230e`.
 
 PR7 delivered the canonical project/profile memory and fact path, evidence and
 provenance, corrections and trust, curation, migration, deletion lineage, and
@@ -76,8 +76,19 @@ Every remaining PR must leave a supported user journey working through a real
 entry point, the daemon/application kernel, durable state or computation, and a
 visible result. Prerequisite contracts ship inside the first journey that uses
 them. Compatibility names delegate to the production kernel, and replaced paths
-are deleted after the stated recovery boundary. Direct behavior and focused
-failure/recovery tests plus the relevant aggregate gate are the evidence.
+are deleted after the stated recovery boundary. Direct behavior, focused
+failure/recovery tests, and normal CI are the evidence.
+
+**Authoritative roadmap acceptance rule.** Never create or recreate
+PR-specific acceptance snapshots, owner receipts, gate manifests,
+clean/content-addressed checkout snapshots, signatures, attestations,
+reveal/trust-root evidence, or giant gate scaffolds. Acceptance is direct
+product tests plus simple Linux-only developer benchmarks/evals and truthful
+pass/fail/pending summaries; normal Linux/macOS/Windows CI continues to support
+the product's default features. This rule does not remove product-runtime
+receipts for atomic effects, migrations, Git transactions, daemon operations,
+or rollback, nor immutable code/vector/session generation identity and real
+source/content digests.
 
 The plan set has one minimal baseline. Numbered plans attach these checks to
 the product operation that can actually fail; they do not create separate
@@ -112,8 +123,8 @@ delivery phases:
   alternate identity or persistence authorities.
 - Plan 05 owns shared query execution. Plan 23 owns temporal session/LCM truth
   and session-derived evidence spans; Plan 13 owns cross-domain
-  `EvidenceSpanRecordV1` anchors. Plan 15 owns locked retrieval/quantifier
-  evaluation, Plan 25 exact code generations and typed graph evidence, and Plan
+  `EvidenceSpanRecordV1` anchors. Plan 15 owns retrieval/quantifier evaluation,
+  Plan 25 exact code generations and typed graph evidence, and Plan
   31 the optional semantic representation/search profile; exact lexical
   inclusion remains authoritative before semantic augmentation. Plan 16 owns
   authorized `QueryCollection` / `WorkspaceCollection` identity, membership,
@@ -154,8 +165,8 @@ delivery phases:
 | PR6 (complete) | Provider coverage and event normalization: remaining hosts/sources, daemon host-admission spool for non-replayable events, identities, dedupe, partial input, backpressure, and canonical event relations. |
 | PR7 (complete) | Memory, facts, and provenance: project/profile ownership, evidence, corrections, trust, curation, migration, deletion lineage, and generation-bound repository provenance anchors. |
 | PR8 (complete) | Session/LCM temporal retrieval: occurrences, copies, summaries, supersession, current/as-of/evolution retrieval, stable context assembly, and explicit daemon-owned refresh. |
-| PR9 (acceptance active) | Code intelligence and lexical retrieval: deterministic extraction with typed edge authority and coverage, exact occurrence identity plus evidenced/abstaining lineage, generation-bound managed diagnostics/tests, a non-demotable exact/phrase/BM25 tier, typed quantifier inputs, V1 parity, and typed read-only Git status/diff/history/blame/hunk intelligence enriched by graph impact. Worktree-aware incremental indexing reuses content-addressed parse/chunk artifacts while retaining exact worktree and generation identity. |
-| PR10 (acceptance active) | Native semantic retrieval and ranking: local FastEmbed artifacts, immutable vector generations, exact flat-vector baseline/oracle, measured hybrid/reranking candidates, calibrated abstention, redundancy augmentation, and byte-stable lexical fallback. Semantic projection is asynchronous and batches only changed eligible chunks; ordinary search never waits for it. ANN, late interaction, and quantization are optional only after locked admission evidence. |
+| PR9 (delivery active) | Code intelligence and lexical retrieval: deterministic extraction with typed edge authority and coverage, exact occurrence identity plus evidenced/abstaining lineage, generation-bound managed diagnostics/tests, a non-demotable exact/phrase/BM25 tier, typed quantifier inputs, V1 parity, and typed read-only Git status/diff/history/blame/hunk intelligence enriched by graph impact. Worktree-aware incremental indexing reuses content-addressed parse/chunk artifacts while retaining exact worktree and generation identity. |
+| PR10 (delivery active) | Native semantic retrieval and ranking: local FastEmbed artifacts, immutable vector generations, exact flat-vector baseline/oracle, measured hybrid/reranking candidates, calibrated abstention, redundancy augmentation, and byte-stable lexical fallback. Semantic projection is asynchronous and batches only changed eligible chunks; ordinary search never waits for it. ANN, late interaction, and quantization remain optional measured candidates. |
 | PR11 (integration active) | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, analyzer policy/settings, one runtime configuration authority, daemon-serialized `stage_hunks`/`unstage_hunks`/`commit_index` transactions with `HunkRef` compare-and-swap and receipts, and the typed branch-aware feedback-cycle request/result and orchestration ([Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)) — first pillar of the PR11–PR13 read-only/advisory milestone (post-edit diagnostics and impact). |
 | PR12 (integration active) | CLI, MCP, HTTP API, LSP gateway, and output convergence: one revisioned schema authority, dispatcher, binding taxonomy, semantic problem model, capability intersection, and executable lifecycle/stream/cancellation contract; stable errors/cursors, compact Markdown, canonical JSON, managed diagnostics, semantic surface parity, shared Git preview/apply bindings, callable canonical feedback diagnostics/impact reads with HTTP parity, and [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s PR12 slice — [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)'s standard projections plus a negotiated, versioned TraceDecay LSP context extension for diagnostics, impact, affected tests, and test results, and the explicit diagnostics-call trigger/surface bound once through [Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) — completing the post-edit diagnostics-and-impact pillar for LSP/MCP/CLI/HTTP surfaces. Dashboard binding starts in PR14. |
 
@@ -228,10 +239,9 @@ custom-LSP duplicate-analyzer avoidance, and truthful provider-unavailable
 behavior,
 including an explicit Cline-family route or evidence-backed typed unavailable
 result. Dogfood the official install/upgrade/repair/uninstall flow for Kimi
-Code and OpenCode alongside every supported host on Linux and Windows and on
-macOS wherever the host exists; prove competing-extension,
-interrupted-lifecycle, host-by-host rollback, and the direct feedback rollback
-switch. Run the relevant aggregate host-conformance gate.
+Code and OpenCode; prove competing-extension, interrupted-lifecycle,
+host-by-host rollback, and the direct feedback rollback switch. Normal
+Linux/macOS/Windows CI covers supported-host default-feature compatibility.
 
 **Not in this PR.** Dashboard investigation belongs to PR14; multi-root scope to
 PR15; remote delivery to PR16; workflow composition to PR17.
@@ -539,8 +549,7 @@ claim success from schema-only evidence.
 **Direct acceptance.** Migrate representative released data, interrupt and
 resume every phase, compare direct product journeys, cut over atomically,
 restore from the archive into a new V2 fence, and prove deletion,
-compatibility, and rollback-window behavior before deleting the old path. Run
-the aggregate migration/recovery/deletion gates.
+compatibility, and rollback-window behavior before deleting the old path.
 
 **Not in this PR.** V1 archives are bounded recovery input, not a second product
 or permanent read path.
@@ -562,9 +571,9 @@ practical gain.
 
 **Implementation and deletion.**
 
-- Compare a frozen real workload with A/A noise floors, paired effect sizes and
-  intervals, practical margins, worst-stratum/resource/tail results, open-loop
-  overload accounting, and Linux/Windows crash/restart correctness.
+- Compare the same real Linux developer workload before and after a candidate,
+  report raw samples and practical deltas, and keep crash/restart correctness
+  in direct product tests and normal cross-platform CI.
 - Preserve exact/lexical fallbacks, project/user isolation, receipts,
   determinism, coverage, and recomputation equivalence.
 - Developer-build improvements may change portable manifests, profiles,
@@ -577,16 +586,16 @@ practical gain.
 **Library-first implementation defaults.** Reuse existing `tracing`,
 `sysinfo`, and Criterion diagnostics, with `psutil` only in the Python soak
 harness. This replaces custom telemetry collectors, process sampling, and
-microbenchmark plumbing while retaining real-journey oracles, A/A noise,
-paired comparisons, platform/resource strata, tail behavior, and semantic/
-recovery equivalence. Missing child-process or platform coverage yields
-`insufficient_evidence`; it does not justify a benchmark service, performance
+microbenchmark plumbing while retaining real-journey oracles, practical
+before/after comparisons, resource observations, and semantic/recovery
+equivalence. Missing Linux measurement coverage yields a truthful pending or
+insufficient result; it does not justify a benchmark service, performance
 protocol, or new measurement authority.
 
 **Direct acceptance.** Re-run representative shipped journeys before and after
-each retained change, reproduce the gain and equivalent result, then pass the
-stable aggregate Linux, Windows, migration, recovery, performance, and
-deletion gates. No universal score, public benchmark rank, or paper threshold
+each retained change on Linux, reproduce the gain and equivalent result, and
+pass direct migration, recovery, deletion, and cross-platform default-feature
+CI tests. No universal score, public benchmark rank, or paper threshold
 substitutes for product evidence.
 
 **Not in this PR.** Unmeasured speculative optimizations and placeholder
@@ -656,5 +665,5 @@ benchmarks do not ship.
   migration section whose released data or API crosses the cutover.
 - PR20: [Plan 33](33-end-to-end-performance-optimization.md).
 
-PR #421 stays open through PR20. It merges only after PR20 and the aggregate
-verification named above is stable.
+PR #421 stays open through PR20. It merges only after PR20, direct product
+tests, and normal cross-platform CI are stable.
