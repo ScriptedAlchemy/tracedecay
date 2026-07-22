@@ -189,6 +189,7 @@ tempfile = "3"
 ed25519-dalek = { version = "3.0.0", features = ["signature"] }
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
+yaml-edit = { version = "0.2.3", default-features = false }
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"
