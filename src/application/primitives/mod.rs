@@ -2,6 +2,7 @@
 
 pub mod concrete;
 pub mod grep_analysis;
+pub mod production;
 pub mod runtime;
 pub mod symbol_graph;
 
@@ -13,6 +14,10 @@ pub use grep_analysis::{
     ProductionGrepAnalysisOperationsV1, TraceDecayAstGrepAuthorityV1,
     TraceDecayComplexityAuthorityV1, TraceDecayDependencyDepthAuthorityV1,
     production_grep_analysis_operations,
+};
+pub use production::{
+    TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project, locator_digest_for_project,
+    open_pr12_production_primitive_runtime, worktree_id_for_project,
 };
 pub use runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,

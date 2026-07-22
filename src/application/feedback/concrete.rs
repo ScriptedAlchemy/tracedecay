@@ -186,7 +186,7 @@ impl DurablePlan26FeedbackObservationSinkV1 for ProjectFeedbackObservationSinkV1
     ) -> FeedbackObservationSinkOutcome {
         match self.sender.try_send(envelope) {
             Ok(()) => FeedbackObservationSinkOutcome::Enqueued,
-            Err(mpsc::error::TrySendError::Full(_)) | Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => {
                 self.record_drop();
                 FeedbackObservationSinkOutcome::Dropped
             }
@@ -622,9 +622,8 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
             {
                 return interrupted;
             }
-            let publications = match self.scoped_publications(context.request).await {
-                Ok(publications) => publications,
-                Err(_) => return unavailable(now_micros(), domains),
+            let Ok(publications) = self.scoped_publications(context.request).await else {
+                return unavailable(now_micros(), domains);
             };
             let finished_at = now_micros();
             if let Some(interrupted) = interruption(context.request, finished_at, domains.clone()) {
@@ -663,9 +662,8 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
             {
                 return interrupted;
             }
-            let publications = match self.scoped_publications(context.request).await {
-                Ok(publications) => publications,
-                Err(_) => return unavailable(now_micros(), domains),
+            let Ok(publications) = self.scoped_publications(context.request).await else {
+                return unavailable(now_micros(), domains);
             };
             let finished_at = now_micros();
             if let Some(interrupted) = interruption(context.request, finished_at, domains.clone()) {
@@ -675,9 +673,9 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
             let Some((publication, finding)) = selected else {
                 return unavailable(finished_at, domains);
             };
-            let view = match self.finding_view(context.request, publication, finding, finished_at) {
-                Ok(view) => view,
-                Err(_) => return unavailable(finished_at, domains),
+            let Ok(view) = self.finding_view(context.request, publication, finding, finished_at)
+            else {
+                return unavailable(finished_at, domains);
             };
             complete(
                 FeedbackGetResultV1 { finding: view },
@@ -708,19 +706,16 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 );
                 return interrupted;
             }
-            let publications = match self.scoped_publications(context.request).await {
-                Ok(publications) => publications,
-                Err(_) => {
-                    let observed_at = now_micros();
-                    self.observe_expansion(
-                        context.request,
-                        request,
-                        Plan26FeedbackOutcomeV1::Unavailable,
-                        0,
-                        observed_at,
-                    );
-                    return unavailable(observed_at, domains);
-                }
+            let Ok(publications) = self.scoped_publications(context.request).await else {
+                let observed_at = now_micros();
+                self.observe_expansion(
+                    context.request,
+                    request,
+                    Plan26FeedbackOutcomeV1::Unavailable,
+                    0,
+                    observed_at,
+                );
+                return unavailable(observed_at, domains);
             };
             let mut finished_at = now_micros();
             if let Some(interrupted) = interruption(context.request, finished_at, domains.clone()) {
@@ -755,24 +750,22 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 return unavailable(finished_at, domains);
             }
             let diagnostics = DiagnosticsStore::new(self.database.conn());
-            let expanded = match diagnostics
+            let Ok(Some(_)) = diagnostics
                 .diagnostic_by_anchor(&request.expansion.anchor)
                 .await
-            {
-                Ok(Some(_)) => tracedecay_application::AnchorExpandResult {
-                    anchors: vec![request.expansion.anchor.clone()],
-                },
-                Ok(None) | Err(_) => {
-                    let observed_at = now_micros();
-                    self.observe_expansion(
-                        context.request,
-                        request,
-                        Plan26FeedbackOutcomeV1::Partial,
-                        0,
-                        observed_at,
-                    );
-                    return unavailable(observed_at, domains);
-                }
+            else {
+                let observed_at = now_micros();
+                self.observe_expansion(
+                    context.request,
+                    request,
+                    Plan26FeedbackOutcomeV1::Partial,
+                    0,
+                    observed_at,
+                );
+                return unavailable(observed_at, domains);
+            };
+            let expanded = tracedecay_application::AnchorExpandResult {
+                anchors: vec![request.expansion.anchor.clone()],
             };
             finished_at = now_micros();
             if let Some(interrupted) = interruption(context.request, finished_at, domains.clone()) {
@@ -785,18 +778,16 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 );
                 return interrupted;
             }
-            let view = match self.finding_view(context.request, publication, finding, finished_at) {
-                Ok(view) => view,
-                Err(_) => {
-                    self.observe_expansion(
-                        context.request,
-                        request,
-                        Plan26FeedbackOutcomeV1::Unavailable,
-                        0,
-                        finished_at,
-                    );
-                    return unavailable(finished_at, domains);
-                }
+            let Ok(view) = self.finding_view(context.request, publication, finding, finished_at)
+            else {
+                self.observe_expansion(
+                    context.request,
+                    request,
+                    Plan26FeedbackOutcomeV1::Unavailable,
+                    0,
+                    finished_at,
+                );
+                return unavailable(finished_at, domains);
             };
             self.observe_expansion(
                 context.request,
@@ -830,9 +821,8 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
             {
                 return interrupted;
             }
-            let publications = match self.scoped_publications(context.request).await {
-                Ok(publications) => publications,
-                Err(_) => return unavailable(now_micros(), domains),
+            let Ok(publications) = self.scoped_publications(context.request).await else {
+                return unavailable(now_micros(), domains);
             };
             let mut finished_at = now_micros();
             if let Some(interrupted) = interruption(context.request, finished_at, domains.clone()) {
@@ -859,9 +849,8 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 }
             }
             let records: Vec<_> = latest.into_iter().collect();
-            let start = match self.list_start(context.request, request, &records, finished_at) {
-                Ok(start) => start,
-                Err(_) => return unavailable(finished_at, domains),
+            let Ok(start) = self.list_start(context.request, request, &records, finished_at) else {
+                return unavailable(finished_at, domains);
             };
             let end = start
                 .saturating_add(request.page.page_size as usize)
@@ -871,13 +860,11 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
             let mut authorities = Vec::new();
             for (_, (publication_index, finding)) in selected {
                 let publication = &publications[*publication_index];
-                let view =
-                    match self.finding_view(context.request, publication, finding, finished_at) {
-                        Ok(view) => view,
-                        Err(_) => {
-                            return unavailable(finished_at, domains);
-                        }
-                    };
+                let Ok(view) =
+                    self.finding_view(context.request, publication, finding, finished_at)
+                else {
+                    return unavailable(finished_at, domains);
+                };
                 views.push(view);
                 authorities.push(publication);
             }
@@ -1353,8 +1340,9 @@ fn publication_matches_context(
         && publication.result.scope.project_id == scope.project_id
         && publication.result.scope.repository_id == scope.repository_id
         && publication.result.scope.worktree_id == scope.worktree_id
-        && scope.reference.as_ref().map(|reference| reference.as_str())
-            == Some(publication.result.scope.branch_ref.as_str())
+        && scope.reference.as_ref().is_some_and(|reference| {
+            reference.as_str() == publication.result.scope.branch_ref.as_str()
+        })
 }
 
 fn publication_order(

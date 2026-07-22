@@ -67,6 +67,7 @@ mod core_hooks;
 mod core_lifecycle;
 mod core_logging;
 mod core_proxy;
+mod project_open_owners;
 pub(crate) use core_admission::*;
 pub use core_client::*;
 pub(crate) use core_doctor::*;
@@ -527,12 +528,23 @@ impl DaemonInvocationState {
         project_root: &Path,
         store_root: PathBuf,
         semantic_runtime: Option<&crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
+        semantic_database: Option<Arc<crate::db::Database>>,
+        semantic_lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
+        semantic_resources: Option<crate::config::SemanticResourceCeilings>,
     ) -> Result<()> {
-        let semantic_schedule = semantic_runtime.map(|handle| {
-            crate::application::semantic_runtime::production_saved_generation_schedule_hook(
-                handle.clone(),
-            )
-        });
+        let semantic_schedule = semantic_runtime
+            .zip(semantic_database)
+            .zip(semantic_lifecycle)
+            .zip(semantic_resources)
+            .map(|(((handle, database), lifecycle), resources)| {
+                crate::application::semantic_runtime::production_saved_generation_schedule_hook(
+                    project_root.to_path_buf(),
+                    handle.clone(),
+                    database,
+                    lifecycle,
+                    resources,
+                )
+            });
         self.code_index_schedulers
             .mount_worktree(project_root, store_root, semantic_schedule)
             .await
@@ -1569,7 +1581,9 @@ impl DaemonEngine {
             .resources;
         let semantic_runtime = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(
             semantic_resources.max_concurrent_sessions as usize,
-            semantic_resources.max_batch_size as usize,
+            usize::try_from(semantic_resources.max_resident_bytes / 4096)
+                .unwrap_or(usize::MAX)
+                .max(semantic_resources.max_batch_size as usize),
             semantic_resources.max_resident_bytes,
         )
         .map_err(|_| TraceDecayError::Config {
@@ -1582,6 +1596,8 @@ impl DaemonEngine {
             semantic_config.selected_model.as_deref(),
             semantic_config.auto_download,
         );
+        let semantic_database = cg.dashboard_database_guard();
+        let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
 
         let existing = {
             let mut servers = self.store_administration.project_servers().lock().await;
@@ -1698,6 +1714,9 @@ impl DaemonEngine {
                     &canonical_project_path,
                     code_index_store_root,
                     Some(&semantic_runtime),
+                    Some(semantic_database),
+                    semantic_lifecycle,
+                    Some(semantic_resources),
                 )
                 .await?;
             match self
@@ -1708,6 +1727,21 @@ impl DaemonEngine {
             {
                 Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
             }
+            let project_id =
+                key.owner
+                    .project_id
+                    .as_deref()
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message: "project-open owners require an authoritative project identity"
+                            .to_owned(),
+                    })?;
+            project_open_owners::register_project_open_production_owners(
+                &self.invocation,
+                &canonical_project_path,
+                project_id,
+                server.as_ref(),
+            )
+            .await?;
             self.spawn_project_maintenance_activation(
                 key.clone(),
                 canonical_project_path.clone(),
@@ -2477,7 +2511,9 @@ async fn portable_project_server(
         .resources;
     let semantic_runtime = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(
         semantic_resources.max_concurrent_sessions as usize,
-        semantic_resources.max_batch_size as usize,
+        usize::try_from(semantic_resources.max_resident_bytes / 4096)
+            .unwrap_or(usize::MAX)
+            .max(semantic_resources.max_batch_size as usize),
         semantic_resources.max_resident_bytes,
     )
     .map_err(|_| TraceDecayError::Config {
@@ -2488,6 +2524,8 @@ async fn portable_project_server(
         semantic_config.selected_model.as_deref(),
         semantic_config.auto_download,
     );
+    let semantic_database = cg.dashboard_database_guard();
+    let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
     let existing = {
         let mut servers = store_administration.project_servers().lock().await;
         let existing = servers.get(&key).cloned();
@@ -2565,6 +2603,13 @@ async fn portable_project_server(
         },
     );
     let candidate = crate::mcp::McpServer::new_with_context(context).await;
+    let project_id = key
+        .owner
+        .project_id
+        .clone()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open owners require an authoritative project identity".to_owned(),
+        })?;
     let resolution = store_administration
         .project_servers()
         .lock()
@@ -2588,6 +2633,9 @@ async fn portable_project_server(
                 canonical_project_path,
                 code_index_store_root,
                 Some(&semantic_runtime),
+                Some(semantic_database),
+                semantic_lifecycle,
+                Some(semantic_resources),
             )
             .await?;
         match invocation
@@ -2597,6 +2645,13 @@ async fn portable_project_server(
         {
             Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
         }
+        project_open_owners::register_project_open_production_owners(
+            invocation,
+            canonical_project_path,
+            &project_id,
+            resolved.as_ref(),
+        )
+        .await?;
     }
     Ok(resolved)
 }

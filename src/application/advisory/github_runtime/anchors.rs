@@ -168,15 +168,14 @@ impl ProjectGitHubAnchorAuthorityV1 {
         else {
             return false;
         };
-        let mut rows = match transaction
+        let Ok(mut rows) = transaction
             .query(
                 "SELECT value FROM metadata WHERE key = ?1",
                 params![key.as_str()],
             )
             .await
-        {
-            Ok(rows) => rows,
-            Err(_) => return false,
+        else {
+            return false;
         };
         let existing = match rows.next().await {
             Ok(row) => row

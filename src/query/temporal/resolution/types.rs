@@ -26,6 +26,7 @@ impl ResolutionEvidence {
         self.authorized
     }
 
+    #[must_use]
     pub fn with_supporting_anchor(mut self, anchor_id: RetrievalAnchorId) -> Self {
         self.supporting_anchor_ids.insert(anchor_id);
         self

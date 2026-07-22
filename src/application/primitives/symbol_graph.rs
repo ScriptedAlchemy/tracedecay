@@ -550,7 +550,7 @@ fn relation_record(
     }
 }
 
-fn symbol_record(node: Node, score: Option<f64>) -> SymbolPrimitiveRecord {
+pub(crate) fn symbol_record(node: Node, score: Option<f64>) -> SymbolPrimitiveRecord {
     SymbolPrimitiveRecord {
         node_id: node.id,
         name: node.name,

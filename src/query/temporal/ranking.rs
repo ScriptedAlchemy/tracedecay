@@ -282,11 +282,11 @@ fn prepare_candidates(
 fn copy_metadata(candidate: &mut RankingCandidate, metadata: &RankingCandidate) {
     candidate.anchor_id = metadata.anchor_id.clone();
     candidate.knowledge_at_micros = metadata.knowledge_at_micros;
-    candidate.logical_message = metadata.logical_message.clone();
-    candidate.turn = metadata.turn.clone();
-    candidate.session = metadata.session.clone();
-    candidate.source = metadata.source.clone();
-    candidate.evidence_role = metadata.evidence_role.clone();
+    candidate.logical_message.clone_from(&metadata.logical_message);
+    candidate.turn.clone_from(&metadata.turn);
+    candidate.session.clone_from(&metadata.session);
+    candidate.source.clone_from(&metadata.source);
+    candidate.evidence_role.clone_from(&metadata.evidence_role);
 }
 
 struct ScoredFusion {
@@ -334,16 +334,16 @@ fn option_conflicts(left: Option<&str>, right: Option<&str>) -> bool {
 
 fn fill_missing_metadata(existing: &mut RankingCandidate, candidate: &RankingCandidate) {
     if existing.logical_message.is_none() {
-        existing.logical_message = candidate.logical_message.clone();
+        existing.logical_message.clone_from(&candidate.logical_message);
     }
     if existing.turn.is_none() {
-        existing.turn = candidate.turn.clone();
+        existing.turn.clone_from(&candidate.turn);
     }
     if existing.session.is_none() {
-        existing.session = candidate.session.clone();
+        existing.session.clone_from(&candidate.session);
     }
     if existing.evidence_role.is_none() {
-        existing.evidence_role = candidate.evidence_role.clone();
+        existing.evidence_role.clone_from(&candidate.evidence_role);
     }
 }
 

@@ -28,7 +28,8 @@ use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
     CompatibilityFactAddAliasV1, CompatibilityFactCurationOperationV1,
     CompatibilityFactCurationReceiptV1, CompatibilityFactMappingV1,
-    CompatibilityFactMergeEntitiesV1, CompatibilityFactTargetV1, CompatibilityMemoryRepairStatsV1,
+    CompatibilityFactMergeEntitiesV1, CompatibilityFactTargetV1, CompatibilityLegacyEntityTargetV1,
+    CompatibilityMemoryRepairStatsV1,
     FactCompatibilityResult, FactStoreError, FactStoreResult,
 };
 async fn compatibility_owner_entity_tx(
@@ -446,7 +447,7 @@ pub(super) fn compatibility_curation_operation_digest(
         CompatibilityFactCurationOperationV1::MergeEntities(operation) => Ok(json!({
             "kind": "merge_entities",
             "winner": operation.winner().legacy_entity_id(),
-            "losers": operation.losers().iter().map(|target| target.legacy_entity_id()).collect::<Vec<_>>(),
+            "losers": operation.losers().iter().map(CompatibilityLegacyEntityTargetV1::legacy_entity_id).collect::<Vec<_>>(),
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
         })),

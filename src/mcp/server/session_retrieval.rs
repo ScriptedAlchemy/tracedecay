@@ -1051,12 +1051,9 @@ fn describe_retrieval_outcome(
         SessionRetrievalOutcome::Denied => LcmDescribeServiceOutcome::Denied,
         SessionRetrievalOutcome::BudgetExhausted => LcmDescribeServiceOutcome::BudgetExhausted,
         SessionRetrievalOutcome::Cancelled => LcmDescribeServiceOutcome::Cancelled,
-        SessionRetrievalOutcome::Stale { .. } | SessionRetrievalOutcome::Unavailable => {
-            LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
-                SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
-            ))
-        }
-        SessionRetrievalOutcome::Complete { .. }
+        SessionRetrievalOutcome::Stale { .. }
+        | SessionRetrievalOutcome::Unavailable
+        | SessionRetrievalOutcome::Complete { .. }
         | SessionRetrievalOutcome::CompleteZero { .. }
         | SessionRetrievalOutcome::Partial { .. } => {
             LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
@@ -1077,12 +1074,9 @@ fn expand_retrieval_outcome(
         SessionRetrievalOutcome::Denied => LcmExpandServiceOutcome::Denied,
         SessionRetrievalOutcome::BudgetExhausted => LcmExpandServiceOutcome::BudgetExhausted,
         SessionRetrievalOutcome::Cancelled => LcmExpandServiceOutcome::Cancelled,
-        SessionRetrievalOutcome::Stale { .. } | SessionRetrievalOutcome::Unavailable => {
-            LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
-                SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
-            ))
-        }
-        SessionRetrievalOutcome::Complete { .. }
+        SessionRetrievalOutcome::Stale { .. }
+        | SessionRetrievalOutcome::Unavailable
+        | SessionRetrievalOutcome::Complete { .. }
         | SessionRetrievalOutcome::CompleteZero { .. }
         | SessionRetrievalOutcome::Partial { .. } => {
             LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
@@ -1150,13 +1144,13 @@ fn message_search_result_matches(
         return false;
     }
     match filters.scope {
-        SessionSearchScope::All => {}
         SessionSearchScope::ParentsOnly if result.session.is_subagent => return false,
         SessionSearchScope::SubagentsOnly if !result.session.is_subagent => return false,
-        SessionSearchScope::ParentsOnly | SessionSearchScope::SubagentsOnly => {}
+        SessionSearchScope::All
+        | SessionSearchScope::ParentsOnly
+        | SessionSearchScope::SubagentsOnly => {}
     }
     match filters.message_type {
-        SessionMessageType::All => {}
         SessionMessageType::DirectUser
             if result.message.role != "user"
                 || result.message.kind.as_deref() == Some("tool_result") =>
@@ -1169,7 +1163,9 @@ fn message_search_result_matches(
         {
             return false;
         }
-        SessionMessageType::DirectUser | SessionMessageType::ToolResult => {}
+        SessionMessageType::All
+        | SessionMessageType::DirectUser
+        | SessionMessageType::ToolResult => {}
     }
     if !filters.roles.is_empty()
         && !filters

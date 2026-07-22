@@ -199,11 +199,11 @@ async fn feedback_handle_bootstrap_reads() {
         .await
         .expect("feedback database");
     let scope = resolved_scope("feedback");
-    let access = feedback_access(&scope);
+    let observed_at = wall_clock_micros();
+    let access = feedback_access(&scope, observed_at);
     let runtime = open_pr12_feedback_runtime(database, project.path(), scope, access)
         .expect("feedback runtime");
     let owner = runtime.owner();
-    let observed_at = UtcMicros(1_000_000);
 
     let list_handle = runtime
         .mint_list("request.feedback-bootstrap.list", None, 1, observed_at)
@@ -445,7 +445,7 @@ fn resolved_scope(suffix: &str) -> ResolvedScope {
     .expect("resolved scope")
 }
 
-fn feedback_access(scope: &ResolvedScope) -> ProjectSourceAccessSnapshot {
+fn feedback_access(scope: &ResolvedScope, observed_at: UtcMicros) -> ProjectSourceAccessSnapshot {
     ProjectSourceAccessSnapshot {
         scope: scope.clone(),
         requester: ActorId::new("actor.runtime-acceptance.feedback").expect("requester"),
@@ -467,8 +467,21 @@ fn feedback_access(scope: &ResolvedScope) -> ProjectSourceAccessSnapshot {
                 .expect("diagnostics capability"),
             CapabilityId::new(FEEDBACK_LIST_CAPABILITY_ID_V1).expect("list capability"),
         ]),
-        grant_expires_at: UtcMicros(20_000_000),
+        // Wall-clock aligned so port interruption checks using now_micros admit.
+        grant_expires_at: UtcMicros(observed_at.0.saturating_add(60_000_000)),
     }
+}
+
+fn wall_clock_micros() -> UtcMicros {
+    UtcMicros(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_micros())
+                .unwrap_or(0),
+        )
+        .unwrap_or(i64::MAX),
+    )
 }
 
 fn operation_context(suffix: &str) -> RequestContext {

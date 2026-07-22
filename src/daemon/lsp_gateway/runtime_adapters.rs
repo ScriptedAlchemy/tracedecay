@@ -442,13 +442,10 @@ impl Pr12FeedbackCycleAdapter {
 
 impl FeedbackCyclePort for Pr12FeedbackCycleAdapter {
     fn request_feedback_cycle(&self, request: FeedbackCycleRequest) -> FeedbackCycleResponse {
-        let permit = match Arc::clone(&self.capacity).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                return FeedbackCycleResponse::Deferred {
-                    reason: "feedback-cycle-capacity".to_owned(),
-                };
-            }
+        let Ok(permit) = Arc::clone(&self.capacity).try_acquire_owned() else {
+            return FeedbackCycleResponse::Deferred {
+                reason: "feedback-cycle-capacity".to_owned(),
+            };
         };
         let authority = Arc::clone(&self.authority);
         let _task = self.runtime.spawn(async move {
@@ -749,8 +746,7 @@ fn project_semantic_outcome(
         }
         LspSemanticOperationOutcome::Partial { value, coverage } => {
             let value = parse_semantic_response(request, value)
-                .map(|(value, _)| value)
-                .unwrap_or_else(|_| empty_semantic_response(request));
+                .map_or_else(|_| empty_semantic_response(request), |(value, _)| value);
             let (value, _) = confine_semantic_response(root, value);
             SemanticProviderOutcome::Partial { value, coverage }
         }
@@ -1387,14 +1383,13 @@ impl ContextProjectionPort for Pr12ContextProjectionAdapter {
                 in_flight.remove(&key);
                 Some(outcome)
             }
-            Some(Err(TryRecvError::Empty)) => None,
+            Some(Err(TryRecvError::Empty)) | None => None,
             Some(Err(TryRecvError::Closed)) => {
                 in_flight.remove(&key);
                 Some(ContextProjectionOutcome::Failed {
                     reason: "context-operation-dropped".to_owned(),
                 })
             }
-            None => None,
         }
     }
 
@@ -1454,14 +1449,13 @@ impl ContextProjectionPort for Pr12ContextProjectionAdapter {
                 expansions.remove(&key);
                 Some(outcome)
             }
-            Some(Err(TryRecvError::Empty)) => None,
+            Some(Err(TryRecvError::Empty)) | None => None,
             Some(Err(TryRecvError::Closed)) => {
                 expansions.remove(&key);
                 Some(ContextExpansionOutcome::Failed {
                     reason: "context-expansion-operation-dropped".to_owned(),
                 })
             }
-            None => None,
         }
     }
 

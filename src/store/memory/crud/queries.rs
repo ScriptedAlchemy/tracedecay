@@ -14,7 +14,7 @@ use libsql::{Transaction, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    Confidence, CoverageUniverseKnowledgeV1, FactAssertionId, FactEventId, FactId,
+    ActorId, Confidence, CoverageUniverseKnowledgeV1, FactAssertionId, FactEventId, FactId,
     FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyFactMappingV1, LegacyHistoryCoverageV1,
     PayloadAccessState, ProvenanceId, RetrievalAnchorRecordV2, ShardDispositionV1, UtcMicros,
 };
@@ -810,9 +810,10 @@ fn classify_fact_coverage(
             }
         }
     };
-    let anchor_access = anchor
-        .map(RetrievalAnchorRecordV2::payload_access)
-        .unwrap_or(PayloadAccessState::Eligible);
+    let anchor_access = anchor.map_or(
+        PayloadAccessState::Eligible,
+        RetrievalAnchorRecordV2::payload_access,
+    );
     if effective_access == PayloadAccessState::Redacted
         || anchor_access == PayloadAccessState::Redacted
     {
@@ -1185,7 +1186,7 @@ fn promotion_transition_json(
             "proposal_id": promotion.proposal_id().as_str(),
             "previous_state": proposal_state_label(promotion.expected_state()),
             "current_state": "applied",
-            "reviewer": promotion.reviewer().map(|reviewer| reviewer.as_str()),
+            "reviewer": promotion.reviewer().map(ActorId::as_str),
             "fact_id": receipt.fact_id().as_str(),
             "active_assertion_id": receipt.active_assertion_id().map(FactAssertionId::as_str),
             "last_event_id": receipt.last_event_id().as_str(),
@@ -1196,8 +1197,8 @@ fn promotion_transition_json(
 }
 
 pub(in crate::store::memory) fn proposal_transition_id(transition_json: &str) -> String {
-    let digest = Sha256::digest(transition_json.as_bytes());
     const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(transition_json.as_bytes());
     let mut id = String::from("proposal-transition:");
     for byte in digest {
         id.push(char::from(HEX[usize::from(byte >> 4)]));
@@ -1206,7 +1207,7 @@ pub(in crate::store::memory) fn proposal_transition_id(transition_json: &str) ->
     id
 }
 
-impl<'a> DatabaseFactStore<'a> {
+impl DatabaseFactStore<'_> {
     pub(in crate::store::memory) async fn commit_batch(
         &self,
         batch: &FactWriteBatch,

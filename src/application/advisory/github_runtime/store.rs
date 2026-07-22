@@ -189,25 +189,22 @@ impl GitHubReviewAtomicRefreshStoreV1 for ProjectGitHubReviewStoreV1 {
             else {
                 return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
             };
-            let encoded = match self
+            let Ok(encoded) = self
                 .database
                 .get_metadata_unguarded(&transaction, &key)
                 .await
-            {
-                Ok(encoded) => encoded,
-                Err(_) => {
-                    let _ = transaction.rollback().await;
-                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                }
+            else {
+                let _ = transaction.rollback().await;
+                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
             };
             let current = match encoded {
-                Some(encoded) => match Self::decode(request, &encoded) {
-                    Some(state) => Some(state),
-                    None => {
+                Some(encoded) => {
+                    let Some(state) = Self::decode(request, &encoded) else {
                         let _ = transaction.rollback().await;
                         return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                    }
-                },
+                    };
+                    Some(state)
+                }
                 None => None,
             };
             if current
@@ -225,25 +222,22 @@ impl GitHubReviewAtomicRefreshStoreV1 for ProjectGitHubReviewStoreV1 {
                 let _ = transaction.rollback().await;
                 return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
             };
-            let encoded_source = match self
+            let Ok(encoded_source) = self
                 .database
                 .get_metadata_unguarded(&transaction, &source_key)
                 .await
-            {
-                Ok(encoded) => encoded,
-                Err(_) => {
-                    let _ = transaction.rollback().await;
-                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                }
+            else {
+                let _ = transaction.rollback().await;
+                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
             };
             let current_source = match encoded_source {
-                Some(encoded) => match Self::decode_source_state(&encoded) {
-                    Some(state) => Some(state),
-                    None => {
+                Some(encoded) => {
+                    let Some(state) = Self::decode_source_state(&encoded) else {
                         let _ = transaction.rollback().await;
                         return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                    }
-                },
+                    };
+                    Some(state)
+                }
                 None => None,
             };
             let Some(source_commit) = source_commit_for_refresh(

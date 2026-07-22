@@ -22,7 +22,7 @@ use super::{
     GitHubRestReadRequestV1, MAX_GITHUB_READ_RESPONSE_BYTES_V1,
 };
 
-pub const GITHUB_REVIEW_THREADS_QUERY_V1: &str = r#"
+pub const GITHUB_REVIEW_THREADS_QUERY_V1: &str = r"
 query TraceDecayPR13ReviewThreads(
   $owner: String!
   $repository: String!
@@ -71,7 +71,7 @@ query TraceDecayPR13ReviewThreads(
     }
   }
 }
-"#;
+";
 
 const MAX_REVIEW_ITEMS_V1: usize = 2_000;
 const MAX_NESTED_COMMENT_PAGES_V1: usize = 20;
@@ -148,7 +148,7 @@ impl GitHubRepositoryTargetV1 {
         valid_path_segment(&self.owner)
             && valid_path_segment(&self.repository)
             && self.pull_request_number > 0
-            && self.pull_request_number <= i32::MAX as u64
+            && i32::try_from(self.pull_request_number).is_ok()
             && self.pull_request_id.validate().is_ok()
     }
 }
@@ -255,9 +255,8 @@ impl GitHubReadOnlyClientV1 {
         if request.pull_request_id != self.target.pull_request_id {
             return GitHubReadNetworkOutcomeV1::Denied;
         }
-        let page = match page_from_cursor(request.resume.cursor.as_ref()) {
-            Some(page) => page,
-            None => return GitHubReadNetworkOutcomeV1::Unavailable,
+        let Some(page) = page_from_cursor(request.resume.cursor.as_ref()) else {
+            return GitHubReadNetworkOutcomeV1::Unavailable;
         };
         let suffix = match request.descriptor.operation {
             GitHubReviewReadOperationV1::RestGetPullRequest => String::new(),
@@ -280,7 +279,7 @@ impl GitHubReadOnlyClientV1 {
             suffix
         );
         let response = self.get(&url, request.resume.etag.as_ref());
-        self.decode_rest_response(response, request.descriptor.operation)
+        Self::decode_rest_response(response, request.descriptor.operation)
     }
 
     fn execute_graphql(&self, request: &GitHubGraphQlReadRequestV1) -> GitHubReadNetworkOutcomeV1 {
@@ -297,7 +296,7 @@ impl GitHubReadOnlyClientV1 {
             "owner": self.target.owner,
             "repository": self.target.repository,
             "number": self.target.pull_request_number,
-            "threadAfter": request.resume.cursor.as_ref().map(|cursor| cursor.as_str()),
+            "threadAfter": request.resume.cursor.as_ref().map(GitHubReviewCursorV1::as_str),
             "commentThreadId": "unused",
             "commentAfter": null,
             "loadThreads": true,
@@ -323,7 +322,7 @@ impl GitHubReadOnlyClientV1 {
                     .review_threads
                     .page_info
                     .has_next_page
-                    .then(|| pull_request.review_threads.page_info.end_cursor.as_deref())
+                    .then_some(pull_request.review_threads.page_info.end_cursor.as_deref())
                     .flatten()
             })
             .and_then(|cursor| GitHubReviewCursorV1::new(cursor).ok());
@@ -419,7 +418,6 @@ impl GitHubReadOnlyClientV1 {
     }
 
     fn decode_rest_response(
-        &self,
         response: HttpResponseV1,
         operation: GitHubReviewReadOperationV1,
     ) -> GitHubReadNetworkOutcomeV1 {
@@ -720,14 +718,13 @@ fn decode_ureq_response(
             let etag = header(response.headers(), "etag")
                 .and_then(|value| GitHubReviewEtagV1::new(value).ok());
             let next_page = next_page(response.headers());
-            let body = match response
+            let Ok(body) = response
                 .body_mut()
                 .with_config()
                 .limit(maximum as u64)
                 .read_to_vec()
-            {
-                Ok(body) => body,
-                Err(_) => return HttpResponseV1::Unavailable,
+            else {
+                return HttpResponseV1::Unavailable;
             };
             HttpResponseV1::Ok {
                 body,
@@ -744,8 +741,7 @@ fn decode_ureq_response(
         401 => HttpResponseV1::Denied,
         403 | 429 => rate_limit
             .filter(|limit| limit.remaining == 0)
-            .map(HttpResponseV1::RateLimited)
-            .unwrap_or(HttpResponseV1::Denied),
+            .map_or(HttpResponseV1::Denied, HttpResponseV1::RateLimited),
         _ => HttpResponseV1::Unavailable,
     }
 }
@@ -1081,15 +1077,17 @@ mod tests {
             .comments;
         assert_eq!(comments.nodes.len(), 2);
         assert!(!comments.page_info.has_next_page);
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0]["variables"]["loadThreads"], true);
-        assert_eq!(requests[1]["variables"]["loadComments"], true);
-        assert_eq!(requests[1]["variables"]["commentThreadId"], thread_id);
-        assert_eq!(
-            requests[1]["variables"]["commentAfter"],
-            "cursor.comments.1"
-        );
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0]["variables"]["loadThreads"], true);
+            assert_eq!(requests[1]["variables"]["loadComments"], true);
+            assert_eq!(requests[1]["variables"]["commentThreadId"], thread_id);
+            assert_eq!(
+                requests[1]["variables"]["commentAfter"],
+                "cursor.comments.1"
+            );
+        }
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("github-owner-bound.db");

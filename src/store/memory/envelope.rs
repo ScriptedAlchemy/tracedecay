@@ -51,9 +51,9 @@ pub(super) struct CompatibilityOperationReceiptV1 {
 }
 
 pub(super) fn compatibility_digest(material: Value) -> FactStoreResult<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let encoded = to_json(&material, "serialize compatibility request digest")?;
     let digest = Sha256::digest(encoded.as_bytes());
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut value = String::with_capacity(digest.len() * 2);
     for byte in digest {
         value.push(char::from(HEX[usize::from(byte >> 4)]));
@@ -187,7 +187,7 @@ pub(super) fn compatibility_receipt_u64(
     })
 }
 
-impl<'a> DatabaseFactStore<'a> {
+impl DatabaseFactStore<'_> {
     pub(super) async fn compatibility_read<T>(
         &self,
         work: impl for<'tx> FnOnce(

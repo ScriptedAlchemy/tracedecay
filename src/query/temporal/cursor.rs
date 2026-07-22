@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1, TemporalModeV1,
+    SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
 };
 
 use super::ports::{
@@ -136,7 +136,7 @@ impl CursorPayload {
                 .request()
                 .retrieval_scope()
                 .session_id()
-                .map(|session_id| session_id.to_string()),
+                .map(ToString::to_string),
             provider_scope: snapshot.provider_scope().map(str::to_string),
             access_digest: snapshot.access_digest().as_str().to_string(),
             temporal_mode: snapshot.temporal_mode().as_str().to_string(),
@@ -297,7 +297,7 @@ fn verify_bindings(
     if payload.scope_kind != cursor_scope_kind(expected_scope) {
         return Err(CursorError::SessionMismatch);
     }
-    if payload.session_id.as_deref() != expected_scope.session_id().map(|id| id.as_str()) {
+    if payload.session_id.as_deref() != expected_scope.session_id().map(SessionId::as_str) {
         return Err(CursorError::SessionMismatch);
     }
     if payload.provider_scope.as_deref() != expected.provider_scope() {

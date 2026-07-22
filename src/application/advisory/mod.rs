@@ -28,8 +28,9 @@ pub use ci_runtime::{
     GitHubCiPullRequestRefV1, GitHubCiWorkflowRunV1, MAX_CI_RETAINED_ANNOTATIONS_V1,
     MAX_CI_RETAINED_CHECKS_V1, MAX_CI_RETAINED_FAILURES_V1, ProductionCiArchiveHandleV1,
     ProductionCiExactEvidenceHandleV1, ProductionCiProviderAuthoritiesV1,
-    ProductionCiProviderConfigV1, ProductionCiProviderOpenErrorV1,
-    concrete_ci_failure_localization_owner_v1, open_production_ci_provider_authorities_v1,
+    ProductionCiProviderConfigV1, ProductionCiProviderOpenErrorV1, ProjectCiCodeAnchorStoreV1,
+    ProjectCiRetainedObservationStoreV1, concrete_ci_failure_localization_owner_v1,
+    open_production_ci_provider_authorities_v1,
 };
 pub use fixtures::{
     PR13_CHECK_ANNOTATIONS_FIXTURE_V1, PR13_CHECK_RUN_FIXTURE_V1, PR13_FIXTURE_ROOT_V1,

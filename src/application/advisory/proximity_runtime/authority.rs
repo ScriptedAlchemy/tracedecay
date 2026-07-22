@@ -228,12 +228,11 @@ impl ProductionProximityEvidenceAuthorityV1 {
                 partial = true;
                 continue;
             }
-            let graph_nodes = match self.graph.get_nodes_by_file(&path).await {
-                Ok(nodes) => nodes,
-                Err(_) => {
-                    partial = true;
-                    Vec::new()
-                }
+            let graph_nodes = if let Ok(nodes) = self.graph.get_nodes_by_file(&path).await {
+                nodes
+            } else {
+                partial = true;
+                Vec::new()
             };
             let blast_radius_size = if graph_nodes.is_empty() {
                 partial = true;
@@ -243,12 +242,11 @@ impl ProductionProximityEvidenceAuthorityV1 {
                     .iter()
                     .map(|node| node.id.clone())
                     .collect::<Vec<_>>();
-                match self.graph.get_impact_radius_multi(&seeds, 1).await {
-                    Ok(nodes) => u32::try_from(nodes.len().max(1)).unwrap_or(u32::MAX),
-                    Err(_) => {
-                        partial = true;
-                        u32::try_from(graph_nodes.len()).unwrap_or(u32::MAX)
-                    }
+                if let Ok(nodes) = self.graph.get_impact_radius_multi(&seeds, 1).await {
+                    u32::try_from(nodes.len().max(1)).unwrap_or(u32::MAX)
+                } else {
+                    partial = true;
+                    u32::try_from(graph_nodes.len()).unwrap_or(u32::MAX)
                 }
             };
             let latest_activity = session_keys

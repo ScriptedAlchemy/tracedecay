@@ -143,10 +143,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
                     return;
                 };
                 match result {
-                    Ok(()) => {
-                        worker_state.mark_stopped();
-                        return;
-                    }
                     Err(error)
                         if error.is_panic() && !worker_state.cancelled.load(Ordering::Acquire) =>
                     {
@@ -165,7 +161,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             )) => {}
                         }
                     }
-                    Err(_) => {
+                    Ok(()) | Err(_) => {
                         worker_state.mark_stopped();
                         return;
                     }

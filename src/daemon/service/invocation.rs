@@ -1238,14 +1238,11 @@ async fn execute_feedback(
     let Some(owner) = owner else {
         return concealed_application_problem(wire_request_id);
     };
-    let request_id = match RequestId::new(wire_request_id.clone()) {
-        Ok(request_id) => request_id,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                wire_request_id,
-                DaemonInvocationProblem::InvalidRequest,
-            );
-        }
+    let Ok(request_id) = RequestId::new(wire_request_id.clone()) else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
     };
     let result = owner
         .service
@@ -1296,16 +1293,13 @@ async fn execute_primitive(
     let Some(dispatch) = dispatch else {
         return concealed_application_problem(wire_request_id);
     };
-    let request_id = match RequestId::new(wire_request_id.clone()) {
-        Ok(request_id) => request_id,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                wire_request_id,
-                DaemonInvocationProblem::InvalidRequest,
-            );
-        }
+    let Ok(request_id) = RequestId::new(wire_request_id.clone()) else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
     };
-    let operation = match tracedecay_application::feedback::feedback_surface_operation(
+    let Ok(Some(operation)) = tracedecay_application::feedback::feedback_surface_operation(
         surface_operation.as_str(),
     )
     .and_then(|operation| {
@@ -1317,16 +1311,13 @@ async fn execute_primitive(
             },
             |operation| Ok(Some(operation)),
         )
-    }) {
-        Ok(Some(operation)) => operation,
-        _ => {
-            return DaemonInvocationResponse::problem(
-                wire_request_id,
-                DaemonInvocationProblem::InvalidRequest,
-            );
-        }
+    }) else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
     };
-    let result = match dispatch
+    let Ok(result) = dispatch
         .dispatch_transport(
             request_id,
             operation,
@@ -1336,14 +1327,11 @@ async fn execute_primitive(
             cancellation,
         )
         .await
-    {
-        Ok(result) => result,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                wire_request_id,
-                DaemonInvocationProblem::InvalidRequest,
-            );
-        }
+    else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
     };
     match feedback_invocation_result(result) {
         Ok(result) => DaemonInvocationResponse::with_outcome(
@@ -2003,17 +1991,14 @@ async fn execute_git_preview(
         Err(problem) => return application_problem(wire_request_id, problem),
     };
     let scope = request.context.scope().clone();
-    let emitter = match operation_events
+    let Ok(emitter) = operation_events
         .begin(&request.context, OperationKind::GitPreview, observed_at)
         .await
-    {
-        Ok(emitter) => emitter,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                wire_request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        }
+    else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::Unavailable,
+        );
     };
     let _ = emitter.progress(0, Some(1)).await;
     let started_at = request.observed_at;
@@ -2069,17 +2054,14 @@ async fn execute_git_apply(
         Err(problem) => return application_problem(wire_request_id, problem),
     };
     let scope = request.context.scope().clone();
-    let emitter = match operation_events
+    let Ok(emitter) = operation_events
         .begin(&request.context, OperationKind::GitApply, observed_at)
         .await
-    {
-        Ok(emitter) => emitter,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                wire_request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        }
+    else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::Unavailable,
+        );
     };
     let _ = emitter.progress(0, Some(1)).await;
     let started_at = request.observed_at;
@@ -2153,7 +2135,7 @@ fn build_git_preview_request(
     let preview_id = mint_git_preview_id()?;
     let mut selected_hunks = request.selected_hunks;
     for hunk in &mut selected_hunks {
-        hunk.preview_id = preview_id.as_str().to_owned();
+        preview_id.as_str().clone_into(&mut hunk.preview_id);
     }
     let (context, authority, binding) = git_request_authority(
         request_id,
@@ -2331,8 +2313,7 @@ fn now_micros() -> UtcMicros {
         i64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_micros())
-                .unwrap_or(0),
+                .map_or(0, |duration| duration.as_micros()),
         )
         .unwrap_or(i64::MAX),
     )
@@ -2850,14 +2831,11 @@ impl DaemonInvocationService {
             *registry = endpoint.into_registry();
             result
         };
-        let access = match access {
-            Ok(access) => access,
-            Err(_) => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                );
-            }
+        let Ok(access) = access else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
         };
         let expires_at_ms = now_ms.saturating_add(LSP_SESSION_TTL_MS);
         let session_id = access.session_id().clone();
@@ -3064,7 +3042,6 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         DaemonInvocationOperation::FeedbackGet => Plan26FeedbackOperationV1::FeedbackGet,
         DaemonInvocationOperation::FeedbackExpand => Plan26FeedbackOperationV1::FeedbackExpand,
         DaemonInvocationOperation::FeedbackList => Plan26FeedbackOperationV1::FeedbackList,
-        DaemonInvocationOperation::FeedbackObserve => Plan26FeedbackOperationV1::FeedbackCycle,
         DaemonInvocationOperation::PrimitiveImpact => Plan26FeedbackOperationV1::PrimitiveImpact,
         DaemonInvocationOperation::PrimitiveAffectedTests => {
             Plan26FeedbackOperationV1::PrimitiveAffectedTests
@@ -3072,15 +3049,15 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         DaemonInvocationOperation::PrimitiveTestResults => {
             Plan26FeedbackOperationV1::PrimitiveTestResults
         }
-        DaemonInvocationOperation::PrimitiveRead => Plan26FeedbackOperationV1::FeedbackCycle,
         DaemonInvocationOperation::LspOpen
         | DaemonInvocationOperation::LspFrame
         | DaemonInvocationOperation::LspPoll
         | DaemonInvocationOperation::LspAcknowledge
         | DaemonInvocationOperation::LspDetach => Plan26FeedbackOperationV1::LspSession,
-        DaemonInvocationOperation::GitPreview | DaemonInvocationOperation::GitApply => {
-            Plan26FeedbackOperationV1::FeedbackCycle
-        }
+        DaemonInvocationOperation::FeedbackObserve
+        | DaemonInvocationOperation::PrimitiveRead
+        | DaemonInvocationOperation::GitPreview
+        | DaemonInvocationOperation::GitApply => Plan26FeedbackOperationV1::FeedbackCycle,
     }
 }
 
@@ -3208,11 +3185,10 @@ fn observe_plan26_invocation_response(
     if let DaemonInvocationOutcome::Feedback { result, .. }
     | DaemonInvocationOutcome::Primitive { result, .. } = &response.outcome
     {
-        let omitted = result
-            .page
-            .total
-            .map(|total| total.saturating_sub(result.page.returned))
-            .unwrap_or_else(|| u64::from(result.page.cursor.is_some()));
+        let omitted = result.page.total.map_or_else(
+            || u64::from(result.page.cursor.is_some()),
+            |total| total.saturating_sub(result.page.returned),
+        );
         if omitted > 0 || result.page.cursor.is_some() {
             emit_plan26_invocation_event(
                 observations,

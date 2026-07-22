@@ -225,7 +225,7 @@ where
         host: HostKindV1,
         rollback: HookFeedbackRollbackSwitchV1,
     ) -> Result<Pr13AdvisoryRunResultV1, Pr13AdvisoryRunErrorV1> {
-        let outcome = self.runtime().run_once(context, control, request).await?;
+        let outcome = Box::pin(self.runtime().run_once(context, control, request)).await?;
         let delivery = if outcome.publication().is_some() {
             Some(self.consume_completed_publication(host, &outcome, rollback)?)
         } else {
@@ -564,10 +564,12 @@ fn capability_state(host: HostKindV1, capability: HostCapabilityV1) -> HostCapab
     stock_host_capabilities(host)
         .into_iter()
         .find(|record| record.capability == capability)
-        .map(|record| record.state)
-        .unwrap_or(HostCapabilityStateV1::Unavailable(
-            HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported,
-        ))
+        .map_or(
+            HostCapabilityStateV1::Unavailable(
+                HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported,
+            ),
+            |record| record.state,
+        )
 }
 
 fn effective_state(

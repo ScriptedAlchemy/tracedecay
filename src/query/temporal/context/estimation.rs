@@ -274,8 +274,7 @@ impl TokenSummary {
 
     pub fn tokens(&self) -> u64 {
         match self {
-            Self::Whitespace { tokens, .. } => *tokens,
-            Self::Characters(tokens) => *tokens,
+            Self::Whitespace { tokens, .. } | Self::Characters(tokens) => *tokens,
             Self::Substring { matches, .. } => *matches,
             Self::JsonDocument { first, last } => {
                 u64::from(!matches!((first, last), (Some('{'), Some('}'))))

@@ -35,7 +35,7 @@ use crate::sessions::lcm::{
     LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource, LcmSourceRef,
 };
 
-use self::cursor_keys::GlobalDbCursorKeyProvider;
+pub(crate) use self::cursor_keys::GlobalDbCursorKeyProvider;
 pub(crate) use self::direct::ResolvedDirectAnchor;
 use self::hydration::GlobalDbTemporalHydrationPort;
 use self::retrieval::GlobalDbTemporalReadPort;

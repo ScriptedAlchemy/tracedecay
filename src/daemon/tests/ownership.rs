@@ -172,8 +172,7 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         1
     );
     eprintln!(
-        "same_worktree_live_engine_proxy clients={} open_attempts=1 retained_servers={retained_servers} cache_hits={}",
-        PARALLEL_CLIENT_IDENTITIES, PARALLEL_CLIENT_IDENTITIES
+        "same_worktree_live_engine_proxy clients={PARALLEL_CLIENT_IDENTITIES} open_attempts=1 retained_servers={retained_servers} cache_hits={PARALLEL_CLIENT_IDENTITIES}"
     );
     drop(cached);
     drop(alias_server);

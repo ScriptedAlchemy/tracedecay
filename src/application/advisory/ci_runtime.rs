@@ -5,6 +5,7 @@
 //! scheduler, credential, or log-text retention is representable here.
 
 mod production;
+mod stores;
 
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ pub use production::{
     ProductionCiProviderConfigV1, ProductionCiProviderOpenErrorV1,
     open_production_ci_provider_authorities_v1,
 };
+pub use stores::{ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1};
 
 use tracedecay_application::RequestContext;
 use tracedecay_application::feedback::{
@@ -112,7 +114,7 @@ pub type GitHubCiPullRequestRefV1 = GitHubActionsPullRequestRefV1;
 pub type GitHubCiCheckAnnotationV1 = GitHubCheckAnnotationV1;
 pub type GitHubCiAnnotationLevelV1 = GitHubCheckAnnotationLevelV1;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitHubCiProviderRecordV1 {
     pub workflow_run: GitHubCiWorkflowRunV1,
     pub workflow_job: GitHubActionsWorkflowJobV1,

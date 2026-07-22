@@ -252,6 +252,7 @@ impl ExecutionControl {
         }
     }
 
+    #[must_use]
     pub fn with_work_limit(mut self, work_units: usize) -> Self {
         self.remaining_work = Some(Arc::new(AtomicUsize::new(work_units)));
         self
@@ -516,11 +517,13 @@ impl TemporalSnapshotRequest {
         })
     }
 
+    #[must_use]
     pub fn with_limits(mut self, limits: ExecutionLimits) -> Self {
         self.limits = limits;
         self
     }
 
+    #[must_use]
     pub fn with_retrieval_scope(mut self, retrieval_scope: TemporalRetrievalScope) -> Self {
         if let TemporalRetrievalScope::Session(session_id) = &retrieval_scope {
             self.session_id = session_id.clone();
@@ -566,6 +569,7 @@ impl TemporalSnapshotRequest {
         Ok(self)
     }
 
+    #[must_use]
     pub fn with_cancellation_requested(self, requested: bool) -> Self {
         if requested {
             self.control.cancel();
@@ -573,6 +577,7 @@ impl TemporalSnapshotRequest {
         self
     }
 
+    #[must_use]
     pub fn with_execution_control(mut self, control: ExecutionControl) -> Self {
         self.control = control;
         self
@@ -2625,8 +2630,7 @@ mod tests {
                 let all = ["candidate-0", "candidate-1", "candidate-2"];
                 let start = request
                     .keyset()
-                    .map(|key| key.as_str().parse::<usize>().expect("numeric key"))
-                    .unwrap_or(0);
+                    .map_or(0, |key| key.as_str().parse::<usize>().expect("numeric key"));
                 for stable_id in all.iter().skip(start).take(request.page_item_limit()) {
                     sink.push(candidate(*stable_id))?;
                 }
@@ -2942,8 +2946,7 @@ mod tests {
             Box::pin(async move {
                 let start = request
                     .keyset()
-                    .map(|key| key.as_str().parse::<usize>().expect("numeric key"))
-                    .unwrap_or(0);
+                    .map_or(0, |key| key.as_str().parse::<usize>().expect("numeric key"));
                 if let Some(stable_id) = self.candidate_ids.get(start) {
                     sink.push(candidate(*stable_id))?;
                 }
@@ -2962,8 +2965,7 @@ mod tests {
             Box::pin(async move {
                 let start = request
                     .keyset()
-                    .map(|key| key.as_str().parse::<usize>().expect("numeric key"))
-                    .unwrap_or(0);
+                    .map_or(0, |key| key.as_str().parse::<usize>().expect("numeric key"));
                 if let Some(anchor_id) = self.record_anchors.get(start) {
                     sink.push(summary_record(anchor_id))?;
                 }
@@ -2989,8 +2991,7 @@ mod tests {
             Box::pin(async move {
                 let start = request
                     .keyset()
-                    .map(|key| key.as_str().parse::<usize>().expect("numeric key"))
-                    .unwrap_or(0);
+                    .map_or(0, |key| key.as_str().parse::<usize>().expect("numeric key"));
                 let end = (start + request.page_item_limit()).min(self.candidates.len());
                 for stable_id in &self.candidates[start..end] {
                     sink.push(candidate(*stable_id))?;
@@ -3014,8 +3015,7 @@ mod tests {
             Box::pin(async move {
                 let start = request
                     .keyset()
-                    .map(|key| key.as_str().parse::<usize>().expect("numeric key"))
-                    .unwrap_or(0);
+                    .map_or(0, |key| key.as_str().parse::<usize>().expect("numeric key"));
                 let end = (start + request.page_item_limit()).min(self.records.len());
                 for anchor_id in &self.records[start..end] {
                     sink.push(summary_record(anchor_id))?;
@@ -3342,22 +3342,22 @@ mod tests {
                 }
             );
 
-            let record_err =
-                match pull_temporal_record_page(&port, &snapshot, &[], &mut record_state).await {
-                    Err(error) => error,
-                    Ok(_) => panic!("More + record cap must not complete"),
-                };
+            let Err(record_err) =
+                pull_temporal_record_page(&port, &snapshot, &[], &mut record_state).await
+            else {
+                panic!("More + record cap must not complete");
+            };
             assert_eq!(
                 record_err,
                 TemporalPortError::BudgetExceeded {
                     resource: "record item count"
                 }
             );
-            let record_follow_up =
-                match pull_temporal_record_page(&port, &snapshot, &[], &mut record_state).await {
-                    Err(error) => error,
-                    Ok(_) => panic!("exhausted record state must not synthesize Complete"),
-                };
+            let Err(record_follow_up) =
+                pull_temporal_record_page(&port, &snapshot, &[], &mut record_state).await
+            else {
+                panic!("exhausted record state must not synthesize Complete");
+            };
             assert_eq!(
                 record_follow_up,
                 TemporalPortError::BudgetExceeded {
@@ -3779,16 +3779,15 @@ mod tests {
                 ),
             ] {
                 let mut state = TemporalRecordReadState::new(limits);
-                let error = match pull_temporal_record_page(
+                let Err(error) = pull_temporal_record_page(
                     &UnreachableReadPort,
                     &snapshot,
                     &[],
                     &mut state,
                 )
                 .await
-                {
-                    Err(error) => error,
-                    Ok(_) => panic!("looser record state must fail before producer entry"),
+                else {
+                    panic!("looser record state must fail before producer entry");
                 };
                 assert_eq!(error, TemporalPortError::BudgetExceeded { resource });
             }

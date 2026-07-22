@@ -1,6 +1,7 @@
 //! Static reachability contract for the PR12 daemon-owned production path.
 
 const DAEMON_SOURCE: &str = include_str!("../src/daemon.rs");
+const PROJECT_OPEN_OWNERS_SOURCE: &str = include_str!("../src/daemon/project_open_owners.rs");
 const INVOCATION_SOURCE: &str = include_str!("../src/daemon/service/invocation.rs");
 const APPLICATION_SURFACE_SOURCE: &str = include_str!("../src/application_surface.rs");
 const CLI_SURFACE_SOURCE: &str = include_str!("../src/cli/dispatch.rs");
@@ -95,6 +96,93 @@ fn project_open_scout_bootstrap_precedes_each_cache_publication() {
             "{function} must retain Scout before cache publication"
         );
     }
+}
+
+#[test]
+fn project_open_registers_production_owners_after_cache_publication() {
+    assert!(
+        DAEMON_SOURCE.contains("mod project_open_owners"),
+        "daemon must own the project-open production owner module"
+    );
+    for function in ["open_project_server", "portable_project_server"] {
+        let publication = call_offsets(DAEMON_SOURCE, function, "bind_or_insert_route_bounded");
+        let owners = call_offsets(
+            DAEMON_SOURCE,
+            function,
+            "register_project_open_production_owners",
+        );
+        assert_eq!(
+            publication.len(),
+            1,
+            "{function} must have one cache publication"
+        );
+        assert_eq!(
+            owners.len(),
+            1,
+            "{function} must register production owners once"
+        );
+        assert!(
+            publication[0] < owners[0],
+            "{function} must register production owners after cache publication"
+        );
+    }
+}
+
+#[test]
+fn project_open_mounts_concrete_cycle_lsp_advisory_and_hook_owners() {
+    assert_contains_all(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        &[
+            "resolve_production_feedback_cycle_parts",
+            "open_cycle_and_register",
+            "build_and_register_pr12",
+            "register_production",
+            "production_advisory_hook_notice_sink",
+            "open_pr12_production_primitive_runtime",
+            "ProductionFeedbackRuntimeStateV1",
+            "ProjectCiRetainedObservationStoreV1",
+            "ProjectCiCodeAnchorStoreV1",
+            "AuthorizationPortOutcome::Absent",
+        ],
+    );
+    assert!(
+        !PROJECT_OPEN_OWNERS_SOURCE.contains("Unavailable stub"),
+        "project-open must not document Unavailable stub installation"
+    );
+    assert!(
+        !PROJECT_OPEN_OWNERS_SOURCE.contains("AuthorizationPortOutcome::Unavailable"),
+        "project-open must not install Unavailable authorization shortcuts"
+    );
+    let feedback = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        "register_project_open_production_owners",
+        "open_and_register",
+    );
+    let cycle = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        "register_production_feedback_cycle",
+        "open_cycle_and_register",
+    );
+    let lsp = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        "register_production_lsp_owner",
+        "build_and_register_pr12",
+    );
+    let advisory = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        "register_production_advisory_owner",
+        "register_production",
+    );
+    let hooks = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        "register_production_advisory_owner",
+        "production_advisory_hook_notice_sink",
+    );
+    assert_eq!(feedback.len(), 1, "feedback runtime must register once");
+    assert_eq!(cycle.len(), 1, "feedback cycle must register once");
+    assert_eq!(lsp.len(), 1, "LSP owner must register once");
+    assert_eq!(advisory.len(), 1, "advisory production must register once");
+    assert_eq!(hooks.len(), 1, "hook host-delivery sink must be constructed");
 }
 
 #[test]

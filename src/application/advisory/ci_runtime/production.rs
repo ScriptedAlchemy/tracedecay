@@ -24,7 +24,7 @@ use super::{
     GitHubCiProviderRecordV1, MAX_CI_RETAINED_ANNOTATIONS_V1, MAX_CI_RETAINED_FAILURES_V1,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CiRetainedProviderObservationV1 {
     pub observation_id: CanonicalObservationIdV1,
     pub failure_anchor: RetrievalAnchorId,
@@ -34,7 +34,7 @@ pub struct CiRetainedProviderObservationV1 {
 }
 
 impl CiRetainedProviderObservationV1 {
-    fn validate_for(
+    pub(crate) fn validate_for(
         &self,
         request: &CiFailureLocalizationRequestV1,
         record: &GitHubCiProviderRecordV1,
@@ -46,14 +46,14 @@ impl CiRetainedProviderObservationV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CiRetainedProviderRecordV1 {
     pub provider_record: GitHubCiProviderRecordV1,
     pub observation: CiRetainedProviderObservationV1,
 }
 
 impl CiRetainedProviderRecordV1 {
-    fn validate_for(&self, request: &CiFailureLocalizationRequestV1) -> bool {
+    pub(crate) fn validate_for(&self, request: &CiFailureLocalizationRequestV1) -> bool {
         self.observation
             .validate_for(request, &self.provider_record)
     }

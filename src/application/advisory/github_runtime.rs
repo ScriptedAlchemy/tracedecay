@@ -748,7 +748,7 @@ where
                     let deleted_items = next
                         .last_complete
                         .as_ref()
-                        .map(|generation| {
+                        .map_or(0, |generation| {
                             generation
                                 .response
                                 .ingress
@@ -759,8 +759,7 @@ where
                                         == tracedecay_domain::feedback::GitHubReviewLifecycleV1::Deleted
                                 })
                                 .count() as u64
-                        })
-                        .unwrap_or(0);
+                        });
                     GitHubReviewRefreshOutcomeV1::Stored(Box::new(GitHubReviewRefreshReceiptV1 {
                         state: next,
                         deleted_items,

@@ -107,7 +107,7 @@ pub struct McpServer {
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     identical_read_coalescer: IdenticalReadCoalescer,
     diagnostics_cache: crate::diagnostics::DiagnosticsCache,
-    diagnostics_lsp: tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>,
+    diagnostics_lsp: Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
     /// `Arc` so the detached D4 background-refresh task can hold a cheap
     /// clone and swap in the freshly synced map on completion.
@@ -569,7 +569,7 @@ impl McpServer {
             tool_call_counts: std::sync::Mutex::new(HashMap::new()),
             identical_read_coalescer: IdenticalReadCoalescer::default(),
             diagnostics_cache: crate::diagnostics::DiagnosticsCache::default(),
-            diagnostics_lsp: tokio::sync::Mutex::new(diagnostics_lsp),
+            diagnostics_lsp: Arc::new(tokio::sync::Mutex::new(diagnostics_lsp)),
             file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
             tokens_saved: AtomicU64::new(persisted),
             last_flushed_tokens: AtomicU64::new(persisted),
@@ -746,6 +746,16 @@ impl McpServer {
     #[doc(hidden)]
     pub async fn cg(&self) -> Arc<TraceDecay> {
         self.cg_snapshot().await
+    }
+
+    pub fn diagnostics_lsp(
+        &self,
+    ) -> Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>> {
+        Arc::clone(&self.diagnostics_lsp)
+    }
+
+    pub fn project_session_db(&self) -> Option<Arc<GlobalDb>> {
+        self.session_db.clone()
     }
 
     /// Clones out the currently served `TraceDecay` instance. The lock is

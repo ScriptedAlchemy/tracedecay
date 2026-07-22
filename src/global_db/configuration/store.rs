@@ -4521,7 +4521,6 @@ mod tests {
         );
         let store = GlobalDbConfigurationControlStore::new(&db);
         store.save_plan(&source_plan, &source_change).await.unwrap();
-        drop(store);
         drop(db);
 
         let db = GlobalDb::open_at(&path).await.expect("reopen global DB");
@@ -5064,7 +5063,6 @@ mod tests {
         let store = ConfigurationSqlStore::new(&connection);
         let (plan, commit) = protected_commit(&root);
         store.save_change_plan(&plan).await.unwrap();
-        drop(store);
 
         validate_commit_bindings(&commit).unwrap();
         let transaction = connection
