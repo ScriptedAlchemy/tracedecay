@@ -120,7 +120,7 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
     for (request_id, request_handle) in [("request.1", "handle.1"), ("request.2", "handle.2")] {
         writer
             .write_all(
-                serde_json::to_string(&json!({
+                serde_json::to_string(&serde_json::json!({
                     "protocol": "tracedecay.daemon.invocation",
                     "revision": 1,
                     "request_id": request_id,
@@ -139,7 +139,7 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
             .expect("invocation response should not time out")
             .expect("read invocation response")
             .expect("invocation response");
-        let response: Value = serde_json::from_str(&line).expect("response json");
+        let response: serde_json::Value = serde_json::from_str(&line).expect("response json");
         assert_eq!(response["protocol"], "tracedecay.daemon.invocation");
         assert_eq!(response["request_id"], request_id);
         assert_eq!(response["status"], "problem");
@@ -555,7 +555,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
     for (request_id, request_handle) in [("request.1", "handle.1"), ("request.2", "handle.2")] {
         writer
             .write_all(
-                serde_json::to_string(&json!({
+                serde_json::to_string(&serde_json::json!({
                     "protocol": "tracedecay.daemon.invocation",
                     "revision": 1,
                     "request_id": request_id,
@@ -574,7 +574,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
             .expect("invocation response should not time out")
             .expect("read invocation response")
             .expect("invocation response");
-        let response: Value = serde_json::from_str(&line).expect("response json");
+        let response: serde_json::Value = serde_json::from_str(&line).expect("response json");
         assert_eq!(response["protocol"], "tracedecay.daemon.invocation");
         assert_eq!(response["request_id"], request_id);
         assert_eq!(response["status"], "problem");

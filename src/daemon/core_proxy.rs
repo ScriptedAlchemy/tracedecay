@@ -240,10 +240,15 @@ pub(crate) async fn resolve_daemon_initialize_route(
         }
         if let Some(git_root) = crate::worktree::git_worktree_root(&root) {
             // An initialize route has no retained configuration authority.
-            // Never revive legacy-file fallback here: absent a published
-            // snapshot, auto-init stays disabled.
-            let allow_init =
-                crate::config::cached_sync_config(&git_root).is_ok_and(|config| config.auto_init);
+            // Never revive legacy-file fallback here — but a fresh repo with
+            // no published snapshot follows the schema default (auto-init
+            // enabled), not fail-closed: treating a missing snapshot as
+            // "disabled" contradicted the config default and left explicit
+            // initialize-roots repos unable to open at all.
+            let allow_init = crate::config::cached_sync_config(&git_root).map_or_else(
+                |_| crate::config::SyncConfig::default().auto_init,
+                |config| config.auto_init,
+            );
             return Some(InitializeRouteMetadata {
                 project_path: git_root,
                 allow_init,

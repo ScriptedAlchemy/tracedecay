@@ -1573,7 +1573,10 @@ mod path_tests {
     use tempfile::TempDir;
     use url::Url;
 
-    use super::{open_project_file, strict_file_url, validated_document_path};
+    // The symlink-escape test that exercises open_project_file is unix-only.
+    #[cfg(unix)]
+    use super::open_project_file;
+    use super::{strict_file_url, validated_document_path};
 
     fn admitted_root() -> (TempDir, std::path::PathBuf, Url, Dir) {
         let temp = TempDir::new().expect("temporary directory");

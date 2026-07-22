@@ -37,9 +37,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use cap_fs_ext::{
-    DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt, OpenOptionsSyncExt,
-    ambient_authority,
+    DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt, ambient_authority,
 };
+// The directory-fsync path that needs maybe_dir is compiled out on Windows.
+#[cfg(not(windows))]
+use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_std::fs::{Dir, DirBuilder, File as CapFile, OpenOptions as CapOpenOptions};
 #[cfg(unix)]
 use cap_std::fs::{DirBuilderExt, OpenOptionsExt};
