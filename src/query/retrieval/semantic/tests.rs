@@ -1,20 +1,31 @@
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, CodeGenerationId, CodeSearchChunkId,
-    CompactCandidate, ComponentRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-    EmbeddingTruncationSideV1, EvidenceRole, FreshnessCompatibilityV1, LogicalEvidenceId,
-    ManifestDigest, PrincipalId, ProjectionKeyV1, QueryDigest, QueryMac,
-    QueryNormalizationRevision, RetrievalAnchorId, RetrievalBudget, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, Retriever, RetrieverKind, RetrieverOutcome,
-    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SourceFreshness, SourceNamespace,
+    AdmittedEmbeddingProjectionKeyV1, CalibrationProfileId, ChunkerRevision, CodeGenerationId,
+    CodeSearchChunkId, CompactCandidate, ComponentRevision, DiversityPolicy,
+    EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
+    EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, EvidenceRole,
+    ExactClass, FreshnessCompatibilityV1, FusionProfile, LogicalEvidenceId, ManifestDigest,
+    Pr9FallbackSubpayload, PrincipalId, ProjectionKeyV1, PublicRetrieverStatus, QueryDigest,
+    QueryMac, QueryNormalizationRevision, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SourceFreshness, SourceNamespace,
     SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
 };
 
 use super::*;
+use crate::query::retrieval::fusion::{
+    CompositionKernel, CompositionLaneInput, FusionStageInput, RetrievalCursorKeyringV1,
+};
+use crate::query::retrieval::hydrate::{
+    DeterministicLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
+    HydrationReadOutcomeV1, HydrationWorkPermitV1, LateHydrationSource,
+};
 use crate::query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
 };
@@ -310,6 +321,57 @@ impl SemanticExecutionControl for FixedExecutionControl {
     }
 }
 
+struct FixedSemanticLane {
+    calls: Cell<u32>,
+    outcome: Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError>,
+}
+
+impl SemanticLaneRetriever for FixedSemanticLane {
+    fn retrieve_semantic(
+        &self,
+        _request: &SemanticRetrievalRequestV1<'_>,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
+        self.calls.set(self.calls.get() + 1);
+        self.outcome.clone()
+    }
+}
+
+#[derive(Default)]
+struct DenyingHydrationSource {
+    authorization_checks: usize,
+    payload_reads: usize,
+}
+
+impl LateHydrationSource<String> for DenyingHydrationSource {
+    fn authorize(
+        &mut self,
+        _request: &RetrievalRequest,
+        _candidate: &tracedecay_domain::RankedCandidate,
+    ) -> HydrationAuthorizationV1 {
+        self.authorization_checks += 1;
+        HydrationAuthorizationV1::Denied
+    }
+
+    fn preflight_authorized(
+        &mut self,
+        _request: &RetrievalRequest,
+        _candidate: &tracedecay_domain::RankedCandidate,
+        _permit: &HydrationWorkPermitV1,
+    ) -> HydrationPreflightOutcomeV1 {
+        panic!("denied semantic candidate must not reach hydration preflight")
+    }
+
+    fn hydrate_authorized(
+        &mut self,
+        _request: &RetrievalRequest,
+        _candidate: &tracedecay_domain::RankedCandidate,
+        _permit: &HydrationWorkPermitV1,
+    ) -> HydrationReadOutcomeV1<String> {
+        self.payload_reads += 1;
+        panic!("denied semantic candidate must not read payload")
+    }
+}
+
 #[test]
 fn exact_flat_scan_is_deterministic_and_emits_generic_semantic_evidence() {
     let query_view = query_view();
@@ -579,6 +641,32 @@ fn malformed_scan_coverage_is_rejected() {
 }
 
 #[test]
+fn unknown_vector_coverage_is_unavailable_and_never_returns_candidates() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let embedder = FakeQueryEmbedder::default();
+    let mut vectors =
+        FakeVectorReadPort::new(&request, vec![record(&request, "one", vec![1.0, 0.0])]);
+    vectors.summary = Some(SemanticVectorScanSummaryV1 {
+        examined: 2,
+        eligible: 1,
+        excluded: 0,
+        unknown: 1,
+    });
+    let control = FixedExecutionControl::default();
+
+    assert!(matches!(
+        SemanticCodeRetriever::new(&embedder, &vectors, &control)
+            .retrieve_semantic(&request)
+            .expect("unknown coverage is a typed lane outcome"),
+        RetrieverOutcome::Unavailable(
+            tracedecay_domain::RetrievalFailure::AuthorityUnavailable { .. }
+        )
+    ));
+}
+
+#[test]
 fn complete_uncapped_scan_marks_continuation_exhausted() {
     let query_view = query_view();
     let projection = projection();
@@ -729,4 +817,557 @@ fn cancellation_and_deadline_are_rechecked_before_completion() {
             .expect("typed deadline"),
         RetrieverOutcome::BudgetExceeded(_)
     ));
+}
+
+fn fallback() -> Arc<Pr9FallbackSubpayload> {
+    let mut fallback = Pr9FallbackSubpayload {
+        profile_id: id("profile.pr9.fixture"),
+        ordered_candidates: Vec::new(),
+        public_pr9_lane_coverage: BTreeMap::from([
+            (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
+            (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
+            (RetrieverKind::Graph, PublicRetrieverStatus::Complete),
+        ]),
+        freshness: Vec::new(),
+        cursor: None,
+        digest: digest('0'),
+    };
+    fallback.digest = fallback.compute_digest().expect("fallback digest");
+    Arc::new(fallback)
+}
+
+fn calibration(
+    request: &SemanticRetrievalRequestV1<'_>,
+    maximum_distance_micros: i64,
+    minimum_margin_micros: u64,
+) -> SemanticCalibrationProfileV1 {
+    SemanticCalibrationProfileV1 {
+        calibration_profile_id: id::<CalibrationProfileId>("calibration.semantic.fixture.v1"),
+        cohort_digest: digest('7'),
+        projection_key: request.projection.projection_key().clone(),
+        vector_generation: request.vector_generation.clone(),
+        capability_manifest_digest: request.capability_manifest_digest.clone(),
+        maximum_distance_micros,
+        minimum_margin_micros,
+    }
+}
+
+fn complete_generation(request: &SemanticRetrievalRequestV1<'_>) -> CompleteSemanticGenerationV1 {
+    CompleteSemanticGenerationV1::new(
+        request.projection.projection_key().clone(),
+        request.vector_generation.clone(),
+        request.code_generation.clone(),
+        request.capability_manifest_digest.clone(),
+    )
+    .expect("complete semantic generation")
+}
+
+fn shared_fusion_profile() -> FusionProfile {
+    let lanes = [
+        RetrieverKind::ExactLiteral,
+        RetrieverKind::Lexical,
+        RetrieverKind::Graph,
+        RetrieverKind::Semantic,
+    ];
+    let calibrations = lanes
+        .into_iter()
+        .map(|lane| {
+            (
+                lane,
+                id::<CalibrationProfileId>(&format!("calibration.{}.v1", lane.as_str())),
+            )
+        })
+        .collect();
+    let score_domain_calibrations = lanes
+        .into_iter()
+        .map(|lane| {
+            let score_domain: ScoreDomainId = if lane == RetrieverKind::Semantic {
+                id("score.semantic-distance.v1")
+            } else {
+                id(&format!("score.{}.v1", lane.as_str()))
+            };
+            (
+                score_domain.clone(),
+                ScoreDomainCalibrationV1 {
+                    calibration_profile_id: id(&format!("calibration.{}.v1", lane.as_str())),
+                    score_domain,
+                    raw_min_micros: 0,
+                    raw_max_micros: u64::MAX,
+                },
+            )
+        })
+        .collect();
+    FusionProfile {
+        profile_id: id("profile.semantic.v1"),
+        evaluation_result_anchor: RetrievalAnchorId::new("evaluation.semantic.v1")
+            .expect("evaluation anchor"),
+        calibrations,
+        score_domain_calibrations,
+        weights_micros: lanes.into_iter().map(|lane| (lane, 1_000_000)).collect(),
+        diversity_policy_id: id("diversity.semantic.v1"),
+        rerank_policy_id: None,
+        retrieval_budget: budget(16),
+    }
+}
+
+fn no_diversity_caps() -> DiversityPolicy {
+    DiversityPolicy {
+        policy_id: id("diversity.semantic.v1"),
+        evaluation_result_anchor: Some(
+            RetrievalAnchorId::new("evaluation.semantic.v1").expect("evaluation anchor"),
+        ),
+        per_source_namespace: None,
+        per_source_instance: None,
+        per_repository: None,
+        per_session_or_thread: None,
+        per_copy_cluster: None,
+        per_evidence_role: None,
+    }
+}
+
+fn empty_shared_lane(lane: RetrieverKind) -> CompositionLaneInput {
+    CompositionLaneInput::new(
+        lane,
+        RetrieverOutcome::Complete(RetrieverBatch::<()> {
+            candidates: Vec::new(),
+            evidence_by_occurrence: BTreeMap::new(),
+            coverage: RetrieverCoverage::default(),
+            continuation: None,
+        }),
+    )
+    .expect("empty shared-kernel lane")
+}
+
+#[test]
+fn calibrated_semantic_service_augments_without_mutating_fallback() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(
+        &request,
+        vec![
+            record(&request, "orthogonal", vec![0.0, 1.0]),
+            record(&request, "identical", vec![1.0, 0.0]),
+        ],
+    );
+    let control = FixedExecutionControl::default();
+    let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let fallback = fallback();
+    let fallback_identity = Arc::as_ptr(&fallback);
+    let generation = complete_generation(&request);
+    let calibration = calibration(&request, 100_000_000, 100_000_000);
+
+    let outcome = CalibratedSemanticQueryService::new(&lane)
+        .execute(
+            SemanticLaneReadinessV1::Ready {
+                request: &request,
+                generation: &generation,
+                calibration: Some(&calibration),
+            },
+            SemanticQueryModeV1::FallbackAllowed,
+            Arc::clone(&fallback),
+        )
+        .expect("calibrated semantic query");
+
+    let SemanticQueryServiceOutcomeV1::Augmented {
+        semantic_lane,
+        fallback,
+        ..
+    } = outcome
+    else {
+        panic!("a separated best match should be admitted");
+    };
+    let RetrieverOutcome::Complete(semantic) = semantic_lane.outcome else {
+        panic!("semantic lane must enter the shared kernel as complete");
+    };
+    assert_eq!(semantic.candidates.len(), 2);
+    assert_eq!(Arc::as_ptr(&fallback), fallback_identity);
+    fallback.validate().expect("fallback remains byte-valid");
+}
+
+#[test]
+fn admitted_semantic_lane_uses_shared_fusion_cursor_and_hydration_stages() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(
+        &request,
+        vec![
+            record(&request, "orthogonal", vec![0.0, 1.0]),
+            record(&request, "identical", vec![1.0, 0.0]),
+        ],
+    );
+    let control = FixedExecutionControl::default();
+    let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let generation = complete_generation(&request);
+    let calibration = calibration(&request, 2_000_000_000, 0);
+    let outcome = CalibratedSemanticQueryService::new(&lane)
+        .execute(
+            SemanticLaneReadinessV1::Ready {
+                request: &request,
+                generation: &generation,
+                calibration: Some(&calibration),
+            },
+            SemanticQueryModeV1::FallbackAllowed,
+            fallback(),
+        )
+        .expect("semantic lane admission");
+    let SemanticQueryServiceOutcomeV1::Augmented { semantic_lane, .. } = outcome else {
+        panic!("complete calibrated semantic generation must be admitted");
+    };
+
+    let mut lanes = vec![
+        semantic_lane,
+        empty_shared_lane(RetrieverKind::Graph),
+        empty_shared_lane(RetrieverKind::ExactLiteral),
+        empty_shared_lane(RetrieverKind::Lexical),
+    ];
+    let kernel = CompositionKernel::new(id("ranking.semantic.v1"));
+    let first = kernel
+        .compose(
+            &FusionStageInput {
+                profile: shared_fusion_profile(),
+                lanes: lanes.clone(),
+            },
+            &no_diversity_caps(),
+        )
+        .expect("shared kernel composes semantic candidates");
+    lanes.reverse();
+    let second = kernel
+        .compose(
+            &FusionStageInput {
+                profile: shared_fusion_profile(),
+                lanes,
+            },
+            &no_diversity_caps(),
+        )
+        .expect("shared kernel is independent of lane completion order");
+
+    assert_eq!(first, second);
+    assert_eq!(first.ranked_candidates.len(), 2);
+    assert!(
+        first
+            .ranked_candidates
+            .iter()
+            .all(|candidate| candidate.candidate.exact_class == ExactClass::Approximate)
+    );
+
+    let keyring = RetrievalCursorKeyringV1::new(
+        request.base.scope.privacy_domain.clone(),
+        id::<RetrievalCursorKeyId>("semantic-cursor-key.v1"),
+        7,
+        vec![7_u8; 32],
+        100,
+    )
+    .expect("cursor keyring");
+    let left_page = kernel
+        .paginate_at(
+            &request.base,
+            request.query_view,
+            &keyring,
+            &first,
+            1,
+            None,
+            UtcMicros(10),
+        )
+        .expect("first deterministic page");
+    let right_page = kernel
+        .paginate_at(
+            &request.base,
+            request.query_view,
+            &keyring,
+            &second,
+            1,
+            None,
+            UtcMicros(10),
+        )
+        .expect("second deterministic page");
+    assert_eq!(left_page, right_page);
+    assert!(left_page.cursor.is_some());
+
+    let mut hydration_budget = request.budget;
+    hydration_budget.max_hydrated_results = 1;
+    let mut source = DenyingHydrationSource::default();
+    let hydrated = DeterministicLateHydration::new(&mut source)
+        .hydrate(&request.base, &first.ranked_candidates, &hydration_budget)
+        .expect("denial is a positional hydration result");
+    assert_eq!(hydrated.results.len(), 1);
+    assert_eq!(source.authorization_checks, 1);
+    assert_eq!(source.payload_reads, 0);
+}
+
+#[test]
+fn missing_or_shifted_calibration_abstains_and_preserves_exact_fallback() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, vec![record(&request, "one", vec![1.0, 0.0])]);
+    let control = FixedExecutionControl::default();
+    let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let fallback = fallback();
+    let fallback_identity = Arc::as_ptr(&fallback);
+    let generation = complete_generation(&request);
+
+    let permissive = CalibratedSemanticQueryService::new(&lane)
+        .execute(
+            SemanticLaneReadinessV1::Ready {
+                request: &request,
+                generation: &generation,
+                calibration: None,
+            },
+            SemanticQueryModeV1::FallbackAllowed,
+            Arc::clone(&fallback),
+        )
+        .expect("missing calibration uses the declared fallback");
+    assert!(matches!(
+        &permissive,
+        SemanticQueryServiceOutcomeV1::Fallback {
+            abstention: SemanticAbstentionV1::CalibrationUnavailable,
+            ..
+        }
+    ));
+    assert_eq!(
+        Arc::as_ptr(permissive.fallback()),
+        fallback_identity,
+        "fallback is the exact same owned payload"
+    );
+    assert_eq!(embedder.calls.get(), 0);
+    assert_eq!(vectors.scans.get(), 0);
+
+    let mut shifted = calibration(&request, 100_000_000, 0);
+    shifted.vector_generation = VectorGenerationIdV1::new(digest('6'));
+    assert!(matches!(
+        CalibratedSemanticQueryService::new(&lane).execute(
+            SemanticLaneReadinessV1::Ready {
+                request: &request,
+                generation: &generation,
+                calibration: Some(&shifted),
+            },
+            SemanticQueryModeV1::StrictSemantic,
+            fallback,
+        ),
+        Err(SemanticQueryServiceError::StrictUnavailable(
+            SemanticAbstentionV1::CalibrationShifted
+        ))
+    ));
+}
+
+#[test]
+fn calibrated_distance_and_margin_thresholds_abstain_without_relabeling_scores() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(
+        &request,
+        vec![
+            record(&request, "left", vec![0.0, 1.0]),
+            record(&request, "right", vec![0.0, -1.0]),
+        ],
+    );
+    let control = FixedExecutionControl::default();
+    let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let generation = complete_generation(&request);
+    let calibration = calibration(&request, 2_000_000_000, 1);
+
+    let outcome = CalibratedSemanticQueryService::new(&lane)
+        .execute(
+            SemanticLaneReadinessV1::Ready {
+                request: &request,
+                generation: &generation,
+                calibration: Some(&calibration),
+            },
+            SemanticQueryModeV1::FallbackAllowed,
+            fallback(),
+        )
+        .expect("ambiguous semantic result falls back");
+
+    assert!(matches!(
+        outcome,
+        SemanticQueryServiceOutcomeV1::Fallback {
+            abstention: SemanticAbstentionV1::AmbiguousTopCandidates,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn every_non_ready_state_bypasses_semantic_authorities_and_preserves_pr9_bytes() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors =
+        FakeVectorReadPort::new(&request, vec![record(&request, "ignored", vec![1.0, 0.0])]);
+    let control = FixedExecutionControl::default();
+    let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let fallback = fallback();
+    let fallback_bytes = serde_json::to_vec(fallback.as_ref()).expect("serialize fallback");
+
+    for (state, expected) in [
+        (
+            SemanticIndexStateV1::Unavailable,
+            SemanticAbstentionV1::IndexUnavailable,
+        ),
+        (
+            SemanticIndexStateV1::Indexing,
+            SemanticAbstentionV1::Indexing,
+        ),
+        (
+            SemanticIndexStateV1::Degraded,
+            SemanticAbstentionV1::IndexDegraded,
+        ),
+        (
+            SemanticIndexStateV1::Failed,
+            SemanticAbstentionV1::IndexFailed,
+        ),
+        (
+            SemanticIndexStateV1::Stale,
+            SemanticAbstentionV1::IndexStale,
+        ),
+        (
+            SemanticIndexStateV1::Incompatible,
+            SemanticAbstentionV1::IndexIncompatible,
+        ),
+    ] {
+        let outcome = CalibratedSemanticQueryService::new(&lane)
+            .execute(
+                SemanticLaneReadinessV1::Unavailable(state),
+                SemanticQueryModeV1::FallbackAllowed,
+                Arc::clone(&fallback),
+            )
+            .expect("ordinary search bypasses a non-ready semantic lane");
+        let SemanticQueryServiceOutcomeV1::Fallback { abstention, .. } = &outcome else {
+            panic!("non-ready semantic state must preserve the PR9 fallback");
+        };
+        assert_eq!(abstention, &expected);
+        assert_eq!(
+            serde_json::to_vec(outcome.fallback().as_ref()).expect("serialize returned fallback"),
+            fallback_bytes
+        );
+        assert!(matches!(
+            CalibratedSemanticQueryService::new(&lane).execute(
+                SemanticLaneReadinessV1::Unavailable(state),
+                SemanticQueryModeV1::StrictSemantic,
+                Arc::clone(&fallback),
+            ),
+            Err(SemanticQueryServiceError::StrictUnavailable(ref reason)) if reason == &expected
+        ));
+    }
+    assert_eq!(embedder.calls.get(), 0);
+    assert_eq!(vectors.scans.get(), 0);
+}
+
+#[test]
+fn mismatched_complete_generation_bypasses_semantic_authorities() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors =
+        FakeVectorReadPort::new(&request, vec![record(&request, "ignored", vec![1.0, 0.0])]);
+    let control = FixedExecutionControl::default();
+    let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let generation = CompleteSemanticGenerationV1::new(
+        request.projection.projection_key().clone(),
+        VectorGenerationIdV1::new(digest('6')),
+        request.code_generation.clone(),
+        request.capability_manifest_digest.clone(),
+    )
+    .expect("well-formed but incompatible generation");
+    let calibration = calibration(&request, 100_000_000, 0);
+
+    let outcome = CalibratedSemanticQueryService::new(&lane)
+        .execute(
+            SemanticLaneReadinessV1::Ready {
+                request: &request,
+                generation: &generation,
+                calibration: Some(&calibration),
+            },
+            SemanticQueryModeV1::FallbackAllowed,
+            fallback(),
+        )
+        .expect("ordinary search bypasses a shifted complete generation");
+
+    assert!(matches!(
+        outcome,
+        SemanticQueryServiceOutcomeV1::Fallback {
+            abstention: SemanticAbstentionV1::IndexIncompatible,
+            ..
+        }
+    ));
+    assert_eq!(embedder.calls.get(), 0);
+    assert_eq!(vectors.scans.get(), 0);
+}
+
+#[test]
+fn partial_cancelled_and_failed_semantic_attempts_preserve_pr9_bytes() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, vec![record(&request, "one", vec![1.0, 0.0])]);
+    let control = FixedExecutionControl::default();
+    let complete = SemanticCodeRetriever::new(&embedder, &vectors, &control)
+        .retrieve_semantic(&request)
+        .expect("fixture semantic retrieval");
+    let RetrieverOutcome::Complete(batch) = complete else {
+        panic!("fixture semantic retrieval must complete");
+    };
+    let generation = complete_generation(&request);
+    let calibration = calibration(&request, 100_000_000, 0);
+    let fallback = fallback();
+    let fallback_bytes = serde_json::to_vec(fallback.as_ref()).expect("serialize fallback");
+
+    let cases = [
+        (
+            Ok(RetrieverOutcome::Partial {
+                value: batch,
+                reason: tracedecay_domain::RetrievalFailure::AuthorityUnavailable {
+                    detail: "partial vector publication".to_owned(),
+                },
+            }),
+            SemanticAbstentionV1::PartialCoverage,
+        ),
+        (
+            Ok(RetrieverOutcome::Cancelled),
+            SemanticAbstentionV1::Cancelled,
+        ),
+        (
+            Err(RetrievalPortError::AuthorityUnavailable(
+                "fastembed out of memory".to_owned(),
+            )),
+            SemanticAbstentionV1::LaneFailure,
+        ),
+    ];
+
+    for (lane_outcome, expected) in cases {
+        let lane = FixedSemanticLane {
+            calls: Cell::new(0),
+            outcome: lane_outcome,
+        };
+        let outcome = CalibratedSemanticQueryService::new(&lane)
+            .execute(
+                SemanticLaneReadinessV1::Ready {
+                    request: &request,
+                    generation: &generation,
+                    calibration: Some(&calibration),
+                },
+                SemanticQueryModeV1::FallbackAllowed,
+                Arc::clone(&fallback),
+            )
+            .expect("ordinary search falls back on any incomplete semantic attempt");
+        let SemanticQueryServiceOutcomeV1::Fallback { abstention, .. } = &outcome else {
+            panic!("incomplete semantic attempts must never enter ranking");
+        };
+        assert_eq!(abstention, &expected);
+        assert_eq!(lane.calls.get(), 1);
+        assert_eq!(
+            serde_json::to_vec(outcome.fallback().as_ref()).expect("serialize returned fallback"),
+            fallback_bytes
+        );
+    }
 }

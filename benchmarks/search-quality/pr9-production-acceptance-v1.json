@@ -1,0 +1,378 @@
+{
+  "schema_version": 1,
+  "packet_id": "pr9-production-acceptance-v1",
+  "scope": "production_acceptance_preflight",
+  "fixture_manifest": "tests/fixtures/search_quality/fixture-manifest-v1.json",
+  "fixture_run_contract": "tests/fixtures/search_quality/run-contract-v1.json",
+  "code_index_workload": "benchmarks/pr9-code-index/workload-v1.json",
+  "code_index_expected": "benchmarks/pr9-code-index/expected-v1.json",
+  "static_gate_ids": [
+    "packet_shape",
+    "real_corpus_integrity",
+    "production_api_bindings",
+    "direct_contract_bindings",
+    "promotion_pending"
+  ],
+  "parent_gate_ids": [
+    "code_index_contracts",
+    "search_quality_contracts",
+    "search_eval_cli_contracts",
+    "code_index_benchmark_validation",
+    "platform_linux",
+    "platform_windows",
+    "platform_macos"
+  ],
+  "requirements": [
+    {
+      "id": "deterministic_extraction",
+      "production_apis": [
+        {
+          "path": "src/code_index/extract.rs",
+          "symbols": [
+            "TreeSitterExtractor",
+            "LanguageExtractor"
+          ]
+        },
+        {
+          "path": "src/code_index/chunks.rs",
+          "symbols": [
+            "DeterministicCodeChunker"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/code_index_suite/deterministic_extraction.rs",
+        "tests": [
+          "extraction_is_deterministic_and_revision_bound",
+          "extraction_reports_cancellation_after_sanitized_intake",
+          "extraction_caps_large_sources_as_partial_evidence"
+        ]
+      },
+      "corpus_documents": [
+        "doc-research-time",
+        "doc-research-canonical"
+      ],
+      "parent_gate_id": "code_index_contracts"
+    },
+    {
+      "id": "deterministic_generations",
+      "production_apis": [
+        {
+          "path": "src/code_index/generations.rs",
+          "symbols": [
+            "GenerationPlanner",
+            "RebuildTriggerV1"
+          ]
+        },
+        {
+          "path": "src/code_index/incremental.rs",
+          "symbols": [
+            "materialize_generation_increment",
+            "plan_chunk_increment"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/code_index_suite/generations.rs",
+        "tests": [
+          "immutable_generation_seals_are_deterministic_and_parent_bound",
+          "invalidation_digest_fences_sibling_generation_identity_and_publication",
+          "file_increment_planning_reports_deletion_without_reparsing_unchanged_files"
+        ]
+      },
+      "corpus_documents": [
+        "doc-repository",
+        "doc-session"
+      ],
+      "parent_gate_id": "code_index_contracts"
+    },
+    {
+      "id": "restart_and_projection_replay",
+      "production_apis": [
+        {
+          "path": "src/code_index/projection.rs",
+          "symbols": [
+            "project_for_publication",
+            "verify_batch_receipt",
+            "ProjectionPublicationHandoffV1"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/code_index_suite/projection_receipts.rs",
+        "tests": [
+          "projection_key_change_replays_reused_chunks_through_the_projector",
+          "valid_receipt_is_deterministic_and_becomes_an_atomic_publication_handoff",
+          "invalid_or_failed_receipts_never_cross_the_publication_handoff"
+        ]
+      },
+      "corpus_documents": [
+        "doc-integration"
+      ],
+      "parent_gate_id": "code_index_contracts"
+    },
+    {
+      "id": "exact_non_demotion",
+      "production_apis": [
+        {
+          "path": "src/query/retrieval/exact.rs",
+          "symbols": [
+            "CentralExactAdmissionAuthorityV1",
+            "ExactLane"
+          ]
+        },
+        {
+          "path": "src/query/retrieval/fusion.rs",
+          "symbols": [
+            "CompositionKernel"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/search_quality_suite/single_root.rs",
+        "tests": [
+          "protected_exact_precedes_higher_scoring_lexical_and_graph_evidence",
+          "shuffled_lane_completion_is_byte_stable"
+        ]
+      },
+      "corpus_documents": [
+        "doc-research-time",
+        "doc-research-id",
+        "doc-research-error"
+      ],
+      "parent_gate_id": "search_quality_contracts"
+    },
+    {
+      "id": "lexical_ranking",
+      "production_apis": [
+        {
+          "path": "src/query/retrieval/lexical.rs",
+          "symbols": [
+            "CodeLexicalProjectionAdapterV1",
+            "LexicalLane"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/search_quality_suite/candidate_producers.rs",
+        "tests": [
+          "fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct",
+          "lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic",
+          "lexical_projection_reports_freshness_coverage_and_page_cutoff"
+        ]
+      },
+      "corpus_documents": [
+        "doc-research-watermark",
+        "doc-research-canonical"
+      ],
+      "parent_gate_id": "search_quality_contracts"
+    },
+    {
+      "id": "graph_join",
+      "production_apis": [
+        {
+          "path": "src/query/retrieval/graph.rs",
+          "symbols": [
+            "GraphLane",
+            "GraphEvidenceReadPort"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/search_quality_suite/single_root.rs",
+        "tests": [
+          "exact_lexical_and_graph_rank_before_hydrating_only_the_selected_prefix",
+          "denied_graph_lane_does_not_change_public_results_or_cursor_bytes"
+        ]
+      },
+      "corpus_documents": [
+        "doc-repository",
+        "doc-integration"
+      ],
+      "parent_gate_id": "search_quality_contracts"
+    },
+    {
+      "id": "git_join",
+      "production_apis": [
+        {
+          "path": "src/code_index/git_join.rs",
+          "symbols": [
+            "GenerationGitJoinV1",
+            "GenerationGitWatermarkV1"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/code_index_suite/git_joins.rs",
+        "tests": [
+          "working_staged_and_range_diffs_join_only_at_exact_watermarks",
+          "rename_deletion_and_binary_evidence_preserve_native_git_typing",
+          "stale_generation_or_content_watermarks_never_join"
+        ]
+      },
+      "corpus_documents": [
+        "doc-repository"
+      ],
+      "parent_gate_id": "code_index_contracts"
+    },
+    {
+      "id": "diagnostic_join",
+      "production_apis": [
+        {
+          "path": "src/code_index/diagnostics.rs",
+          "symbols": [
+            "GenerationDiagnosticJoinV1",
+            "DiagnosticEvidenceWatermarkV1"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/code_index_suite/diagnostic_generation.rs",
+        "tests": [
+          "exact_current_diagnostic_attaches_to_the_clean_generation",
+          "superseded_and_cleared_records_remain_typed_historical_evidence",
+          "stale_content_and_partial_capture_never_report_a_clean_current_set"
+        ]
+      },
+      "corpus_documents": [
+        "doc-research-error"
+      ],
+      "parent_gate_id": "code_index_contracts"
+    },
+    {
+      "id": "test_attribution_join",
+      "production_apis": [
+        {
+          "path": "src/code_index/test_attribution.rs",
+          "symbols": [
+            "GenerationTestJoinV1",
+            "TestAttributionWatermarkV1"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/code_index_suite/test_attribution.rs",
+        "tests": [
+          "exact_occurrence_content_binds_current_attribution",
+          "tampered_evidence_digest_never_binds_attribution_as_current",
+          "generation_source_and_content_drift_are_typed_partial_not_current"
+        ]
+      },
+      "corpus_documents": [
+        "doc-session"
+      ],
+      "parent_gate_id": "code_index_contracts"
+    },
+    {
+      "id": "coverage_and_abstention",
+      "production_apis": [
+        {
+          "path": "src/tracedecay.rs",
+          "symbols": [
+            "TraceDecay"
+          ]
+        },
+        {
+          "path": "crates/tracedecay-domain/src/evaluation.rs",
+          "symbols": [
+            "QueryWorkloadV1",
+            "EvidenceBatchV1"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/search_quality_suite/harness_test.rs",
+        "tests": [
+          "development_workload_executes_and_emits_valid_evidence"
+        ]
+      },
+      "corpus_documents": [
+        "doc-research-time",
+        "doc-research-watermark",
+        "doc-cargo-slot-main"
+      ],
+      "parent_gate_id": "search_quality_contracts"
+    },
+    {
+      "id": "v1_parity",
+      "production_apis": [
+        {
+          "path": "src/code_index/v1_import.rs",
+          "symbols": [
+            "V1CodeBatchConsumer",
+            "V1GenerationRebuilder"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/code_index_suite/v1_migration.rs",
+        "tests": [
+          "logical_batches_rebuild_deterministically_and_preserve_provenance",
+          "unsupported_rows_are_explicit_and_cannot_masquerade_as_supported",
+          "v1_import_boundary_has_no_database_or_filesystem_open_surface"
+        ]
+      },
+      "corpus_documents": [
+        "doc-repository",
+        "doc-integration"
+      ],
+      "parent_gate_id": "code_index_contracts"
+    },
+    {
+      "id": "platform_portability",
+      "production_apis": [
+        {
+          "path": "src/code_index/languages.rs",
+          "symbols": [
+            "StaticLanguageRegistry",
+            "LanguageRegistry"
+          ]
+        }
+      ],
+      "direct_contract": {
+        "path": "tests/code_index_suite/language_registry.rs",
+        "tests": [
+          "registry_is_total_canonical_and_alias_backed",
+          "registry_revision_is_stable_for_identical_compiled_extractors",
+          "registry_revision_covers_every_descriptor_fact"
+        ]
+      },
+      "corpus_documents": [
+        "doc-research-time",
+        "doc-cargo-slot-main"
+      ],
+      "parent_gate_id": "code_index_contracts"
+    }
+  ],
+  "platforms": [
+    {
+      "id": "linux",
+      "runner": "linux",
+      "parent_gate_id": "platform_linux",
+      "status": "pending_parent_gate",
+      "benchmark_measurement": "required"
+    },
+    {
+      "id": "windows",
+      "runner": "windows",
+      "parent_gate_id": "platform_windows",
+      "status": "pending_parent_gate",
+      "benchmark_measurement": "not_applicable_linux_proc_metrics"
+    },
+    {
+      "id": "macos",
+      "runner": "macos",
+      "parent_gate_id": "platform_macos",
+      "status": "pending_parent_gate",
+      "benchmark_measurement": "not_applicable_linux_proc_metrics"
+    }
+  ],
+  "promotion": {
+    "status": "pending_parent_gates",
+    "runtime_results": null,
+    "locked_report": null,
+    "promotion_evidence": null,
+    "requires_all_parent_gates": true,
+    "requires_locked_outcome": "accepted"
+  }
+}

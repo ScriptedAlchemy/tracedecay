@@ -10,8 +10,9 @@
 //! hydration.
 //!
 //! PR9 is explicitly single-root. The exact lane is independent of the
-//! fielded lexical/BM25 lane; semantic, temporal, task/session, and
-//! diagnostic lanes report a typed `unavailable` until their delivery PRs.
+//! fielded lexical/BM25 lane. Semantic is an optional independently admitted
+//! lane; temporal, task/session, and diagnostic lanes remain unavailable
+//! until their delivery PRs.
 
 pub mod dedupe;
 pub mod diversity;
@@ -22,6 +23,7 @@ pub mod hydrate;
 pub mod lexical;
 pub mod ports;
 pub mod request;
+pub mod semantic;
 pub mod unavailable;
 
 pub use self::ports::{
@@ -29,9 +31,6 @@ pub use self::ports::{
 };
 pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
 pub use self::unavailable::{CapabilityReportedLane, UnavailableLaneReportV1};
-
-#[cfg(test)]
-mod semantic;
 
 #[cfg(test)]
 mod tests;

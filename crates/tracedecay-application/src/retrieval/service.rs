@@ -247,7 +247,7 @@ where
     }
 }
 
-fn problem_envelope<T>(
+pub(super) fn problem_envelope<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
     problem: ApplicationProblem,
@@ -259,7 +259,7 @@ fn problem_envelope<T>(
     ))
 }
 
-fn evidence_envelope<T, A, E>(
+pub(super) fn evidence_envelope<T, A, E>(
     context: &RequestContext,
     operation: &ApplicationOperation,
     authorization: &AuthorizationService<A, E>,

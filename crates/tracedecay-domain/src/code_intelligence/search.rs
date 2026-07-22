@@ -965,6 +965,51 @@ pub struct AdmittedEmbeddingProjectionKeyV1 {
     projection_key: ProjectionKeyV1,
 }
 
+impl Serialize for AdmittedEmbeddingProjectionKeyV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct AdmittedProjectionRef<'a> {
+            embedding_key: &'a EmbeddingProjectionKeyV1,
+            projection_key: &'a ProjectionKeyV1,
+        }
+
+        AdmittedProjectionRef {
+            embedding_key: &self.embedding_key,
+            projection_key: &self.projection_key,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AdmittedEmbeddingProjectionKeyV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AdmittedProjectionRepr {
+            embedding_key: EmbeddingProjectionKeyV1,
+            projection_key: ProjectionKeyV1,
+        }
+
+        let repr = AdmittedProjectionRepr::deserialize(deserializer)?;
+        let admitted = repr
+            .embedding_key
+            .admit()
+            .map_err(serde::de::Error::custom)?;
+        if admitted.projection_key != repr.projection_key {
+            return Err(serde::de::Error::custom(
+                "admitted embedding projection key digest mismatch",
+            ));
+        }
+        Ok(admitted)
+    }
+}
+
 impl EmbeddingProjectionKeyV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.model_artifact_digest.validate()?;

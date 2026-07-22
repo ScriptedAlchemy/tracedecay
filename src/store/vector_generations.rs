@@ -1,9 +1,10 @@
-//! Quarantined Plan 02 vector-generation store preparation.
+//! Immutable semantic vector-generation storage.
 //!
-//! The in-memory store proves the persistence contract before a physical
-//! schema is selected: projection effects and checkpoints commit together,
-//! partial generations remain unqueryable, and immutable generation records
-//! plus the active pointer publish in one atomic state swap.
+//! The deterministic state machine is retained as a test oracle. Production
+//! persistence stores that same state in the already-open project database,
+//! using a revisioned compare-and-swap so generation publication and the
+//! active pointer become visible together. No separate vector database or
+//! approximate index is introduced.
 
 #![forbid(unsafe_code)]
 
@@ -20,12 +21,22 @@ use tracedecay_domain::{
 pub use tracedecay_domain::VectorGenerationIdV1;
 
 use crate::code_index::projection::verify_batch_receipt;
+use crate::db::Database;
 use crate::semantic_code::projector::{
     PreparedVectorGenerationV1, ProjectedChunkVectorV1, SemanticProjectionErrorV1,
 };
 
 const VECTOR_GENERATION_BUILD_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-build.v1";
 const VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-manifest.v1";
+const VECTOR_GENERATION_STATE_OPERATION: &str = "persist semantic vector generations";
+const VECTOR_GENERATION_STATE_SCHEMA_V1: &str = "
+CREATE TABLE IF NOT EXISTS semantic_vector_generation_state_v1 (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    state_json TEXT NOT NULL
+) STRICT;
+";
+const MAX_STATE_CAS_RETRIES: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
@@ -52,14 +63,18 @@ pub struct VectorProjectionCheckpointV1 {
     pub last_publication_digest: Option<ManifestDigest>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PublishedVectorGenerationV1 {
     generation_id: VectorGenerationIdV1,
     projection_key: ProjectionKeyV1,
     source_generation: CodeGenerationId,
     source_manifest_digest: ManifestDigest,
+    base_generation: Option<VectorGenerationIdV1>,
+    embedding_key: AdmittedEmbeddingProjectionKeyV1,
     vectors: BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
     tombstones: Vec<CodeSearchChunkId>,
+    tombstone_digests: BTreeMap<CodeSearchChunkId, ContentDigest>,
     receipts: Vec<ProjectionBatchReceiptV1>,
     checkpoint: VectorProjectionCheckpointV1,
     manifest_digest: ManifestDigest,
@@ -82,12 +97,24 @@ impl PublishedVectorGenerationV1 {
         &self.source_manifest_digest
     }
 
+    pub fn base_generation(&self) -> Option<&VectorGenerationIdV1> {
+        self.base_generation.as_ref()
+    }
+
+    pub fn embedding_key(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
+        &self.embedding_key
+    }
+
     pub fn vectors(&self) -> &BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1> {
         &self.vectors
     }
 
     pub fn tombstones(&self) -> &[CodeSearchChunkId] {
         &self.tombstones
+    }
+
+    pub fn tombstone_digests(&self) -> &BTreeMap<CodeSearchChunkId, ContentDigest> {
+        &self.tombstone_digests
     }
 
     pub fn receipts(&self) -> &[ProjectionBatchReceiptV1] {
@@ -106,13 +133,51 @@ impl PublishedVectorGenerationV1 {
         self.projection_key == other.projection_key
             && self.source_generation == other.source_generation
             && self.source_manifest_digest == other.source_manifest_digest
+            && self.base_generation == other.base_generation
+            && self.embedding_key == other.embedding_key
             && self.vectors == other.vectors
             && self.tombstones == other.tombstones
+            && self.tombstone_digests == other.tombstone_digests
             && self.manifest_digest == other.manifest_digest
+    }
+
+    fn canonicalize_tombstones(&mut self) {
+        self.tombstones = self.tombstone_digests.keys().cloned().collect();
+    }
+
+    fn validate_persisted(&self) -> Result<(), VectorGenerationStoreErrorV1> {
+        if self.generation_id.as_digest() != &self.manifest_digest {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "published generation id does not match manifest digest".to_string(),
+            ));
+        }
+        if self.embedding_key.projection_key() != &self.projection_key {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "published embedding key does not match projection key".to_string(),
+            ));
+        }
+        let canonical_tombstones = self.tombstone_digests.keys().cloned().collect::<Vec<_>>();
+        if self.tombstones != canonical_tombstones {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "published tombstone list is not the canonical digest-map order".to_string(),
+            ));
+        }
+        for vector in self.vectors.values() {
+            validate_vector_row_for_published(self, vector)?;
+        }
+        for chunk_id in self.tombstone_digests.keys() {
+            if self.vectors.contains_key(chunk_id) {
+                return Err(VectorGenerationStoreErrorV1::Storage(format!(
+                    "published generation retains both vector and tombstone for {chunk_id}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct VectorGenerationPublicationV1 {
     pub generation_id: VectorGenerationIdV1,
     pub manifest_digest: ManifestDigest,
@@ -147,11 +212,16 @@ pub enum VectorGenerationStoreErrorV1 {
     ImmutableGenerationConflict,
     #[error("injected failure before atomic publication swap")]
     InjectedPublicationFailure,
+    #[error("project vector generation storage failed: {0}")]
+    Storage(String),
+    #[error("project vector generation state changed repeatedly during compare-and-swap")]
+    ConcurrentMutation,
     #[error("semantic projector handoff rejected: {0}")]
     Projection(#[from] SemanticProjectionErrorV1),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StagedVectorGenerationV1 {
     plan: VectorGenerationPlanV1,
     embedding_key: Option<AdmittedEmbeddingProjectionKeyV1>,
@@ -162,18 +232,21 @@ struct StagedVectorGenerationV1 {
     checkpoint: VectorProjectionCheckpointV1,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublishedStateV1 {
     generations: BTreeMap<VectorGenerationIdV1, PublishedVectorGenerationV1>,
     active_generation: Option<VectorGenerationIdV1>,
 }
 
-/// Deterministic fake store used to lock the Plan 02 publication interface.
-/// It performs no I/O and is not wired into production.
-#[derive(Clone, Default)]
+/// Deterministic state machine used directly by focused tests and persisted by
+/// [`DatabaseVectorGenerationStoreV1`].
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FakeVectorGenerationStoreV1 {
     staged: BTreeMap<VectorGenerationBuildIdV1, StagedVectorGenerationV1>,
     published: PublishedStateV1,
+    #[serde(default, skip)]
     fail_before_publication_swap: bool,
 }
 
@@ -225,6 +298,44 @@ impl FakeVectorGenerationStoreV1 {
             },
         );
         Ok(build_id)
+    }
+
+    /// Discard any checkpointed execution for the same deterministic build
+    /// identity and restart projection from its authoritative PR9 inputs.
+    /// Already-published generations and the active pointer are untouched.
+    pub fn rebuild_generation(
+        &mut self,
+        plan: VectorGenerationPlanV1,
+    ) -> Result<VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1> {
+        let build_id = self.begin_generation(plan.clone())?;
+        let checkpoint = VectorProjectionCheckpointV1 {
+            target_projection_key: plan.target_projection_key.clone(),
+            source_generation: plan.source_generation.clone(),
+            source_manifest_digest: plan.source_manifest_digest.clone(),
+            completed_batches: 0,
+            last_request_digest: None,
+            last_publication_digest: None,
+        };
+        self.staged.insert(
+            build_id.clone(),
+            StagedVectorGenerationV1 {
+                plan,
+                embedding_key: None,
+                vectors: BTreeMap::new(),
+                tombstones: BTreeMap::new(),
+                batches: Vec::new(),
+                committed_chunk_effects: BTreeSet::new(),
+                checkpoint,
+            },
+        );
+        Ok(build_id)
+    }
+
+    /// Discard one unpublished build without changing any immutable
+    /// generation or the active pointer. This is the cancellation boundary
+    /// for asynchronous projection work.
+    pub fn cancel_generation(&mut self, build_id: &VectorGenerationBuildIdV1) -> bool {
+        self.staged.remove(build_id).is_some()
     }
 
     /// Atomically commit one batch's vector effects, tombstones, Plan 25
@@ -403,22 +514,26 @@ impl FakeVectorGenerationStoreV1 {
         }
         let embedding_key = staged
             .embedding_key
-            .as_ref()
+            .clone()
             .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?;
         for vector in staged.vectors.values() {
-            validate_vector_row(&staged.plan, embedding_key, vector)?;
+            validate_vector_row(&staged.plan, &embedding_key, vector)?;
         }
 
         let manifest_digest =
             generation_identity_digest(&staged.plan, &staged.vectors, &staged.tombstones)?;
         let generation_id = VectorGenerationIdV1::new(manifest_digest.clone());
-        let generation = PublishedVectorGenerationV1 {
+        let tombstone_digests = staged.tombstones;
+        let mut generation = PublishedVectorGenerationV1 {
             generation_id: generation_id.clone(),
             projection_key: staged.plan.target_projection_key,
             source_generation: staged.plan.source_generation,
             source_manifest_digest: staged.plan.source_manifest_digest,
+            base_generation: staged.plan.base_generation,
+            embedding_key,
             vectors: staged.vectors,
-            tombstones: staged.tombstones.into_keys().collect(),
+            tombstones: Vec::new(),
+            tombstone_digests,
             receipts: staged
                 .batches
                 .into_iter()
@@ -427,6 +542,8 @@ impl FakeVectorGenerationStoreV1 {
             checkpoint: staged.checkpoint.clone(),
             manifest_digest: manifest_digest.clone(),
         };
+        generation.canonicalize_tombstones();
+        generation.validate_persisted()?;
         let mut next = self.published.clone();
         let checkpoint = if let Some(existing) = next.generations.get(&generation_id) {
             if !existing.same_vector_content(&generation) {
@@ -465,6 +582,23 @@ impl FakeVectorGenerationStoreV1 {
             .and_then(|id| self.published.generations.get(id))
     }
 
+    /// Return the active immutable generation only when every query-facing
+    /// projection and source identity matches exactly. A staged replacement
+    /// is never considered, so incompatible searches omit semantics rather
+    /// than reading stale or partial rows.
+    pub fn active_generation_for(
+        &self,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+    ) -> Option<&PublishedVectorGenerationV1> {
+        self.active_generation().filter(|generation| {
+            generation.embedding_key() == embedding_key
+                && generation.source_generation() == source_generation
+                && generation.source_manifest_digest() == source_manifest_digest
+        })
+    }
+
     pub fn generation(
         &self,
         generation_id: &VectorGenerationIdV1,
@@ -476,6 +610,230 @@ impl FakeVectorGenerationStoreV1 {
     pub fn fail_before_publication_swap_once(&mut self) {
         self.fail_before_publication_swap = true;
     }
+}
+
+/// Persistent adapter over the already-open project database.
+///
+/// The complete generation state is one canonical JSON value guarded by a
+/// monotonically increasing revision. Every mutation is a single conditional
+/// update, so a reader observes either the complete old state or the complete
+/// new state. In particular, an immutable generation record cannot become
+/// visible separately from its active-generation pointer.
+pub struct DatabaseVectorGenerationStoreV1<'database> {
+    database: &'database Database,
+}
+
+impl<'database> DatabaseVectorGenerationStoreV1<'database> {
+    pub async fn open(database: &'database Database) -> Result<Self, VectorGenerationStoreErrorV1> {
+        database
+            .execute_write_batch(
+                VECTOR_GENERATION_STATE_OPERATION,
+                VECTOR_GENERATION_STATE_SCHEMA_V1,
+            )
+            .await
+            .map_err(storage_error)?;
+        let initial_state = serde_json::to_string(&FakeVectorGenerationStoreV1::default())
+            .map_err(storage_error)?;
+        database
+            .execute_write(
+                VECTOR_GENERATION_STATE_OPERATION,
+                "INSERT OR IGNORE INTO semantic_vector_generation_state_v1 (
+                    singleton, revision, state_json
+                 ) VALUES (1, 0, ?1)",
+                libsql::params![initial_state],
+            )
+            .await
+            .map_err(storage_error)?;
+        let store = Self { database };
+        store.load_state().await?;
+        Ok(store)
+    }
+
+    pub async fn begin_generation(
+        &self,
+        plan: VectorGenerationPlanV1,
+    ) -> Result<VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| state.begin_generation(plan.clone()))
+            .await
+    }
+
+    pub async fn rebuild_generation(
+        &self,
+        plan: VectorGenerationPlanV1,
+    ) -> Result<VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| state.rebuild_generation(plan.clone()))
+            .await
+    }
+
+    pub async fn cancel_generation(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+    ) -> Result<bool, VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| Ok(state.cancel_generation(build_id)))
+            .await
+    }
+
+    pub async fn commit_batch(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+        expected_checkpoint: Option<&VectorProjectionCheckpointV1>,
+        prepared: PreparedVectorGenerationV1,
+    ) -> Result<VectorProjectionCheckpointV1, VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| {
+            state.commit_batch(build_id, expected_checkpoint, prepared.clone())
+        })
+        .await
+    }
+
+    pub async fn publish_generation(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+        expected_active_generation: Option<&VectorGenerationIdV1>,
+    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| state.publish_generation(build_id, expected_active_generation))
+            .await
+    }
+
+    pub async fn active_generation_id(
+        &self,
+    ) -> Result<Option<VectorGenerationIdV1>, VectorGenerationStoreErrorV1> {
+        let (_, state) = self.load_state().await?;
+        Ok(state.active_generation_id().cloned())
+    }
+
+    pub async fn active_checkpoint(
+        &self,
+    ) -> Result<Option<VectorProjectionCheckpointV1>, VectorGenerationStoreErrorV1> {
+        let (_, state) = self.load_state().await?;
+        Ok(state.active_checkpoint().cloned())
+    }
+
+    pub async fn active_generation(
+        &self,
+    ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+        let (_, state) = self.load_state().await?;
+        Ok(state.active_generation().cloned())
+    }
+
+    pub async fn active_generation_for(
+        &self,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+    ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+        let (_, state) = self.load_state().await?;
+        Ok(state
+            .active_generation_for(embedding_key, source_generation, source_manifest_digest)
+            .cloned())
+    }
+
+    pub async fn generation(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+    ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+        let (_, state) = self.load_state().await?;
+        Ok(state.generation(generation_id).cloned())
+    }
+
+    async fn mutate_state<ResultValue>(
+        &self,
+        mut mutation: impl FnMut(
+            &mut FakeVectorGenerationStoreV1,
+        ) -> Result<ResultValue, VectorGenerationStoreErrorV1>,
+    ) -> Result<ResultValue, VectorGenerationStoreErrorV1> {
+        for _ in 0..MAX_STATE_CAS_RETRIES {
+            let (revision, mut state) = self.load_state().await?;
+            let result = mutation(&mut state)?;
+            let state_json = serde_json::to_string(&state).map_err(storage_error)?;
+            let changed = self
+                .database
+                .execute_write(
+                    VECTOR_GENERATION_STATE_OPERATION,
+                    "UPDATE semantic_vector_generation_state_v1
+                     SET revision = revision + 1, state_json = ?1
+                     WHERE singleton = 1 AND revision = ?2",
+                    libsql::params![state_json, revision],
+                )
+                .await
+                .map_err(storage_error)?;
+            if changed == 1 {
+                return Ok(result);
+            }
+        }
+        Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
+    }
+
+    async fn load_state(
+        &self,
+    ) -> Result<(i64, FakeVectorGenerationStoreV1), VectorGenerationStoreErrorV1> {
+        let mut rows = self
+            .database
+            .conn()
+            .query(
+                "SELECT revision, state_json
+                 FROM semantic_vector_generation_state_v1
+                 WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+        let row = rows.next().await.map_err(storage_error)?.ok_or_else(|| {
+            VectorGenerationStoreErrorV1::Storage(
+                "vector generation state row is missing".to_string(),
+            )
+        })?;
+        let revision = row.get::<i64>(0).map_err(storage_error)?;
+        let state_json = row.get::<String>(1).map_err(storage_error)?;
+        drop(rows);
+        let state = serde_json::from_str(&state_json).map_err(storage_error)?;
+        validate_loaded_state(&state)?;
+        Ok((revision, state))
+    }
+}
+
+fn validate_loaded_state(
+    state: &FakeVectorGenerationStoreV1,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    if let Some(active) = &state.published.active_generation {
+        if !state.published.generations.contains_key(active) {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "active vector generation pointer is dangling".to_string(),
+            ));
+        }
+    }
+    for (generation_id, generation) in &state.published.generations {
+        if generation.generation_id() != generation_id {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "published generation map key does not match record id".to_string(),
+            ));
+        }
+        generation.validate_persisted()?;
+    }
+    for staged in state.staged.values() {
+        if let Some(embedding_key) = &staged.embedding_key {
+            for vector in staged.vectors.values() {
+                validate_vector_row(&staged.plan, embedding_key, vector)?;
+            }
+        }
+        let canonical = staged.tombstones.keys().cloned().collect::<BTreeSet<_>>();
+        if staged.tombstones.len() != canonical.len() {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "staged tombstones contain duplicate chunk ids".to_string(),
+            ));
+        }
+        for chunk_id in staged.tombstones.keys() {
+            if staged.vectors.contains_key(chunk_id) {
+                return Err(VectorGenerationStoreErrorV1::Storage(format!(
+                    "staged generation retains both vector and tombstone for {chunk_id}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn storage_error(error: impl std::fmt::Display) -> VectorGenerationStoreErrorV1 {
+    VectorGenerationStoreErrorV1::Storage(error.to_string())
 }
 
 /// Derive the immutable vector-generation identity from projected content,
@@ -573,6 +931,24 @@ fn validate_vector_row(
     Ok(())
 }
 
+fn validate_vector_row_for_published(
+    generation: &PublishedVectorGenerationV1,
+    vector: &ProjectedChunkVectorV1,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    if vector.projection_key != generation.projection_key
+        || vector.source_generation != generation.source_generation
+        || vector.source_manifest_digest != generation.source_manifest_digest
+    {
+        return Err(VectorGenerationStoreErrorV1::Storage(
+            "published vector row identity drifted from generation metadata".to_string(),
+        ));
+    }
+    vector
+        .validate(generation.embedding_key.embedding_key().dimensions)
+        .map_err(|error| VectorGenerationStoreErrorV1::Storage(error.to_string()))?;
+    Ok(())
+}
+
 fn base_vector<'a>(
     published: &'a PublishedStateV1,
     plan: &VectorGenerationPlanV1,
@@ -606,6 +982,11 @@ fn validate_base_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_domain::{
+        ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+        EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
+        EmbeddingTruncationSideV1, PrivacyDomainId,
+    };
 
     fn id<T>(value: &str) -> T
     where
@@ -623,13 +1004,36 @@ mod tests {
         id(&format!("sha256:{}", byte.to_string().repeat(64)))
     }
 
+    fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
+        EmbeddingProjectionKeyV1 {
+            model_artifact_digest: manifest_digest('1'),
+            tokenizer_digest: manifest_digest('2'),
+            config_digest: manifest_digest('3'),
+            query_instruction_digest: Some(manifest_digest('4')),
+            document_instruction_digest: Some(manifest_digest('5')),
+            pooling: EmbeddingPoolingV1::Mean,
+            truncation_side: EmbeddingTruncationSideV1::Right,
+            truncation_length: 512,
+            runtime_backend: "fastembed-ort".to_owned(),
+            runtime_build_revision: "ort-test-rev-1".to_owned(),
+            device_class: EmbeddingDeviceClassV1::Cpu,
+            dimensions: 1,
+            metric: EmbeddingMetricV1::Cosine,
+            normalization: EmbeddingNormalizationV1::L2,
+            precision: EmbeddingPrecisionV1::Fp32,
+            chunk_schema_revision: "code-search-chunk.v1".to_owned(),
+            chunker_revision: id::<ChunkerRevision>("chunker.v1"),
+            privacy_domain: id::<PrivacyDomainId>("privacy.project-a"),
+            privacy_key_epoch: 7,
+        }
+        .admit()
+        .expect("admitted embedding fixture")
+    }
+
     #[test]
     fn generation_identity_ignores_batch_execution_history() {
-        let projection_key = ProjectionKeyV1 {
-            kind: ProjectionKindV1::Embedding,
-            schema_revision: "embedding.v1".to_owned(),
-            profile_digest: manifest_digest('a'),
-        };
+        let embedding_key = admitted_embedding();
+        let projection_key = embedding_key.projection_key().clone();
         let source_generation = id::<CodeGenerationId>("code-generation.1");
         let source_manifest_digest = manifest_digest('b');
         let chunk_id = id::<CodeSearchChunkId>("chunk.v1.alpha");
@@ -643,12 +1047,13 @@ mod tests {
         let vectors = BTreeMap::from([(
             chunk_id.clone(),
             ProjectedChunkVectorV1 {
-                projection_key,
-                source_generation,
-                source_manifest_digest,
+                projection_key: projection_key.clone(),
+                source_generation: source_generation.clone(),
+                source_manifest_digest: source_manifest_digest.clone(),
                 chunk_id,
                 chunk_digest: content_digest('c'),
                 values: vec![0.25],
+                // Identity tests compare digest bytes, not recomputed projector validity.
                 output_digest: content_digest('d'),
             },
         )]);
@@ -674,8 +1079,11 @@ mod tests {
             projection_key: plan.target_projection_key.clone(),
             source_generation: plan.source_generation.clone(),
             source_manifest_digest: plan.source_manifest_digest.clone(),
+            base_generation: None,
+            embedding_key,
             vectors: vectors.clone(),
             tombstones: vec![],
+            tombstone_digests: BTreeMap::new(),
             receipts: vec![],
             checkpoint,
             manifest_digest: first,
@@ -690,5 +1098,65 @@ mod tests {
             published.same_vector_content(&replayed),
             "execution checkpoint history does not redefine immutable vector content"
         );
+
+        let encoded = serde_json::to_string(&published).expect("serialize published generation");
+        let decoded: PublishedVectorGenerationV1 =
+            serde_json::from_str(&encoded).expect("deserialize published generation");
+        assert!(published.same_vector_content(&decoded));
+        assert_eq!(decoded.tombstones(), published.tombstones());
+        assert_eq!(decoded.tombstone_digests(), published.tombstone_digests());
+        assert_eq!(decoded.base_generation(), published.base_generation());
+        assert_eq!(decoded.embedding_key(), published.embedding_key());
+    }
+
+    #[test]
+    fn persisted_state_rejects_tombstone_vector_overlap_and_dangling_active() {
+        let embedding_key = admitted_embedding();
+        let projection_key = embedding_key.projection_key().clone();
+        let chunk_id = id::<CodeSearchChunkId>("chunk.v1.alpha");
+        let generation_id = VectorGenerationIdV1::new(manifest_digest('a'));
+        let mut generation = PublishedVectorGenerationV1 {
+            generation_id: generation_id.clone(),
+            projection_key: projection_key.clone(),
+            source_generation: id("code-generation.1"),
+            source_manifest_digest: manifest_digest('b'),
+            base_generation: None,
+            embedding_key: embedding_key.clone(),
+            vectors: BTreeMap::from([(
+                chunk_id.clone(),
+                ProjectedChunkVectorV1 {
+                    projection_key,
+                    source_generation: id("code-generation.1"),
+                    source_manifest_digest: manifest_digest('b'),
+                    chunk_id: chunk_id.clone(),
+                    chunk_digest: content_digest('c'),
+                    values: vec![1.0],
+                    output_digest: content_digest('d'),
+                },
+            )]),
+            tombstones: vec![chunk_id.clone()],
+            tombstone_digests: BTreeMap::from([(chunk_id, content_digest('c'))]),
+            receipts: vec![],
+            checkpoint: VectorProjectionCheckpointV1 {
+                target_projection_key: embedding_key.projection_key().clone(),
+                source_generation: id("code-generation.1"),
+                source_manifest_digest: manifest_digest('b'),
+                completed_batches: 1,
+                last_request_digest: None,
+                last_publication_digest: None,
+            },
+            manifest_digest: generation_id.as_digest().clone(),
+        };
+        assert!(generation.validate_persisted().is_err());
+
+        generation.vectors.clear();
+        generation.canonicalize_tombstones();
+        // Empty vector sets remain valid when tombstones and embedding metadata
+        // stay canonical; digest-valid rows are checked only when present.
+        assert!(generation.validate_persisted().is_ok());
+
+        let mut state = FakeVectorGenerationStoreV1::default();
+        state.published.active_generation = Some(VectorGenerationIdV1::new(manifest_digest('9')));
+        assert!(validate_loaded_state(&state).is_err());
     }
 }

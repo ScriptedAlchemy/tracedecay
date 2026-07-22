@@ -1,26 +1,29 @@
 //! Generation-exact joins over Plan 36 read-only Git evidence.
 //!
-//! Native Git remains authoritative for status, diff, hunk, blob, mode, and
-//! coverage semantics. This module only verifies that a typed [`GitDiffV1`]
-//! and its capture watermark describe the exact sanitized snapshot sealed by
-//! one code generation, then attaches canonical file occurrence/content
-//! identity. It never reads a repository, reconstructs a patch, or infers a
-//! match from a path or line alone.
+//! Native Git remains authoritative for status, diff, hunk, history, blame,
+//! blob, mode, and coverage semantics. This module only verifies that typed
+//! Git results and their capture watermarks describe the exact sanitized
+//! snapshot sealed by one code generation, then attaches canonical occurrence
+//! and content identity. It never reads a repository, reconstructs a patch, or
+//! infers Git evidence from indexed rows.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, CommitId, ContentDigest, FileOccurrenceId,
-    GitChangeKindV1, GitDegradationV1, GitDiffScopeV1, GitDiffV1, GitFileModeV1, GitHunkV1,
-    GitOidV1, ManifestDigest, RefId, RepositoryId, SanitizedCodeFileV1, SnapshotFileDispositionV1,
+    GitBlameAvailabilityV1, GitBlameLineV1, GitBlameV1, GitChangeKindV1, GitDegradationV1,
+    GitDiffScopeV1, GitDiffV1, GitFileModeV1, GitHistoryV1, GitHunkV1, GitOidV1, ManifestDigest,
+    RefId, RepositoryId, SanitizedCodeFileV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
     UtcMicros, ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
 };
 
 use super::capabilities::expected_seal_digest;
 
 const GIT_JOIN_EVIDENCE_SEPARATOR: &str = "tracedecay.generation-git-evidence.v1";
+const GIT_HISTORY_EVIDENCE_SEPARATOR: &str = "tracedecay.generation-git-history.v1";
+const GIT_BLAME_EVIDENCE_SEPARATOR: &str = "tracedecay.generation-git-blame.v1";
 
 /// Immutable native-Git scope captured with a generation join.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,6 +74,16 @@ struct GenerationGitEvidenceDigestInput<'a> {
     diff: &'a GitDiffV1,
 }
 
+#[derive(Serialize)]
+struct GenerationGitReadEvidenceDigestInput<'a, T> {
+    domain: &'static str,
+    repository: &'a RepositoryId,
+    source_revision: &'a Option<CommitId>,
+    snapshot_content_identity: &'a ContentDigest,
+    scope: &'a GenerationGitEvidenceScopeV1,
+    evidence: &'a T,
+}
+
 /// Plan-36/capture watermark retained separately from the code-generation
 /// watermark. Equality against the sanitized snapshot is required before any
 /// file or hunk evidence can be attached.
@@ -110,6 +123,51 @@ impl GenerationGitWatermarkV1 {
     }
 }
 
+/// Independent watermark for native Git history or blame reads.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationGitReadWatermarkV1 {
+    pub repository: RepositoryId,
+    pub source_revision: Option<CommitId>,
+    pub snapshot_content_identity: ContentDigest,
+    pub scope: GenerationGitEvidenceScopeV1,
+    pub evidence_digest: ManifestDigest,
+    pub captured_at: UtcMicros,
+}
+
+impl GenerationGitReadWatermarkV1 {
+    pub fn recompute_history_digest(
+        &self,
+        history: &GitHistoryV1,
+    ) -> Result<ManifestDigest, GenerationGitJoinErrorV1> {
+        self.recompute_digest(GIT_HISTORY_EVIDENCE_SEPARATOR, history)
+    }
+
+    pub fn recompute_blame_digest(
+        &self,
+        blame: &GitBlameV1,
+    ) -> Result<ManifestDigest, GenerationGitJoinErrorV1> {
+        self.recompute_digest(GIT_BLAME_EVIDENCE_SEPARATOR, blame)
+    }
+
+    fn recompute_digest<T: Serialize>(
+        &self,
+        domain: &'static str,
+        evidence: &T,
+    ) -> Result<ManifestDigest, GenerationGitJoinErrorV1> {
+        self.scope.validate()?;
+        canonical_sha256(&GenerationGitReadEvidenceDigestInput {
+            domain,
+            repository: &self.repository,
+            source_revision: &self.source_revision,
+            snapshot_content_identity: &self.snapshot_content_identity,
+            scope: &self.scope,
+            evidence,
+        })
+        .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))
+    }
+}
+
 /// Exact content identity observed for one path by the Git/capture boundary.
 /// The join requires this digest to equal the sanitized snapshot file digest.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +175,74 @@ impl GenerationGitWatermarkV1 {
 pub struct GitFileContentIdentityV1 {
     pub path: String,
     pub content_digest: ContentDigest,
+}
+
+/// Native history joined to one immutable code-generation watermark.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "coverage", rename_all = "snake_case")]
+pub enum GenerationGitHistoryJoinCoverageV1 {
+    Complete,
+    Partial {
+        degradations: Vec<GitDegradationV1>,
+        truncated: bool,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationGitHistoryJoinV1 {
+    pub generation_id: CodeGenerationId,
+    pub code_snapshot_digest: ManifestDigest,
+    pub code_content_identity: ContentDigest,
+    pub git_watermark: GenerationGitReadWatermarkV1,
+    pub history: GitHistoryV1,
+    pub coverage: GenerationGitHistoryJoinCoverageV1,
+}
+
+/// Exact generation-local symbol line range supplied by the canonical code
+/// occurrence authority. Native blame remains line provenance authority.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct GitSymbolLineBindingV1 {
+    pub generation_id: CodeGenerationId,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub symbol_occurrence_id: SymbolOccurrenceId,
+    pub content_digest: ContentDigest,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "coverage", rename_all = "snake_case")]
+pub enum GenerationGitBlameJoinCoverageV1 {
+    Complete,
+    Partial {
+        degradations: Vec<GitDegradationV1>,
+    },
+    Unavailable {
+        availability: GitBlameAvailabilityV1,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationGitBlameLineJoinV1 {
+    pub line: GitBlameLineV1,
+    pub symbol_occurrence_ids: Vec<SymbolOccurrenceId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationGitBlameJoinV1 {
+    pub generation_id: CodeGenerationId,
+    pub code_snapshot_digest: ManifestDigest,
+    pub code_content_identity: ContentDigest,
+    pub git_watermark: GenerationGitReadWatermarkV1,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub content_digest: ContentDigest,
+    pub blame: GitBlameV1,
+    pub lines: Vec<GenerationGitBlameLineJoinV1>,
+    pub coverage: GenerationGitBlameJoinCoverageV1,
 }
 
 /// Why a file can retain exact file-level Git evidence but cannot expose
@@ -210,8 +336,20 @@ pub enum GenerationGitJoinErrorV1 {
     StaleSourceRevision,
     #[error("the Git/capture content watermark is stale")]
     StaleContentWatermark,
-    #[error("the Git/capture evidence digest does not bind this typed diff")]
+    #[error("the Git/capture evidence digest does not bind this typed result")]
     StaleGitEvidence,
+    #[error("Git blame path and supplied content identity differ")]
+    BlamePathMismatch,
+    #[error("duplicate Git symbol line binding for {0}")]
+    DuplicateSymbolBinding(SymbolOccurrenceId),
+    #[error("Git symbol line binding {0} belongs to another generation")]
+    StaleSymbolGeneration(SymbolOccurrenceId),
+    #[error("Git symbol line binding {0} names another file")]
+    StaleSymbolFile(SymbolOccurrenceId),
+    #[error("Git symbol line binding {0} has stale content")]
+    StaleSymbolContent(SymbolOccurrenceId),
+    #[error("Git symbol line binding {0} has an invalid line range")]
+    InvalidSymbolLineRange(SymbolOccurrenceId),
     #[error("duplicate Git content identity for {0}")]
     DuplicateContentIdentity(String),
     #[error("Git evidence for {0} has no exact content identity")]
@@ -224,6 +362,161 @@ pub enum GenerationGitJoinErrorV1 {
     DispositionMismatch(String),
     #[error("invalid generation or Git evidence: {0}")]
     Contract(String),
+}
+
+impl GenerationGitHistoryJoinV1 {
+    pub fn join(
+        generation: &CodeGenerationManifestV1,
+        snapshot: &ValidatedCodeSnapshotV1,
+        history: &GitHistoryV1,
+        git_watermark: &GenerationGitReadWatermarkV1,
+    ) -> Result<Self, GenerationGitJoinErrorV1> {
+        validate_generation_snapshot(generation, snapshot)?;
+        history
+            .validate()
+            .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+        validate_git_read_watermark(snapshot, git_watermark)?;
+        if history.repository != snapshot.snapshot.repository {
+            return Err(GenerationGitJoinErrorV1::RepositoryMismatch);
+        }
+        if git_watermark.recompute_history_digest(history)? != git_watermark.evidence_digest {
+            return Err(GenerationGitJoinErrorV1::StaleGitEvidence);
+        }
+
+        let coverage = if history.coverage.is_complete() && !history.truncated {
+            GenerationGitHistoryJoinCoverageV1::Complete
+        } else {
+            GenerationGitHistoryJoinCoverageV1::Partial {
+                degradations: history.coverage.degradations.clone(),
+                truncated: history.truncated,
+            }
+        };
+        Ok(Self {
+            generation_id: generation.generation_id.clone(),
+            code_snapshot_digest: generation.snapshot_digest.clone(),
+            code_content_identity: snapshot.snapshot.content_identity.clone(),
+            git_watermark: git_watermark.clone(),
+            history: history.clone(),
+            coverage,
+        })
+    }
+}
+
+impl GenerationGitBlameJoinV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn join(
+        generation: &CodeGenerationManifestV1,
+        snapshot: &ValidatedCodeSnapshotV1,
+        blame: &GitBlameV1,
+        git_watermark: &GenerationGitReadWatermarkV1,
+        file_content: &GitFileContentIdentityV1,
+        symbol_bindings: &[GitSymbolLineBindingV1],
+    ) -> Result<Self, GenerationGitJoinErrorV1> {
+        validate_generation_snapshot(generation, snapshot)?;
+        blame
+            .validate()
+            .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+        validate_git_read_watermark(snapshot, git_watermark)?;
+        if blame.repository != snapshot.snapshot.repository {
+            return Err(GenerationGitJoinErrorV1::RepositoryMismatch);
+        }
+        if git_watermark.recompute_blame_digest(blame)? != git_watermark.evidence_digest {
+            return Err(GenerationGitJoinErrorV1::StaleGitEvidence);
+        }
+        if blame.path != file_content.path {
+            return Err(GenerationGitJoinErrorV1::BlamePathMismatch);
+        }
+
+        let snapshot_file = snapshot
+            .snapshot
+            .files
+            .iter()
+            .find(|file| file.logical_path == blame.path)
+            .ok_or_else(|| GenerationGitJoinErrorV1::MissingSnapshotFile(blame.path.clone()))?;
+        if snapshot_file.content_digest != file_content.content_digest {
+            return Err(GenerationGitJoinErrorV1::ContentMismatch(
+                blame.path.clone(),
+            ));
+        }
+
+        let mut seen_symbols = BTreeSet::new();
+        for binding in symbol_bindings {
+            binding
+                .symbol_occurrence_id
+                .validate()
+                .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+            if !seen_symbols.insert(&binding.symbol_occurrence_id) {
+                return Err(GenerationGitJoinErrorV1::DuplicateSymbolBinding(
+                    binding.symbol_occurrence_id.clone(),
+                ));
+            }
+            if binding.generation_id != generation.generation_id {
+                return Err(GenerationGitJoinErrorV1::StaleSymbolGeneration(
+                    binding.symbol_occurrence_id.clone(),
+                ));
+            }
+            if binding.file_occurrence_id != snapshot_file.file_occurrence_id {
+                return Err(GenerationGitJoinErrorV1::StaleSymbolFile(
+                    binding.symbol_occurrence_id.clone(),
+                ));
+            }
+            if binding.content_digest != snapshot_file.content_digest {
+                return Err(GenerationGitJoinErrorV1::StaleSymbolContent(
+                    binding.symbol_occurrence_id.clone(),
+                ));
+            }
+            if binding.start_line == 0
+                || binding.end_line == 0
+                || binding.start_line > binding.end_line
+            {
+                return Err(GenerationGitJoinErrorV1::InvalidSymbolLineRange(
+                    binding.symbol_occurrence_id.clone(),
+                ));
+            }
+        }
+
+        let lines = blame
+            .lines
+            .iter()
+            .map(|line| {
+                let mut symbol_occurrence_ids: Vec<SymbolOccurrenceId> = symbol_bindings
+                    .iter()
+                    .filter(|binding| {
+                        binding.start_line <= line.final_line && line.final_line <= binding.end_line
+                    })
+                    .map(|binding| binding.symbol_occurrence_id.clone())
+                    .collect();
+                symbol_occurrence_ids.sort();
+                GenerationGitBlameLineJoinV1 {
+                    line: line.clone(),
+                    symbol_occurrence_ids,
+                }
+            })
+            .collect();
+        let coverage = if blame.availability != GitBlameAvailabilityV1::Available {
+            GenerationGitBlameJoinCoverageV1::Unavailable {
+                availability: blame.availability,
+            }
+        } else if blame.coverage.is_complete() {
+            GenerationGitBlameJoinCoverageV1::Complete
+        } else {
+            GenerationGitBlameJoinCoverageV1::Partial {
+                degradations: blame.coverage.degradations.clone(),
+            }
+        };
+
+        Ok(Self {
+            generation_id: generation.generation_id.clone(),
+            code_snapshot_digest: generation.snapshot_digest.clone(),
+            code_content_identity: snapshot.snapshot.content_identity.clone(),
+            git_watermark: git_watermark.clone(),
+            file_occurrence_id: snapshot_file.file_occurrence_id.clone(),
+            content_digest: snapshot_file.content_digest.clone(),
+            blame: blame.clone(),
+            lines,
+            coverage,
+        })
+    }
 }
 
 impl GenerationGitJoinV1 {
@@ -400,6 +693,41 @@ fn validate_git_watermark(
         || watermark.recompute_evidence_digest(diff)? != watermark.git_snapshot_digest
     {
         return Err(GenerationGitJoinErrorV1::StaleGitEvidence);
+    }
+    Ok(())
+}
+
+fn validate_git_read_watermark(
+    snapshot: &ValidatedCodeSnapshotV1,
+    watermark: &GenerationGitReadWatermarkV1,
+) -> Result<(), GenerationGitJoinErrorV1> {
+    watermark
+        .repository
+        .validate()
+        .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+    watermark
+        .snapshot_content_identity
+        .validate()
+        .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+    watermark
+        .evidence_digest
+        .validate()
+        .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+    watermark.scope.validate()?;
+    if watermark.repository != snapshot.snapshot.repository {
+        return Err(GenerationGitJoinErrorV1::RepositoryMismatch);
+    }
+    if watermark.scope.worktree != snapshot.snapshot.worktree {
+        return Err(GenerationGitJoinErrorV1::WorktreeMismatch);
+    }
+    if watermark.scope.reference != snapshot.snapshot.reference {
+        return Err(GenerationGitJoinErrorV1::ReferenceMismatch);
+    }
+    if watermark.source_revision != snapshot.snapshot.source_revision {
+        return Err(GenerationGitJoinErrorV1::StaleSourceRevision);
+    }
+    if watermark.snapshot_content_identity != snapshot.snapshot.content_identity {
+        return Err(GenerationGitJoinErrorV1::StaleContentWatermark);
     }
     Ok(())
 }

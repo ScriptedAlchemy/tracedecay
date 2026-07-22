@@ -10,6 +10,15 @@ members = [
 ]
 resolver = "3"
 
+[workspace.metadata.cargo-shear]
+ignored-paths = [
+    "eval/hermetic/fixtures/tool-args/*.rs",
+    "eval/hermetic/fixtures/tool-args-other/*.rs",
+    "evals/agent_adoption/fixture_broken/*.rs",
+    "tests/fixtures/context_eval_project/src/**/*.rs",
+    "tests/fixtures/search_quality/corpus/**/*.rs",
+]
+
 # Declared once here; every member (including the root package) inherits via
 # `edition.workspace = true`. Cargo has no config-level edition default — this
 # inheritance table is the sanctioned single source of truth.
@@ -48,7 +57,25 @@ include = [
     "/benchmarks/pr8-temporal/**",
     "/benchmarks/pr9-code-index/**",
     "/scripts/run-pr8-temporal-benchmark.sh",
-    "/plugin/**",
+    "/plugin/.claude-plugin/**",
+    "/plugin/.cursor-plugin/**",
+    "/plugin/.codex-plugin/**",
+    "/plugin/.kimi-plugin/**",
+    "/plugin/.lsp.json",
+    "/plugin/.mcp.json",
+    "/plugin/README*.md",
+    "/plugin/agents/**",
+    "/plugin/commands/**",
+    "/plugin/hooks/**",
+    "/plugin/mcp-cursor.json",
+    "/plugin/opencode/**",
+    "/plugin/overlays/**",
+    "/plugin/rules/**",
+    "/plugin/skills/**",
+    "/plugin/cursor-native-extension/package.json",
+    "/plugin/cursor-native-extension/README.md",
+    "/plugin/cursor-native-extension/LICENSE",
+    "/plugin/cursor-native-extension/dist/extension.js",
     "/vendor/**",
     "/dashboard/shell/dist/**",
     "/dashboard/holographic/dist/**",
@@ -63,7 +90,54 @@ include = [
 ]
 
 [features]
-default = ["full", "token-counting"]
+# Keep the shipped default and `--all-features` behavior equivalent. Every
+# declared root feature is listed explicitly so adding a feature requires a
+# deliberate default-set decision rather than silently creating a lean build.
+default = [
+    "token-counting",
+    "lite",
+    "medium",
+    "full",
+    "lang-dart",
+    "lang-pascal",
+    "lang-php",
+    "lang-ruby",
+    "lang-bash",
+    "lang-protobuf",
+    "lang-powershell",
+    "lang-nix",
+    "lang-vbnet",
+    "lang-lua",
+    "lang-zig",
+    "lang-objc",
+    "lang-perl",
+    "lang-batch",
+    "lang-fortran",
+    "lang-cobol",
+    "lang-msbasic2",
+    "lang-gwbasic",
+    "lang-qbasic",
+    "lang-dockerfile",
+    "lang-glsl",
+    "lang-wgsl",
+    "lang-hlsl",
+    "lang-metal",
+    "lang-markdown",
+    "lang-r",
+    "lang-sql",
+    "lang-julia",
+    "lang-haskell",
+    "lang-ocaml",
+    "lang-clojure",
+    "lang-erlang",
+    "lang-elixir",
+    "lang-fsharp",
+    "lang-quint",
+    "lang-toml",
+    "lang-lean",
+    "test-transport",
+    "semantic-fastembed",
+]
 
 # Exact token counting for the Savings & Cost dashboard (tiktoken BPE).
 # Embeds the o200k_base/cl100k_base vocabularies (~4 MB of binary weight);
@@ -118,6 +192,14 @@ lang-toml = ["dep:tracedecay-large-treesitters"]
 lang-lean = ["dep:tracedecay-large-treesitters"]
 test-transport = []
 
+# PR10 FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
+# model-hub and image defaults disabled; models still load only from locally
+# verified artifact bytes in `src/semantic_code/fastembed_adapter.rs`.
+semantic-fastembed = [
+    "dep:fastembed",
+    "fastembed/ort-download-binaries-rustls-tls",
+]
+
 [lib]
 name = "tracedecay"
 
@@ -137,8 +219,10 @@ tree-sitter-language = "0.1"
 # crates are pulled in and no external `ast-grep` binary is required. Pinned to
 # tree-sitter ^0.26.3, ABI-compatible with the 0.26 grammars this repo builds.
 ast-grep-core = "0.44"
+tracedecay-api = { path = "crates/tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0" }
 tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
+tracedecay-hooks = { path = "crates/tracedecay-hooks", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }
@@ -153,6 +237,7 @@ ureq = { version = "3", features = ["json"] }
 url = "2"
 webpki-roots = "1"
 tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
@@ -160,7 +245,7 @@ sha2 = "0.11"
 glob = "0.3"
 walkdir = "2"
 ignore = "0.4"
-gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1"] }
+gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
 dirs = "6"
 hex = "0.4"
 rayon = "1"
@@ -179,6 +264,10 @@ regex = "1.12.3"
 shell-words = "1.1"
 open = "5.3"
 tiktoken-rs = { version = "0.12", optional = true }
+# Library-first FastEmbed: disable hub/image defaults so the adapter can only
+# construct from local verified artifact bytes (no model-hub / cache discovery).
+# The `semantic-fastembed` feature adds the bundled ORT runtime separately.
+fastembed = { version = "5", optional = true, default-features = false }
 # Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
 # We deliberately use the raw watcher (not notify-debouncer-full) and debounce
 # ourselves so a monorepo's git-ref churn coalesces into a single sync.
@@ -189,7 +278,9 @@ tempfile = "3"
 ed25519-dalek = { version = "3.0.0", features = ["signature"] }
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
+lsp-types = "0.97.0"
 yaml-edit = { version = "0.2.3", default-features = false }
+notify-debouncer-full = "0.7.0"
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"

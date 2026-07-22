@@ -20,6 +20,14 @@ use tracedecay_domain::{
 
 use super::ports::{CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError};
 
+mod service;
+pub use service::{
+    CalibratedSemanticQueryService, CompleteSemanticGenerationV1, SemanticAbstentionV1,
+    SemanticCalibrationEvidenceV1, SemanticCalibrationProfileV1, SemanticIndexStateV1,
+    SemanticLaneReadinessV1, SemanticQueryModeV1, SemanticQueryServiceError,
+    SemanticQueryServiceOutcomeV1,
+};
+
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
 const SEMANTIC_CHECKPOINT_DOMAIN: &str = "tracedecay.semantic-flat-checkpoint.v1";
 
@@ -142,6 +150,10 @@ impl EphemeralQueryEmbeddingV1 {
             projection,
             values,
         })
+    }
+
+    pub(crate) fn values(&self) -> &[f32] {
+        &self.values
     }
 }
 
@@ -367,6 +379,13 @@ where
         if summary.examined != accounted {
             return Err(RetrievalPortError::Contract(
                 "semantic vector scan coverage is incomplete".to_owned(),
+            ));
+        }
+        if summary.unknown != 0 {
+            return Ok(RetrieverOutcome::Unavailable(
+                RetrievalFailure::AuthorityUnavailable {
+                    detail: "semantic vector generation has unknown coverage".to_owned(),
+                },
             ));
         }
 

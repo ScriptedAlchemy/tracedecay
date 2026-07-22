@@ -233,6 +233,7 @@ impl Error for SessionAcquireError {}
 pub struct SessionPoolStats {
     pub active: usize,
     pub idle: usize,
+    pub live_sessions: usize,
     pub queued_waiters: usize,
     pub resident_bytes: u64,
     pub sessions_opened: usize,
@@ -278,6 +279,14 @@ impl<S> Default for PoolState<S> {
 }
 
 impl<S> PoolState<S> {
+    fn idle_sessions(&self) -> usize {
+        self.idle.values().map(Vec::len).sum()
+    }
+
+    fn live_sessions(&self) -> usize {
+        self.active.saturating_add(self.idle_sessions())
+    }
+
     fn next_waiter_id(&mut self) -> u64 {
         let waiter_id = self.next_waiter_id;
         self.next_waiter_id = self.next_waiter_id.wrapping_add(1);
@@ -315,6 +324,14 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> PoolInner<R, C> {
 /// are exercised against this pool with the deterministic fake runtime).
 pub(super) struct SessionPool<R: EmbeddingRuntime, C: MonotonicClock> {
     inner: Arc<PoolInner<R, C>>,
+}
+
+impl<R: EmbeddingRuntime, C: MonotonicClock> Clone for SessionPool<R, C> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
@@ -397,7 +414,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             }
             return Ok(self.make_guard(identity, entry.session, entry.resident_bytes));
         }
-        if state.active >= self.inner.config.max_sessions {
+        if state.live_sessions() >= self.inner.config.max_sessions {
             let active = state.active;
             drop(state);
             if reaped != 0 {
@@ -428,20 +445,29 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         let mut state = self.inner.lock_state();
         if state.closed {
             state.active -= 1;
+            state.sessions_opened += 1;
+            state.sessions_closed += 1;
             state.mark_availability_changed();
             drop(state);
             self.inner.wakeups.notify_all();
             drop(session);
             return Err(SessionAcquireError::Closed);
         }
-        let effective_ceiling = self
-            .inner
-            .config
-            .memory_ceiling_bytes
-            .min(authority.resident_byte_ceiling());
-        if state.resident_bytes + resident_bytes > effective_ceiling {
+        let projected_resident = state.resident_bytes.checked_add(resident_bytes);
+        let violated_ceiling = if resident_bytes > authority.resident_byte_ceiling() {
+            Some(authority.resident_byte_ceiling())
+        } else if projected_resident
+            .is_none_or(|bytes| bytes > self.inner.config.memory_ceiling_bytes)
+        {
+            Some(self.inner.config.memory_ceiling_bytes)
+        } else {
+            None
+        };
+        if let Some(ceiling_bytes) = violated_ceiling {
             let used = state.resident_bytes;
             state.active -= 1;
+            state.sessions_opened += 1;
+            state.sessions_closed += 1;
             state.mark_availability_changed();
             drop(state);
             self.inner.wakeups.notify_all();
@@ -449,10 +475,10 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             return Err(SessionAcquireError::MemoryCeilingExceeded {
                 used_bytes: used,
                 requested_bytes: resident_bytes,
-                ceiling_bytes: effective_ceiling,
+                ceiling_bytes,
             });
         }
-        state.resident_bytes += resident_bytes;
+        state.resident_bytes = projected_resident.expect("resident total checked above");
         state.sessions_opened += 1;
         Ok(self.make_guard(identity, session, resident_bytes))
     }
@@ -510,6 +536,13 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                 match self.acquire_verified(authority, Some(waiter_id)) {
                     Ok(guard) => return Ok(guard),
                     Err(
+                        permanent @ SessionAcquireError::MemoryCeilingExceeded {
+                            requested_bytes,
+                            ceiling_bytes,
+                            ..
+                        },
+                    ) if requested_bytes > ceiling_bytes => return Err(permanent),
+                    Err(
                         retryable @ (SessionAcquireError::Exhausted { .. }
                         | SessionAcquireError::MemoryCeilingExceeded { .. }),
                     ) => {
@@ -552,9 +585,11 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
 
     pub fn stats(&self) -> SessionPoolStats {
         let state = self.inner.lock_state();
+        let idle = state.idle_sessions();
         SessionPoolStats {
             active: state.active,
-            idle: state.idle.values().map(Vec::len).sum(),
+            idle,
+            live_sessions: state.active.saturating_add(idle),
             queued_waiters: state.waiters.len(),
             resident_bytes: state.resident_bytes,
             sessions_opened: state.sessions_opened,
@@ -574,9 +609,15 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             return 0;
         }
         state.closed = true;
-        let drained: usize = state.idle.values().map(Vec::len).sum();
+        let drained: usize = state.idle_sessions();
+        let drained_bytes = state
+            .idle
+            .values()
+            .flatten()
+            .map(|entry| entry.resident_bytes)
+            .sum::<u64>();
         state.idle.clear();
-        state.resident_bytes = 0;
+        state.resident_bytes = state.resident_bytes.saturating_sub(drained_bytes);
         state.sessions_closed += drained;
         state.mark_availability_changed();
         drop(state);
@@ -717,8 +758,8 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> Drop for WaiterPermit<R, C> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::atomic::Ordering as AtomicOrdering;
+pub(crate) mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::mpsc;
     use std::thread;
 
@@ -891,7 +932,7 @@ mod tests {
         }
     }
 
-    fn authority() -> AdmittedProjectionArtifactV1 {
+    pub(crate) fn authority() -> AdmittedProjectionArtifactV1 {
         authority_with_privacy("domain-a", 7)
     }
 
@@ -909,7 +950,11 @@ mod tests {
         SessionIdentityV1::from_authority(&authority_with_privacy(domain, key_epoch))
     }
 
-    fn config(max_sessions: usize, idle_timeout: Duration, ceiling: u64) -> SessionPoolConfigV1 {
+    pub(crate) fn config(
+        max_sessions: usize,
+        idle_timeout: Duration,
+        ceiling: u64,
+    ) -> SessionPoolConfigV1 {
         SessionPoolConfigV1 {
             max_sessions,
             max_queued_waiters: 4,
@@ -997,6 +1042,38 @@ mod tests {
         let stats = pool.stats();
         assert_eq!(stats.active, 1, "failed acquisition reserves no slot");
         assert_eq!(stats.resident_bytes, 1024);
+        assert_eq!(
+            (stats.sessions_opened, stats.sessions_closed),
+            (2, 1),
+            "resource accounting includes sessions rejected after runtime open"
+        );
+    }
+
+    #[test]
+    fn blocking_acquire_does_not_wait_on_an_impossible_memory_request() {
+        let pool = SessionPool::new(
+            FakeEmbeddingRuntime::new().with_resident_bytes_per_session(2048),
+            ManualClock::new(),
+            config(1, Duration::from_secs(60), 1024),
+        )
+        .expect("valid pool");
+        let error = pool
+            .acquire_blocking(
+                &authority(),
+                Duration::from_secs(60),
+                &ManualCancellation::new(),
+            )
+            .err()
+            .expect("one session can never fit");
+
+        assert_eq!(
+            error,
+            SessionAcquireError::MemoryCeilingExceeded {
+                used_bytes: 0,
+                requested_bytes: 2048,
+                ceiling_bytes: 1024,
+            }
+        );
     }
 
     #[test]
@@ -1554,6 +1631,11 @@ mod tests {
         let authority = authority();
         let guard = pool.acquire(&authority).expect("acquire");
         assert_eq!(pool.close(), 0);
+        assert_eq!(
+            pool.stats().resident_bytes,
+            1024,
+            "closing idle sessions must not erase active-session accounting"
+        );
         drop(guard);
         let stats = pool.stats();
         assert_eq!(stats.active, 0);
@@ -1608,5 +1690,90 @@ mod tests {
             "pool stats agree with runtime counters"
         );
         assert_eq!(counters.sessions_closed.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn hard_session_bound_counts_idle_sessions_from_other_identities() {
+        let pool = fake_pool(1, Duration::from_secs(60), 1 << 20);
+        {
+            let _domain_a = pool
+                .acquire(&authority_with_privacy("domain-a", 7))
+                .expect("first identity");
+        }
+        assert_eq!(pool.stats().idle, 1);
+
+        let error = pool
+            .acquire(&authority_with_privacy("domain-b", 7))
+            .err()
+            .expect("an idle foreign identity still occupies the only live session slot");
+
+        assert_eq!(error, SessionAcquireError::Exhausted { active: 0, max: 1 });
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.sessions_opened, 1);
+    }
+
+    #[test]
+    fn owned_runtime_factory_restarts_without_exposing_a_half_reloaded_pool() {
+        use super::super::runtime_service::{
+            SemanticRuntimeService, SharedEmbeddingRuntimeFactory,
+        };
+
+        let opens = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&opens);
+        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> = Arc::new(move || {
+            observed.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024))
+        });
+        let service = SemanticRuntimeService::new_owned(
+            Arc::new(authority()),
+            factory,
+            config(1, Duration::from_secs(60), 1 << 20),
+        )
+        .expect("runtime service");
+        {
+            let _session = service.acquire().expect("warm the original pool");
+        }
+
+        let report = service.restart().expect("restart atomically");
+
+        assert_eq!(report.prior_generation, 1);
+        assert_eq!(report.current_generation, 2);
+        assert_eq!(report.closed_idle_sessions, 1);
+        assert_eq!(opens.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(service.stats().sessions_opened, 0);
+        service.acquire().expect("replacement pool is usable");
+    }
+
+    #[test]
+    fn failed_reload_preserves_the_published_runtime_generation() {
+        use super::super::runtime_service::{
+            SemanticRuntimeService, SharedEmbeddingRuntimeFactory,
+        };
+
+        let initial: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
+            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
+        let service = SemanticRuntimeService::new_owned(
+            Arc::new(authority()),
+            initial,
+            config(1, Duration::from_secs(60), 1 << 20),
+        )
+        .expect("runtime service");
+        {
+            let _session = service.acquire().expect("warm original");
+        }
+        let failing: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> = Arc::new(|| {
+            Ok(FakeEmbeddingRuntime::new()
+                .with_compatibility_failure(RuntimeFailureKindV1::IncompatibleRuntime))
+        });
+
+        assert!(
+            service.reload(Arc::new(authority()), failing).is_err(),
+            "an incompatible replacement is never published"
+        );
+        assert_eq!(service.generation(), 1);
+        assert_eq!(service.stats().idle, 1);
+        service.acquire().expect("the original pool remains usable");
     }
 }

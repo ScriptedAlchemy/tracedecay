@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -193,15 +194,90 @@ impl From<io::Error> for SemanticCapabilityDisabledV1 {
     }
 }
 
+/// A verified runtime member could not be opened from its pinned artifact.
+///
+/// The capability never exposes a path or an I/O error to callers: a changed,
+/// missing, or unsafe member is indistinguishable from a corrupt artifact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AdmittedArtifactReadErrorV1 {
+    Unavailable,
+    Corrupt,
+}
+
+/// Store-owned capability for re-reading a verified artifact member without
+/// reconstructing a path from package metadata.
+struct AdmittedArtifactSourceV1 {
+    directory: Dir,
+}
+
+impl AdmittedArtifactSourceV1 {
+    fn read_member_bytes(
+        &self,
+        member: &ArtifactPackageMemberV1,
+    ) -> Result<Vec<u8>, AdmittedArtifactReadErrorV1> {
+        let mut file = open_cap_file(
+            &self.directory,
+            member_file_name(member.role),
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .map_err(|_| AdmittedArtifactReadErrorV1::Corrupt)?;
+        let declared_length = usize::try_from(member.byte_length)
+            .map_err(|_| AdmittedArtifactReadErrorV1::Corrupt)?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| AdmittedArtifactReadErrorV1::Corrupt)?;
+        if metadata.len() != member.byte_length {
+            return Err(AdmittedArtifactReadErrorV1::Corrupt);
+        }
+
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(declared_length)
+            .map_err(|_| AdmittedArtifactReadErrorV1::Corrupt)?;
+        file.read_to_end(&mut bytes)
+            .map_err(|_| AdmittedArtifactReadErrorV1::Corrupt)?;
+        if bytes.len() != declared_length || Sha256DigestHex::of_bytes(&bytes) != member.digest {
+            return Err(AdmittedArtifactReadErrorV1::Corrupt);
+        }
+        Ok(bytes)
+    }
+}
+
 /// An artifact admitted for runtime use. The disk path intentionally stays
 /// store-private; later runtime wiring receives a store-owned handle instead
 /// of an ambient filesystem path.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub(super) struct AdmittedArtifactV1 {
     artifact_digest: Sha256DigestHex,
     manifest_digest: Sha256DigestHex,
     manifest: ModelArtifactManifestV1,
+    source: Option<Arc<AdmittedArtifactSourceV1>>,
 }
+
+impl fmt::Debug for AdmittedArtifactV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdmittedArtifactV1")
+            .field("artifact_digest", &self.artifact_digest)
+            .field("manifest_digest", &self.manifest_digest)
+            .field("manifest", &self.manifest)
+            .field("has_store_source", &self.source.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for AdmittedArtifactV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.artifact_digest == other.artifact_digest
+            && self.manifest_digest == other.manifest_digest
+            && self.manifest == other.manifest
+    }
+}
+
+impl Eq for AdmittedArtifactV1 {}
 
 impl AdmittedArtifactV1 {
     pub(super) fn artifact_digest(&self) -> &Sha256DigestHex {
@@ -216,12 +292,29 @@ impl AdmittedArtifactV1 {
         &self.manifest
     }
 
+    /// Read one declared member through the digest-addressed store capability
+    /// and re-check the exact signed length and SHA-256 pin.
+    pub(super) fn read_member_bytes(
+        &self,
+        role: ArtifactMemberRoleV1,
+    ) -> Result<Vec<u8>, AdmittedArtifactReadErrorV1> {
+        let member = self
+            .manifest
+            .package_member(role)
+            .ok_or(AdmittedArtifactReadErrorV1::Unavailable)?;
+        self.source
+            .as_ref()
+            .ok_or(AdmittedArtifactReadErrorV1::Unavailable)?
+            .read_member_bytes(member)
+    }
+
     #[cfg(test)]
     pub(super) fn test_fixture(manifest: ModelArtifactManifestV1) -> Self {
         Self {
             artifact_digest: manifest.signed_identity_digest(),
             manifest_digest: manifest.canonical_digest(),
             manifest,
+            source: None,
         }
     }
 
@@ -235,6 +328,7 @@ impl AdmittedArtifactV1 {
             artifact_digest,
             manifest_digest,
             manifest,
+            source: None,
         }
     }
 }
@@ -932,10 +1026,15 @@ impl ModelArtifactStore {
             .map_err(|_| SemanticCapabilityDisabledV1::CorruptArtifact)?;
         check_compatibility(&manifest.payload.runtime, env)?;
         check_resource_ceiling(&manifest.payload.resource_ceiling, env)?;
+        let directory = self
+            .artifacts_dir
+            .open_dir_nofollow(digest.as_str())
+            .map_err(|_| SemanticCapabilityDisabledV1::CorruptArtifact)?;
         Ok(AdmittedArtifactV1 {
             artifact_digest: digest.clone(),
             manifest_digest: manifest.canonical_digest(),
             manifest: manifest.clone(),
+            source: Some(Arc::new(AdmittedArtifactSourceV1 { directory })),
         })
     }
 
@@ -1636,6 +1735,8 @@ fn member_file_name(role: ArtifactMemberRoleV1) -> &'static str {
         ArtifactMemberRoleV1::Model => "model",
         ArtifactMemberRoleV1::Tokenizer => "tokenizer",
         ArtifactMemberRoleV1::Config => "config",
+        ArtifactMemberRoleV1::SpecialTokensMap => "special-tokens-map",
+        ArtifactMemberRoleV1::TokenizerConfig => "tokenizer-config",
         ArtifactMemberRoleV1::QueryInstruction => "query-instruction",
         ArtifactMemberRoleV1::DocumentInstruction => "document-instruction",
     }
@@ -1694,6 +1795,10 @@ mod tests {
             ArtifactMemberRoleV1::Model => model,
             ArtifactMemberRoleV1::Tokenizer => b"tokenizer",
             ArtifactMemberRoleV1::Config => b"config",
+            ArtifactMemberRoleV1::SpecialTokensMap => b"{}",
+            ArtifactMemberRoleV1::TokenizerConfig => {
+                br#"{"model_max_length": 512, "pad_token": "[PAD]"}"#
+            }
             ArtifactMemberRoleV1::QueryInstruction | ArtifactMemberRoleV1::DocumentInstruction => {
                 unreachable!()
             }
@@ -1845,6 +1950,28 @@ mod tests {
         assert_eq!(
             std::fs::read(store.artifact_path(&digest)).unwrap(),
             model_bytes()
+        );
+    }
+
+    #[test]
+    fn runtime_member_reader_rechecks_the_signed_artifact_identity() {
+        let (_dir, store) = store();
+        let (manifest, digest) = import_ok(&store, &model_bytes());
+        let admitted = store
+            .admit_for_runtime(&digest, &manifest, &env(), NOW)
+            .expect("admitted artifact");
+
+        assert_eq!(
+            admitted
+                .read_member_bytes(ArtifactMemberRoleV1::Model)
+                .expect("verified model bytes"),
+            model_bytes()
+        );
+
+        std::fs::write(store.artifact_path(&digest), b"tampered model weights").unwrap();
+        assert_eq!(
+            admitted.read_member_bytes(ArtifactMemberRoleV1::Model),
+            Err(AdmittedArtifactReadErrorV1::Corrupt)
         );
     }
 

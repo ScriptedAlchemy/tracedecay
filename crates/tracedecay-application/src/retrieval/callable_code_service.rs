@@ -1,0 +1,333 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "the sealed problem envelope is the canonical pre-admission boundary contract"
+)]
+
+use std::future::Future;
+use std::pin::Pin;
+
+use tracedecay_domain::{CodeGenerationId, TemporalModeV1, UtcMicros};
+use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
+
+use crate::authorization::{AuthorizationPort, AuthorizationService};
+use crate::context::RequestContext;
+use crate::result::{ApplicationProblem, ApplicationResult, RetryDirective, SafeDiagnostic};
+
+use super::callable_code::{
+    CallableCodeOperationKind, CallableCodeOperations, CodeHierarchyRequest, CodeImpactRequest,
+    CodeImplementationsRequest, CodeQueryPage, CodeRelationRequest, CodeSignatureRequest,
+    CodeSymbolSearchRequest, ExactOccurrenceRecord, ExactOccurrenceRequest,
+    LexicalOccurrenceRecord, ModuleApiRequest, PhraseSearchRequest, QualifiedNameRequest,
+    SourceMetadataRecord, SourceMetadataRequest, ValidatedCodeQueryRequest,
+};
+use super::service::{evidence_envelope, problem_envelope};
+use super::{
+    RetrievalPortContext, RetrievalPortOutcome, SymbolPrimitiveRecord, SymbolRelationRecord,
+    TypeHierarchyRecord,
+};
+
+pub type CallableCodeQueryFuture<'a, T> =
+    Pin<Box<dyn Future<Output = RetrievalPortOutcome<CodeQueryPage<T>>> + Send + 'a>>;
+
+/// Typed application port over the existing exact, lexical, and graph
+/// kernels. Implementations select the requested immutable generation and
+/// delegate one method to its owning kernel; this trait contains no planner,
+/// parser, index, fallback synthesis, or transport dispatch.
+pub trait CallableCodeQueryPort: Send + Sync {
+    fn exact_occurrence<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a ExactOccurrenceRequest,
+    ) -> CallableCodeQueryFuture<'a, ExactOccurrenceRecord>;
+
+    fn phrase_search<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a PhraseSearchRequest,
+    ) -> CallableCodeQueryFuture<'a, LexicalOccurrenceRecord>;
+
+    fn symbol_search<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeSymbolSearchRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolPrimitiveRecord>;
+
+    fn qualified_name<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a QualifiedNameRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolPrimitiveRecord>;
+
+    fn signature_search<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeSignatureRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolPrimitiveRecord>;
+
+    fn implementations<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeImplementationsRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord>;
+
+    fn type_hierarchy<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeHierarchyRequest,
+    ) -> CallableCodeQueryFuture<'a, TypeHierarchyRecord>;
+
+    fn callers<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeRelationRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord>;
+
+    fn callees<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeRelationRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord>;
+
+    fn impact<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeImpactRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolPrimitiveRecord>;
+
+    fn module_api<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a ModuleApiRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolPrimitiveRecord>;
+
+    fn source_metadata<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a SourceMetadataRequest,
+    ) -> CallableCodeQueryFuture<'a, SourceMetadataRecord>;
+}
+
+pub struct CallableCodeQueryService<P, A, E> {
+    port: P,
+    authorization: AuthorizationService<A, E>,
+    operations: CallableCodeOperations,
+}
+
+macro_rules! callable_code_service_method {
+    ($name:ident, $kind:ident, $request:ty, $item:ty, $port_method:ident) => {
+        pub async fn $name(
+            &self,
+            context: &RequestContext,
+            request: $request,
+            observed_at: UtcMicros,
+        ) -> ApplicationResult<CodeQueryPage<$item>> {
+            let operation = self.operations.get(CallableCodeOperationKind::$kind);
+            if request.validate().is_err() {
+                return problem_envelope(context, operation, invalid_code_query_problem());
+            }
+            let admission = match self.authorization.admit(context, operation, observed_at) {
+                Ok(admission) => admission,
+                Err(problem) => return problem_envelope(context, operation, problem),
+            };
+            let outcome = self
+                .port
+                .$port_method(
+                    RetrievalPortContext {
+                        request: context,
+                        operation,
+                    },
+                    &request,
+                )
+                .await;
+            if let Err(problem) = validate_code_query_outcome(
+                &outcome,
+                &request.scope.generation,
+                request.meta.page.page_size,
+            ) {
+                return problem_envelope(context, operation, problem);
+            }
+            evidence_envelope(
+                context,
+                operation,
+                &self.authorization,
+                &admission,
+                outcome,
+                observed_at,
+            )
+        }
+    };
+}
+
+impl<P, A, E> CallableCodeQueryService<P, A, E>
+where
+    P: CallableCodeQueryPort,
+    A: AuthorizationPort,
+    E: SourceAuthorizationEvaluator,
+{
+    pub fn new(
+        port: P,
+        authorization: AuthorizationService<A, E>,
+        operations: CallableCodeOperations,
+    ) -> Self {
+        Self {
+            port,
+            authorization,
+            operations,
+        }
+    }
+
+    callable_code_service_method!(
+        exact_occurrence,
+        ExactOccurrence,
+        ExactOccurrenceRequest,
+        ExactOccurrenceRecord,
+        exact_occurrence
+    );
+    callable_code_service_method!(
+        phrase_search,
+        PhraseSearch,
+        PhraseSearchRequest,
+        LexicalOccurrenceRecord,
+        phrase_search
+    );
+    callable_code_service_method!(
+        symbol_search,
+        SymbolSearch,
+        CodeSymbolSearchRequest,
+        SymbolPrimitiveRecord,
+        symbol_search
+    );
+    callable_code_service_method!(
+        qualified_name,
+        QualifiedName,
+        QualifiedNameRequest,
+        SymbolPrimitiveRecord,
+        qualified_name
+    );
+    callable_code_service_method!(
+        signature_search,
+        SignatureSearch,
+        CodeSignatureRequest,
+        SymbolPrimitiveRecord,
+        signature_search
+    );
+    callable_code_service_method!(
+        implementations,
+        Implementations,
+        CodeImplementationsRequest,
+        SymbolRelationRecord,
+        implementations
+    );
+    callable_code_service_method!(
+        type_hierarchy,
+        TypeHierarchy,
+        CodeHierarchyRequest,
+        TypeHierarchyRecord,
+        type_hierarchy
+    );
+    callable_code_service_method!(
+        callers,
+        Callers,
+        CodeRelationRequest,
+        SymbolRelationRecord,
+        callers
+    );
+    callable_code_service_method!(
+        callees,
+        Callees,
+        CodeRelationRequest,
+        SymbolRelationRecord,
+        callees
+    );
+    callable_code_service_method!(
+        impact,
+        Impact,
+        CodeImpactRequest,
+        SymbolPrimitiveRecord,
+        impact
+    );
+    callable_code_service_method!(
+        module_api,
+        ModuleApi,
+        ModuleApiRequest,
+        SymbolPrimitiveRecord,
+        module_api
+    );
+    callable_code_service_method!(
+        source_metadata,
+        SourceMetadata,
+        SourceMetadataRequest,
+        SourceMetadataRecord,
+        source_metadata
+    );
+}
+
+fn validate_code_query_outcome<T>(
+    outcome: &RetrievalPortOutcome<CodeQueryPage<T>>,
+    requested_generation: &CodeGenerationId,
+    requested_page_size: u32,
+) -> Result<(), ApplicationProblem> {
+    let evidence = outcome.evidence();
+    if evidence.temporal.requested_mode != TemporalModeV1::Current {
+        return Err(invalid_code_query_outcome_problem());
+    }
+    if let Some(page) = &evidence.payload {
+        if &page.generation != requested_generation
+            || evidence.temporal.source_generation.as_ref() != Some(requested_generation)
+        {
+            return Err(stale_code_query_problem());
+        }
+        if page.validate().is_err() {
+            return Err(invalid_code_query_outcome_problem());
+        }
+        let returned = page.items.len() as u64;
+        if returned > u64::from(requested_page_size)
+            || evidence.page.returned != returned
+            || evidence.coverage.returned != returned
+            || evidence.page.total != page.total
+            || evidence.page.cursor != page.next_cursor
+        {
+            return Err(invalid_code_query_outcome_problem());
+        }
+    } else if evidence
+        .temporal
+        .source_generation
+        .as_ref()
+        .is_some_and(|generation| generation != requested_generation)
+    {
+        return Err(stale_code_query_problem());
+    }
+    Ok(())
+}
+
+fn stale_code_query_problem() -> ApplicationProblem {
+    ApplicationProblem::stale(
+        SafeDiagnostic::new(
+            "application.code-query.generation-mismatch",
+            "The code-intelligence result does not belong to the requested index generation.",
+        )
+        .expect("static safe diagnostic is valid"),
+    )
+}
+
+fn invalid_code_query_outcome_problem() -> ApplicationProblem {
+    ApplicationProblem::unavailable(
+        SafeDiagnostic::new(
+            "application.code-query.invalid-port-evidence",
+            "The callable code-intelligence result could not be verified.",
+        )
+        .expect("static safe diagnostic is valid"),
+    )
+}
+
+fn invalid_code_query_problem() -> ApplicationProblem {
+    ApplicationProblem::InvalidRequest {
+        diagnostic: SafeDiagnostic::new(
+            "application.code-query.invalid-request",
+            "The callable code-intelligence request is invalid.",
+        )
+        .expect("static safe diagnostic is valid"),
+        retry: RetryDirective::Never,
+        legal_actions: Vec::new(),
+    }
+}

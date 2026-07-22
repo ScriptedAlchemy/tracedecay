@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 use std::fmt::Write as _;
+use std::sync::mpsc;
+use std::time::Duration;
 
 #[path = "../src/code_index/projection.rs"]
 pub mod projection_impl;
@@ -11,6 +13,10 @@ pub mod code_index {
     pub mod projection {
         pub use super::super::projection_impl::*;
     }
+}
+
+pub mod db {
+    pub use tracedecay::db::*;
 }
 
 #[path = "../src/semantic_code/projector.rs"]
@@ -37,13 +43,15 @@ use tracedecay_domain::{
 
 use semantic_projector::{
     CanonicalChunkVectorEncoderV1, SemanticProjectionErrorV1, prepare_vector_generation,
+    prepare_vector_generation_async,
 };
 use vector_generations::{
-    FakeVectorGenerationStoreV1, VectorGenerationIdV1, VectorGenerationPlanV1,
-    VectorGenerationStoreErrorV1,
+    DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, VectorGenerationIdV1,
+    VectorGenerationPlanV1, VectorGenerationStoreErrorV1,
 };
 
 use crate::code_index::projection::{expected_request_digest, verify_batch_receipt};
+use crate::db::{Database, DatabaseAuthority};
 
 fn id<T>(value: &str) -> T
 where
@@ -203,6 +211,23 @@ impl CanonicalChunkVectorEncoderV1 for FakeEncoder {
     }
 }
 
+struct BlockingEncoder {
+    started: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+}
+
+impl CanonicalChunkVectorEncoderV1 for BlockingEncoder {
+    fn encode(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        _chunk: &CodeSearchChunkV1,
+    ) -> Result<Vec<f32>, String> {
+        self.started.send(()).map_err(|error| error.to_string())?;
+        self.release.recv().map_err(|error| error.to_string())?;
+        Ok(vec![0.25; key.dimensions as usize])
+    }
+}
+
 fn publish_initial_generation() -> (
     FakeVectorGenerationStoreV1,
     EmbeddingProjectionKeyV1,
@@ -279,6 +304,89 @@ fn publish_initial_generation() -> (
     );
     assert_eq!(published.manifest_digest(), &publication.manifest_digest);
     (store, key, publication.generation_id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn indexing_and_cancellation_leave_only_the_compatible_prior_generation_queryable() {
+    let (mut store, key, base_generation) = publish_initial_generation();
+    let admitted = admitted_key(&key);
+    let projection_key = admitted.projection_key().clone();
+    let prior = store
+        .generation(&base_generation)
+        .expect("published prior generation");
+    let prior_source_generation = prior.source_generation().clone();
+    let prior_source_manifest = prior.source_manifest_digest().clone();
+    let alpha = chunk("code-generation.2", "alpha", "fn alpha() -> u8 { 2 }", 0);
+    let projection_request = request(
+        changes(
+            Some("code-generation.1"),
+            "code-generation.2",
+            vec![change(
+                &alpha,
+                Some(content_digest(b"fn alpha() -> u8 { 1 }")),
+                Some(alpha.content_digest.clone()),
+            )],
+            vec![],
+            vec![],
+        ),
+        Some(projection_key.clone()),
+        projection_key.clone(),
+        ProjectionReplayReasonV1::SourceEdit,
+    );
+    let next_source_manifest = projection_request.changes.manifest_digest.clone();
+    let build_id = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: projection_key,
+            source_generation: id("code-generation.2"),
+            source_manifest_digest: next_source_manifest.clone(),
+            expected_chunk_ids: vec![alpha.id.clone()],
+            base_generation: Some(base_generation.clone()),
+        })
+        .expect("staged replacement");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let projection = tokio::spawn(prepare_vector_generation_async(
+        admitted.clone(),
+        projection_request,
+        vec![alpha],
+        BlockingEncoder {
+            started: started_tx,
+            release: release_rx,
+        },
+    ));
+
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("background projection started");
+    assert_eq!(store.active_generation_id(), Some(&base_generation));
+    assert!(
+        store
+            .active_generation_for(&admitted, &prior_source_generation, &prior_source_manifest,)
+            .is_some(),
+        "an exactly compatible prior snapshot remains queryable while indexing"
+    );
+    assert!(
+        store
+            .active_generation_for(&admitted, &id("code-generation.2"), &next_source_manifest,)
+            .is_none(),
+        "the partial replacement is omitted instead of exposing stale semantic rows"
+    );
+
+    release_tx.send(()).expect("release projector");
+    let prepared = projection
+        .await
+        .expect("projection task joined")
+        .expect("projection completed");
+    store
+        .commit_batch(&build_id, None, prepared)
+        .expect("checkpoint completed batch");
+    assert_eq!(store.active_generation_id(), Some(&base_generation));
+    assert!(store.cancel_generation(&build_id));
+    assert_eq!(store.active_generation_id(), Some(&base_generation));
+    assert_eq!(
+        store.publish_generation(&build_id, Some(&base_generation)),
+        Err(VectorGenerationStoreErrorV1::UnknownBuild)
+    );
 }
 
 #[test]
@@ -779,4 +887,214 @@ fn one_batch_and_multi_batch_publications_have_equal_generation_identity() {
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn database_store_survives_restart_and_preserves_superseded_generations() {
+    let temp = tempfile::tempdir().expect("temporary project store");
+    let database_path = temp.path().join("project.db");
+    let authority =
+        DatabaseAuthority::acquire_test(&database_path, "vector generation restart test")
+            .expect("project database authority");
+    let database = Database::initialize(&database_path, &authority)
+        .await
+        .expect("project database")
+        .0;
+    let key = embedding_key();
+    let admitted = admitted_key(&key);
+    let projection_key = key.projection_key().expect("projection key");
+    let alpha_v1 = chunk("code-generation.1", "alpha", "fn alpha() -> u8 { 1 }", 0);
+    let stable_v1 = chunk("code-generation.1", "stable", "fn stable() {}", 1);
+    let initial = prepare_vector_generation(
+        &admitted,
+        request(
+            changes(
+                None,
+                "code-generation.1",
+                vec![
+                    change(&alpha_v1, None, Some(alpha_v1.content_digest.clone())),
+                    change(&stable_v1, None, Some(stable_v1.content_digest.clone())),
+                ],
+                vec![],
+                vec![],
+            ),
+            None,
+            projection_key.clone(),
+            ProjectionReplayReasonV1::InitialProjection,
+        ),
+        &[alpha_v1.clone(), stable_v1.clone()],
+        &mut FakeEncoder::default(),
+    )
+    .expect("initial projection");
+    let store = DatabaseVectorGenerationStoreV1::open(&database)
+        .await
+        .expect("persistent vector store");
+    let initial_build = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: projection_key.clone(),
+            source_generation: id("code-generation.1"),
+            source_manifest_digest: initial.receipt.source_manifest_digest.clone(),
+            expected_chunk_ids: vec![alpha_v1.id.clone(), stable_v1.id.clone()],
+            base_generation: None,
+        })
+        .await
+        .expect("initial persistent build");
+    store
+        .commit_batch(&initial_build, None, initial)
+        .await
+        .expect("initial persistent batch");
+    drop(store);
+
+    let resumed = DatabaseVectorGenerationStoreV1::open(&database)
+        .await
+        .expect("resume checkpointed vector build");
+    assert_eq!(
+        resumed.active_generation_id().await.unwrap(),
+        None,
+        "checkpointed partial generations remain unqueryable"
+    );
+    let initial_publication = resumed
+        .publish_generation(&initial_build, None)
+        .await
+        .expect("publish resumed persistent generation");
+    drop(resumed);
+
+    let restarted = DatabaseVectorGenerationStoreV1::open(&database)
+        .await
+        .expect("restart persistent vector store");
+    assert_eq!(
+        restarted.active_generation_id().await.unwrap(),
+        Some(initial_publication.generation_id.clone())
+    );
+    assert_eq!(
+        restarted
+            .generation(&initial_publication.generation_id)
+            .await
+            .unwrap()
+            .expect("initial immutable generation")
+            .vectors()
+            .len(),
+        2
+    );
+
+    let stable_v2 = chunk("code-generation.2", "stable", "fn stable() {}", 0);
+    let next = prepare_vector_generation(
+        &admitted,
+        request(
+            changes(
+                Some("code-generation.1"),
+                "code-generation.2",
+                vec![],
+                vec![change(
+                    &alpha_v1,
+                    Some(alpha_v1.content_digest.clone()),
+                    None,
+                )],
+                vec![change(
+                    &stable_v2,
+                    Some(stable_v1.content_digest.clone()),
+                    Some(stable_v2.content_digest.clone()),
+                )],
+            ),
+            Some(projection_key.clone()),
+            projection_key.clone(),
+            ProjectionReplayReasonV1::SourceEdit,
+        ),
+        &[],
+        &mut FakeEncoder::default(),
+    )
+    .expect("deletion and reuse projection");
+    let next_plan = VectorGenerationPlanV1 {
+        target_projection_key: projection_key,
+        source_generation: id("code-generation.2"),
+        source_manifest_digest: next.receipt.source_manifest_digest.clone(),
+        expected_chunk_ids: vec![stable_v2.id.clone()],
+        base_generation: Some(initial_publication.generation_id.clone()),
+    };
+    let next_build = restarted
+        .begin_generation(next_plan.clone())
+        .await
+        .expect("superseding build");
+    restarted
+        .commit_batch(&next_build, None, next.clone())
+        .await
+        .expect("superseding batch");
+    let next_publication = restarted
+        .publish_generation(&next_build, Some(&initial_publication.generation_id))
+        .await
+        .expect("atomic supersession");
+
+    let current = restarted
+        .generation(&next_publication.generation_id)
+        .await
+        .unwrap()
+        .expect("current immutable generation");
+    assert_eq!(
+        current.base_generation(),
+        Some(&initial_publication.generation_id)
+    );
+    assert_eq!(
+        current.vectors().keys().collect::<Vec<_>>(),
+        vec![&stable_v2.id]
+    );
+    assert_eq!(current.tombstones(), &[alpha_v1.id.clone()]);
+    assert_eq!(
+        current.tombstone_digests().get(&alpha_v1.id),
+        Some(&alpha_v1.content_digest)
+    );
+    assert!(
+        restarted
+            .generation(&initial_publication.generation_id)
+            .await
+            .unwrap()
+            .expect("superseded generation remains addressable")
+            .vectors()
+            .contains_key(&alpha_v1.id)
+    );
+
+    drop(restarted);
+    let rebuilt = DatabaseVectorGenerationStoreV1::open(&database)
+        .await
+        .expect("second restart");
+    assert_eq!(
+        rebuilt.active_generation_id().await.unwrap(),
+        Some(next_publication.generation_id.clone())
+    );
+    let replay_build = rebuilt
+        .rebuild_generation(next_plan.clone())
+        .await
+        .expect("restart deterministic rebuild from PR9 inputs");
+    rebuilt
+        .commit_batch(&replay_build, None, next.clone())
+        .await
+        .expect("lost-ack replay");
+    assert_eq!(
+        rebuilt.active_generation_id().await.unwrap(),
+        Some(next_publication.generation_id.clone()),
+        "rebuild staging cannot expose a partial generation"
+    );
+    assert!(
+        rebuilt
+            .cancel_generation(&replay_build)
+            .await
+            .expect("cancel staged rebuild")
+    );
+    assert_eq!(
+        rebuilt.active_generation_id().await.unwrap(),
+        Some(next_publication.generation_id.clone()),
+        "cancelling a rebuild preserves the prior active pointer"
+    );
+    let replay_build = rebuilt
+        .rebuild_generation(next_plan)
+        .await
+        .expect("restart deterministic rebuild after cancellation");
+    rebuilt
+        .commit_batch(&replay_build, None, next)
+        .await
+        .expect("replay after cancellation");
+    let replay = rebuilt
+        .publish_generation(&replay_build, Some(&next_publication.generation_id))
+        .await
+        .expect("deterministic rebuild publication");
+    assert_eq!(replay.generation_id, next_publication.generation_id);
 }

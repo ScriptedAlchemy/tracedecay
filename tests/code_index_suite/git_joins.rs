@@ -1,15 +1,18 @@
 use tracedecay::code_index::generations::GenerationPlanner;
 use tracedecay::code_index::git_join::{
-    GenerationGitEvidenceScopeV1, GenerationGitFileJoinStateV1, GenerationGitFileOnlyReasonV1,
-    GenerationGitJoinCoverageV1, GenerationGitJoinErrorV1, GenerationGitJoinV1,
-    GenerationGitWatermarkV1, GitFileContentIdentityV1,
+    GenerationGitBlameJoinCoverageV1, GenerationGitBlameJoinV1, GenerationGitEvidenceScopeV1,
+    GenerationGitFileJoinStateV1, GenerationGitFileOnlyReasonV1,
+    GenerationGitHistoryJoinCoverageV1, GenerationGitHistoryJoinV1, GenerationGitJoinCoverageV1,
+    GenerationGitJoinErrorV1, GenerationGitJoinV1, GenerationGitReadWatermarkV1,
+    GenerationGitWatermarkV1, GitFileContentIdentityV1, GitSymbolLineBindingV1,
 };
 use tracedecay::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_domain::{
-    CodeGenerationManifestV1, ContentDigest, GitChangeKindV1, GitCoverageV1, GitDiffScopeV1,
-    GitDiffV1, GitFileDiffV1, GitFileModeV1, GitHunkV1, GitOidV1, ManifestDigest, RepositoryId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, UtcMicros,
-    ValidatedCodeSnapshotV1,
+    CodeGenerationManifestV1, ContentDigest, GitBlameAvailabilityV1, GitBlameLineV1, GitBlameV1,
+    GitChangeKindV1, GitCommitIdentityV1, GitCommitMetadataV1, GitCoverageV1, GitDegradationV1,
+    GitDiffScopeV1, GitDiffV1, GitFileDiffV1, GitFileModeV1, GitHistoryV1, GitHunkV1, GitOidV1,
+    ManifestDigest, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SnapshotFileDispositionV1, UtcMicros, ValidatedCodeSnapshotV1,
 };
 
 use super::support::{id, registry};
@@ -92,6 +95,31 @@ fn watermark(snapshot: &ValidatedCodeSnapshotV1, diff: &GitDiffV1) -> Generation
         .recompute_evidence_digest(diff)
         .expect("canonical Git evidence digest");
     watermark
+}
+
+fn read_watermark(snapshot: &ValidatedCodeSnapshotV1) -> GenerationGitReadWatermarkV1 {
+    GenerationGitReadWatermarkV1 {
+        repository: snapshot.snapshot.repository.clone(),
+        source_revision: snapshot.snapshot.source_revision.clone(),
+        snapshot_content_identity: snapshot.snapshot.content_identity.clone(),
+        scope: GenerationGitEvidenceScopeV1 {
+            worktree: snapshot.snapshot.worktree.clone(),
+            index_tree: Some(oid('e')),
+            tree: Some(oid('f')),
+            reference: snapshot.snapshot.reference.clone(),
+            options_digest: manifest_digest('8'),
+        },
+        evidence_digest: manifest_digest('9'),
+        captured_at: UtcMicros(11),
+    }
+}
+
+fn commit_identity() -> GitCommitIdentityV1 {
+    GitCommitIdentityV1 {
+        name: "Trace Decay".to_owned(),
+        email: "trace@example.test".to_owned(),
+        at: UtcMicros(5),
+    }
 }
 
 fn hunk(byte: char) -> GitHunkV1 {
@@ -394,5 +422,155 @@ fn stale_generation_or_content_watermarks_never_join() {
     assert_eq!(
         GenerationGitJoinV1::join(&manifest, &snapshot, &diff, &stale, &contents),
         Err(GenerationGitJoinErrorV1::StaleContentWatermark)
+    );
+}
+
+#[test]
+fn history_and_blame_preserve_native_git_evidence_and_occurrence_ids() {
+    let (snapshot, manifest) = generation(vec![file(
+        "file.live",
+        "src/live.rs",
+        'a',
+        SnapshotFileDispositionV1::Present,
+    )]);
+    let history = GitHistoryV1 {
+        repository: id("repository.fixture"),
+        commits: vec![GitCommitMetadataV1 {
+            commit: oid('c'),
+            tree: oid('d'),
+            parents: vec![oid('b')],
+            author: commit_identity(),
+            committer: commit_identity(),
+            subject: "join history".to_owned(),
+            message_digest: manifest_digest('4'),
+        }],
+        truncated: false,
+        coverage: GitCoverageV1::complete(),
+    };
+    let mut history_watermark = read_watermark(&snapshot);
+    history_watermark.evidence_digest = history_watermark
+        .recompute_history_digest(&history)
+        .expect("canonical history evidence digest");
+    let joined_history =
+        GenerationGitHistoryJoinV1::join(&manifest, &snapshot, &history, &history_watermark)
+            .expect("history joins to the exact generation");
+
+    assert_eq!(joined_history.history, history);
+    assert_eq!(
+        joined_history.coverage,
+        GenerationGitHistoryJoinCoverageV1::Complete
+    );
+
+    let blame = GitBlameV1 {
+        repository: id("repository.fixture"),
+        path: "src/live.rs".to_owned(),
+        lines: vec![GitBlameLineV1 {
+            final_line: 2,
+            origin_line: 7,
+            commit: oid('c'),
+            author: commit_identity(),
+            boundary: false,
+            previous: None,
+        }],
+        availability: GitBlameAvailabilityV1::Available,
+        coverage: GitCoverageV1::complete(),
+    };
+    let mut blame_watermark = read_watermark(&snapshot);
+    blame_watermark.evidence_digest = blame_watermark
+        .recompute_blame_digest(&blame)
+        .expect("canonical blame evidence digest");
+    let joined_blame = GenerationGitBlameJoinV1::join(
+        &manifest,
+        &snapshot,
+        &blame,
+        &blame_watermark,
+        &GitFileContentIdentityV1 {
+            path: "src/live.rs".to_owned(),
+            content_digest: content('a'),
+        },
+        &[GitSymbolLineBindingV1 {
+            generation_id: manifest.generation_id.clone(),
+            file_occurrence_id: id("file.live"),
+            symbol_occurrence_id: id("symbol.live"),
+            content_digest: content('a'),
+            start_line: 1,
+            end_line: 3,
+        }],
+    )
+    .expect("blame joins to exact file and symbol occurrences");
+
+    assert_eq!(
+        joined_blame.coverage,
+        GenerationGitBlameJoinCoverageV1::Complete
+    );
+    assert_eq!(
+        joined_blame.lines[0].symbol_occurrence_ids,
+        vec![id("symbol.live")]
+    );
+}
+
+#[test]
+fn history_blame_degradation_and_tampering_remain_explicit() {
+    let (snapshot, manifest) = generation(vec![file(
+        "file.live",
+        "src/live.rs",
+        'a',
+        SnapshotFileDispositionV1::Present,
+    )]);
+    let history = GitHistoryV1 {
+        repository: id("repository.fixture"),
+        commits: Vec::new(),
+        truncated: true,
+        coverage: GitCoverageV1::degraded(vec![GitDegradationV1::ShallowBoundary]),
+    };
+    let mut history_watermark = read_watermark(&snapshot);
+    history_watermark.evidence_digest = history_watermark
+        .recompute_history_digest(&history)
+        .expect("canonical history evidence digest");
+    let joined =
+        GenerationGitHistoryJoinV1::join(&manifest, &snapshot, &history, &history_watermark)
+            .expect("degraded history remains typed evidence");
+    assert!(matches!(
+        joined.coverage,
+        GenerationGitHistoryJoinCoverageV1::Partial {
+            truncated: true,
+            ..
+        }
+    ));
+
+    let blame = GitBlameV1 {
+        repository: id("repository.fixture"),
+        path: "src/live.rs".to_owned(),
+        lines: vec![GitBlameLineV1 {
+            final_line: 1,
+            origin_line: 1,
+            commit: oid('c'),
+            author: commit_identity(),
+            boundary: false,
+            previous: None,
+        }],
+        availability: GitBlameAvailabilityV1::Available,
+        coverage: GitCoverageV1::complete(),
+    };
+    let mut blame_watermark = read_watermark(&snapshot);
+    blame_watermark.evidence_digest = blame_watermark
+        .recompute_blame_digest(&blame)
+        .expect("canonical blame evidence digest");
+    let mut tampered = blame;
+    tampered.lines[0].origin_line = 2;
+
+    assert_eq!(
+        GenerationGitBlameJoinV1::join(
+            &manifest,
+            &snapshot,
+            &tampered,
+            &blame_watermark,
+            &GitFileContentIdentityV1 {
+                path: "src/live.rs".to_owned(),
+                content_digest: content('a'),
+            },
+            &[],
+        ),
+        Err(GenerationGitJoinErrorV1::StaleGitEvidence)
     );
 }

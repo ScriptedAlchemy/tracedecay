@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "workload_id": "pr10-locked-semantic-search-v1",
+  "outcome": "pending",
+  "rationale": "Callable PR10 boundaries and direct regressions are present, but the parent has not executed the library/default-feature, local-model, production FastEmbed/vector, search-during-indexing, atomic-activation, saved-candidate, locked-holdout, resource, native-platform, rollback, and aggregate gates.",
+  "acceptance_authority": false,
+  "semantic_activation_disabled": true,
+  "measured_results": null,
+  "promotion_evidence": null,
+  "fallback_digest": null,
+  "locked_report_digest": null,
+  "parent_gate_receipts": [],
+  "candidate_decisions": [
+    {
+      "profile_id": "semantic-exact-flat",
+      "decision": "required_production_baseline_and_oracle_pending_execution"
+    },
+    {
+      "profile_id": "semantic-hybrid",
+      "decision": "candidate_evidence_required"
+    },
+    {
+      "profile_id": "semantic-reranked",
+      "decision": "candidate_evidence_required"
+    },
+    {
+      "profile_id": "semantic-ann",
+      "decision": "candidate_evidence_required"
+    },
+    {
+      "profile_id": "semantic-late-interaction",
+      "decision": "candidate_evidence_required"
+    },
+    {
+      "profile_id": "semantic-quantized",
+      "decision": "candidate_evidence_required"
+    }
+  ],
+  "blocked_on": [
+    "accepted_pr9_locked_baseline",
+    "production_fastembed_runtime",
+    "library_first_default_all_features",
+    "local_verified_model_bytes",
+    "production_exact_flat_vector_service",
+    "saved_candidate_ablation_evidence",
+    "calibration_and_abstention",
+    "fallback_byte_stability",
+    "asynchronous_search_during_indexing",
+    "atomic_compatible_generation_activation",
+    "current_and_10x_resources",
+    "linux_and_windows_native_runtime",
+    "cold_offline_rollback",
+    "plan15_locked_holdout_decision",
+    "aggregate_all_feature_gate"
+  ]
+}

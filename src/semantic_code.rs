@@ -1,0 +1,765 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, RwLock};
+
+use serde::Serialize;
+use tracedecay_domain::{
+    CodeGenerationId, CodeSearchChunkV1, ProjectionBatchRequestV1, ProjectionKeyV1,
+    VectorGenerationIdV1,
+};
+
+use crate::application::semantic_runtime::SemanticFallbackReasonV1;
+use crate::query::retrieval::ports::RetrievalPortError;
+use crate::query::retrieval::semantic::{
+    EphemeralQueryEmbeddingV1, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
+};
+
+use self::fastembed_adapter::{
+    AdmittedProjectionArtifactV1, BoundedSanitizedTextBatchV1, CancellationSignal,
+    EmbeddingRuntime, EmbeddingSession, FastEmbedEmbeddingRuntime,
+};
+use self::projector::{
+    CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation_async,
+};
+use self::runtime_query::{
+    CurrentSemanticQueryRuntimeV1, PooledSemanticQueryEmbedder, PooledSemanticQueryEmbedderFactory,
+};
+use self::runtime_service::{
+    SemanticRuntimeService, SharedEmbeddingRuntimeFactory, fastembed_runtime_factory,
+};
+use self::session_pool::{PooledSession, SessionPoolConfigV1, SystemMonotonicClock};
+
+mod artifact_store;
+mod evaluation;
+mod fastembed_adapter;
+mod manifest;
+pub(crate) mod projector;
+mod runtime_query;
+mod runtime_service;
+mod session_pool;
+mod trust_roots;
+
+pub(crate) use runtime_service::{
+    PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1,
+    SemanticRuntimeScheduleCancellationV1, SemanticRuntimeScheduleFailureV1,
+    SemanticRuntimeScheduleStatusV1, SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1,
+};
+
+type SemanticProjectionStageFutureV1 = Pin<
+    Box<
+        dyn Future<
+                Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>,
+            > + Send
+            + 'static,
+    >,
+>;
+type SemanticProjectionStageV1 =
+    Box<dyn FnOnce(PreparedVectorGenerationV1) -> SemanticProjectionStageFutureV1 + Send + 'static>;
+type FastEmbedArtifactLoaderV1 = Box<
+    dyn FnOnce() -> Result<LoadedSemanticArtifactV1, SemanticRuntimeScheduleFailureV1>
+        + Send
+        + 'static,
+>;
+
+pub(crate) struct LoadedSemanticArtifactV1(Arc<AdmittedProjectionArtifactV1>);
+
+impl LoadedSemanticArtifactV1 {
+    pub(in crate::semantic_code) fn from_admitted(
+        authority: Arc<AdmittedProjectionArtifactV1>,
+    ) -> Self {
+        Self(authority)
+    }
+}
+
+/// Store-neutral input for asynchronously projecting one saved code generation.
+pub(crate) struct FastEmbedSemanticGenerationRequestV1 {
+    target_generation: CodeGenerationId,
+    projection_request: ProjectionBatchRequestV1,
+    canonical_chunks: Vec<CodeSearchChunkV1>,
+    load_artifact: FastEmbedArtifactLoaderV1,
+    stage_projection: SemanticProjectionStageV1,
+}
+
+impl FastEmbedSemanticGenerationRequestV1 {
+    pub(crate) fn new<LoadArtifact, StageProjection, StageFuture>(
+        target_generation: CodeGenerationId,
+        projection_request: ProjectionBatchRequestV1,
+        canonical_chunks: Vec<CodeSearchChunkV1>,
+        load_artifact: LoadArtifact,
+        stage_projection: StageProjection,
+    ) -> Result<Self, SemanticRuntimeScheduleFailureV1>
+    where
+        LoadArtifact: FnOnce() -> Result<LoadedSemanticArtifactV1, SemanticRuntimeScheduleFailureV1>
+            + Send
+            + 'static,
+        StageProjection: FnOnce(PreparedVectorGenerationV1) -> StageFuture + Send + 'static,
+        StageFuture: Future<
+                Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>,
+            > + Send
+            + 'static,
+    {
+        if projection_request.changes.to_generation != target_generation {
+            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+        }
+        Ok(Self {
+            target_generation,
+            projection_request,
+            canonical_chunks,
+            load_artifact: Box::new(load_artifact),
+            stage_projection: Box::new(move |prepared| Box::pin(stage_projection(prepared))),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct SemanticRuntimeStatusProjectionV1 {
+    pub(crate) status: SemanticRuntimeScheduleStatusV1,
+    pub(crate) degraded_reason: Option<SemanticFallbackReasonV1>,
+    pub(crate) prior_generation: Option<VectorGenerationIdV1>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DaemonSemanticQueryFactoryV1 {
+    inner: Arc<PooledSemanticQueryEmbedderFactory<FastEmbedEmbeddingRuntime>>,
+}
+
+impl DaemonSemanticQueryFactoryV1 {
+    pub(crate) fn create(
+        &self,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync + 'static>,
+    ) -> DaemonSemanticQueryEmbedderV1 {
+        let cancellation = Arc::new(QueryCancellationV1(cancelled));
+        DaemonSemanticQueryEmbedderV1 {
+            inner: self.inner.create(cancellation),
+        }
+    }
+}
+
+struct QueryCancellationV1(Arc<dyn Fn() -> bool + Send + Sync + 'static>);
+
+impl CancellationSignal for QueryCancellationV1 {
+    fn cancelled(&self) -> bool {
+        (self.0)()
+    }
+}
+
+pub(crate) struct DaemonSemanticQueryEmbedderV1 {
+    inner: PooledSemanticQueryEmbedder<FastEmbedEmbeddingRuntime>,
+}
+
+impl SemanticQueryEmbeddingPort for DaemonSemanticQueryEmbedderV1 {
+    fn embed_query(
+        &self,
+        request: SemanticQueryEmbeddingRequestV1<'_>,
+    ) -> Result<EphemeralQueryEmbeddingV1, RetrievalPortError> {
+        self.inner.embed_query(request)
+    }
+}
+
+/// The daemon-callable semantic owner. It exposes no transport operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SemanticRuntimeSchedulingBoundsV1 {
+    pub(crate) max_sessions: usize,
+    pub(crate) max_projection_units: u64,
+    pub(crate) memory_ceiling_bytes: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct DaemonSemanticRuntimeHandleV1 {
+    scheduling: SemanticRuntimeSchedulingHandleV1,
+    bounds: SemanticRuntimeSchedulingBoundsV1,
+    runtime: Arc<RwLock<Option<CurrentSemanticQueryRuntimeV1<FastEmbedEmbeddingRuntime>>>>,
+    pool_config: SessionPoolConfigV1,
+}
+
+impl DaemonSemanticRuntimeHandleV1 {
+    pub(crate) fn new(
+        max_sessions: usize,
+        max_projection_units: usize,
+        memory_ceiling_bytes: u64,
+    ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
+        if max_sessions == 0 || max_projection_units == 0 || memory_ceiling_bytes == 0 {
+            return Err(SemanticRuntimeScheduleFailureV1::Runtime);
+        }
+        let pool_config = SessionPoolConfigV1 {
+            max_sessions,
+            max_queued_waiters: 0,
+            idle_timeout: std::time::Duration::from_secs(5 * 60),
+            memory_ceiling_bytes,
+        };
+        pool_config
+            .validate()
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+        Ok(Self {
+            scheduling: SemanticRuntimeSchedulingHandleV1::new(),
+            bounds: SemanticRuntimeSchedulingBoundsV1 {
+                max_sessions,
+                max_projection_units: max_projection_units as u64,
+                memory_ceiling_bytes,
+            },
+            runtime: Arc::new(RwLock::new(None)),
+            pool_config,
+        })
+    }
+
+    pub(crate) fn status(&self) -> SemanticRuntimeScheduleStatusV1 {
+        self.scheduling.status()
+    }
+
+    pub(crate) fn schedule(&self, work: SemanticRuntimeWorkV1) -> bool {
+        if work.total_units() > self.bounds.max_projection_units {
+            return false;
+        }
+        self.scheduling.schedule(work)
+    }
+
+    /// Schedule one saved generation without blocking exact, lexical, or graph
+    /// search on artifact loading, model startup, projection, or publication.
+    pub(crate) fn schedule_generation(
+        &self,
+        request: FastEmbedSemanticGenerationRequestV1,
+    ) -> bool {
+        let total_units = request
+            .projection_request
+            .changes
+            .added_or_changed
+            .len()
+            .max(1) as u64;
+        if request.canonical_chunks.len() > self.bounds.max_projection_units as usize
+            || total_units > self.bounds.max_projection_units
+        {
+            return false;
+        }
+
+        let target_generation = request.target_generation.clone();
+        let projection_key = request.projection_request.target_projection_key.clone();
+        let pool_config = self.pool_config.clone();
+        let runtime = Arc::clone(&self.runtime);
+        self.scheduling.schedule(SemanticRuntimeWorkV1::new(
+            request.target_generation,
+            total_units,
+            move |progress| async move {
+                let authority = tokio::task::spawn_blocking(request.load_artifact)
+                    .await
+                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??
+                    .0;
+                if progress.cancelled() {
+                    return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
+                }
+
+                let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
+                    fastembed_runtime_factory();
+                let candidate =
+                    SemanticRuntimeService::new_owned(Arc::clone(&authority), factory, pool_config)
+                        .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+                let encoder =
+                    RuntimeChunkVectorEncoderV1::new(Arc::clone(&candidate), Arc::clone(&progress));
+                let prepared = prepare_vector_generation_async(
+                    authority.projection().clone(),
+                    request.projection_request,
+                    request.canonical_chunks,
+                    encoder,
+                )
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+                if progress.cancelled() {
+                    return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
+                }
+                progress.set_completed_units(total_units);
+
+                let commit = (request.stage_projection)(prepared).await?;
+                Ok(commit.on_success(move |pointer| {
+                    if pointer.source_generation != target_generation
+                        || pointer.projection_key != projection_key
+                    {
+                        return Err(SemanticRuntimeScheduleFailureV1::Publication);
+                    }
+                    *runtime.write().unwrap_or_else(|error| error.into_inner()) = Some(
+                        CurrentSemanticQueryRuntimeV1::new(pointer.clone(), candidate),
+                    );
+                    Ok(())
+                }))
+            },
+        ))
+    }
+
+    pub(crate) fn bounds(&self) -> SemanticRuntimeSchedulingBoundsV1 {
+        self.bounds
+    }
+
+    pub(crate) fn current(&self) -> Option<SemanticGenerationPointerV1> {
+        self.scheduling.current()
+    }
+
+    pub(crate) fn cancel(&self) -> bool {
+        self.scheduling.cancel()
+    }
+
+    pub(crate) fn query_factory(
+        &self,
+        source_generation: &CodeGenerationId,
+        vector_generation: &VectorGenerationIdV1,
+        projection_key: &ProjectionKeyV1,
+    ) -> Option<DaemonSemanticQueryFactoryV1> {
+        let current = self.current()?;
+        if current.source_generation != *source_generation
+            || current.generation != *vector_generation
+            || current.projection_key != *projection_key
+        {
+            return None;
+        }
+        let inner = self
+            .runtime
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()?
+            .factory_for(source_generation, vector_generation, projection_key)?;
+        Some(DaemonSemanticQueryFactoryV1 { inner })
+    }
+
+    pub(crate) fn status_projection(&self) -> SemanticRuntimeStatusProjectionV1 {
+        let status = self.status();
+        let (degraded_reason, prior_generation) = match &status {
+            SemanticRuntimeScheduleStatusV1::Indexing {
+                prior_generation, ..
+            } => (None, prior_generation.clone()),
+            SemanticRuntimeScheduleStatusV1::Failed {
+                reason,
+                prior_generation,
+            } => (
+                Some(match reason {
+                    SemanticRuntimeScheduleFailureV1::Artifact => {
+                        SemanticFallbackReasonV1::ArtifactUnavailable
+                    }
+                    SemanticRuntimeScheduleFailureV1::Runtime
+                    | SemanticRuntimeScheduleFailureV1::Projection
+                    | SemanticRuntimeScheduleFailureV1::Publication => {
+                        SemanticFallbackReasonV1::RuntimeFailure
+                    }
+                    SemanticRuntimeScheduleFailureV1::Cancelled => {
+                        SemanticFallbackReasonV1::RuntimeUnavailable
+                    }
+                }),
+                prior_generation.clone(),
+            ),
+            SemanticRuntimeScheduleStatusV1::Current { generation } => {
+                (None, Some(generation.clone()))
+            }
+            SemanticRuntimeScheduleStatusV1::Unavailable => {
+                (Some(SemanticFallbackReasonV1::RuntimeUnavailable), None)
+            }
+        };
+        SemanticRuntimeStatusProjectionV1 {
+            status,
+            degraded_reason,
+            prior_generation,
+        }
+    }
+}
+
+struct RuntimeChunkVectorEncoderV1<R: EmbeddingRuntime> {
+    runtime: Arc<SemanticRuntimeService<R>>,
+    progress: Arc<SemanticRuntimeScheduleCancellationV1>,
+    session: Option<PooledSession<R, SystemMonotonicClock>>,
+    completed_units: u64,
+}
+
+impl<R> RuntimeChunkVectorEncoderV1<R>
+where
+    R: EmbeddingRuntime + Send + Sync + 'static,
+{
+    fn new(
+        runtime: Arc<SemanticRuntimeService<R>>,
+        progress: Arc<SemanticRuntimeScheduleCancellationV1>,
+    ) -> Self {
+        Self {
+            runtime,
+            progress,
+            session: None,
+            completed_units: 0,
+        }
+    }
+}
+
+impl<R> CanonicalChunkVectorEncoderV1 for RuntimeChunkVectorEncoderV1<R>
+where
+    R: EmbeddingRuntime + Send + Sync + 'static,
+{
+    fn encode(
+        &mut self,
+        key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+        chunk: &CodeSearchChunkV1,
+    ) -> Result<Vec<f32>, String> {
+        if self.progress.cancelled() {
+            return Err("semantic projection cancelled".to_owned());
+        }
+        let session = match self.session.as_mut() {
+            Some(session) => session,
+            None => {
+                self.session = Some(self.runtime.acquire().map_err(|error| error.to_string())?);
+                self.session.as_mut().expect("session was just installed")
+            }
+        };
+        if session.authority().projection().embedding_key() != key {
+            return Err("semantic projection authority changed".to_owned());
+        }
+        let text = chunk.sanitized_text.as_str().to_owned();
+        let batch = BoundedSanitizedTextBatchV1::try_new(
+            vec![text],
+            1,
+            chunk.sanitized_text.as_str().len(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut vectors = session
+            .embed_batch(&batch, self.progress.as_ref())
+            .map_err(|error| error.to_string())?;
+        if vectors.len() != 1 {
+            return Err("semantic projector returned a non-unit vector batch".to_owned());
+        }
+        let vector = vectors.pop().expect("unit vector batch");
+        vector.validate().map_err(|error| error.to_string())?;
+        self.completed_units = self.completed_units.saturating_add(1);
+        self.progress.set_completed_units(self.completed_units);
+        Ok(vector.values)
+    }
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use tokio::sync::oneshot;
+    use tracedecay_domain::{
+        ChangedCodeChunkSetV1, CodeGenerationId, ManifestDigest, ProjectionBatchRequestV1,
+        ProjectionReplayReasonV1, VectorGenerationIdV1,
+    };
+
+    use super::{
+        SemanticFallbackReasonV1, SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1,
+        SemanticRuntimeScheduleStatusV1, SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1,
+    };
+
+    fn source_generation(value: char) -> CodeGenerationId {
+        CodeGenerationId::new(format!("code-generation.{value}")).expect("source generation")
+    }
+
+    fn vector_generation(value: char) -> VectorGenerationIdV1 {
+        VectorGenerationIdV1::new(
+            ManifestDigest::new(format!("sha256:{}", value.to_string().repeat(64)))
+                .expect("manifest digest"),
+        )
+    }
+
+    fn pointer(vector: char, source: char) -> SemanticGenerationPointerV1 {
+        let authority = super::session_pool::tests::authority();
+        SemanticGenerationPointerV1 {
+            generation: vector_generation(vector),
+            source_generation: source_generation(source),
+            projection_key: authority.projection().projection_key().clone(),
+        }
+    }
+
+    fn projection_request(source: char) -> ProjectionBatchRequestV1 {
+        ProjectionBatchRequestV1 {
+            request_digest: ManifestDigest::new(format!("sha256:{}", "c".repeat(64)))
+                .expect("request digest"),
+            changes: ChangedCodeChunkSetV1 {
+                from_generation: None,
+                to_generation: source_generation(source),
+                manifest_digest: ManifestDigest::new(format!("sha256:{}", "d".repeat(64)))
+                    .expect("source manifest"),
+                added_or_changed: Vec::new(),
+                deleted: Vec::new(),
+                reused: Vec::new(),
+            },
+            previous_projection_key: None,
+            target_projection_key: super::session_pool::tests::authority()
+                .projection()
+                .projection_key()
+                .clone(),
+            replay_reason: ProjectionReplayReasonV1::SourceEdit,
+        }
+    }
+
+    async fn wait_for_current(
+        handle: &SemanticRuntimeSchedulingHandleV1,
+        expected: &VectorGenerationIdV1,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if handle
+                    .current()
+                    .is_some_and(|current| current.generation == *expected)
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("semantic generation became current");
+    }
+
+    #[tokio::test]
+    async fn scheduling_returns_before_blocked_semantic_preparation() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (_release_tx, release_rx) = oneshot::channel::<()>();
+        let target = source_generation('a');
+
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            target.clone(),
+            3,
+            move |_cancellation| async move {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Err(SemanticRuntimeScheduleFailureV1::Projection)
+            },
+        ));
+
+        started_rx
+            .await
+            .expect("preparation started asynchronously");
+        assert!(matches!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Indexing {
+                target_generation,
+                completed_units: 0,
+                total_units: 3,
+                ..
+            } if target_generation == target
+        ));
+        assert!(handle.current().is_none());
+    }
+
+    #[tokio::test]
+    async fn saved_edit_scheduling_does_not_block_exact_search() {
+        let handle =
+            super::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let request = super::FastEmbedSemanticGenerationRequestV1::new(
+            source_generation('a'),
+            projection_request('a'),
+            Vec::new(),
+            move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+                Err(SemanticRuntimeScheduleFailureV1::Projection)
+            },
+            move |_| async move { Err(SemanticRuntimeScheduleFailureV1::Publication) },
+        )
+        .expect("saved generation request");
+        assert!(handle.schedule_generation(request));
+        started_rx.await.expect("saved edit started in background");
+
+        let exact_results = ["exact-match"];
+        assert_eq!(exact_results, ["exact-match"]);
+        assert!(matches!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Indexing { .. }
+        ));
+        release_tx.send(()).expect("release artifact loader");
+    }
+
+    #[tokio::test]
+    async fn indexing_progress_reports_completed_units_monotonically() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let (progress_tx, progress_rx) = oneshot::channel();
+        let (_release_tx, release_rx) = oneshot::channel::<()>();
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('a'),
+            4,
+            move |progress| async move {
+                progress.set_completed_units(2);
+                let _ = progress_tx.send(());
+                let _ = release_rx.await;
+                Err(SemanticRuntimeScheduleFailureV1::Projection)
+            },
+        ));
+        progress_rx.await.expect("progress reported");
+
+        assert!(matches!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Indexing {
+                completed_units: 2,
+                total_units: 4,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn daemon_handle_rejects_projection_work_above_its_bound() {
+        let handle =
+            super::DaemonSemanticRuntimeHandleV1::new(1, 2, 1 << 20).expect("bounded handle");
+        let started = Arc::new(AtomicBool::new(false));
+        let started_by_work = Arc::clone(&started);
+        let accepted = handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('a'),
+            3,
+            move |_cancellation| async move {
+                started_by_work.store(true, Ordering::Release);
+                Err(SemanticRuntimeScheduleFailureV1::Projection)
+            },
+        ));
+
+        assert!(!accepted);
+        tokio::task::yield_now().await;
+        assert!(!started.load(Ordering::Acquire));
+        assert_eq!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_reload_keeps_the_compatible_prior_generation_current() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let prior_pointer = pointer('a', 'a');
+        let prior = prior_pointer.generation.clone();
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('a'),
+            1,
+            move |_cancellation| async move {
+                Ok(super::PreparedSemanticRuntimeCommitV1::new(
+                    move || async move { Ok(prior_pointer) },
+                ))
+            },
+        ));
+        wait_for_current(&handle, &prior).await;
+
+        let (release_tx, release_rx) = oneshot::channel();
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('b'),
+            1,
+            move |_cancellation| async move {
+                let _ = release_rx.await;
+                Err(SemanticRuntimeScheduleFailureV1::Artifact)
+            },
+        ));
+        assert_eq!(
+            handle.current().map(|current| current.generation),
+            Some(prior.clone())
+        );
+        release_tx.send(()).expect("release failed reload");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if matches!(
+                    handle.status(),
+                    SemanticRuntimeScheduleStatusV1::Failed {
+                        reason: SemanticRuntimeScheduleFailureV1::Artifact,
+                        ..
+                    }
+                ) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failure became observable");
+        assert_eq!(
+            handle.current().map(|current| current.generation),
+            Some(prior)
+        );
+    }
+
+    #[tokio::test]
+    async fn degraded_status_retains_the_prior_generation_and_reason() {
+        let handle =
+            super::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
+        let prior_pointer = pointer('a', 'a');
+        let prior = prior_pointer.generation.clone();
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('a'),
+            1,
+            move |_progress| async move {
+                Ok(super::PreparedSemanticRuntimeCommitV1::new(
+                    move || async move { Ok(prior_pointer) },
+                ))
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while handle.current().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("prior semantic generation published");
+
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('b'),
+            1,
+            move |_progress| async move { Err(SemanticRuntimeScheduleFailureV1::Artifact) },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !matches!(
+                handle.status(),
+                SemanticRuntimeScheduleStatusV1::Failed { .. }
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("degraded status published");
+
+        let projection = handle.status_projection();
+        assert_eq!(
+            projection.degraded_reason,
+            Some(SemanticFallbackReasonV1::ArtifactUnavailable)
+        );
+        assert_eq!(projection.prior_generation, Some(prior));
+        let status = serde_json::to_value(projection).expect("serialize runtime status");
+        assert_eq!(status["degraded_reason"], "artifact_unavailable");
+        assert!(status["prior_generation"].is_string());
+    }
+
+    #[tokio::test]
+    async fn superseded_preparation_cannot_publish_after_the_new_generation() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let (old_started_tx, old_started_rx) = oneshot::channel();
+        let old_pointer = pointer('a', 'a');
+        let old = old_pointer.generation.clone();
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('a'),
+            1,
+            move |cancellation| async move {
+                let _ = old_started_tx.send(());
+                while !cancellation.cancelled() {
+                    tokio::task::yield_now().await;
+                }
+                Ok(super::PreparedSemanticRuntimeCommitV1::new(
+                    move || async move { Ok(old_pointer) },
+                ))
+            },
+        ));
+        old_started_rx.await.expect("old preparation started");
+
+        let current_pointer = pointer('b', 'b');
+        let current = current_pointer.generation.clone();
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('b'),
+            1,
+            move |_cancellation| async move {
+                Ok(super::PreparedSemanticRuntimeCommitV1::new(
+                    move || async move { Ok(current_pointer) },
+                ))
+            },
+        ));
+
+        wait_for_current(&handle, &current).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            handle.current().map(|pointer| pointer.generation),
+            Some(current)
+        );
+        assert_ne!(
+            handle.current().map(|pointer| pointer.generation),
+            Some(old)
+        );
+    }
+}

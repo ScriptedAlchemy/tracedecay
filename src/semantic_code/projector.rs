@@ -1,14 +1,14 @@
-//! Quarantined PR10 vector-generation projector preparation.
+//! PR10 vector-generation projector.
 //!
 //! This module consumes PR9's canonical, generation-bound chunks and emits
 //! Plan 25 projection receipts plus a store-neutral vector-generation handoff.
-//! It owns no scheduler, query path, profile activation, or real model
-//! implementation. Tests inject a deterministic fake encoder.
+//! It owns no scheduler, query path, profile activation, ANN, or quantization.
 
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
@@ -24,9 +24,7 @@ use crate::code_index::projection::{
 
 const VECTOR_OUTPUT_DIGEST_DOMAIN: &str = "tracedecay.semantic-vector-output.v1";
 
-/// The only projector dependency that may produce vector values. The
-/// quarantined packet supplies no production implementation; fake tests
-/// implement this port directly.
+/// The only projector dependency that may produce vector values.
 pub trait CanonicalChunkVectorEncoderV1 {
     fn encode(
         &mut self,
@@ -49,7 +47,7 @@ pub enum SemanticProjectionErrorV1 {
     ForeignChunkGeneration { chunk_id: CodeSearchChunkId },
     #[error("canonical chunk {chunk_id} carries a digest not named by the request")]
     ChunkDigestMismatch { chunk_id: CodeSearchChunkId },
-    #[error("fake vector encoder rejected chunk {chunk_id}: {reason}")]
+    #[error("vector encoder rejected chunk {chunk_id}: {reason}")]
     Encoder {
         chunk_id: CodeSearchChunkId,
         reason: String,
@@ -64,12 +62,15 @@ pub enum SemanticProjectionErrorV1 {
     NonFiniteVector { chunk_id: CodeSearchChunkId },
     #[error("vector output digest does not recompute for chunk {chunk_id}")]
     VectorDigestMismatch { chunk_id: CodeSearchChunkId },
+    #[error("background semantic projection worker did not complete")]
+    WorkerTerminated,
     #[error("Plan25 projection receipt rejected: {0}")]
     Receipt(#[from] ProjectionReceiptErrorV1),
 }
 
 /// One immutable vector row prepared from a canonical chunk.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectedChunkVectorV1 {
     pub projection_key: ProjectionKeyV1,
     pub source_generation: CodeGenerationId,
@@ -121,14 +122,16 @@ impl ProjectedChunkVectorV1 {
 }
 
 /// Deletion evidence carried into the immutable vector-generation manifest.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct VectorTombstoneV1 {
     pub chunk_id: CodeSearchChunkId,
     pub prior_chunk_digest: ContentDigest,
 }
 
 /// Store-neutral handoff for one complete Plan 25 projection batch.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PreparedVectorGenerationV1 {
     pub embedding_key: AdmittedEmbeddingProjectionKeyV1,
     pub request: ProjectionBatchRequestV1,
@@ -284,6 +287,33 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
         vectors,
         tombstones,
     })
+}
+
+/// Run one bounded projection batch on the blocking worker pool.
+///
+/// Projection never executes on retrieval tasks. The returned handoff is
+/// still store-neutral: cancellation or worker failure cannot change the
+/// active vector-generation pointer, and publication remains a separate
+/// complete-generation compare-and-swap.
+pub async fn prepare_vector_generation_async<E>(
+    admitted_projection: AdmittedEmbeddingProjectionKeyV1,
+    request: ProjectionBatchRequestV1,
+    canonical_chunks: Vec<CodeSearchChunkV1>,
+    mut encoder: E,
+) -> Result<PreparedVectorGenerationV1, SemanticProjectionErrorV1>
+where
+    E: CanonicalChunkVectorEncoderV1 + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        prepare_vector_generation(
+            &admitted_projection,
+            request,
+            &canonical_chunks,
+            &mut encoder,
+        )
+    })
+    .await
+    .map_err(|_| SemanticProjectionErrorV1::WorkerTerminated)?
 }
 
 fn validate_vector(

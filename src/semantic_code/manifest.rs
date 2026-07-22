@@ -229,6 +229,7 @@ pub enum DeviceClassV1 {
 /// Truncation policy: side and maximum token length, both part of the
 /// projection identity (changing either creates a new projection generation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TruncationPolicyV1 {
     pub side: TruncationSideV1,
     pub max_length: u32,
@@ -244,6 +245,7 @@ pub enum TruncationSideV1 {
 /// package identity is carried by [`ArtifactPackageMemberV1`] entries in the
 /// signed payload.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactMemberPinV1 {
     pub digest: Sha256DigestHex,
     pub byte_length: u64,
@@ -258,12 +260,15 @@ pub enum ArtifactMemberRoleV1 {
     Model,
     Tokenizer,
     Config,
+    SpecialTokensMap,
+    TokenizerConfig,
     QueryInstruction,
     DocumentInstruction,
 }
 
 /// Complete signed identity for one artifact package member.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactPackageMemberV1 {
     pub role: ArtifactMemberRoleV1,
     /// Portable package-relative identity, not a destination path.
@@ -276,6 +281,7 @@ pub struct ArtifactPackageMemberV1 {
 /// Admission requires an exact match against the host runtime evidence; there
 /// is no silent substitution or cascade to an unmeasured representation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeCompatibilityV1 {
     /// Runtime family name, e.g. `fastembed-ort` (value chosen during PR10).
     pub runtime: String,
@@ -286,6 +292,7 @@ pub struct RuntimeCompatibilityV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlatformTargetV1 {
     pub os: String,
     pub arch: String,
@@ -294,6 +301,7 @@ pub struct PlatformTargetV1 {
 /// Complete resource ceiling pinned by the manifest. Admission verifies the
 /// host can honor the ceiling before enabling the semantic stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceCeilingV1 {
     pub max_model_bytes: u64,
     pub max_tokenizer_bytes: u64,
@@ -308,6 +316,7 @@ pub struct ResourceCeilingV1 {
 /// caller-provided bytes or an explicitly configured source as a separate
 /// user action; the manifest never carries an implicit fetch address.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpstreamSourceV1 {
     pub name: String,
     pub version: String,
@@ -317,6 +326,7 @@ pub struct UpstreamSourceV1 {
 /// The signed portion of the manifest. The detached signature covers the
 /// canonical bytes of this payload (and only this payload).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestSignedPayloadV1 {
     pub schema: String,
     pub artifact_id: String,
@@ -351,6 +361,7 @@ pub struct ManifestSignedPayloadV1 {
 /// The detached Ed25519 signature over the canonical payload bytes, plus the
 /// trust-root key ID Plan 20 configuration uses to resolve the admitted root.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DetachedSignatureV1 {
     pub algorithm: SignatureAlgorithmV1,
     pub trust_root_id: String,
@@ -362,6 +373,7 @@ pub struct DetachedSignatureV1 {
 
 /// The frozen V1 model artifact manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelArtifactManifestV1 {
     pub payload: ManifestSignedPayloadV1,
     pub signature: DetachedSignatureV1,
@@ -877,5 +889,13 @@ mod tests {
             .insert("unsigned_extension".to_string(), serde_json::json!(true));
         let with_unknown = serde_json::to_vec(&value).unwrap();
         assert!(ModelArtifactManifestV1::parse(&with_unknown).is_err());
+
+        let mut nested: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+        nested["payload"]["runtime"]
+            .as_object_mut()
+            .unwrap()
+            .insert("ambient_cache".to_string(), serde_json::json!(true));
+        let with_nested_unknown = serde_json::to_vec(&nested).unwrap();
+        assert!(ModelArtifactManifestV1::parse(&with_nested_unknown).is_err());
     }
 }

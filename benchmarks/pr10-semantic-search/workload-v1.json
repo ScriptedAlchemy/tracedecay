@@ -1,0 +1,531 @@
+{
+  "schema_version": 1,
+  "workload_id": "pr10-locked-semantic-search-v1",
+  "schema": "benchmarks/pr10-semantic-search/schema-v1.json",
+  "authority": "plan15_locked_evaluation_pending",
+  "corpus": {
+    "provider": "checked_in_real_repo_fixture",
+    "fixture_manifest": {
+      "path": "tests/fixtures/search_quality/fixture-manifest-v1.json",
+      "byte_len": 9973,
+      "digest": "sha256:46d0b4fc29125d45a0adf7d408dc9791f1c2a2a6f25ea767c99179d82f6eae23"
+    },
+    "query_set": {
+      "path": "tests/fixtures/search_quality/queries-v1.jsonl",
+      "byte_len": 19325,
+      "digest": "sha256:755b128735144fd097ccf5603c960bfdc5254d07427a59df44aae97cd6391b99"
+    },
+    "development_labels": {
+      "path": "tests/fixtures/search_quality/judgments-development-v1.jsonl",
+      "byte_len": 13595,
+      "digest": "sha256:2f091bd88586fb558b94773c997f77a97a4afd31c6569474d943126b76295276",
+      "authority": "contract_only_not_promotion_authority"
+    },
+    "holdout": {
+      "locator": "authorized-store://search-quality/holdout/judgments-v1",
+      "seal_digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de",
+      "access": "sealed_until_frozen_parent_run"
+    },
+    "file_count": 10,
+    "eligible_file_count": 9,
+    "eligible_chunk_count": 1505,
+    "total_bytes": 116725,
+    "files": [
+      {
+        "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/time.rs",
+        "byte_len": 728,
+        "digest": "sha256:f9a38b7cb1b1500bee592a30d959110a2167430e97e7e8d9ff1ad34eb14633e0"
+      },
+      {
+        "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/id.rs",
+        "byte_len": 9262,
+        "digest": "sha256:7a9268dd5af8b51a845cf4ee8762288535530f79d1cd4be62e140216e29ef006"
+      },
+      {
+        "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs",
+        "byte_len": 1641,
+        "digest": "sha256:397010afedbe6c04c42532ce70fbbe51db2dce9fd3c94431d0f3c5e0f1821974"
+      },
+      {
+        "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/canonical.rs",
+        "byte_len": 5338,
+        "digest": "sha256:eb4088fc19af1ca3c62d02b1070a75a71f4c1e62f1752ebfe8734382b6da1c38"
+      },
+      {
+        "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/error.rs",
+        "byte_len": 1645,
+        "digest": "sha256:ac3d5d890dd1913b49c1ddecffdafa158cd322a2da8ccf459a901ddcbc97349e"
+      },
+      {
+        "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/coverage.rs",
+        "byte_len": 21786,
+        "digest": "sha256:3934c17a7bf2558de7fd09f4723357e4287e92c5932877da4fd137df3467b7ac"
+      },
+      {
+        "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/repository.rs",
+        "byte_len": 20408,
+        "digest": "sha256:4c5051b454d78424449118696914d034aeca589b837d8060e21667c0ab0463eb"
+      },
+      {
+        "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/integration.rs",
+        "byte_len": 13584,
+        "digest": "sha256:d5e69b79a73e2d1043fa2fe4a984c165bc4ee290f7491d32a0e8a9c340a60f1c"
+      },
+      {
+        "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs",
+        "byte_len": 42151,
+        "digest": "sha256:3859562ff861f3cae564206d3f6a5d042e6d4b0e1462de6af43c5f2b422c5678"
+      },
+      {
+        "path": "tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture",
+        "byte_len": 182,
+        "digest": "sha256:21fbdbca75a12068a2e44e4c7468c6a9caa5dd31a0c3f7d4c5e1a9f325c95bd0",
+        "eligibility": "held_out_source_stratum_not_in_pr9_chunk_count"
+      }
+    ]
+  },
+  "production_apis": {
+    "fastembed_runtime": {
+      "path": "src/semantic_code/fastembed_adapter.rs",
+      "boundary": "EmbeddingRuntime::open_session -> EmbeddingSession::embed_batch",
+      "callable_functions": [
+        {
+          "implementation": "impl EmbeddingRuntime for FastEmbedEmbeddingRuntime",
+          "function": "open_session"
+        },
+        {
+          "implementation": "production FastEmbed local-byte model constructor",
+          "function": "fastembed_model"
+        }
+      ],
+      "parent_gate": "production_fastembed_runtime"
+    },
+    "vector_service": {
+      "path": "src/query/retrieval/semantic.rs",
+      "boundary": "SemanticQueryEmbeddingPort + SemanticVectorReadPort -> SemanticCodeRetriever",
+      "callable_functions": [
+        {
+          "implementation": "impl Retriever<SemanticRetrievalRequestV1, CodeSemanticEvidenceV1> for SemanticCodeRetriever",
+          "function": "retrieve"
+        }
+      ],
+      "parent_gate": "production_exact_flat_vector_service"
+    }
+  },
+  "model_integrity": {
+    "artifact_contract": "versioned_manifest_with_sha256_length_and_member_digests",
+    "runtime_input": "locally_installed_verified_member_bytes",
+    "fastembed_constructor": "TextEmbedding::try_new_from_user_defined",
+    "fastembed_upstream_default_features": false,
+    "ambient_hub_discovery": false,
+    "ambient_cache_discovery": false,
+    "query_time_download": false,
+    "network_inference": false,
+    "external_inference_process": false
+  },
+  "asynchronous_activation": {
+    "projection_execution": "background_optional_work",
+    "baseline_lanes": [
+      "exact_literal",
+      "lexical",
+      "graph"
+    ],
+    "baseline_waits_for_semantic": false,
+    "semantic_visibility": "complete_compatible_generation_atomically_current",
+    "excluded_generation_states": [
+      "partial",
+      "indexing",
+      "stale",
+      "failed",
+      "cancelled",
+      "incompatible"
+    ],
+    "excluded_states_affect_rank": false,
+    "strict_semantic_behavior": "typed_unavailable",
+    "search_during_indexing_comparison": "byte_identical_pr9_fallback_and_rank",
+    "activation_visibility": "generation_and_active_pointer_single_atomic_step"
+  },
+  "implementation_audit": [
+    {
+      "id": "library_first_fastembed",
+      "delivery": "delivered",
+      "locked_acceptance": "pending_parent_execution"
+    },
+    {
+      "id": "default_equals_all_features",
+      "delivery": "delivered",
+      "locked_acceptance": "pending_parent_execution"
+    },
+    {
+      "id": "local_verified_model_bytes",
+      "delivery": "delivered",
+      "locked_acceptance": "pending_parent_execution"
+    },
+    {
+      "id": "exact_flat_baseline",
+      "delivery": "delivered",
+      "locked_acceptance": "pending_parent_execution"
+    },
+    {
+      "id": "immutable_generations",
+      "delivery": "delivered",
+      "locked_acceptance": "pending_parent_execution"
+    },
+    {
+      "id": "asynchronous_non_blocking_indexing",
+      "delivery": "delivered",
+      "locked_acceptance": "pending_parent_execution"
+    },
+    {
+      "id": "calibrated_abstention",
+      "delivery": "delivered",
+      "locked_acceptance": "pending_parent_execution"
+    },
+    {
+      "id": "byte_stable_pr9_fallback",
+      "delivery": "delivered",
+      "locked_acceptance": "pending_parent_execution"
+    },
+    {
+      "id": "locked_evidence_before_activation",
+      "delivery": "activation_guard_delivered_evidence_consumption_pending",
+      "locked_acceptance": "pending_parent_execution"
+    }
+  ],
+  "callable_acceptance": [
+    {
+      "id": "search_during_indexing",
+      "path": "tests/pr10_vector_generation_prep_test.rs",
+      "function": "indexing_and_cancellation_leave_only_the_compatible_prior_generation_queryable"
+    },
+    {
+      "id": "atomic_generation_publication",
+      "path": "tests/pr10_vector_generation_prep_test.rs",
+      "function": "checkpoint_and_active_pointer_publish_atomically"
+    },
+    {
+      "id": "runtime_routes_only_current_generation",
+      "path": "src/application/semantic_runtime/tests.rs",
+      "function": "only_a_current_receipt_routes_to_semantic_search"
+    },
+    {
+      "id": "indexing_receipt_cannot_activate",
+      "path": "src/application/semantic_runtime/tests.rs",
+      "function": "activation_receipt_cannot_silently_promote_an_indexing_runtime"
+    },
+    {
+      "id": "semantic_capacity_never_blocks_query",
+      "path": "src/semantic_code/runtime_query.rs",
+      "function": "saturated_runtime_omits_semantics_without_entering_the_waiter_queue"
+    },
+    {
+      "id": "exact_flat_callable",
+      "path": "src/query/retrieval/semantic/tests.rs",
+      "function": "exact_flat_scan_is_deterministic_and_emits_generic_semantic_evidence"
+    },
+    {
+      "id": "calibrated_fallback_and_strict_unavailable",
+      "path": "src/query/retrieval/semantic/tests.rs",
+      "function": "missing_or_shifted_calibration_abstains_and_preserves_exact_fallback"
+    },
+    {
+      "id": "calibrated_threshold_abstention",
+      "path": "src/query/retrieval/semantic/tests.rs",
+      "function": "calibrated_distance_and_margin_thresholds_abstain_without_relabeling_scores"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "pr9-exact-lexical-graph",
+      "role": "frozen_baseline",
+      "state": "pending_pr9_locked_acceptance",
+      "activation_eligible": false,
+      "candidate_budget_per_lane": 32
+    },
+    {
+      "id": "semantic-exact-flat",
+      "role": "production_baseline_and_oracle",
+      "state": "required_shadow_baseline",
+      "activation_eligible": false,
+      "production_api": "SemanticVectorReadPort::scan_exact_flat",
+      "search_kind": "exact_flat",
+      "candidate_budget_per_lane": 32
+    },
+    {
+      "id": "semantic-hybrid",
+      "role": "candidate",
+      "state": "candidate_evidence_required",
+      "activation_eligible": false,
+      "lanes": [
+        "exact_literal",
+        "lexical",
+        "graph",
+        "semantic"
+      ],
+      "candidate_budget_per_lane": 32
+    },
+    {
+      "id": "semantic-reranked",
+      "role": "candidate",
+      "state": "candidate_evidence_required",
+      "activation_eligible": false,
+      "input": "bounded_non_protected_hybrid_prefix",
+      "failure_behavior": "pre_rerank_bytes_unchanged",
+      "candidate_budget_per_lane": 32
+    },
+    {
+      "id": "semantic-ann",
+      "role": "research_candidate",
+      "state": "candidate_evidence_required",
+      "activation_eligible": false,
+      "oracle": "semantic-exact-flat",
+      "required_gates": [
+        "average_recall",
+        "tail_recall",
+        "minimum_recall",
+        "zero_recall_query_count",
+        "immutable_generation_compatibility",
+        "reviewed_resource_budget"
+      ]
+    },
+    {
+      "id": "semantic-late-interaction",
+      "role": "research_candidate",
+      "state": "candidate_evidence_required",
+      "activation_eligible": false
+    },
+    {
+      "id": "semantic-quantized",
+      "role": "research_candidate",
+      "state": "candidate_evidence_required",
+      "activation_eligible": false,
+      "oracle": "semantic-exact-flat"
+    }
+  ],
+  "quality_metrics": [
+    "exact_hit_retention",
+    "precision_at_1",
+    "recall_at_5",
+    "recall_at_10",
+    "mrr",
+    "ndcg",
+    "wrong_scope_error",
+    "no_answer_error",
+    "forbidden_anchor_observations",
+    "worst_stratum"
+  ],
+  "ablations": [
+    "pr9_baseline",
+    "semantic_only",
+    "hybrid_without_calibration",
+    "hybrid_calibrated",
+    "hybrid_reranked",
+    "semantic_unavailable_fallback",
+    "search_during_indexing",
+    "atomic_generation_activation",
+    "strict_semantic_unavailable"
+  ],
+  "calibration": {
+    "selection_partition": "development",
+    "locked_partition": "sealed_holdout",
+    "profile_binding": [
+      "cohort",
+      "code_generation",
+      "vector_generation",
+      "projection_key",
+      "model_revision"
+    ],
+    "raw_similarity_is_confidence": false,
+    "invalid_or_shifted_behavior": "abstain_and_report_invalid_calibration",
+    "required_strata": [
+      "expected_no_result",
+      "false_exact_hard_negative",
+      "wrong_scope_near_match",
+      "authorization_canary",
+      "worst_supported_stratum"
+    ]
+  },
+  "fallback": {
+    "source": "frozen_pr9_saved_candidate_lists",
+    "comparison": "byte_identical_pr9_fallback_subpayload",
+    "semantic_failure_classes": [
+      "unavailable",
+      "timeout",
+      "cancelled",
+      "out_of_memory",
+      "corrupt_artifact",
+      "missing_artifact",
+      "integrity_mismatch",
+      "incompatible_generation",
+      "indexing",
+      "stale_generation",
+      "failed_generation",
+      "invalid_calibration",
+      "reranker_failure"
+    ],
+    "expected_digest": null,
+    "digest_state": "pending_parent_gate"
+  },
+  "resource_strata": [
+    {
+      "scale": "current",
+      "file_count": 10,
+      "eligible_chunks": 1505,
+      "query_count": 31,
+      "warmups": 5,
+      "measured_repetitions": 30,
+      "concurrency": [
+        1,
+        "declared_saturation"
+      ],
+      "cache_states": [
+        "cold",
+        "warm"
+      ]
+    },
+    {
+      "scale": "10x",
+      "file_count": 100,
+      "eligible_chunks": 15050,
+      "query_count": 31,
+      "warmups": 5,
+      "measured_repetitions": 30,
+      "concurrency": [
+        1,
+        "declared_saturation"
+      ],
+      "cache_states": [
+        "cold",
+        "warm"
+      ],
+      "construction": "ten disjoint source instances; labels are not copied across partitions"
+    }
+  ],
+  "resource_metrics": [
+    "projection_clean_ns",
+    "projection_one_symbol_ns",
+    "projection_deletion_ns",
+    "projection_no_op_ns",
+    "projection_model_key_replay_ns",
+    "projection_cancellation_ns",
+    "projection_incompatible_rebuild_ns",
+    "lexical_ns",
+    "graph_ns",
+    "semantic_ns",
+    "fusion_ns",
+    "rerank_ns",
+    "hydration_ns",
+    "cpu_ns",
+    "peak_rss_bytes",
+    "model_bytes",
+    "vector_bytes",
+    "cache_bytes",
+    "candidates_per_channel",
+    "chunks_embedded",
+    "chunks_reused",
+    "chunks_deleted",
+    "hydration_fetches",
+    "baseline_search_during_indexing_ns",
+    "atomic_activation_visibility_ns",
+    "baseline_rank_drift_during_indexing"
+  ],
+  "platform_strata": [
+    {
+      "platform": "linux",
+      "runtime": "native_fastembed",
+      "device_class": "cpu",
+      "state": "pending_parent_gate"
+    },
+    {
+      "platform": "windows",
+      "runtime": "native_fastembed",
+      "device_class": "cpu",
+      "state": "pending_parent_gate"
+    }
+  ],
+  "rollback": {
+    "activation_pointer": "compare_and_swap",
+    "previous_generation_retained": true,
+    "cold_start": true,
+    "offline": true,
+    "migration": "rebuild_from_retained_eligible_code",
+    "on_failure": "semantic_disabled",
+    "fallback_bytes": "must_match_frozen_pr9_digest"
+  },
+  "parent_gates": [
+    {
+      "id": "accepted_pr9_locked_baseline",
+      "state": "pending"
+    },
+    {
+      "id": "production_fastembed_runtime",
+      "state": "pending"
+    },
+    {
+      "id": "library_first_default_all_features",
+      "state": "pending"
+    },
+    {
+      "id": "local_verified_model_bytes",
+      "state": "pending"
+    },
+    {
+      "id": "production_exact_flat_vector_service",
+      "state": "pending"
+    },
+    {
+      "id": "saved_candidate_ablation_evidence",
+      "state": "pending"
+    },
+    {
+      "id": "calibration_and_abstention",
+      "state": "pending"
+    },
+    {
+      "id": "fallback_byte_stability",
+      "state": "pending"
+    },
+    {
+      "id": "asynchronous_search_during_indexing",
+      "state": "pending"
+    },
+    {
+      "id": "atomic_compatible_generation_activation",
+      "state": "pending"
+    },
+    {
+      "id": "current_and_10x_resources",
+      "state": "pending"
+    },
+    {
+      "id": "linux_and_windows_native_runtime",
+      "state": "pending"
+    },
+    {
+      "id": "cold_offline_rollback",
+      "state": "pending"
+    },
+    {
+      "id": "plan15_locked_holdout_decision",
+      "state": "pending"
+    },
+    {
+      "id": "aggregate_all_feature_gate",
+      "state": "pending"
+    }
+  ],
+  "acceptance": {
+    "state": "pending_parent_gates",
+    "required_outcome": "accepted",
+    "promotion_allowed": false,
+    "semantic_activation_allowed": false,
+    "terminal_non_accepting_outcomes": [
+      "pending",
+      "blocked",
+      "inconclusive",
+      "rejected",
+      "invalid_run",
+      "runtime_fallback_observed"
+    ]
+  }
+}

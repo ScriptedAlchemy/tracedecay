@@ -78,6 +78,8 @@ fn symbol_search_calls_one_port_and_preserves_pr9_fallback_bytes() {
     )
     .unwrap();
 
+    let expected_fallback_bytes =
+        serde_json::to_vec(&pr9_fallback()).expect("serialize expected PR9 fallback");
     let result = service.execute(&context, request, UtcMicros(2)).unwrap();
 
     assert_eq!(calls.get(), 1);
@@ -86,6 +88,10 @@ fn symbol_search_calls_one_port_and_preserves_pr9_fallback_bytes() {
     };
     assert_eq!(packet.authority.revalidated_at, UtcMicros(3));
     let payload = packet.payload.expect("completed read has a payload");
+    assert_eq!(
+        serde_json::to_vec(&payload.pr9_fallback).expect("serialize returned PR9 fallback"),
+        expected_fallback_bytes
+    );
     payload.pr9_fallback.validate().unwrap();
     assert_eq!(
         payload.pr9_fallback.public_pr9_lane_coverage.len(),

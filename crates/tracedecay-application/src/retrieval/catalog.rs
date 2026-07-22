@@ -1,14 +1,15 @@
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, CancellationContract, CancellationPoint,
-    CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
-    CatalogContributionV1, ContributionContractRef, ContributionId, CoverageContractRef,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, OmissionContractRef, PaginationContract, PrivacyClass, ProfileId,
+    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
+    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1,
+    ContributionContractRef, ContributionId, CoverageContractRef, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
+    OmissionContractRef, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
     ReceiptContract, ReconciliationContract, RetrievalFamily, RetrievalPrimitiveManifestInputV1,
     RetrievalPrimitiveManifestV1, RetrieverId, RevalidationContract, RevalidationPoint,
     RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, ScoringContractRef,
-    SortContract, SortContractId, StreamingContract, TemporalMode, TerminalState,
-    TerminalStateContract, UnavailabilityReason,
+    SortContract, SortContractId, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
+    SurfaceOperationName, TemporalMode, TerminalState, TerminalStateContract,
 };
 
 use crate::error::ApplicationContractError;
@@ -26,10 +27,189 @@ pub fn application_catalog_contributions()
 -> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
     Ok(vec![
         symbol_search_contribution()?,
+        primitive_read_contribution()?,
         crate::git::git_index_catalog_contribution()?,
         crate::git::git_surface_catalog_contribution()?,
+        crate::configuration::configuration_surface_catalog_contribution()?,
         crate::feedback::feedback_surface_catalog_contribution()?,
     ])
+}
+
+struct PrimitiveReadSpec {
+    operation: &'static str,
+    capability: &'static str,
+    use_case: &'static str,
+}
+
+const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 12] = [
+    primitive_spec("session_lookup"),
+    primitive_spec("qualified_name"),
+    primitive_spec("call_chain"),
+    primitive_spec("file_dependents"),
+    primitive_spec("source_lines"),
+    primitive_spec("source_body"),
+    primitive_spec("source_outline"),
+    primitive_spec("module_api"),
+    primitive_spec("file_metadata"),
+    primitive_spec("health_read"),
+    primitive_spec("storage_status"),
+    primitive_spec("diagnostics_read"),
+];
+
+const fn primitive_spec(operation: &'static str) -> PrimitiveReadSpec {
+    PrimitiveReadSpec {
+        operation,
+        capability: operation,
+        use_case: operation,
+    }
+}
+
+fn primitive_schema(
+    operation: &str,
+    suffix: &str,
+    maximum_bytes: u32,
+) -> Result<SchemaRef, ApplicationContractError> {
+    let operation = operation.replace('_', "-");
+    Ok(SchemaRef::new(
+        SchemaId::new(format!("schema.application.primitive.{operation}.{suffix}"))?,
+        1,
+        maximum_bytes,
+    )?)
+}
+
+fn primitive_operation(
+    spec: &PrimitiveReadSpec,
+) -> Result<ApplicationOperation, ApplicationContractError> {
+    Ok(ApplicationOperation::new(
+        CapabilityId::new(format!(
+            "capability.application.primitive.{}",
+            spec.capability.replace('_', "-")
+        ))?,
+        tracedecay_tool_catalog::UseCaseId::new(format!(
+            "use-case.application.primitive.{}",
+            spec.use_case.replace('_', "-")
+        ))?,
+        ResultContractRef::from_schema(&primitive_schema(spec.operation, "result", 1_048_576)?),
+        true,
+    ))
+}
+
+pub fn primitive_read_operation(
+    operation: &str,
+) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
+    PRIMITIVE_READ_SPECS
+        .iter()
+        .find(|spec| spec.operation == operation)
+        .map(primitive_operation)
+        .transpose()
+}
+
+pub fn primitive_read_handler_descriptors()
+-> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
+    PRIMITIVE_READ_SPECS
+        .iter()
+        .map(|spec| {
+            ApplicationHandlerDescriptor::new(
+                primitive_operation(spec)?,
+                primitive_schema(spec.operation, "request", 65_536)?,
+                primitive_schema(spec.operation, "result", 1_048_576)?,
+            )
+        })
+        .collect()
+}
+
+pub fn primitive_read_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
+    let mut capabilities = Vec::with_capacity(PRIMITIVE_READ_SPECS.len());
+    let mut bindings = Vec::with_capacity(PRIMITIVE_READ_SPECS.len() * 3);
+    for spec in &PRIMITIVE_READ_SPECS {
+        let capability_id = CapabilityId::new(format!(
+            "capability.application.primitive.{}",
+            spec.capability.replace('_', "-")
+        ))?;
+        let mut binding_ids = Vec::with_capacity(3);
+        for surface in [
+            BindingSurface::Cli,
+            BindingSurface::Mcp,
+            BindingSurface::Http,
+        ] {
+            let surface_name = match surface {
+                BindingSurface::Cli => "cli",
+                BindingSurface::Mcp => "mcp",
+                BindingSurface::Http => "http",
+                BindingSurface::Lsp => "lsp",
+                BindingSurface::Dashboard => "dashboard",
+            };
+            let binding_id =
+                BindingId::new(format!("binding.{surface_name}.{}.v1", spec.operation))?;
+            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+                binding_id: binding_id.clone(),
+                capability_id: capability_id.clone(),
+                surface,
+                operation: SurfaceOperationName::new(spec.operation)?,
+                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+                required_features: Vec::new(),
+                status: BindingStatus::Current,
+                alias_of: None,
+            })?);
+            binding_ids.push(binding_id);
+        }
+        capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
+            capability_id,
+            use_case_id: tracedecay_tool_catalog::UseCaseId::new(format!(
+                "use-case.application.primitive.{}",
+                spec.use_case.replace('_', "-")
+            ))?,
+            routing: RoutingContractV1::new(
+                1,
+                format!("Read {}", spec.operation.replace('_', " ")),
+                "Invoke the daemon-retained typed primitive owner.",
+                vec![format!("Read {}", spec.operation.replace('_', " "))],
+            )?,
+            request_schema: primitive_schema(spec.operation, "request", 65_536)?,
+            result_schema: primitive_schema(spec.operation, "result", 1_048_576)?,
+            effect: EffectClass::Read,
+            scope: symbol_search_scope()?,
+            authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
+            denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+            privacy: PrivacyClass::ScopedMetadata,
+            lifecycle: LifecycleClass::Resumable,
+            streaming: StreamingContract::Unsupported,
+            cancellation: CancellationContract::cooperative(vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeRead,
+                CancellationPoint::DuringRead,
+            ])?,
+            deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
+            pagination: Some(PaginationContract::new(10, 1_000, 60_000)?),
+            idempotency: IdempotencyContract::NotRequired,
+            authority_revalidation: RevalidationContract::required(vec![
+                RevalidationPoint::Authority,
+                RevalidationPoint::Scope,
+                RevalidationPoint::Policy,
+                RevalidationPoint::Configuration,
+            ])?,
+            reconciliation: ReconciliationContract::NotRequired,
+            receipt: ReceiptContract::Operation,
+            terminal_states: TerminalStateContract::new(vec![
+                TerminalState::Completed,
+                TerminalState::Cancelled,
+                TerminalState::TimedOut,
+                TerminalState::Failed,
+                TerminalState::Partial,
+            ])?,
+            availability: AvailabilityContract::Available,
+            binding_ids,
+            profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
+            required_features: Vec::new(),
+        })?);
+    }
+    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
+        contribution_id: ContributionId::new("contribution.application.primitive-reads")?,
+        depends_on: Vec::new(),
+        capabilities,
+        retrieval_primitives: Vec::new(),
+        bindings,
+    })?)
 }
 
 pub fn symbol_search_request_schema() -> Result<SchemaRef, ApplicationContractError> {
@@ -116,9 +296,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
             TerminalState::Failed,
             TerminalState::Partial,
         ])?,
-        availability: AvailabilityContract::Unavailable {
-            reason: UnavailabilityReason::NotImplemented,
-        },
+        availability: AvailabilityContract::Available,
         binding_ids: Vec::new(),
         profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
         required_features: Vec::new(),

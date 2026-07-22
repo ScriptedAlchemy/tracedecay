@@ -11,10 +11,11 @@
 //! This spine holds intake validation, language registry, extraction,
 //! chunks, and capability emission port traits, plus the generation engine:
 //! immutable generation planning/sealing, increment planning, symbol lineage
-//! resolution, and projection receipt construction. No parser acquisition,
-//! filesystem access, storage, or scheduling lives here; capture owns intake
-//! snapshots, the store owns persistence, and the projector composition owns
-//! publication (Plan 25 boundaries).
+//! resolution, projection receipt construction, and read-side joins over the
+//! existing Git, managed-diagnostic, graph-impact, and test authorities. No
+//! parser acquisition, filesystem access, storage, or scheduling lives here;
+//! capture owns intake snapshots, the owning stores retain evidence, and the
+//! projector composition owns publication (Plan 25 boundaries).
 //!
 //! Contract constructors in this tree validate canonical identities built
 //! from controlled formats; the `expect` on those constructor calls documents
@@ -27,11 +28,14 @@ pub mod diagnostics;
 pub mod extract;
 pub mod generations;
 pub mod git_join;
+pub mod impact_join;
 pub mod incremental;
 pub mod intake;
 pub mod languages;
 pub mod lineage;
+pub mod production;
 pub mod projection;
+pub mod provider;
 pub mod receipts;
 pub mod test_attribution;
 pub mod v1_import;

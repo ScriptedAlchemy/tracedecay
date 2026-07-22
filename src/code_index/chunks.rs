@@ -8,13 +8,23 @@
 //! windows with pinned size/overlap are used. Extractor enumeration order
 //! and mutable line numbers cannot affect `CodeSearchChunkId`.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeSearchChunkV1, CodeSearchDocumentV1, ExtractionBatchV1, LanguageDescriptorV1,
-    ValidatedCodeFileV1,
+    BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
+    CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
+    CodeSearchChunkV1, CodeSearchDocumentV1, CodeSearchEligibilityV1, EdgeAuthorityV1,
+    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionBatchV1, FileIdentityDigest,
+    FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, ParseOutcomeV1, PolicyRevisionId,
+    RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+    SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, ValidatedCodeFileV1, canonical_sha256,
 };
 
-use super::{extract::ExtractionCancellation, intake::ReceiptBoundCodeFileV1};
+use super::{
+    extract::ExtractionCancellation, intake::ReceiptBoundCodeFileV1, lineage::LineageSymbolRecordV1,
+};
+use crate::types::{Edge, EdgeKind, Node, NodeKind};
 
 /// Chunker failures. Partial coverage is evidence, not an error; errors are
 /// reserved for contract violations.
@@ -51,6 +61,35 @@ pub trait CodeChunker {
 pub struct CodeFileChunksV1 {
     pub document: CodeSearchDocumentV1,
     pub chunks: Vec<CodeSearchChunkV1>,
+}
+
+/// Parser-backed evidence for one indexed file. The canonical relation rows
+/// contain only relation kinds the Plan 25 graph contract can represent;
+/// everything else remains a typed abstention rather than a synthetic edge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeFileIndexArtifactsV1 {
+    pub chunks: CodeFileChunksV1,
+    pub symbols: Vec<LineageSymbolRecordV1>,
+    pub edges: Vec<CanonicalRelationEdgeV1>,
+    pub edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
+}
+
+/// Why one parser relation was not promoted into the canonical graph lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CodeIndexEdgeAbstentionReasonV1 {
+    MissingSymbolEndpoint,
+    UnsupportedRelationKind,
+}
+
+/// A parser-observed edge that remains explicitly unavailable to graph
+/// traversal. This preserves the raw limitation without inventing a
+/// semantically stronger relation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CodeIndexEdgeAbstentionV1 {
+    pub source_node_id: String,
+    pub target_node_id: String,
+    pub legacy_kind: String,
+    pub reason: CodeIndexEdgeAbstentionReasonV1,
 }
 
 /// Opaque capability proving the exact chunk bytes produced by one
@@ -109,6 +148,34 @@ impl ExactExtractionAuthorityV1 {
         chunks: Vec<CodeSearchChunkV1>,
     ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
         chunks.into_iter().map(|chunk| self.admit(chunk)).collect()
+    }
+
+    /// Rebind an exact authority only after every prior parser-backed chunk
+    /// has been verified and the carried chunks preserve logical identity and
+    /// content digest. This is the restart/incremental bridge for the
+    /// non-demotable exact and lexical lanes.
+    pub fn rematerialize_for_generation(
+        &self,
+        prior: &CodeFileChunksV1,
+        current: &CodeFileChunksV1,
+    ) -> Result<Self, ChunkingFailureV1> {
+        prior.validate()?;
+        current.validate()?;
+        if prior.chunks.len() != current.chunks.len()
+            || prior
+                .chunks
+                .iter()
+                .zip(&current.chunks)
+                .any(|(prior, current)| {
+                    prior.id != current.id || prior.content_digest != current.content_digest
+                })
+        {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "carried exact chunks changed logical identity or content".to_owned(),
+            ));
+        }
+        self.admit_all(prior.chunks.clone())?;
+        Self::mint(&current.chunks)
     }
 }
 
@@ -200,18 +267,140 @@ impl CodeFileChunksV1 {
     }
 }
 
-use std::collections::{BTreeMap, BTreeSet};
+impl CodeFileIndexArtifactsV1 {
+    /// Verify that every lineage and graph row is bound to a parser-backed
+    /// symbol occurrence in this file's immutable chunk generation.
+    pub fn validate(&self) -> Result<(), ChunkingFailureV1> {
+        self.chunks.validate()?;
+        if self
+            .symbols
+            .windows(2)
+            .any(|pair| pair[0].occurrence >= pair[1].occurrence)
+        {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "lineage symbols are not in occurrence order".to_owned(),
+            ));
+        }
+        let chunk_occurrences = self
+            .chunks
+            .chunks
+            .iter()
+            .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.as_ref())
+            .collect::<BTreeSet<_>>();
+        let occurrences = self
+            .symbols
+            .iter()
+            .map(|symbol| &symbol.occurrence)
+            .collect::<BTreeSet<_>>();
+        if !occurrences.is_subset(&chunk_occurrences) {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "lineage symbol is not represented by a chunk".to_owned(),
+            ));
+        }
+        if self.edges.iter().any(|edge| {
+            !occurrences.contains(&edge.from_occurrence)
+                || !occurrences.contains(&edge.to_occurrence)
+        }) || self
+            .edges
+            .windows(2)
+            .any(|pair| canonical_edge_key(&pair[0]) > canonical_edge_key(&pair[1]))
+            || self
+                .edge_abstentions
+                .windows(2)
+                .any(|pair| pair[0] > pair[1])
+        {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "file graph evidence is not canonical".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 
-use tracedecay_domain::{
-    BoundedSanitizedText, ChunkLogicalIdentityV1, ChunkerRevision, CodeGenerationId,
-    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchEligibilityV1,
-    ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileIdentityDigest, FileOccurrenceId,
-    MAX_CHUNK_TEXT_BYTES, ParseOutcomeV1, PolicyRevisionId, RepositoryId, SanitizerRevision,
-    SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
-    canonical_sha256,
-};
+    /// Carry parser-backed file evidence into a new immutable generation.
+    /// Every generation-local occurrence is rematerialized; edge endpoints
+    /// follow that same mapping and cannot continue to point at the prior
+    /// generation.
+    pub fn rematerialize_for_generation(
+        &self,
+        generation_id: CodeGenerationId,
+        file_occurrence_id: FileOccurrenceId,
+    ) -> Result<Self, ChunkingFailureV1> {
+        self.validate()?;
+        let chunks = self
+            .chunks
+            .rematerialize_for_generation(generation_id, file_occurrence_id)?;
+        let mut occurrences = BTreeMap::new();
+        for (prior, current) in self.chunks.chunks.iter().zip(&chunks.chunks) {
+            if let Some(prior_occurrence) = &prior.anchor.symbol_occurrence_id {
+                let current_occurrence = current
+                    .anchor
+                    .symbol_occurrence_id
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ChunkingFailureV1::NonCanonicalIdentity(
+                            "rematerialized symbol occurrence is missing".to_owned(),
+                        )
+                    })?
+                    .clone();
+                match occurrences.get(prior_occurrence) {
+                    Some(existing) if existing != &current_occurrence => {
+                        return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                            "symbol occurrence rematerialized inconsistently".to_owned(),
+                        ));
+                    }
+                    _ => {
+                        occurrences.insert(prior_occurrence.clone(), current_occurrence);
+                    }
+                }
+            }
+        }
 
-use crate::types::{Node, NodeKind};
+        let mut symbols = self.symbols.clone();
+        for symbol in &mut symbols {
+            symbol.occurrence = occurrences
+                .get(&symbol.occurrence)
+                .cloned()
+                .ok_or_else(|| {
+                    ChunkingFailureV1::NonCanonicalIdentity(
+                        "lineage symbol could not be rematerialized".to_owned(),
+                    )
+                })?;
+        }
+        symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+
+        let mut edges = self.edges.clone();
+        for edge in &mut edges {
+            edge.from_occurrence =
+                occurrences
+                    .get(&edge.from_occurrence)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ChunkingFailureV1::NonCanonicalIdentity(
+                            "edge source could not be rematerialized".to_owned(),
+                        )
+                    })?;
+            edge.to_occurrence =
+                occurrences
+                    .get(&edge.to_occurrence)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ChunkingFailureV1::NonCanonicalIdentity(
+                            "edge target could not be rematerialized".to_owned(),
+                        )
+                    })?;
+        }
+        edges.sort_by(|left, right| canonical_edge_key(left).cmp(&canonical_edge_key(right)));
+
+        let result = Self {
+            chunks,
+            symbols,
+            edges,
+            edge_abstentions: self.edge_abstentions.clone(),
+        };
+        result.validate()?;
+        Ok(result)
+    }
+}
 
 /// Compatibility re-export for callers that previously obtained raw source
 /// digests from the chunking module.
@@ -301,6 +490,32 @@ impl DeterministicCodeChunker {
         &self.generation_id
     }
 
+    /// Index one receipt-bound file and retain its symbols, canonical graph
+    /// edges, and typed edge abstentions alongside its chunks.
+    pub fn index_file(
+        &self,
+        file: &ReceiptBoundCodeFileV1,
+        batch: &ExtractionBatchV1,
+        descriptor: &LanguageDescriptorV1,
+        cancellation: &dyn ExtractionCancellation,
+    ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
+        self.build_file_artifacts(file, batch, descriptor, cancellation)
+    }
+
+    /// Index one receipt-bound file and return the opaque capability required
+    /// to re-admit its exact extraction evidence into lexical projection.
+    pub fn index_file_with_authority(
+        &self,
+        file: &ReceiptBoundCodeFileV1,
+        batch: &ExtractionBatchV1,
+        descriptor: &LanguageDescriptorV1,
+        cancellation: &dyn ExtractionCancellation,
+    ) -> Result<(CodeFileIndexArtifactsV1, ExactExtractionAuthorityV1), ChunkingFailureV1> {
+        let result = self.index_file(file, batch, descriptor, cancellation)?;
+        let authority = ExactExtractionAuthorityV1::mint(&result.chunks.chunks)?;
+        Ok((result, authority))
+    }
+
     /// Chunk one receipt-bound file and return the opaque capability required
     /// to re-admit its exact extraction evidence into lexical projection.
     pub fn chunk_file_with_authority(
@@ -310,10 +525,9 @@ impl DeterministicCodeChunker {
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<(CodeFileChunksV1, ExactExtractionAuthorityV1), ChunkingFailureV1> {
-        let result =
-            <Self as CodeChunker>::chunk_file(self, file, batch, descriptor, cancellation)?;
-        let authority = ExactExtractionAuthorityV1::mint(&result.chunks)?;
-        Ok((result, authority))
+        let (result, authority) =
+            self.index_file_with_authority(file, batch, descriptor, cancellation)?;
+        Ok((result.chunks, authority))
     }
 
     fn file_identity(&self, logical_path: &str) -> Result<FileIdentityDigest, ChunkingFailureV1> {
@@ -417,8 +631,11 @@ fn is_symbol_kind(kind: &NodeKind) -> bool {
 
 /// One extracted symbol reduced to chunk-relevant, identity-stable facts.
 struct SymbolRow {
+    node_id: String,
     span: SourceSpan,
     name: String,
+    qualified_name: String,
+    kind: String,
     parent: Option<usize>,
     identity: SymbolIdentityDigest,
     occurrence: SymbolOccurrenceId,
@@ -809,6 +1026,22 @@ impl CodeChunker for DeterministicCodeChunker {
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<CodeFileChunksV1, ChunkingFailureV1> {
+        self.index_file(file, batch, descriptor, cancellation)
+            .map(|artifacts| artifacts.chunks)
+    }
+}
+
+impl DeterministicCodeChunker {
+    /// Build all parser-backed file artifacts. The legacy chunk-only port
+    /// delegates here so chunk, lineage, and graph evidence are always
+    /// derived from the same bounded parser result.
+    fn build_file_artifacts(
+        &self,
+        file: &ReceiptBoundCodeFileV1,
+        batch: &ExtractionBatchV1,
+        descriptor: &LanguageDescriptorV1,
+        cancellation: &dyn ExtractionCancellation,
+    ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
         if cancellation.is_cancelled() {
             return Err(ChunkingFailureV1::Cancelled);
         }
@@ -834,7 +1067,13 @@ impl CodeChunker for DeterministicCodeChunker {
         let parse_reason = match &batch.parse_outcome {
             ParseOutcomeV1::Complete => None,
             ParseOutcomeV1::Partial { reason } => {
-                return self.chunk_partial(file, batch, descriptor, cancellation, reason.clone());
+                return self.build_partial_artifacts(
+                    file,
+                    batch,
+                    descriptor,
+                    cancellation,
+                    reason.clone(),
+                );
             }
             other => Some(format!("{other:?}")),
         };
@@ -846,28 +1085,31 @@ impl CodeChunker for DeterministicCodeChunker {
                 eligibility: CodeSearchEligibilityV1::Unsupported { reason },
                 chunk_ids: Vec::new(),
             };
-            let result = CodeFileChunksV1 {
-                document,
-                chunks: Vec::new(),
+            let artifacts = CodeFileIndexArtifactsV1 {
+                chunks: CodeFileChunksV1 {
+                    document,
+                    chunks: Vec::new(),
+                },
+                symbols: Vec::new(),
+                edges: Vec::new(),
+                edge_abstentions: Vec::new(),
             };
-            result.validate()?;
-            return Ok(result);
+            artifacts.validate()?;
+            return Ok(artifacts);
         }
-        self.chunk_partial(file, batch, descriptor, cancellation, String::new())
+        self.build_partial_artifacts(file, batch, descriptor, cancellation, String::new())
     }
-}
 
-impl DeterministicCodeChunker {
     /// Shared complete/partial chunk production. `partial_reason` is empty
     /// for complete parses.
-    fn chunk_partial(
+    fn build_partial_artifacts(
         &self,
         file: &ValidatedCodeFileV1,
         batch: &ExtractionBatchV1,
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
         partial_reason: String,
-    ) -> Result<CodeFileChunksV1, ChunkingFailureV1> {
+    ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
         let full_source = std::str::from_utf8(&file.sanitized_bytes).map_err(|error| {
             ChunkingFailureV1::NonCanonicalIdentity(format!(
                 "sanitized bytes are not valid UTF-8: {error}"
@@ -920,7 +1162,7 @@ impl DeterministicCodeChunker {
         let len = source.len() as u64;
         let offsets = line_offsets(source.as_bytes());
         let file_identity = self.file_identity(&file.file.logical_path)?;
-        let symbols = self.symbol_rows(
+        let symbol_rows = self.symbol_rows(
             &file.file.file_occurrence_id,
             &file_identity,
             &result.nodes,
@@ -933,9 +1175,11 @@ impl DeterministicCodeChunker {
             batch,
             descriptor,
             &file_identity,
-            &symbols,
+            &symbol_rows,
             cancellation,
         )?;
+        let symbols = self.lineage_symbols(source, &file_identity, &symbol_rows)?;
+        let (edges, edge_abstentions) = canonical_relation_edges(&result.edges, &symbol_rows);
 
         let eligibility = if partial_reason.is_empty() {
             CodeSearchEligibilityV1::Eligible
@@ -951,9 +1195,14 @@ impl DeterministicCodeChunker {
             eligibility,
             chunk_ids: chunks.iter().map(|chunk| chunk.id.clone()).collect(),
         };
-        let result = CodeFileChunksV1 { document, chunks };
-        result.validate()?;
-        Ok(result)
+        let artifacts = CodeFileIndexArtifactsV1 {
+            chunks: CodeFileChunksV1 { document, chunks },
+            symbols,
+            edges,
+            edge_abstentions,
+        };
+        artifacts.validate()?;
+        Ok(artifacts)
     }
 
     /// Reduce extractor nodes to canonically ordered, identity-stable symbol
@@ -969,7 +1218,8 @@ impl DeterministicCodeChunker {
         len: u64,
     ) -> Result<Vec<SymbolRow>, ChunkingFailureV1> {
         struct Raw {
-            kind: &'static str,
+            node_id: String,
+            kind: String,
             name: String,
             qualified_name: String,
             span: SourceSpan,
@@ -982,7 +1232,8 @@ impl DeterministicCodeChunker {
                 let start = byte_offset(offsets, len, node.start_line, node.start_column);
                 let end = byte_offset(offsets, len, node.end_line, node.end_column);
                 Raw {
-                    kind: node.kind.as_str(),
+                    node_id: node.id.clone(),
+                    kind: node.kind.as_str().to_owned(),
                     name: node.name.clone(),
                     qualified_name: node.qualified_name.clone(),
                     span: SourceSpan {
@@ -1000,7 +1251,7 @@ impl DeterministicCodeChunker {
                 .cmp(&right.span.start_byte)
                 .then(right.span.end_byte.cmp(&left.span.end_byte))
                 .then(left.qualified_name.cmp(&right.qualified_name))
-                .then(left.kind.cmp(right.kind))
+                .then(left.kind.cmp(&right.kind))
         });
 
         let mut rows = Vec::with_capacity(raw.len());
@@ -1027,7 +1278,7 @@ impl DeterministicCodeChunker {
                 &(
                     file_identity.as_str(),
                     node.qualified_name.as_str(),
-                    node.kind,
+                    node.kind.as_str(),
                     occurrence_index,
                 ),
             )
@@ -1038,14 +1289,53 @@ impl DeterministicCodeChunker {
             let occurrence =
                 symbol_occurrence_id(&self.generation_id, file_occurrence_id, &identity)?;
             rows.push(SymbolRow {
+                node_id: node.node_id.clone(),
                 span: node.span,
                 name: node.name.clone(),
+                qualified_name: node.qualified_name.clone(),
+                kind: node.kind.clone(),
                 parent,
                 identity,
                 occurrence,
             });
         }
         Ok(rows)
+    }
+
+    fn lineage_symbols(
+        &self,
+        source: &str,
+        file_identity: &FileIdentityDigest,
+        rows: &[SymbolRow],
+    ) -> Result<Vec<LineageSymbolRecordV1>, ChunkingFailureV1> {
+        let mut symbols = Vec::with_capacity(rows.len());
+        for row in rows {
+            let start = usize::try_from(row.span.start_byte).map_err(|error| {
+                ChunkingFailureV1::NonCanonicalIdentity(format!(
+                    "symbol start offset does not fit this host: {error}"
+                ))
+            })?;
+            let end = usize::try_from(row.span.end_byte).map_err(|error| {
+                ChunkingFailureV1::NonCanonicalIdentity(format!(
+                    "symbol end offset does not fit this host: {error}"
+                ))
+            })?;
+            let text = source.get(start..end).ok_or_else(|| {
+                ChunkingFailureV1::NonCanonicalIdentity(
+                    "symbol span is not a valid UTF-8 source range".to_owned(),
+                )
+            })?;
+            symbols.push(LineageSymbolRecordV1 {
+                occurrence: row.occurrence.clone(),
+                identity: row.identity.clone(),
+                qualified_name: row.qualified_name.clone(),
+                kind: row.kind.clone(),
+                file_identity: file_identity.clone(),
+                content_digest: content_digest(text.as_bytes()),
+            });
+        }
+        symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+        Ok(symbols)
     }
 
     /// Build, identify, and canonically order every chunk for the file.
@@ -1322,6 +1612,102 @@ impl DeterministicCodeChunker {
     }
 }
 
+fn canonical_relation_edges(
+    raw_edges: &[Edge],
+    symbols: &[SymbolRow],
+) -> (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>) {
+    let mut by_node_id = BTreeMap::new();
+    for symbol in symbols {
+        match by_node_id.entry(symbol.node_id.as_str()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Some(symbol));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.insert(None);
+            }
+        }
+    }
+
+    let mut edges = Vec::new();
+    let mut abstentions = Vec::new();
+    for edge in raw_edges {
+        let Some(Some(from)) = by_node_id.get(edge.source.as_str()) else {
+            abstentions.push(edge_abstention(
+                edge,
+                CodeIndexEdgeAbstentionReasonV1::MissingSymbolEndpoint,
+            ));
+            continue;
+        };
+        let Some(Some(to)) = by_node_id.get(edge.target.as_str()) else {
+            abstentions.push(edge_abstention(
+                edge,
+                CodeIndexEdgeAbstentionReasonV1::MissingSymbolEndpoint,
+            ));
+            continue;
+        };
+        let Some(kind) = canonical_relation_kind(&edge.kind) else {
+            abstentions.push(edge_abstention(
+                edge,
+                CodeIndexEdgeAbstentionReasonV1::UnsupportedRelationKind,
+            ));
+            continue;
+        };
+        edges.push(CanonicalRelationEdgeV1 {
+            from_occurrence: from.occurrence.clone(),
+            to_occurrence: to.occurrence.clone(),
+            kind,
+            authority: EdgeAuthorityV1::SyntaxExact,
+            evidence_span: from.span,
+        });
+    }
+    edges.sort_by(|left, right| canonical_edge_key(left).cmp(&canonical_edge_key(right)));
+    abstentions.sort();
+    (edges, abstentions)
+}
+
+fn canonical_relation_kind(kind: &EdgeKind) -> Option<RelationEdgeKindV1> {
+    match kind {
+        EdgeKind::Contains => Some(RelationEdgeKindV1::Contains),
+        EdgeKind::Calls => Some(RelationEdgeKindV1::Calls),
+        EdgeKind::Uses => Some(RelationEdgeKindV1::Uses),
+        EdgeKind::Implements => Some(RelationEdgeKindV1::Implements),
+        EdgeKind::TypeOf => Some(RelationEdgeKindV1::TypeOf),
+        EdgeKind::Extends => Some(RelationEdgeKindV1::Extends),
+        EdgeKind::Annotates => Some(RelationEdgeKindV1::Annotates),
+        EdgeKind::Returns | EdgeKind::DerivesMacro | EdgeKind::Receives => None,
+    }
+}
+
+fn edge_abstention(
+    edge: &Edge,
+    reason: CodeIndexEdgeAbstentionReasonV1,
+) -> CodeIndexEdgeAbstentionV1 {
+    CodeIndexEdgeAbstentionV1 {
+        source_node_id: edge.source.clone(),
+        target_node_id: edge.target.clone(),
+        legacy_kind: edge.kind.as_str().to_owned(),
+        reason,
+    }
+}
+
+fn canonical_edge_key(
+    edge: &CanonicalRelationEdgeV1,
+) -> (
+    &SymbolOccurrenceId,
+    &SymbolOccurrenceId,
+    RelationEdgeKindV1,
+    u64,
+    u64,
+) {
+    (
+        &edge.from_occurrence,
+        &edge.to_occurrence,
+        edge.kind,
+        edge.evidence_span.start_byte,
+        edge.evidence_span.end_byte,
+    )
+}
+
 /// End offset of the line containing `start` (exclusive of the newline).
 fn offsets_line_end(source: &str, start: u64) -> u64 {
     let rest = &source[start as usize..];
@@ -1367,10 +1753,11 @@ mod tests {
     use tracedecay_domain::{
         BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
         CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchEligibilityV1, ContentDigest,
-        ExtractionCoverageV1, FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision,
-        LanguageId, ManifestDigest, ParseOutcomeV1, PolicyRevisionId, SanitizationReceiptId,
-        SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityDecision,
-        SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, UtcMicros, ValidatedCodeFileV1,
+        ExtractionCoverageV1, FileIdentityDigest, FileOccurrenceId, GrammarRevision,
+        LanguageDescriptorRevision, LanguageId, ManifestDigest, ParseOutcomeV1, PolicyRevisionId,
+        SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+        SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan,
+        SymbolIdentityDigest, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
     };
 
     use crate::code_index::extract::{ExtractionCancellation, NeverCancelled};
@@ -1395,6 +1782,39 @@ mod tests {
 
     fn digest(byte: char) -> String {
         format!("sha256:{}", byte.to_string().repeat(64))
+    }
+
+    fn symbol_identity(byte: char) -> SymbolIdentityDigest {
+        SymbolIdentityDigest::new(digest(byte)).expect("valid fixture symbol identity")
+    }
+
+    fn file_identity(byte: char) -> FileIdentityDigest {
+        FileIdentityDigest::new(digest(byte)).expect("valid fixture file identity")
+    }
+
+    fn fixture_symbol_row(
+        node_id: &str,
+        occurrence: &str,
+        qualified_name: &str,
+        kind: &str,
+        identity_byte: char,
+        span: SourceSpan,
+    ) -> SymbolRow {
+        SymbolRow {
+            node_id: node_id.to_owned(),
+            span,
+            name: qualified_name
+                .rsplit("::")
+                .next()
+                .unwrap_or(qualified_name)
+                .to_owned(),
+            qualified_name: qualified_name.to_owned(),
+            kind: kind.to_owned(),
+            parent: None,
+            identity: symbol_identity(identity_byte),
+            occurrence: SymbolOccurrenceId::new(occurrence)
+                .expect("valid fixture symbol occurrence"),
+        }
     }
 
     fn file_chunks() -> CodeFileChunksV1 {
@@ -2007,6 +2427,159 @@ pub fn real_symbol() {}
         ] {
             assert!(!symbols.contains(rejected));
         }
+    }
+
+    #[test]
+    fn lineage_symbols_preserve_extracted_identity_and_canonical_order() {
+        let source = "alpha\nbeta\n";
+        let file_identity = file_identity('f');
+        let rows = vec![
+            fixture_symbol_row(
+                "node.beta",
+                "sym.beta",
+                "crate::beta",
+                "function",
+                'b',
+                SourceSpan {
+                    start_byte: 6,
+                    end_byte: 10,
+                },
+            ),
+            fixture_symbol_row(
+                "node.alpha",
+                "sym.alpha",
+                "crate::alpha",
+                "function",
+                'a',
+                SourceSpan {
+                    start_byte: 0,
+                    end_byte: 5,
+                },
+            ),
+        ];
+
+        let symbols = chunker()
+            .lineage_symbols(source, &file_identity, &rows)
+            .expect("valid symbol lineage records");
+
+        assert_eq!(
+            symbols
+                .iter()
+                .map(|symbol| symbol.occurrence.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sym.alpha", "sym.beta"],
+            "lineage records must be canonically ordered by occurrence"
+        );
+        let alpha = symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "crate::alpha")
+            .expect("alpha lineage record");
+        assert_eq!(alpha.identity, symbol_identity('a'));
+        assert_eq!(alpha.kind, "function");
+        assert_eq!(alpha.file_identity, file_identity);
+        assert_eq!(alpha.content_digest, content_digest(b"alpha"));
+    }
+
+    #[test]
+    fn canonical_relation_edges_bind_node_ids_sort_and_record_abstentions() {
+        let symbols = vec![
+            fixture_symbol_row(
+                "node.alpha",
+                "sym.zeta",
+                "crate::alpha",
+                "function",
+                'a',
+                SourceSpan {
+                    start_byte: 20,
+                    end_byte: 30,
+                },
+            ),
+            fixture_symbol_row(
+                "node.beta",
+                "sym.alpha",
+                "crate::beta",
+                "function",
+                'b',
+                SourceSpan {
+                    start_byte: 4,
+                    end_byte: 9,
+                },
+            ),
+            fixture_symbol_row(
+                "node.gamma",
+                "sym.middle",
+                "crate::gamma",
+                "function",
+                'c',
+                SourceSpan {
+                    start_byte: 10,
+                    end_byte: 19,
+                },
+            ),
+        ];
+        let raw_edges = vec![
+            Edge {
+                source: "node.alpha".to_owned(),
+                target: "node.beta".to_owned(),
+                kind: EdgeKind::Calls,
+                line: Some(20),
+            },
+            Edge {
+                source: "node.beta".to_owned(),
+                target: "node.gamma".to_owned(),
+                kind: EdgeKind::Uses,
+                line: Some(4),
+            },
+            Edge {
+                source: "node.alpha".to_owned(),
+                target: "node.missing".to_owned(),
+                kind: EdgeKind::Calls,
+                line: None,
+            },
+            Edge {
+                source: "node.alpha".to_owned(),
+                target: "node.beta".to_owned(),
+                kind: EdgeKind::Receives,
+                line: None,
+            },
+        ];
+
+        let (edges, abstentions) = canonical_relation_edges(&raw_edges, &symbols);
+
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0].from_occurrence.as_str(), "sym.alpha");
+        assert_eq!(edges[0].to_occurrence.as_str(), "sym.middle");
+        assert_eq!(edges[0].kind, RelationEdgeKindV1::Uses);
+        assert_eq!(edges[0].authority, EdgeAuthorityV1::SyntaxExact);
+        assert_eq!(
+            edges[0].evidence_span,
+            SourceSpan {
+                start_byte: 4,
+                end_byte: 9,
+            }
+        );
+        assert_eq!(edges[1].from_occurrence.as_str(), "sym.zeta");
+        assert_eq!(edges[1].to_occurrence.as_str(), "sym.alpha");
+        assert_eq!(edges[1].kind, RelationEdgeKindV1::Calls);
+
+        assert_eq!(abstentions.len(), 2);
+        let missing_endpoint = abstentions
+            .iter()
+            .find(|abstention| abstention.target_node_id == "node.missing")
+            .expect("missing endpoint abstention");
+        assert!(matches!(
+            &missing_endpoint.reason,
+            CodeIndexEdgeAbstentionReasonV1::MissingSymbolEndpoint
+        ));
+        assert_eq!(missing_endpoint.legacy_kind, EdgeKind::Calls.as_str());
+        let unsupported_kind = abstentions
+            .iter()
+            .find(|abstention| abstention.legacy_kind == EdgeKind::Receives.as_str())
+            .expect("unsupported kind abstention");
+        assert!(matches!(
+            &unsupported_kind.reason,
+            CodeIndexEdgeAbstentionReasonV1::UnsupportedRelationKind
+        ));
     }
 
     #[test]

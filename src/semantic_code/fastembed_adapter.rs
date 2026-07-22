@@ -1,24 +1,16 @@
-//! PR10 quarantined preparation packet `pr10/prep-runtime-adapter`
+//! PR10 FastEmbed semantic adapter
 //! (Plan 31, `docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md`).
 //!
 //! Root-private embedding runtime port surface. This file owns the typed
 //! `EmbeddingRuntime` / `EmbeddingSession` ports: load a verified artifact,
 //! create bounded sessions, embed bounded sanitized text batches, and return
 //! typed vectors whose dimensions, metric, and normalization are echoed from
-//! the verified manifest descriptor. It also owns the deterministic
-//! [`FakeEmbeddingRuntime`] used by every offline pool/session test.
+//! the verified manifest descriptor.
 //!
-//! QUARANTINE STATUS: temporarily unlinked. Registration happens at
-//! integration by the Sol coordinator; this file must not be referenced from
-//! `src/lib.rs` or `src/semantic_code/mod.rs` in this packet. It depends only
-//! on the quarantined artifact/manifest packet and domain projection types,
-//! and compiles standalone through the PR10 `#[path]` integration test.
-//!
-//! The real FastEmbed-backed implementation is NOT part of this packet. The
-//! port is shaped so that implementation drops in later as another
-//! `EmbeddingRuntime` impl: at integration this becomes the only module that
-//! imports `fastembed` (Plan 31: "Only one root-private adapter depends on
-//! `fastembed`").
+//! The production adapter is feature-gated so dependency activation remains a
+//! deliberate package decision. It initializes FastEmbed only from bytes
+//! opened through the digest-addressed artifact-store capability; it never
+//! selects a catalog model, imports an artifact, or discovers a cache.
 //!
 //! Design decisions recorded for the coordinator (plan-level ambiguities,
 //! flagged rather than guessed):
@@ -37,13 +29,19 @@
 //!   cannot pair an independent projection identity with an artifact.
 //! - ESCALATION-4 (budget type): Plan 31 says deadline/cancellation limits are
 //!   fields of the shared PR9 `RetrievalBudget` and PR10 introduces no
-//!   semantic-only budget type. That domain type is outside this quarantined
+//!   semantic-only budget type. That domain type is outside this root-private
 //!   packet, so deadlines are modelled here as a `Duration` against the
 //!   injected pool clock and cancellation as the [`CancellationSignal`] trait;
 //!   the integrator adapts `RetrievalBudget` onto both.
 
+#[cfg(feature = "semantic-fastembed")]
+use fastembed::{
+    InitOptionsUserDefined, Pooling as FastEmbedPooling, QuantizationMode, TextEmbedding,
+    TokenizerFiles, UserDefinedEmbeddingModel,
+};
 use std::error::Error;
 use std::fmt;
+#[cfg(any(test))]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -182,8 +180,10 @@ struct VerifiedEmbeddingArtifactV1 {
     model_file: String,
     tokenizer_file: String,
     config_file: String,
+    artifact: Option<AdmittedArtifactV1>,
     max_batch_texts: u32,
     max_batch_bytes: u32,
+    max_threads: u32,
     resident_byte_ceiling: u64,
 }
 
@@ -208,6 +208,21 @@ impl VerifiedEmbeddingArtifactV1 {
         self.embedding_key().normalization
     }
 
+    #[cfg(feature = "semantic-fastembed")]
+    fn pooling(&self) -> EmbeddingPoolingV1 {
+        self.embedding_key().pooling
+    }
+
+    #[cfg(feature = "semantic-fastembed")]
+    fn precision(&self) -> EmbeddingPrecisionV1 {
+        self.embedding_key().precision
+    }
+
+    #[cfg(feature = "semantic-fastembed")]
+    fn truncation_length(&self) -> u32 {
+        self.embedding_key().truncation_length
+    }
+
     fn max_batch_texts(&self) -> u32 {
         self.max_batch_texts
     }
@@ -216,8 +231,29 @@ impl VerifiedEmbeddingArtifactV1 {
         self.max_batch_bytes
     }
 
+    #[cfg(feature = "semantic-fastembed")]
+    fn max_threads(&self) -> u32 {
+        self.max_threads
+    }
+
     pub(super) fn resident_byte_ceiling(&self) -> u64 {
         self.resident_byte_ceiling
+    }
+
+    #[cfg(feature = "semantic-fastembed")]
+    fn required_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
+        let artifact = self.artifact.as_ref().ok_or_else(|| {
+            fastembed_failure(
+                RuntimeFailureKindV1::LoadFailed,
+                "verified artifact bytes are unavailable",
+            )
+        })?;
+        artifact.read_member_bytes(role).map_err(|_| {
+            fastembed_failure(
+                RuntimeFailureKindV1::CorruptArtifact,
+                "verified artifact member no longer matches its signed pin",
+            )
+        })
     }
 }
 
@@ -343,12 +379,14 @@ impl AdmittedProjectionArtifactV1 {
                 model_file,
                 tokenizer_file,
                 config_file,
+                artifact: Some(artifact.clone()),
                 max_batch_texts: payload.resource_ceiling.max_batch_size,
                 max_batch_bytes: payload
                     .resource_ceiling
                     .max_batch_size
                     .saturating_mul(payload.resource_ceiling.max_sequence_length)
                     .saturating_mul(4),
+                max_threads: payload.resource_ceiling.max_threads,
                 resident_byte_ceiling: payload.resource_ceiling.max_resident_bytes,
             },
         })
@@ -623,7 +661,245 @@ pub(super) trait EmbeddingRuntime {
     ) -> Result<Self::Session, EmbedError>;
 }
 
+#[cfg(any(test, feature = "semantic-fastembed"))]
+fn validate_batch_limits(
+    batch: &BoundedSanitizedTextBatchV1,
+    artifact: &VerifiedEmbeddingArtifactV1,
+) -> Result<(), EmbedError> {
+    if batch.is_empty() {
+        return Err(EmbedError::EmptyBatch);
+    }
+    if batch.len() > artifact.max_batch_texts() as usize {
+        return Err(EmbedError::TooManyTexts {
+            presented: batch.len(),
+            max: artifact.max_batch_texts() as usize,
+        });
+    }
+    if batch.total_bytes() > artifact.max_batch_bytes() as usize {
+        return Err(EmbedError::BatchBytesExceeded {
+            presented: batch.total_bytes(),
+            max: artifact.max_batch_bytes() as usize,
+        });
+    }
+    Ok(())
+}
+
+/// The production FastEmbed runtime. Its dependency feature disables model-hub
+/// support, and this adapter uses only FastEmbed's local-byte constructor.
+#[cfg(feature = "semantic-fastembed")]
+#[derive(Default)]
+pub(super) struct FastEmbedEmbeddingRuntime;
+
+#[cfg(feature = "semantic-fastembed")]
+impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
+    type Session = FastEmbedEmbeddingSession;
+
+    fn verify_artifact_compatibility(
+        &self,
+        authority: &AdmittedProjectionArtifactV1,
+    ) -> Result<(), EmbedError> {
+        let artifact = authority.runtime_artifact();
+        if artifact.embedding_key().runtime_backend != "fastembed-ort" {
+            return Err(fastembed_failure(
+                RuntimeFailureKindV1::IncompatibleRuntime,
+                "the projection does not select the FastEmbed ORT backend",
+            ));
+        }
+        if artifact.normalization() != EmbeddingNormalizationV1::L2 {
+            return Err(fastembed_failure(
+                RuntimeFailureKindV1::IncompatibleRuntime,
+                "FastEmbed always returns L2-normalized text embeddings",
+            ));
+        }
+        let _ = fastembed_pooling(artifact.pooling())?;
+        let admitted = artifact.artifact.as_ref().ok_or_else(|| {
+            fastembed_failure(
+                RuntimeFailureKindV1::LoadFailed,
+                "verified artifact bytes are unavailable",
+            )
+        })?;
+        for role in [
+            ArtifactMemberRoleV1::Model,
+            ArtifactMemberRoleV1::Tokenizer,
+            ArtifactMemberRoleV1::Config,
+            ArtifactMemberRoleV1::SpecialTokensMap,
+            ArtifactMemberRoleV1::TokenizerConfig,
+        ] {
+            if admitted.manifest().package_member(role).is_none() {
+                return Err(fastembed_failure(
+                    RuntimeFailureKindV1::IncompatibleRuntime,
+                    "the artifact lacks a FastEmbed-required tokenizer member",
+                ));
+            }
+        }
+        if artifact.max_threads() == 0 {
+            return Err(fastembed_failure(
+                RuntimeFailureKindV1::IncompatibleRuntime,
+                "the artifact has no permitted FastEmbed inference threads",
+            ));
+        }
+        Ok(())
+    }
+
+    fn open_session(
+        &self,
+        authority: &AdmittedProjectionArtifactV1,
+    ) -> Result<Self::Session, EmbedError> {
+        self.verify_artifact_compatibility(authority)?;
+        let artifact = authority.runtime_artifact();
+        let model = fastembed_model(artifact)?;
+        let options = InitOptionsUserDefined::new()
+            .with_max_length(artifact.truncation_length() as usize)
+            .with_intra_threads(artifact.max_threads() as usize);
+        let embedding =
+            TextEmbedding::try_new_from_user_defined(model, options).map_err(|error| {
+                fastembed_error(
+                    RuntimeFailureKindV1::LoadFailed,
+                    "FastEmbed could not initialize the verified artifact",
+                    &error,
+                )
+            })?;
+        Ok(FastEmbedEmbeddingSession {
+            authority: authority.clone(),
+            embedding,
+        })
+    }
+}
+
+#[cfg(feature = "semantic-fastembed")]
+pub(super) struct FastEmbedEmbeddingSession {
+    authority: AdmittedProjectionArtifactV1,
+    embedding: TextEmbedding,
+}
+
+#[cfg(feature = "semantic-fastembed")]
+impl EmbeddingSession for FastEmbedEmbeddingSession {
+    fn authority(&self) -> &AdmittedProjectionArtifactV1 {
+        &self.authority
+    }
+
+    fn resident_bytes_estimate(&self) -> u64 {
+        self.authority.resident_byte_ceiling()
+    }
+
+    fn embed_batch(
+        &mut self,
+        batch: &BoundedSanitizedTextBatchV1,
+        cancel: &dyn CancellationSignal,
+    ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
+        let artifact = self.authority.runtime_artifact();
+        validate_batch_limits(batch, artifact)?;
+
+        let mut vectors = Vec::with_capacity(batch.len());
+        for text in batch.texts() {
+            if cancel.cancelled() {
+                return Err(EmbedError::Cancelled);
+            }
+
+            // FastEmbed/ORT inference is synchronous. One-text calls make
+            // cancellation observable between inputs and ensure a cancelled
+            // request never returns a partial batch.
+            let mut embedded = self
+                .embedding
+                .embed(std::slice::from_ref(text), Some(1))
+                .map_err(|error| {
+                    fastembed_error(
+                        RuntimeFailureKindV1::EmbedFailed,
+                        "FastEmbed inference failed for the verified artifact",
+                        &error,
+                    )
+                })?;
+            if cancel.cancelled() {
+                return Err(EmbedError::Cancelled);
+            }
+            if embedded.len() != 1 {
+                return Err(fastembed_failure(
+                    RuntimeFailureKindV1::EmbedFailed,
+                    "FastEmbed returned an unexpected embedding count",
+                ));
+            }
+            let vector = EmbeddingVectorV1 {
+                values: embedded.pop().expect("embedding count was checked"),
+                dimensions: artifact.dimensions(),
+                metric: artifact.metric(),
+                normalization: artifact.normalization(),
+            };
+            vector.validate()?;
+            vectors.push(vector);
+        }
+        Ok(vectors)
+    }
+}
+
+#[cfg(feature = "semantic-fastembed")]
+fn fastembed_model(
+    artifact: &VerifiedEmbeddingArtifactV1,
+) -> Result<UserDefinedEmbeddingModel, EmbedError> {
+    let tokenizer_files = TokenizerFiles {
+        tokenizer_file: artifact.required_member_bytes(ArtifactMemberRoleV1::Tokenizer)?,
+        config_file: artifact.required_member_bytes(ArtifactMemberRoleV1::Config)?,
+        special_tokens_map_file: artifact
+            .required_member_bytes(ArtifactMemberRoleV1::SpecialTokensMap)?,
+        tokenizer_config_file: artifact
+            .required_member_bytes(ArtifactMemberRoleV1::TokenizerConfig)?,
+    };
+    Ok(UserDefinedEmbeddingModel::new(
+        artifact.required_member_bytes(ArtifactMemberRoleV1::Model)?,
+        tokenizer_files,
+    )
+    .with_pooling(fastembed_pooling(artifact.pooling())?)
+    .with_quantization(fastembed_quantization(artifact.precision())))
+}
+
+#[cfg(feature = "semantic-fastembed")]
+fn fastembed_pooling(pooling: EmbeddingPoolingV1) -> Result<FastEmbedPooling, EmbedError> {
+    match pooling {
+        EmbeddingPoolingV1::Mean => Ok(FastEmbedPooling::Mean),
+        EmbeddingPoolingV1::Cls => Ok(FastEmbedPooling::Cls),
+        EmbeddingPoolingV1::LastToken | EmbeddingPoolingV1::MeanSqrtLength => {
+            Err(fastembed_failure(
+                RuntimeFailureKindV1::IncompatibleRuntime,
+                "the projection pooling mode is unsupported by FastEmbed",
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "semantic-fastembed")]
+fn fastembed_quantization(precision: EmbeddingPrecisionV1) -> QuantizationMode {
+    match precision {
+        EmbeddingPrecisionV1::Int8 => QuantizationMode::Static,
+        EmbeddingPrecisionV1::Fp32 | EmbeddingPrecisionV1::Fp16 | EmbeddingPrecisionV1::Bf16 => {
+            QuantizationMode::None
+        }
+    }
+}
+
+#[cfg(feature = "semantic-fastembed")]
+fn fastembed_failure(kind: RuntimeFailureKindV1, detail: &str) -> EmbedError {
+    EmbedError::Runtime(RuntimeFailureV1 {
+        kind,
+        detail: detail.to_owned(),
+    })
+}
+
+#[cfg(feature = "semantic-fastembed")]
+fn fastembed_error(
+    fallback_kind: RuntimeFailureKindV1,
+    detail: &str,
+    error: &impl fmt::Display,
+) -> EmbedError {
+    let message = error.to_string().to_ascii_lowercase();
+    let kind = if message.contains("out of memory") || message.contains("allocation") {
+        RuntimeFailureKindV1::OutOfMemory
+    } else {
+        fallback_kind
+    };
+    fastembed_failure(kind, detail)
+}
+
 /// Test-observable counters for the deterministic fake runtime.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct FakeRuntimeCounters {
     pub compatibility_checks: AtomicUsize,
@@ -639,6 +915,7 @@ pub struct FakeRuntimeCounters {
 /// pseudo-embeddings with the descriptor's declared dimensions, metric, and
 /// normalization. Same descriptor digest + same text always yields the same
 /// vector, so all pool/session behavior is testable offline.
+#[cfg(test)]
 #[derive(Debug)]
 pub(super) struct FakeEmbeddingRuntime {
     resident_bytes_per_session: u64,
@@ -647,12 +924,14 @@ pub(super) struct FakeEmbeddingRuntime {
     counters: Arc<FakeRuntimeCounters>,
 }
 
+#[cfg(test)]
 impl Default for FakeEmbeddingRuntime {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl FakeEmbeddingRuntime {
     pub(super) fn new() -> Self {
         Self {
@@ -683,6 +962,7 @@ impl FakeEmbeddingRuntime {
     }
 }
 
+#[cfg(test)]
 impl EmbeddingRuntime for FakeEmbeddingRuntime {
     type Session = FakeEmbeddingSession;
 
@@ -730,6 +1010,7 @@ impl EmbeddingRuntime for FakeEmbeddingRuntime {
 }
 
 /// One deterministic fake warmed session.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct FakeEmbeddingSession {
     authority: AdmittedProjectionArtifactV1,
@@ -738,6 +1019,7 @@ pub struct FakeEmbeddingSession {
     counters: Arc<FakeRuntimeCounters>,
 }
 
+#[cfg(test)]
 impl EmbeddingSession for FakeEmbeddingSession {
     fn authority(&self) -> &AdmittedProjectionArtifactV1 {
         &self.authority
@@ -752,22 +1034,8 @@ impl EmbeddingSession for FakeEmbeddingSession {
         batch: &BoundedSanitizedTextBatchV1,
         cancel: &dyn CancellationSignal,
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
-        if batch.is_empty() {
-            return Err(EmbedError::EmptyBatch);
-        }
         let artifact = self.authority.runtime_artifact();
-        if batch.len() > artifact.max_batch_texts() as usize {
-            return Err(EmbedError::TooManyTexts {
-                presented: batch.len(),
-                max: artifact.max_batch_texts() as usize,
-            });
-        }
-        if batch.total_bytes() > artifact.max_batch_bytes() as usize {
-            return Err(EmbedError::BatchBytesExceeded {
-                presented: batch.total_bytes(),
-                max: artifact.max_batch_bytes() as usize,
-            });
-        }
+        validate_batch_limits(batch, artifact)?;
         let mut out = Vec::with_capacity(batch.len());
         for text in batch.texts() {
             // Honor cancellation between texts; a cancelled batch returns no
@@ -795,21 +1063,26 @@ impl EmbeddingSession for FakeEmbeddingSession {
     }
 }
 
+#[cfg(test)]
 impl Drop for FakeEmbeddingSession {
     fn drop(&mut self) {
         self.counters.sessions_closed.fetch_add(1, Ordering::SeqCst);
     }
 }
 
+#[cfg(test)]
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+#[cfg(test)]
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+#[cfg(test)]
 fn fnv1a64(bytes: &[u8], seed: u64) -> u64 {
     bytes.iter().fold(seed, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
     })
 }
 
+#[cfg(test)]
 fn xorshift64star(state: &mut u64) -> u64 {
     let mut x = *state;
     x ^= x >> 12;
@@ -824,6 +1097,7 @@ fn xorshift64star(state: &mut u64) -> u64 {
 /// normalization is applied when the descriptor pins it. Pure arithmetic —
 /// no HashMap iteration, no clock, no randomness — so results are stable
 /// across runs on one platform.
+#[cfg(test)]
 fn pseudo_embedding(
     seed: u64,
     text: &str,
@@ -913,8 +1187,10 @@ mod tests {
                 model_file: "model.onnx".to_string(),
                 tokenizer_file: "tokenizer.json".to_string(),
                 config_file: "config.json".to_string(),
+                artifact: None,
                 max_batch_texts: 8,
                 max_batch_bytes: 16 * 1024,
+                max_threads: 4,
                 resident_byte_ceiling: 64 * 1024 * 1024,
             },
         }
@@ -1186,6 +1462,25 @@ mod tests {
                 .load(Ordering::SeqCst),
             1
         );
+    }
+
+    #[cfg(feature = "semantic-fastembed")]
+    #[test]
+    fn real_fastembed_runtime_rejects_unnormalized_projection_before_loading() {
+        let runtime = FastEmbedEmbeddingRuntime;
+        let result = runtime.verify_artifact_compatibility(&authority_with(
+            8,
+            'a',
+            EmbeddingMetricV1::Cosine,
+            EmbeddingNormalizationV1::None,
+        ));
+        assert!(matches!(
+            result,
+            Err(EmbedError::Runtime(RuntimeFailureV1 {
+                kind: RuntimeFailureKindV1::IncompatibleRuntime,
+                ..
+            }))
+        ));
     }
 
     #[test]

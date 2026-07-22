@@ -8,3 +8,4 @@
 pub(crate) mod evaluation;
 
 mod evaluation_schema;
+mod retrieval_contract;

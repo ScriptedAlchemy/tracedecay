@@ -1,0 +1,542 @@
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::{
+    CodeGenerationId, CodeSearchChunkId, EphemeralSanitizedQueryViewV1, ExactTechnicalTermKindV1,
+    FileOccurrenceId, Pr9FallbackSubpayload, SourceSpan, SymbolOccurrenceId, UtcMicros,
+};
+
+use crate::error::ApplicationContractError;
+use crate::handlers::ApplicationOperation;
+use crate::result::OpaqueCursor;
+
+use super::{ImplementationSelector, RetrievalRequestMeta};
+
+pub const CALLABLE_CODE_OPERATION_COUNT: usize = 12;
+pub const MAX_CALLABLE_CODE_QUERY_BYTES: usize = 4_096;
+pub const MAX_CALLABLE_CODE_FILTERS: usize = 32;
+pub const MAX_CALLABLE_CODE_DEPTH: u32 = 10;
+pub const MAX_SOURCE_METADATA_FILES: usize = 256;
+
+/// One immutable code-index generation inside the authorized single root.
+/// The path prefix narrows a query but never establishes project identity.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeQueryScope {
+    pub generation: CodeGenerationId,
+    pub path_prefix: Option<String>,
+}
+
+impl CodeQueryScope {
+    pub fn new(
+        generation: CodeGenerationId,
+        path_prefix: Option<String>,
+    ) -> Result<Self, ApplicationContractError> {
+        let scope = Self {
+            generation,
+            path_prefix,
+        };
+        scope.validate()?;
+        Ok(scope)
+    }
+
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.generation.validate()?;
+        if let Some(path_prefix) = &self.path_prefix {
+            validate_query(path_prefix, "code query path prefix")?;
+            if path_prefix.starts_with('/') || path_prefix.split('/').any(|part| part == "..") {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "code query path prefix",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Generation-bound page returned by every callable code query. Coverage,
+/// omissions, scoring, and terminal state remain in the enclosing
+/// [`crate::result::RetrievalEvidence`].
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeQueryPage<T> {
+    pub generation: CodeGenerationId,
+    pub items: Vec<T>,
+    pub total: Option<u64>,
+    pub next_cursor: Option<OpaqueCursor>,
+    pub pr9_fallback: Option<Pr9FallbackSubpayload>,
+}
+
+impl<T> CodeQueryPage<T> {
+    pub fn new(
+        generation: CodeGenerationId,
+        items: Vec<T>,
+        total: Option<u64>,
+        next_cursor: Option<OpaqueCursor>,
+        pr9_fallback: Option<Pr9FallbackSubpayload>,
+    ) -> Result<Self, ApplicationContractError> {
+        let page = Self {
+            generation,
+            items,
+            total,
+            next_cursor,
+            pr9_fallback,
+        };
+        page.validate()?;
+        Ok(page)
+    }
+
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.generation.validate()?;
+        if self
+            .total
+            .is_some_and(|total| total < self.items.len() as u64)
+        {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "code query page total",
+            });
+        }
+        if let Some(fallback) = &self.pr9_fallback {
+            fallback
+                .validate()
+                .map_err(|_| ApplicationContractError::Inconsistent {
+                    field: "PR9 fallback subpayload",
+                })?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeOccurrenceRecord {
+    pub file: FileOccurrenceId,
+    pub symbol: Option<SymbolOccurrenceId>,
+    pub chunk: Option<CodeSearchChunkId>,
+    pub path: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExactOccurrenceRecord {
+    pub occurrence: CodeOccurrenceRecord,
+    pub matched_kind: ExactTechnicalTermKindV1,
+    pub matched_literal: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalOccurrenceRecord {
+    pub occurrence: CodeOccurrenceRecord,
+    pub score_micros: u64,
+    pub matched_phrases: Vec<String>,
+    pub matched_terms: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceMetadataRecord {
+    pub file: FileOccurrenceId,
+    pub path: String,
+    pub language: Option<String>,
+    pub indexed_at: Option<UtcMicros>,
+    pub byte_size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExactOccurrenceRequest {
+    pub literal: String,
+    pub kind: Option<ExactTechnicalTermKindV1>,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl ExactOccurrenceRequest {
+    pub fn new(
+        literal: impl Into<String>,
+        kind: Option<ExactTechnicalTermKindV1>,
+        scope: CodeQueryScope,
+        meta: RetrievalRequestMeta,
+    ) -> Result<Self, ApplicationContractError> {
+        let request = Self {
+            literal: literal.into(),
+            kind,
+            scope,
+            meta,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+#[derive(Debug)]
+pub struct PhraseSearchRequest {
+    pub query: EphemeralSanitizedQueryViewV1,
+    pub phrases: Vec<String>,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl PhraseSearchRequest {
+    pub fn new(
+        query: EphemeralSanitizedQueryViewV1,
+        phrases: Vec<String>,
+        scope: CodeQueryScope,
+        meta: RetrievalRequestMeta,
+    ) -> Result<Self, ApplicationContractError> {
+        let request = Self {
+            query,
+            phrases,
+            scope,
+            meta,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+#[derive(Debug)]
+pub struct CodeSymbolSearchRequest {
+    pub query: EphemeralSanitizedQueryViewV1,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QualifiedNameRequest {
+    pub qualified_name: String,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeSignatureRequest {
+    pub returns: Option<String>,
+    pub params: Vec<String>,
+    pub is_async: Option<bool>,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeImplementationsRequest {
+    pub selector: ImplementationSelector,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeHierarchyRequest {
+    pub node_id: String,
+    pub maximum_depth: u32,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeRelationRequest {
+    pub node_id: String,
+    pub maximum_depth: u32,
+    pub resolve_trait_dispatch: bool,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeImpactRequest {
+    pub node_id: String,
+    pub maximum_depth: u32,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleApiRequest {
+    pub path: String,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceMetadataRequest {
+    pub files: Vec<FileOccurrenceId>,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl SourceMetadataRequest {
+    pub fn new(
+        files: Vec<FileOccurrenceId>,
+        scope: CodeQueryScope,
+        meta: RetrievalRequestMeta,
+    ) -> Result<Self, ApplicationContractError> {
+        let request = Self { files, scope, meta };
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+pub(super) trait ValidatedCodeQueryRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError>;
+}
+
+impl ValidatedCodeQueryRequest for ExactOccurrenceRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_query(&self.literal, "exact occurrence literal")?;
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for PhraseSearchRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_query(self.query.as_str(), "phrase search query")?;
+        validate_filters(&self.phrases, "phrase search phrases")?;
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for CodeSymbolSearchRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_query(self.query.as_str(), "code symbol query")?;
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for QualifiedNameRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_query(&self.qualified_name, "qualified name")?;
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for CodeSignatureRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        if self.returns.is_none() && self.params.is_empty() && self.is_async.is_none() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "code signature filters",
+            });
+        }
+        if let Some(returns) = &self.returns {
+            validate_query(returns, "code signature return filter")?;
+        }
+        if !self.params.is_empty() {
+            validate_filters(&self.params, "code signature parameter filters")?;
+        }
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for CodeImplementationsRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        match &self.selector {
+            ImplementationSelector::Trait { name } => {
+                validate_query(name, "implementation trait name")?
+            }
+            ImplementationSelector::Method { name } => {
+                validate_query(name, "implementation method name")?
+            }
+        }
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for CodeHierarchyRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_node_depth(&self.node_id, self.maximum_depth)?;
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for CodeRelationRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_node_depth(&self.node_id, self.maximum_depth)?;
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for CodeImpactRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_node_depth(&self.node_id, self.maximum_depth)?;
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for ModuleApiRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_query(&self.path, "module API path")?;
+        if self.path.starts_with('/') || self.path.split('/').any(|part| part == "..") {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "module API path",
+            });
+        }
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for SourceMetadataRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        if self.files.is_empty() || self.files.len() > MAX_SOURCE_METADATA_FILES {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "source metadata files",
+            });
+        }
+        for file in &self.files {
+            file.validate()?;
+        }
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+fn validate_scope_meta(
+    scope: &CodeQueryScope,
+    meta: &RetrievalRequestMeta,
+) -> Result<(), ApplicationContractError> {
+    scope.validate()?;
+    if meta.temporal != tracedecay_domain::TemporalModeV1::Current {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "code query temporal mode",
+        });
+    }
+    super::PageRequest::new(meta.page.page_size, meta.page.cursor.clone()).map(|_| ())
+}
+
+fn validate_filters(
+    filters: &[String],
+    field: &'static str,
+) -> Result<(), ApplicationContractError> {
+    if filters.is_empty() || filters.len() > MAX_CALLABLE_CODE_FILTERS {
+        return Err(ApplicationContractError::InvalidRange { field });
+    }
+    for filter in filters {
+        validate_query(filter, field)?;
+    }
+    Ok(())
+}
+
+fn validate_node_depth(node_id: &str, maximum_depth: u32) -> Result<(), ApplicationContractError> {
+    validate_query(node_id, "code graph node id")?;
+    if maximum_depth == 0 || maximum_depth > MAX_CALLABLE_CODE_DEPTH {
+        return Err(ApplicationContractError::InvalidRange {
+            field: "code graph maximum depth",
+        });
+    }
+    Ok(())
+}
+
+fn validate_query(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
+    validate_text(value, field)?;
+    if value.len() > MAX_CALLABLE_CODE_QUERY_BYTES {
+        return Err(ApplicationContractError::InvalidRange { field });
+    }
+    Ok(())
+}
+
+fn validate_text(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return Err(ApplicationContractError::InvalidIdentifier { field });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CallableCodeOperationKind {
+    ExactOccurrence,
+    PhraseSearch,
+    SymbolSearch,
+    QualifiedName,
+    SignatureSearch,
+    Implementations,
+    TypeHierarchy,
+    Callers,
+    Callees,
+    Impact,
+    ModuleApi,
+    SourceMetadata,
+}
+
+impl CallableCodeOperationKind {
+    pub const ALL: [Self; CALLABLE_CODE_OPERATION_COUNT] = [
+        Self::ExactOccurrence,
+        Self::PhraseSearch,
+        Self::SymbolSearch,
+        Self::QualifiedName,
+        Self::SignatureSearch,
+        Self::Implementations,
+        Self::TypeHierarchy,
+        Self::Callers,
+        Self::Callees,
+        Self::Impact,
+        Self::ModuleApi,
+        Self::SourceMetadata,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactOccurrence => "exact_occurrence",
+            Self::PhraseSearch => "phrase_search",
+            Self::SymbolSearch => "symbol_search",
+            Self::QualifiedName => "qualified_name",
+            Self::SignatureSearch => "signature_search",
+            Self::Implementations => "implementations",
+            Self::TypeHierarchy => "type_hierarchy",
+            Self::Callers => "callers",
+            Self::Callees => "callees",
+            Self::Impact => "impact",
+            Self::ModuleApi => "module_api",
+            Self::SourceMetadata => "source_metadata",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CallableCodeOperations {
+    operations: BTreeMap<CallableCodeOperationKind, ApplicationOperation>,
+}
+
+impl CallableCodeOperations {
+    pub fn new(
+        operations: impl IntoIterator<Item = (CallableCodeOperationKind, ApplicationOperation)>,
+    ) -> Result<Self, ApplicationContractError> {
+        let mut indexed = BTreeMap::new();
+        for (kind, operation) in operations {
+            if indexed.insert(kind, operation).is_some() {
+                return Err(ApplicationContractError::Duplicate {
+                    field: "callable code operation",
+                });
+            }
+        }
+        if CallableCodeOperationKind::ALL
+            .iter()
+            .any(|kind| !indexed.contains_key(kind))
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "callable code operation set",
+            });
+        }
+        Ok(Self {
+            operations: indexed,
+        })
+    }
+
+    pub fn get(&self, kind: CallableCodeOperationKind) -> &ApplicationOperation {
+        self.operations
+            .get(&kind)
+            .expect("validated callable code operation set is complete")
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (CallableCodeOperationKind, &ApplicationOperation)> {
+        CallableCodeOperationKind::ALL
+            .into_iter()
+            .map(|kind| (kind, self.get(kind)))
+    }
+}
