@@ -1,6 +1,6 @@
 //! Private holdout authority storage for locked search-quality evaluation.
 //!
-//! Sensitive label bytes live below the TraceDecay user profile. Public values
+//! Sensitive label bytes live below the `TraceDecay` user profile. Public values
 //! are content-addressed locators and SHA-256 digests. There is no signature,
 //! reveal capability, trust root, attestation, or local anti-forgery keying
 //! for PR7–PR10 holdout/owner acceptance.
@@ -535,7 +535,7 @@ impl HoldoutAuthorityStoreV1 {
         })?;
         line.push(b'\n');
         file.write_all(&line)
-            .and_then(|_| file.sync_all())
+            .and_then(|()| file.sync_all())
             .map_err(|error| map_io("append authority log", error))?;
         set_private_file_permissions(&path)
             .map_err(|error| map_io("chmod authority log", error))?;
