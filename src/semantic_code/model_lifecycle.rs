@@ -98,14 +98,30 @@ impl SemanticModelLifecycleStateV1 {
 
     pub fn artifact_digest(&self) -> &str {
         match self {
-            Self::SelectedNotDownloaded { artifact_digest, .. }
-            | Self::Downloading { artifact_digest, .. }
-            | Self::Verifying { artifact_digest, .. }
-            | Self::Installed { artifact_digest, .. }
-            | Self::Loading { artifact_digest, .. }
-            | Self::Indexing { artifact_digest, .. }
-            | Self::Ready { artifact_digest, .. }
-            | Self::Failed { artifact_digest, .. } => artifact_digest,
+            Self::SelectedNotDownloaded {
+                artifact_digest, ..
+            }
+            | Self::Downloading {
+                artifact_digest, ..
+            }
+            | Self::Verifying {
+                artifact_digest, ..
+            }
+            | Self::Installed {
+                artifact_digest, ..
+            }
+            | Self::Loading {
+                artifact_digest, ..
+            }
+            | Self::Indexing {
+                artifact_digest, ..
+            }
+            | Self::Ready {
+                artifact_digest, ..
+            }
+            | Self::Failed {
+                artifact_digest, ..
+            } => artifact_digest,
         }
     }
 
@@ -116,18 +132,21 @@ impl SemanticModelLifecycleStateV1 {
 
     pub fn remediation(&self) -> SemanticModelRemediationV1 {
         match self {
-            Self::Failed { retryable: true, .. } | Self::SelectedNotDownloaded { .. } => {
-                SemanticModelRemediationV1 {
-                    retry: true,
-                    remove: matches!(self, Self::Failed { .. }),
-                    rollback: false,
-                }
+            Self::Failed {
+                retryable: true, ..
             }
+            | Self::SelectedNotDownloaded { .. } => SemanticModelRemediationV1 {
+                retry: true,
+                remove: matches!(self, Self::Failed { .. }),
+                rollback: false,
+            },
             Self::Installed { .. }
             | Self::Loading { .. }
             | Self::Indexing { .. }
             | Self::Ready { .. }
-            | Self::Failed { retryable: false, .. } => SemanticModelRemediationV1 {
+            | Self::Failed {
+                retryable: false, ..
+            } => SemanticModelRemediationV1 {
                 retry: matches!(self, Self::Failed { .. }),
                 remove: true,
                 rollback: true,
@@ -288,7 +307,8 @@ impl SemanticModelLifecycleOwnerV1 {
     ) -> Result<Self, ModelLifecycleErrorV1> {
         catalog.validate()?;
         let root = root.into();
-        fs::create_dir_all(root.join("staging")).map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
+        fs::create_dir_all(root.join("staging"))
+            .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
         fs::create_dir_all(root.join("installs"))
             .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
         let durable = load_or_default_durable(&root, &catalog)?;
@@ -370,11 +390,12 @@ impl SemanticModelLifecycleOwnerV1 {
                         install_path: path,
                     });
                 } else {
-                    guard.durable.state = Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded {
-                        model_id: model.model_id.clone(),
-                        revision: model.source.revision.clone(),
-                        artifact_digest: digest,
-                    });
+                    guard.durable.state =
+                        Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded {
+                            model_id: model.model_id.clone(),
+                            revision: model.source.revision.clone(),
+                            artifact_digest: digest,
+                        });
                 }
             }
         }
@@ -595,11 +616,11 @@ impl SemanticModelLifecycleOwnerV1 {
     }
 
     fn spawn_acquire(&self) -> bool {
-        let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());
-        if worker
-            .as_ref()
-            .is_some_and(|handle| !handle.is_finished())
-        {
+        let mut worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if worker.as_ref().is_some_and(|handle| !handle.is_finished()) {
             return false;
         }
         self.cancel.store(false, Ordering::SeqCst);
@@ -618,14 +639,8 @@ impl SemanticModelLifecycleOwnerV1 {
         let handle = thread::Builder::new()
             .name("tracedecay-fastembed-acquire".to_owned())
             .spawn(move || {
-                let _ = run_acquisition(
-                    &root,
-                    &catalog,
-                    source.as_ref(),
-                    &model_id,
-                    &cancel,
-                    &inner,
-                );
+                let _ =
+                    run_acquisition(&root, &catalog, source.as_ref(), &model_id, &cancel, &inner);
             });
         match handle {
             Ok(join) => {
@@ -692,25 +707,11 @@ fn run_acquisition(
     let mut bytes_received = 0_u64;
     for member in model.members.values() {
         if cancel.load(Ordering::SeqCst) {
-            return fail_state(
-                root,
-                inner,
-                &model,
-                &digest,
-                "acquisition cancelled",
-                true,
-            );
+            return fail_state(root, inner, &model, &digest, "acquisition cancelled", true);
         }
         let destination = staging.join(&member.path);
         if let Err(error) = source.fetch_member(&model, &member.upstream_path, &destination) {
-            return fail_state(
-                root,
-                inner,
-                &model,
-                &digest,
-                &error.to_string(),
-                true,
-            );
+            return fail_state(root, inner, &model, &digest, &error.to_string(), true);
         }
         bytes_received = bytes_received.saturating_add(member.length);
         let mut guard = inner.lock().unwrap_or_else(|error| error.into_inner());
@@ -1191,8 +1192,7 @@ mod tests {
             root: fixture.path().to_path_buf(),
             calls: AtomicUsize::new(0),
         });
-        let owner =
-            SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap();
         owner.select_model(Some(&model_id), true).unwrap();
         owner.acquire_blocking_for_tests().unwrap();
         owner.mark_ready().unwrap();

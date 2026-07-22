@@ -160,8 +160,7 @@ fn jina_embeddings_v2_base_code() -> CatalogedFastEmbedModelV1 {
             path: "model.onnx".to_owned(),
             upstream_path: "onnx/model.onnx".to_owned(),
             length: 641_517_466,
-            sha256: "63363fc178428b74620c6f3780cbc7191883fa5c7f84c0945c45eb5c4256733b"
-                .to_owned(),
+            sha256: "63363fc178428b74620c6f3780cbc7191883fa5c7f84c0945c45eb5c4256733b".to_owned(),
         },
     );
     members.insert(
@@ -170,8 +169,7 @@ fn jina_embeddings_v2_base_code() -> CatalogedFastEmbedModelV1 {
             path: "tokenizer.json".to_owned(),
             upstream_path: "tokenizer.json".to_owned(),
             length: 2_561_316,
-            sha256: "b01c78a902aa4facb2f47f95449f48e2f7bbfea5d2472ee2f6ce92323c6f86e5"
-                .to_owned(),
+            sha256: "b01c78a902aa4facb2f47f95449f48e2f7bbfea5d2472ee2f6ce92323c6f86e5".to_owned(),
         },
     );
     members.insert(
@@ -180,8 +178,7 @@ fn jina_embeddings_v2_base_code() -> CatalogedFastEmbedModelV1 {
             path: "config.json".to_owned(),
             upstream_path: "config.json".to_owned(),
             length: 1_216,
-            sha256: "e426aa684c7f9a95c5f020aa855faf93a24f065f5fad0c9e17b124670cabdea6"
-                .to_owned(),
+            sha256: "e426aa684c7f9a95c5f020aa855faf93a24f065f5fad0c9e17b124670cabdea6".to_owned(),
         },
     );
     members.insert(
@@ -190,8 +187,7 @@ fn jina_embeddings_v2_base_code() -> CatalogedFastEmbedModelV1 {
             path: "special_tokens_map.json".to_owned(),
             upstream_path: "special_tokens_map.json".to_owned(),
             length: 280,
-            sha256: "06e405a36dfe4b9604f484f6a1e619af1a7f7d09e34a8555eb0b77b66318067f"
-                .to_owned(),
+            sha256: "06e405a36dfe4b9604f484f6a1e619af1a7f7d09e34a8555eb0b77b66318067f".to_owned(),
         },
     );
     members.insert(
@@ -200,8 +196,7 @@ fn jina_embeddings_v2_base_code() -> CatalogedFastEmbedModelV1 {
             path: "tokenizer_config.json".to_owned(),
             upstream_path: "tokenizer_config.json".to_owned(),
             length: 493,
-            sha256: "f477aeb15ff9f78d3c1ddf2361d2b0b8b20cf55220f839f29a37f3a18efddd89"
-                .to_owned(),
+            sha256: "f477aeb15ff9f78d3c1ddf2361d2b0b8b20cf55220f839f29a37f3a18efddd89".to_owned(),
         },
     );
     CatalogedFastEmbedModelV1 {

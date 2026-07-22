@@ -78,13 +78,11 @@ impl CodeGraphEvidenceAdapterV1 {
             let Some(symbol) = chunk.anchor.symbol_occurrence_id.clone() else {
                 continue;
             };
-            symbols
-                .entry(symbol)
-                .or_insert_with(|| SymbolBindingV1 {
-                    file: chunk.anchor.file_occurrence_id.clone(),
-                    chunk: Some(chunk.id.clone()),
-                    language_descriptor_revision: chunk.language_descriptor_revision.clone(),
-                });
+            symbols.entry(symbol).or_insert_with(|| SymbolBindingV1 {
+                file: chunk.anchor.file_occurrence_id.clone(),
+                chunk: Some(chunk.id.clone()),
+                language_descriptor_revision: chunk.language_descriptor_revision.clone(),
+            });
         }
 
         let mut adjacency: BTreeMap<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>> =
@@ -152,8 +150,7 @@ impl CodeGraphEvidenceAdapterV1 {
         &self,
         request: &GraphLaneRequest,
     ) -> Result<RetrieverBatch<GraphLaneEvidence>, RetrievalPortError> {
-        let edge_kinds: BTreeSet<RelationEdgeKindV1> =
-            request.edge_kinds.iter().copied().collect();
+        let edge_kinds: BTreeSet<RelationEdgeKindV1> = request.edge_kinds.iter().copied().collect();
         let mut pairs = Vec::new();
         let mut examined = 0u64;
         for seed in &request.seed_anchors {
@@ -251,15 +248,11 @@ impl CodeGraphEvidenceAdapterV1 {
         }
 
         pairs.sort_by(|left, right| {
-            right
-                .0
-                .raw_score
-                .cmp(&left.0.raw_score)
-                .then_with(|| {
-                    left.0
-                        .source_occurrence_id
-                        .cmp(&right.0.source_occurrence_id)
-                })
+            right.0.raw_score.cmp(&left.0.raw_score).then_with(|| {
+                left.0
+                    .source_occurrence_id
+                    .cmp(&right.0.source_occurrence_id)
+            })
         });
 
         let mut candidates = Vec::with_capacity(pairs.len());
