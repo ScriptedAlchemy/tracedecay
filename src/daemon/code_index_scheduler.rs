@@ -22,12 +22,12 @@ use notify_debouncer_full::{
 use serde::Serialize;
 use thiserror::Error;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ContentDigest, FileOccurrenceId, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1,
+    ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest, ExactAdmissionRuleRevision,
+    FileOccurrenceId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
     ProjectionOutcomeV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros, WorktreeId,
-    canonical_sha256,
+    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1,
+    UtcMicros, WorktreeId, canonical_sha256,
 };
 use tree_sitter::{InputEdit, Parser, Point, Range, Tree};
 
@@ -48,6 +48,15 @@ use crate::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
             build_batch_receipt,
         },
+    },
+    query::retrieval::{
+        exact::{CentralExactAdmissionAuthorityV1, ExactLane},
+        graph::{CodeGraphEvidenceAdapterV1, GraphLane, production_code_index_freshness},
+        lexical::{
+            CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1,
+            CodeLexicalProjectionMetadataV1, LexicalLane,
+        },
+        ports::RetrievalPortError,
     },
 };
 
@@ -305,6 +314,19 @@ pub(super) struct LatestCompleteCodeIndexV1 {
     generation: CodeIndexPublishedGenerationV1,
 }
 
+/// Production exact/lexical/graph owners bound to one immutable published
+/// generation. Lanes remain independently disableable by omitting a field from
+/// composition; this bundle only proves the daemon can mint all three from the
+/// same sealed generation evidence.
+pub(super) struct ProductionCodeIndexQueryOwnersV1 {
+    pub exact: ExactLane<
+        CentralExactAdmissionAuthorityV1,
+        CodeExactProjectionAdapterV1<CentralExactAdmissionAuthorityV1>,
+    >,
+    pub lexical: LexicalLane<CodeLexicalProjectionAdapterV1>,
+    pub graph: GraphLane<CodeGraphEvidenceAdapterV1>,
+}
+
 impl LatestCompleteCodeIndexV1 {
     pub fn exact(
         &self,
@@ -325,6 +347,54 @@ impl LatestCompleteCodeIndexV1 {
         &self,
     ) -> &[crate::code_index::chunks::CodeIndexEdgeAbstentionV1] {
         self.generation.edge_abstentions()
+    }
+
+    /// Connect Plan 15 exact/lexical/graph production owners to the latest
+    /// complete published generation.
+    pub fn production_query_owners(
+        &self,
+    ) -> Result<ProductionCodeIndexQueryOwnersV1, RetrievalPortError> {
+        let generation_id = self.generation.manifest().generation_id.clone();
+        let freshness = production_code_index_freshness(
+            self.generation.manifest().sealed_at,
+            ComponentRevision::new("policy.daemon.v1")
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+        )?;
+        let metadata = CodeLexicalProjectionMetadataV1 {
+            generation: generation_id.clone(),
+            repository_id: Some(self.generation.snapshot().repository.clone()),
+            freshness: freshness.clone(),
+            exact_retriever_revision: ComponentRevision::new("retriever.exact.daemon.v1")
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            lexical_retriever_revision: ComponentRevision::new("retriever.lexical.daemon.v1")
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            exact_score_domain: ScoreDomainId::new("score.exact.daemon.v1")
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+        };
+        let admitted = self
+            .generation
+            .admitted_chunks()
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        let lexical_projection =
+            CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)?;
+        let authority = CentralExactAdmissionAuthorityV1::new(
+            ExactAdmissionRuleRevision::new("exact-rules.daemon.v1")
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+        );
+        let exact = ExactLane::new(authority.clone(), lexical_projection.exact_adapter(authority));
+        let lexical = LexicalLane::new(lexical_projection);
+        let graph = GraphLane::new(CodeGraphEvidenceAdapterV1::new(
+            generation_id,
+            Some(self.generation.snapshot().repository.clone()),
+            freshness,
+            self.generation.edges(),
+            self.generation.chunks().chunks(),
+        )?);
+        Ok(ProductionCodeIndexQueryOwnersV1 {
+            exact,
+            lexical,
+            graph,
+        })
     }
 }
 
@@ -804,6 +874,37 @@ impl CodeIndexSchedulerRegistryV1 {
         );
         wake.notify_one();
         Ok(true)
+    }
+
+    pub async fn notify_path(&self, project_root: &Path, path: PathBuf) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(&project_root) else {
+            return false;
+        };
+        worktree
+            .scheduler
+            .lock()
+            .expect("code-index scheduler lock")
+            .notify_path(path);
+        true
+    }
+
+    pub async fn latest_generation_id(
+        &self,
+        project_root: &Path,
+    ) -> Option<CodeGenerationId> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root)?;
+        worktree
+            .scheduler
+            .lock()
+            .ok()?
+            .latest_complete()
+            .map(|latest| latest.generation.manifest().generation_id.clone())
     }
 
     pub async fn shutdown(&self) {
