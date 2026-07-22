@@ -4,6 +4,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
+use tracedecay_domain::{
+    SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1,
+    SessionTemporalCoverageRequestV1, TemporalModeV1,
+};
 
 use super::{
     SessionRefreshCommand, SessionRefreshCoverageView, SessionRefreshFrontierView,
@@ -54,6 +58,17 @@ fn refresh_args(scope: &str, action: &str) -> Value {
 
 fn response_text(value: &Value) -> &str {
     value["content"][0]["text"].as_str().unwrap()
+}
+
+fn stale_source_coverage() -> SessionSourceCoverageV1 {
+    SessionSourceCoverageV1::from_frontiers(
+        SessionSourceIdV1::new("cursor").unwrap(),
+        SessionSourceFrontierV1::new(4),
+        SessionSourceFrontierV1::new(2),
+        SessionSourceFrontierV1::new(4),
+        SessionTemporalCoverageRequestV1::new(TemporalModeV1::Current),
+    )
+    .unwrap()
 }
 
 fn assert_closed_objects(schema: &Value) {
@@ -348,6 +363,7 @@ async fn status_progress_is_stable_in_json_and_markdown() {
                 unknown: 0,
                 redacted: 0,
             },
+            source_coverage: vec![stale_source_coverage()],
             committed_batches: 2,
             committed_records: 4,
             updated_at: 123,
@@ -364,6 +380,14 @@ async fn status_progress_is_stable_in_json_and_markdown() {
     assert_eq!(payload["outcome"], "running");
     assert_eq!(payload["progress"]["frontier"]["committed_through"], 2);
     assert_eq!(payload["progress"]["coverage"]["hidden"], 1);
+    assert_eq!(
+        payload["progress"]["source_coverage"][0]["source_id"],
+        "cursor"
+    );
+    assert_eq!(
+        payload["progress"]["source_coverage"][0]["reason"]["kind"],
+        "projection_behind_source"
+    );
 
     let mut markdown_args = args;
     markdown_args.as_object_mut().unwrap().remove("format");
@@ -402,6 +426,7 @@ async fn terminal_receipt_preserves_failure_and_coverage_details() {
                 unknown: 1,
                 redacted: 0,
             },
+            source_coverage: vec![stale_source_coverage()],
             state: "failed".to_string(),
             failure_code: Some("projector_failed".to_string()),
             terminal_at: 456,
@@ -419,6 +444,10 @@ async fn terminal_receipt_preserves_failure_and_coverage_details() {
     assert_eq!(payload["receipt"]["state"], "failed");
     assert_eq!(payload["receipt"]["failure_code"], "projector_failed");
     assert_eq!(payload["receipt"]["coverage"]["unknown"], 1);
+    assert_eq!(
+        payload["receipt"]["source_coverage"][0]["committed_frontier"],
+        2
+    );
     assert_eq!(payload["error"]["code"], "refresh_failed");
     assert_eq!(result.semantic_error(), Some(true));
 }
@@ -450,6 +479,7 @@ async fn busy_complete_and_cancelled_keep_typed_semantics() {
             unknown: 0,
             redacted: 0,
         },
+        source_coverage: Vec::new(),
         state: "complete".to_string(),
         failure_code: None,
         terminal_at: 456,

@@ -2,8 +2,10 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    RetrievalGrainV1, SessionId, SessionRefreshOperationIdV1, TemporalCoverageCountsV1,
-    TemporalModeV1, UtcMicros,
+    RetrievalGrainV1, SessionId, SessionRefreshKeyV1, SessionRefreshOperationIdV1,
+    SessionRefreshSourceTargetV1, SessionSourceCoverageReceiptV1, SessionSourceCoverageV1,
+    SessionSourceFrontierV1, SessionSourceIdV1, SessionTemporalCoverageRequestV1,
+    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
@@ -258,10 +260,39 @@ where
             Err(outcome) => return outcome,
         };
         let digests = refresh_digests(context, &target, &grant, &self.configuration);
+        let source_id = match SessionSourceIdV1::new(format!(
+            "{}:{}",
+            target.session_id().as_str(),
+            target.source_scope().unwrap_or("all")
+        )) {
+            Ok(source_id) => source_id,
+            Err(_) => return SessionRefreshOutcome::Unavailable,
+        };
+        let refresh_key = match SessionRefreshKeyV1::new(
+            grant.scope().identity().root_id().as_str(),
+            target.session_id().clone(),
+            vec![match SessionRefreshSourceTargetV1::new(
+                source_id,
+                SessionSourceFrontierV1::new(target.frozen_frontier().observed_through()),
+                SessionSourceFrontierV1::new(target.frozen_frontier().observed_through()),
+            ) {
+                Ok(source) => source,
+                Err(_) => return SessionRefreshOutcome::Unavailable,
+            }],
+            self.configuration.projector_version(),
+            format!("sha256:{}", hex::encode(digests.join.as_bytes())),
+        ) {
+            Ok(refresh_key) => refresh_key,
+            Err(_) => return SessionRefreshOutcome::Unavailable,
+        };
         let request = SessionRefreshBeginOrJoinRequestV1::new(
             target.session_id().clone(),
             target.frozen_frontier(),
-        );
+        )
+        .with_refresh_key(refresh_key)
+        .with_coverage_request(SessionTemporalCoverageRequestV1::new(
+            target.temporal_mode(),
+        ));
         let receipt = match await_with_request_controls(
             context,
             self.store.begin_or_join_session_refresh(request),
@@ -371,6 +402,15 @@ where
             frontier,
             coverage,
         );
+        let request = match progress
+            .as_ref()
+            .and_then(SessionRefreshProgressV1::source_coverage)
+            .cloned()
+            .or_else(|| source_coverage_for_target(&handle.target, frontier))
+        {
+            Some(source_coverage) => request.with_source_coverage(source_coverage),
+            None => request,
+        };
         match await_with_request_controls(context, self.store.cancel_session_refresh(request)).await
         {
             Ok(Ok(receipt)) => {
@@ -519,6 +559,27 @@ const fn empty_coverage() -> TemporalCoverageCountsV1 {
         unknown: 0,
         redacted: 0,
     }
+}
+
+fn source_coverage_for_target(
+    target: &SessionRefreshTarget,
+    frontier: SessionRefreshFrontierV1,
+) -> Option<SessionSourceCoverageReceiptV1> {
+    let request = SessionTemporalCoverageRequestV1::new(target.temporal_mode());
+    let source = SessionSourceCoverageV1::from_frontiers(
+        SessionSourceIdV1::new(format!(
+            "{}:{}",
+            target.session_id().as_str(),
+            target.source_scope().unwrap_or("all")
+        ))
+        .ok()?,
+        SessionSourceFrontierV1::new(frontier.observed_through()),
+        SessionSourceFrontierV1::new(frontier.committed_through()),
+        SessionSourceFrontierV1::new(target.frozen_frontier().observed_through()),
+        request.clone(),
+    )
+    .ok()?;
+    SessionSourceCoverageReceiptV1::new(request, vec![source]).ok()
 }
 
 fn refresh_digests(

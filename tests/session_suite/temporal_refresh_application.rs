@@ -166,10 +166,18 @@ fn frontier(observed: u64, committed: u64) -> SessionRefreshFrontierV1 {
 }
 
 fn target(session: &str, observed: u64) -> SessionRefreshTarget {
+    target_with_mode(session, observed, TemporalModeV1::Current)
+}
+
+fn target_with_mode(
+    session: &str,
+    observed: u64,
+    temporal_mode: TemporalModeV1,
+) -> SessionRefreshTarget {
     SessionRefreshTarget::new(
         SessionId::new(session).unwrap(),
         Some("cursor".to_owned()),
-        TemporalModeV1::Current,
+        temporal_mode,
         RetrievalGrainV1::LogicalMessage,
         frontier(observed, 0),
     )
@@ -659,6 +667,57 @@ async fn cancel_before_first_progress_returns_durable_zero_coverage_receipt() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn application_preserves_each_temporal_mode_in_terminal_source_coverage() {
+    for (suffix, mode) in [
+        ("current", TemporalModeV1::Current),
+        (
+            "as-of",
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(17),
+            },
+        ),
+        ("evolution", TemporalModeV1::Evolution),
+        ("forensic", TemporalModeV1::Forensic),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let db = open_lcm_db(&temp).await;
+        let service = SessionRefreshService::new(
+            AllowAuthorizer,
+            GlobalDbSessionTemporalStore::new(&db),
+            RecordingWake::default(),
+            configuration(),
+        );
+        let context = project_context(
+            "actor.cursor",
+            &format!("request.refresh.mode.{suffix}"),
+            "profile.primary",
+            "project.tracedecay",
+            "root.project",
+        );
+        let accepted = started(
+            service
+                .begin_or_join(
+                    &context,
+                    target_with_mode(&format!("session.refresh.mode.{suffix}"), 4, mode),
+                )
+                .await,
+        );
+        let receipt = match service.cancel(&context, &accepted).await {
+            SessionRefreshOutcome::Cancelled(receipt) => receipt,
+            other => panic!("expected durable cancellation, got {other:?}"),
+        };
+        assert_eq!(
+            receipt
+                .source_coverage()
+                .expect("source-aware terminal coverage")
+                .request()
+                .mode(),
+            mode
+        );
+    }
 }
 
 #[tokio::test]

@@ -71,6 +71,78 @@ pub(super) const SCOPE_CANDIDATE_QUERY: &str = "
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?10";
 
+pub(super) const ANCHOR_CANDIDATE_QUERY: &str = "
+    SELECT stable_id, anchor_id, knowledge_at, logical_message, turn_id, session_id,
+           evidence_role, provider
+    FROM (
+        SELECT o.occurrence_id AS stable_id, o.retrieval_anchor_id AS anchor_id,
+               o.knowledge_at AS knowledge_at, o.message_id AS logical_message,
+               o.turn_id AS turn_id, o.session_id AS session_id, o.role AS evidence_role,
+               COALESCE(json_extract(
+                   provider_observation.observation_json, '$.identity.source.provider'
+               ), 'claude') AS provider
+        FROM session_occurrences AS o
+        JOIN observations AS provider_observation
+          ON provider_observation.observation_id = o.source_observation_id
+        WHERE o.session_id = ?1 AND o.generation = ?2
+          AND (?3 IS NULL OR COALESCE(json_extract(
+              provider_observation.observation_json, '$.identity.source.provider'
+          ), 'claude') = ?3)
+          AND o.retrieval_anchor_id = ?4
+        UNION ALL
+        SELECT n.summary_id, n.summary_anchor_id, n.created_at, NULL, NULL, n.session_id,
+               'summary', json_extract(n.publication_json, '$.provider')
+        FROM session_summary_nodes AS n
+        WHERE n.session_id = ?1
+          AND (?3 IS NULL OR json_extract(n.publication_json, '$.provider') = ?3)
+          AND n.summary_anchor_id = ?4
+    )
+    WHERE knowledge_at < ?5 OR (knowledge_at = ?5 AND stable_id > ?6)
+    ORDER BY knowledge_at DESC, stable_id
+    LIMIT ?7";
+
+pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = "
+    SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
+           o.message_id, o.turn_id, o.session_id, o.role, authority_session.provider
+    FROM session_temporal_generations AS frozen
+    JOIN session_occurrences AS o
+      ON o.session_id = frozen.session_id
+     AND o.generation = frozen.generation
+    JOIN observations AS provider_observation
+      ON provider_observation.observation_id = o.source_observation_id
+    JOIN retrieval_anchors AS authority_anchor
+      ON authority_anchor.anchor_id = o.retrieval_anchor_id
+    JOIN sessions AS authority_session
+      ON authority_session.session_id = o.session_id
+     AND authority_session.provider = COALESCE(json_extract(
+         provider_observation.observation_json, '$.identity.source.provider'
+     ), 'claude')
+     AND authority_session.project_key = ?1
+    WHERE frozen.state = 'active'
+      AND (?2 IS NULL OR authority_session.provider = ?2)
+      AND o.retrieval_anchor_id = ?3
+      AND (
+          (authority_session.project_key = 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+          OR
+          (authority_session.project_key <> 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+           AND json_extract(authority_anchor.owner_json, '$.project_id')
+               = authority_session.project_key)
+      )
+      AND (
+          o.knowledge_at < ?4
+          OR (
+              o.knowledge_at = ?4
+              AND (
+                  o.session_id > ?5
+                  OR (o.session_id = ?5 AND o.occurrence_id > ?6)
+              )
+          )
+      )
+    ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
+    LIMIT ?7";
+
 pub(super) const OCCURRENCE_FTS_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,

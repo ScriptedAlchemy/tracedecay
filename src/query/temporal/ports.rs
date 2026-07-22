@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
-    LogicalCopyRecordV1, RetrievalGrainV1, SessionId, SessionSummaryRecordV1, SignedCursorKeyRefV1,
-    TemporalModeV1,
+    LogicalCopyRecordV1, RetrievalGrainV1, SessionContractError, SessionId,
+    SessionSourceCoverageReasonV1, SessionSourceCoverageReceiptV1, SessionSourceCoverageStateV1,
+    SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1, SessionSummaryRecordV1,
+    SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1, TemporalModeV1,
 };
 use zeroize::Zeroizing;
 
@@ -814,6 +816,80 @@ impl TemporalParticipantManifest {
     pub fn epoch_digest(&self) -> &str {
         &self.epoch_digest
     }
+
+    pub fn source_coverage(
+        &self,
+        mode: TemporalModeV1,
+    ) -> Result<SessionSourceCoverageReceiptV1, SessionContractError> {
+        let request = SessionTemporalCoverageRequestV1::new(mode);
+        let sources = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let source_id = SessionSourceIdV1::new(format!(
+                    "{}:{}",
+                    entry.session_id.as_str(),
+                    entry.source_id
+                ))?;
+                let observed = SessionSourceFrontierV1::new(entry.source_watermark);
+                let committed = SessionSourceFrontierV1::new(entry.projection_watermark);
+                if entry.access == TemporalSourceAccess::Authorized {
+                    return SessionSourceCoverageV1::new(
+                        source_id,
+                        observed,
+                        committed,
+                        observed,
+                        request.clone(),
+                        Vec::new(),
+                        Vec::new(),
+                        if committed == observed {
+                            SessionSourceCoverageStateV1::Fresh
+                        } else {
+                            SessionSourceCoverageStateV1::Stale
+                        },
+                        if committed == observed {
+                            SessionSourceCoverageReasonV1::CaughtUp
+                        } else {
+                            SessionSourceCoverageReasonV1::ProjectionBehindSource {
+                                lag: committed.lag_from(observed),
+                            }
+                        },
+                    );
+                }
+                let (state, reason) = match entry.access {
+                    TemporalSourceAccess::Locked => (
+                        SessionSourceCoverageStateV1::Locked,
+                        SessionSourceCoverageReasonV1::Locked,
+                    ),
+                    TemporalSourceAccess::RetentionWithheld | TemporalSourceAccess::Deleted => (
+                        SessionSourceCoverageStateV1::RetentionWithheld,
+                        SessionSourceCoverageReasonV1::RetentionWithheld,
+                    ),
+                    TemporalSourceAccess::Redacted => (
+                        SessionSourceCoverageStateV1::Redacted,
+                        SessionSourceCoverageReasonV1::Redacted,
+                    ),
+                    TemporalSourceAccess::Unavailable | TemporalSourceAccess::Unauthorized => (
+                        SessionSourceCoverageStateV1::Unavailable,
+                        SessionSourceCoverageReasonV1::Unavailable,
+                    ),
+                    TemporalSourceAccess::Authorized => unreachable!(),
+                };
+                SessionSourceCoverageV1::new(
+                    source_id,
+                    observed,
+                    committed,
+                    observed,
+                    request.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                    state,
+                    reason,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        SessionSourceCoverageReceiptV1::new(request, sources)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1020,6 +1096,10 @@ impl TemporalExecutionSnapshot {
 
     pub fn participant_manifest(&self) -> &TemporalParticipantManifest {
         &self.participants
+    }
+
+    pub fn source_coverage(&self) -> Result<SessionSourceCoverageReceiptV1, SessionContractError> {
+        self.participants.source_coverage(self.temporal_mode())
     }
 
     pub const fn has_authoritative_participant_manifest(&self) -> bool {
@@ -1716,6 +1796,7 @@ impl MeasuredTemporalValue for RankingCandidate {
     fn measured_encoded_bytes(&self) -> Result<usize, TemporalPortError> {
         let channel = match self.channel {
             super::candidates::CandidateChannel::Scope => "scope",
+            super::candidates::CandidateChannel::Anchor => "anchor",
             super::candidates::CandidateChannel::ExactMessage => "exact_message",
             super::candidates::CandidateChannel::Phrase => "phrase",
             super::candidates::CandidateChannel::Entity => "entity",
@@ -3915,5 +3996,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn participant_manifest_reports_mixed_source_freshness_from_real_frontiers() {
+        let configuration =
+            BindingDigest::new("configuration_digest", digest('3')).expect("digest");
+        let authorization =
+            BindingDigest::new("authorization_digest", digest('4')).expect("digest");
+        let participant = |source: &str, source_watermark, projection_watermark| {
+            TemporalParticipantGeneration::new(
+                SessionId::new(format!("session.{source}")).unwrap(),
+                source,
+                TemporalWatermarks {
+                    generation: 1,
+                    source: source_watermark,
+                    projection: projection_watermark,
+                    index: projection_watermark,
+                    summary: 0,
+                },
+                projection_watermark,
+                &configuration,
+                &authorization,
+                TemporalSourceAccess::Authorized,
+            )
+            .unwrap()
+        };
+        let manifest = TemporalParticipantManifest::new(vec![
+            participant("cursor", 10, 10),
+            participant("claude", 10, 7),
+        ])
+        .unwrap();
+
+        let receipt = manifest
+            .source_coverage(TemporalModeV1::Current)
+            .expect("source coverage");
+        assert_eq!(receipt.sources().len(), 2);
+        assert_eq!(
+            receipt.aggregate_state(),
+            tracedecay_domain::SessionSourceCoverageAggregateStateV1::Partial
+        );
+        assert_eq!(receipt.max_frontier_lag(), 3);
     }
 }

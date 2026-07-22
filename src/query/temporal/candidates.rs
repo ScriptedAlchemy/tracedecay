@@ -1,8 +1,11 @@
 use std::collections::BTreeSet;
 
+use tracedecay_domain::RetrievalAnchorId;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CandidateChannel {
     Scope,
+    Anchor,
     ExactMessage,
     Phrase,
     Entity,
@@ -45,6 +48,16 @@ pub fn plan_scope_candidates() -> CandidatePlan {
             channel: CandidateChannel::Scope,
             value: String::new(),
             exact: false,
+        }],
+    }
+}
+
+pub fn plan_anchor(anchor_id: &RetrievalAnchorId) -> CandidatePlan {
+    CandidatePlan {
+        clauses: vec![CandidateClause {
+            channel: CandidateChannel::Anchor,
+            value: anchor_id.to_string(),
+            exact: true,
         }],
     }
 }
@@ -288,6 +301,16 @@ mod tests {
     #[test]
     fn empty_queries_produce_no_candidates() {
         assert!(plan_candidates(" \t\n").clauses().is_empty());
+    }
+
+    #[test]
+    fn direct_anchor_plan_is_exact_and_singleton() {
+        let anchor = RetrievalAnchorId::new("anchor.direct").expect("anchor");
+        let plan = plan_anchor(&anchor);
+
+        assert_eq!(plan.clauses().len(), 1);
+        assert!(plan.contains(CandidateChannel::Anchor, "anchor.direct"));
+        assert!(plan.clauses()[0].exact);
     }
 
     #[test]

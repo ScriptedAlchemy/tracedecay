@@ -1,4 +1,6 @@
+use std::collections::BTreeSet;
 use std::fs;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -9,10 +11,15 @@ use tracedecay::application::context::{
     ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedSessionIdentity, SessionRootId,
     SessionStoreId,
 };
+use tracedecay::application::evidence_assembly::{
+    EvidenceAssemblyPublicationOutcome, EvidenceAssemblyService, SessionDerivedEvidenceKind,
+    SessionEvidencePolicy,
+};
 use tracedecay::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalService,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalQuery,
+    SessionDataFreshness, SessionRetrievalConfiguration, SessionRetrievalOutcome,
+    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionTemporalQuery,
 };
 use tracedecay::global_db::{GlobalDb, GlobalDbSessionTemporalExecution};
 use tracedecay::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
@@ -38,7 +45,7 @@ use tracedecay_store::{
     SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
 };
 
-use crate::common::{isolated_lcm_db_path, lcm_dag_session, open_lcm_db};
+use crate::common::{initialize_test_database, isolated_lcm_db_path, lcm_dag_session, open_lcm_db};
 
 const SESSION_ID: &str = "codex-golden-session";
 const SAFE_PHRASE: &str = "The billing pipeline regression is fixed.";
@@ -559,6 +566,10 @@ async fn sanitized_capture_stays_private_through_temporal_summary_and_context() 
     seed_cursor_key(&path).await;
     let fixture = admit_checked_in_codex_fixture(&tmp, &db).await;
     let occurrences = fixture.occurrences();
+    let occurrence_anchors = occurrences
+        .iter()
+        .map(|occurrence| occurrence.retrieval_anchor_id.clone())
+        .collect::<BTreeSet<_>>();
     let observation = fixture.message;
     let anchor = fixture.message_anchor;
     let message_id = canonical_message_id(&observation);
@@ -667,9 +678,37 @@ async fn sanitized_capture_stays_private_through_temporal_summary_and_context() 
         .retrieve(&context, temporal_query(SAFE_TERM))
         .await;
     match &authorized {
-        SessionRetrievalOutcome::Complete { items, .. }
-        | SessionRetrievalOutcome::Partial { items, .. } => {
+        SessionRetrievalOutcome::Complete { items, freshness }
+        | SessionRetrievalOutcome::Partial {
+            items, freshness, ..
+        } => {
+            assert_eq!(
+                *freshness,
+                SessionDataFreshness::Fresh,
+                "the production temporal execution path must report its aggregate freshness"
+            );
             assert_eq!(items[0].ranked.len(), 1);
+            let ranked = &items[0].ranked[0];
+            assert!(
+                occurrence_anchors.contains(&ranked.anchor_id),
+                "ranking must retain one exact occurrence anchor from the native fixture"
+            );
+            assert!(
+                !ranked.contributions.is_empty()
+                    && ranked
+                        .contributions
+                        .iter()
+                        .all(|contribution| !contribution.retriever_record_id.is_empty()),
+                "ranking must retain typed retriever contributions"
+            );
+            let assembled = items[0]
+                .context
+                .bundle
+                .records
+                .iter()
+                .find(|record| record.anchor_id == ranked.anchor_id)
+                .expect("context assembly must retain the ranked occurrence anchor");
+            assert_eq!(assembled.grain, RetrievalGrainV1::Occurrence);
             assert!(items[0].context.rendered.contains(SAFE_PHRASE));
         }
         SessionRetrievalOutcome::CompleteZero { freshness } => panic!(
@@ -680,6 +719,59 @@ async fn sanitized_capture_stays_private_through_temporal_summary_and_context() 
             "binding fixture is valid, but downstream production retrieval failed: {other:?}"
         ),
     }
+
+    let (evidence_database, _) = initialize_test_database(&tmp.path().join("evidence-assembly.db"))
+        .await
+        .unwrap();
+    let evidence_service = EvidenceAssemblyService::new(
+        evidence_database,
+        Arc::new(GlobalDb::open_at(&path).await.unwrap()),
+    );
+    let evidence_policy = SessionEvidencePolicy {
+        kind: SessionDerivedEvidenceKind::Span,
+        max_members: 8,
+        algorithm_revision: "session-temporal-native-fixture-v1".to_owned(),
+        adjacency_revision: "session-temporal-source-order-v1".to_owned(),
+    };
+    let published = evidence_service
+        .retrieve_and_publish_session(
+            &context,
+            &authorized_service,
+            temporal_query(SAFE_TERM),
+            evidence_policy.clone(),
+            "privacy.temporal-native-fixture",
+            1,
+            b"temporal-native-fixture-key",
+            b"temporal-native-fixture-request",
+            UtcMicros(1_750_000_002),
+        )
+        .await
+        .unwrap();
+    let published_contribution = match published.as_slice() {
+        [EvidenceAssemblyPublicationOutcome::Published(receipt)] => {
+            receipt.contribution_id().clone()
+        }
+        other => panic!("native-fixture evidence assembly did not publish exactly once: {other:?}"),
+    };
+    let replayed_evidence = evidence_service
+        .retrieve_and_publish_session(
+            &context,
+            &authorized_service,
+            temporal_query(SAFE_TERM),
+            evidence_policy,
+            "privacy.temporal-native-fixture",
+            1,
+            b"temporal-native-fixture-key",
+            b"temporal-native-fixture-request",
+            UtcMicros(1_750_000_002),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replayed_evidence.as_slice(),
+        [EvidenceAssemblyPublicationOutcome::Replayed(receipt)]
+            if receipt.contribution_id() == &published_contribution
+    ));
     assert_no_canary("authorized context", &format!("{authorized:?}"));
 
     let denied_service = SessionRetrievalService::new(

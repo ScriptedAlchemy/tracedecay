@@ -171,6 +171,10 @@ impl HydratedPayload {
     pub(super) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    pub(super) fn into_parts(self) -> (RetrievalAnchorId, Zeroizing<Vec<u8>>) {
+        (self.anchor_id, self.bytes)
+    }
 }
 
 impl fmt::Debug for HydratedPayload {
@@ -197,6 +201,10 @@ impl UnavailableHydration {
 
     pub(super) const fn state(&self) -> HydrationStateV1 {
         self.state
+    }
+
+    pub(super) fn into_parts(self) -> (RetrievalAnchorId, HydrationStateV1) {
+        (self.anchor_id, self.state)
     }
 }
 

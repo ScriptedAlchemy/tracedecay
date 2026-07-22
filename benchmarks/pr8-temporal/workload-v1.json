@@ -4,7 +4,7 @@
   "status": "harness_ready",
   "implementation": {
     "path": "src/sessions/session_temporal_benchmark.rs",
-    "sha256": "4736dbeeca9681ad47932edab3bc8bb46ae78c2840df744995bd39fff2db23a4"
+    "sha256": "5384fdd1bd5bc6fd670e47f6fc52eac1f3fabfc167e689ed643fc4f90610a5f6"
   },
   "runner": {
     "path": "scripts/run-pr8-temporal-benchmark.sh",
@@ -12,7 +12,7 @@
   },
   "profile": {
     "manifest_path": "Cargo.toml",
-    "manifest_sha256": "02416aa5ebd06e553d5540078bfb13ca0a01801bd80db1d6a93e44b7c9cd4e88",
+    "manifest_sha256": "5f72c858733538bc635c9bb3b519a461bcc78c1f9485d4ba6f44db28fc064aa3",
     "cargo_profile": "bench",
     "opt_level": 3,
     "debug": false,
@@ -103,7 +103,7 @@
     },
     {
       "path": "Cargo.toml",
-      "sha256": "02416aa5ebd06e553d5540078bfb13ca0a01801bd80db1d6a93e44b7c9cd4e88"
+      "sha256": "5f72c858733538bc635c9bb3b519a461bcc78c1f9485d4ba6f44db28fc064aa3"
     },
     {
       "path": ".github/workflows/ci.yml",

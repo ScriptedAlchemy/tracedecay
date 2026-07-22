@@ -217,27 +217,12 @@ impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapsh
     }
 }
 
-pub(super) async fn hydrate_authorized_occurrence(
+pub(super) async fn session_message_from_hydrated_bytes(
     read: &GlobalDbReadSnapshot,
-    storage_root: &Path,
     snapshot: &TemporalExecutionSnapshot,
     anchor_id: &RetrievalAnchorId,
+    bytes: &[u8],
 ) -> Result<SessionMessageRecord, HydrationError> {
-    let adapter = GlobalDbTemporalHydrationPort::for_snapshot(read, storage_root);
-    let limits = snapshot.request().limits();
-    let mut bytes = Zeroizing::new(Vec::new());
-    adapter
-        .read_after_recheck(
-            snapshot,
-            anchor_id,
-            limits.hydration_payload_bytes,
-            limits.hydration_chunk_bytes,
-            &mut |chunk| {
-                bytes.extend_from_slice(chunk);
-                Ok(())
-            },
-        )
-        .await?;
     let text = String::from_utf8(bytes.to_vec()).map_err(|_| HydrationError::Unavailable)?;
 
     let generation =

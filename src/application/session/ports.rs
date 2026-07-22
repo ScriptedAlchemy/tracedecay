@@ -3,6 +3,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tracedecay_domain::{RetrievalAnchorId, SessionSourceCoverageReceiptV1};
+
 use crate::application::session::SessionDataFreshness;
 use crate::query::temporal::context::{ContextBudget, VersionedTokenEstimator};
 use crate::query::temporal::ports::{ExecutionLimits, TemporalSnapshotRequest};
@@ -13,6 +15,7 @@ use crate::query::temporal::{TemporalKernelError, TemporalKernelResult};
 pub struct AuthorizedTemporalExecutionRequest {
     snapshot_request: TemporalSnapshotRequest,
     query: String,
+    direct_anchor: Option<RetrievalAnchorId>,
     cursor: Option<String>,
     limit: usize,
     diversity: DiversityLimits,
@@ -38,6 +41,7 @@ impl AuthorizedTemporalExecutionRequest {
         Self {
             snapshot_request,
             query,
+            direct_anchor: None,
             cursor,
             limit,
             diversity,
@@ -54,6 +58,12 @@ impl AuthorizedTemporalExecutionRequest {
 
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    #[must_use]
+    pub(crate) fn with_direct_anchor(mut self, anchor_id: RetrievalAnchorId) -> Self {
+        self.direct_anchor = Some(anchor_id);
+        self
     }
 
     pub fn cursor(&self) -> Option<&str> {
@@ -95,6 +105,7 @@ impl AuthorizedTemporalExecutionRequest {
         crate::query::temporal::TemporalKernelRequest {
             snapshot,
             query: self.query,
+            direct_anchor: self.direct_anchor,
             cursor: self.cursor,
             limit: self.limit,
             diversity: self.diversity,
@@ -126,11 +137,29 @@ impl AuthorizedTemporalExecutionRequest {
 pub struct SessionTemporalExecutionReport {
     result: TemporalKernelResult,
     freshness: SessionDataFreshness,
+    source_coverage: Option<SessionSourceCoverageReceiptV1>,
 }
 
 impl SessionTemporalExecutionReport {
     pub fn new(result: TemporalKernelResult, freshness: SessionDataFreshness) -> Self {
-        Self { result, freshness }
+        let source_coverage = result.snapshot.source_coverage().ok();
+        Self {
+            result,
+            freshness,
+            source_coverage,
+        }
+    }
+
+    pub fn from_source_coverage(
+        result: TemporalKernelResult,
+        source_coverage: SessionSourceCoverageReceiptV1,
+    ) -> Self {
+        let freshness = SessionDataFreshness::from_source_coverage(&source_coverage);
+        Self {
+            result,
+            freshness,
+            source_coverage: Some(source_coverage),
+        }
     }
 
     pub fn result(&self) -> &TemporalKernelResult {
@@ -139,6 +168,10 @@ impl SessionTemporalExecutionReport {
 
     pub const fn freshness(&self) -> SessionDataFreshness {
         self.freshness
+    }
+
+    pub fn source_coverage(&self) -> Option<&SessionSourceCoverageReceiptV1> {
+        self.source_coverage.as_ref()
     }
 
     pub fn into_parts(self) -> (TemporalKernelResult, SessionDataFreshness) {

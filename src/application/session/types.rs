@@ -1,6 +1,9 @@
 use std::fmt;
 
-use tracedecay_domain::{ActorId, RetrievalGrainV1, SessionId, TemporalModeV1};
+use tracedecay_domain::{
+    ActorId, RetrievalGrainV1, SessionId, SessionSourceCoverageAggregateStateV1,
+    SessionSourceCoverageReceiptV1, TemporalModeV1,
+};
 
 use crate::application::context::{
     CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline, PolicyDigest,
@@ -432,6 +435,21 @@ impl SessionFreshnessPolicy {
 pub enum SessionDataFreshness {
     Fresh,
     Stored { generation_lag: u64 },
+    Partial { generation_lag: u64 },
+}
+
+impl SessionDataFreshness {
+    pub fn from_source_coverage(receipt: &SessionSourceCoverageReceiptV1) -> Self {
+        match receipt.aggregate_state() {
+            SessionSourceCoverageAggregateStateV1::Fresh => Self::Fresh,
+            SessionSourceCoverageAggregateStateV1::Stale => Self::Stored {
+                generation_lag: receipt.max_frontier_lag(),
+            },
+            SessionSourceCoverageAggregateStateV1::Partial => Self::Partial {
+                generation_lag: receipt.max_frontier_lag(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -567,8 +585,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tracedecay_domain::{
-        ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1, UtcMicros,
-        WorktreeId,
+        ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
+        SessionSourceCoverageReceiptV1, SessionSourceCoverageV1, SessionSourceFrontierV1,
+        SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalModeV1, UtcMicros, WorktreeId,
     };
 
     use super::*;
@@ -1070,10 +1089,45 @@ mod tests {
     #[test]
     fn freshness_policy_distinguishes_stored_from_fresh_data() {
         let stored = SessionDataFreshness::Stored { generation_lag: 2 };
+        let partial = SessionDataFreshness::Partial { generation_lag: 2 };
 
         assert!(SessionFreshnessPolicy::AllowStored.accepts(stored));
         assert!(!SessionFreshnessPolicy::RequireFresh.accepts(stored));
+        assert!(SessionFreshnessPolicy::AllowStored.accepts(partial));
+        assert!(!SessionFreshnessPolicy::RequireFresh.accepts(partial));
         assert!(SessionFreshnessPolicy::RequireFresh.accepts(SessionDataFreshness::Fresh));
+    }
+
+    #[test]
+    fn aggregate_freshness_is_derived_from_typed_source_coverage() {
+        let request = SessionTemporalCoverageRequestV1::new(TemporalModeV1::Current);
+        let source = |id: &str, observed, committed, target| {
+            SessionSourceCoverageV1::from_frontiers(
+                SessionSourceIdV1::new(id).unwrap(),
+                SessionSourceFrontierV1::new(observed),
+                SessionSourceFrontierV1::new(committed),
+                SessionSourceFrontierV1::new(target),
+                request.clone(),
+            )
+            .unwrap()
+        };
+        let stale =
+            SessionSourceCoverageReceiptV1::new(request.clone(), vec![source("cursor", 10, 8, 10)])
+                .unwrap();
+        assert_eq!(
+            SessionDataFreshness::from_source_coverage(&stale),
+            SessionDataFreshness::Stored { generation_lag: 2 }
+        );
+
+        let partial = SessionSourceCoverageReceiptV1::new(
+            request.clone(),
+            vec![source("cursor", 10, 10, 10), source("claude", 10, 8, 10)],
+        )
+        .unwrap();
+        assert_eq!(
+            SessionDataFreshness::from_source_coverage(&partial),
+            SessionDataFreshness::Partial { generation_lag: 2 }
+        );
     }
 
     #[test]

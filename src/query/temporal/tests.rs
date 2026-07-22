@@ -369,6 +369,7 @@ fn request_with_key(
         )
         .expect("application-frozen snapshot"),
         query: "\"exact phrase\"".to_string(),
+        direct_anchor: None,
         cursor: None,
         limit,
         diversity: DiversityLimits::unbounded(),

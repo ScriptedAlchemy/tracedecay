@@ -3,7 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::store::{GlobalDbSessionTemporalStore, SessionRefreshRestartStateV1};
-use tracedecay_domain::{SessionId, TemporalCoverageCountsV1, UtcMicros};
+use tracedecay_domain::{
+    SessionId, SessionRefreshKeyV1, SessionRefreshSourceTargetV1, SessionSourceFrontierV1,
+    SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1,
+    UtcMicros,
+};
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
     SessionRefreshCompletionRequestV1, SessionRefreshDispositionV1, SessionRefreshFailureRequestV1,
@@ -807,6 +811,67 @@ async fn recovery_is_read_only_and_deterministic_across_reopen() {
     )
     .await;
     assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn restart_preserves_source_identity_and_each_temporal_coverage_mode() {
+    for (suffix, mode) in [
+        ("current", TemporalModeV1::Current),
+        (
+            "as-of",
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(17),
+            },
+        ),
+        ("evolution", TemporalModeV1::Evolution),
+        ("forensic", TemporalModeV1::Forensic),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let path = isolated_lcm_db_path(&tmp);
+        let session_id = session(&format!("session.refresh.mode.{suffix}"));
+        let source_id = SessionSourceIdV1::new(format!("source.{suffix}")).unwrap();
+        {
+            let db = open_lcm_db(&tmp).await;
+            let store = GlobalDbSessionTemporalStore::new(&db);
+            let refresh_key = SessionRefreshKeyV1::new(
+                "root.refresh.mode",
+                session_id.clone(),
+                vec![
+                    SessionRefreshSourceTargetV1::new(
+                        source_id.clone(),
+                        SessionSourceFrontierV1::new(4),
+                        SessionSourceFrontierV1::new(4),
+                    )
+                    .unwrap(),
+                ],
+                "session-temporal-projector.v1",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+            store
+                .begin_or_join_session_refresh(
+                    SessionRefreshBeginOrJoinRequestV1::new(session_id.clone(), frontier(4, 0))
+                        .with_refresh_key(refresh_key)
+                        .with_coverage_request(SessionTemporalCoverageRequestV1::new(mode)),
+                )
+                .await
+                .unwrap();
+        }
+
+        let reopened = GlobalDb::try_open_at(&path)
+            .await
+            .unwrap()
+            .expect("database should reopen");
+        let recovery = GlobalDbSessionTemporalStore::new(&reopened)
+            .session_refresh_recovery(&session_id)
+            .await
+            .unwrap()
+            .expect("running refresh should recover");
+        let source_coverage = recovery.source_coverage(0).unwrap();
+        assert_eq!(source_coverage.request().mode(), mode);
+        assert_eq!(source_coverage.sources().len(), 1);
+        assert_eq!(source_coverage.sources()[0].source_id(), &source_id);
+    }
 }
 
 #[tokio::test]

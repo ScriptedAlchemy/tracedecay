@@ -1,8 +1,8 @@
-mod compatibility;
-mod compatibility_cursor;
 mod cursor_keys;
+mod direct;
 mod doctor_health;
 mod hydration;
+mod lcm_render;
 pub(crate) mod operations;
 mod projection;
 mod query;
@@ -13,14 +13,15 @@ mod schema;
 
 use libsql::params;
 use serde::Deserialize;
-use tracedecay_domain::{RetrievalAnchorId, SignedCursorKeyRefV1};
+use tracedecay_domain::{RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
 
 use crate::application::session::{
-    AuthorizedTemporalExecutionRequest, SessionDataFreshness, SessionTemporalExecutionError,
+    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
 };
 use crate::global_db::{GlobalDb, GlobalDbReadSnapshot};
 use crate::query::temporal::context::VersionedTokenEstimator;
+use crate::query::temporal::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use crate::query::temporal::execute_temporal_kernel;
 use crate::query::temporal::ports::{
     BindingDigest, KernelVersions, MAX_TEMPORAL_PARTICIPANTS, TemporalExecutionSnapshot,
@@ -29,19 +30,15 @@ use crate::query::temporal::ports::{
 };
 use crate::query::temporal::resolution::ValidatedAuthorization;
 use crate::sessions::SessionMessageRecord;
+use crate::sessions::lcm::{
+    LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError, LcmExpandRequest,
+    LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource, LcmSourceRef,
+};
 
 use self::cursor_keys::GlobalDbCursorKeyProvider;
+pub(crate) use self::direct::ResolvedDirectAnchor;
 use self::hydration::GlobalDbTemporalHydrationPort;
 use self::retrieval::GlobalDbTemporalReadPort;
-
-pub(crate) use compatibility::{
-    AuthorizedSessionDescribeRequest, AuthorizedSessionDescribeResult,
-    AuthorizedSessionExpandRequest, AuthorizedSessionExpandResult, CompatibilityReadError,
-    CompatibilityTemporalMetadata,
-};
-pub(crate) use compatibility_cursor::{
-    AuthorizedSessionExpandCursorBinding, CompatibilityCursorError,
-};
 
 // Consumed by the pr8/transport cold-Doctor route when that branch is integrated.
 #[allow(unused_imports)]
@@ -63,59 +60,156 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
         Self { db }
     }
 
-    pub(crate) async fn hydrate_authorized_occurrence(
+    pub(crate) async fn session_message_from_hydrated_occurrence(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         anchor_id: &RetrievalAnchorId,
+        content: &[u8],
     ) -> Result<SessionMessageRecord, SessionTemporalExecutionError> {
         let read = self
             .db
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        hydration::hydrate_authorized_occurrence(&read, &self.db.storage_root, snapshot, anchor_id)
+        hydration::session_message_from_hydrated_bytes(&read, snapshot, anchor_id, content)
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)
     }
 
-    pub(crate) async fn encode_expand_cursor(
+    pub(crate) async fn resolve_lcm_describe_target(
         &self,
-        binding: AuthorizedSessionExpandCursorBinding,
-        source_offset: usize,
-    ) -> Result<String, CompatibilityCursorError> {
+        provider: &str,
+        session_id: &SessionId,
+        target: &LcmDescribeTarget,
+    ) -> Result<Option<ResolvedDirectAnchor>, SessionTemporalExecutionError> {
         let read = self
             .db
             .read_snapshot()
             .await
-            .map_err(|_| CompatibilityCursorError::Unavailable)?;
-        compatibility_cursor::encode_expand_cursor(&read, binding, source_offset).await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        direct::resolve_describe_target(&read, provider, session_id, target).await
     }
 
-    pub(crate) async fn decode_expand_cursor(
+    pub(crate) async fn resolve_lcm_expand_target(
         &self,
-        binding: &AuthorizedSessionExpandCursorBinding,
+        provider: &str,
+        session_id: &SessionId,
+        target: &LcmExpandTarget,
+    ) -> Result<ResolvedDirectAnchor, SessionTemporalExecutionError> {
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        direct::resolve_expand_target(&read, provider, session_id, target).await
+    }
+
+    pub(crate) async fn render_lcm_describe(
+        &self,
+        request: LcmDescribeRequest,
+    ) -> Result<LcmDescribeResponse, SessionTemporalExecutionError> {
+        lcm_render::describe(self.db, request)
+            .await
+            .map_err(map_lcm_error)
+    }
+
+    pub(crate) async fn render_lcm_expand(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        request: LcmExpandRequest,
+        canonical_content: &str,
+    ) -> Result<LcmExpandResponse, SessionTemporalExecutionError> {
+        let provider = request.provider.clone();
+        let session_id = SessionId::new(request.session_id.clone())
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let mut expansion = lcm_render::expand(self.db, request, canonical_content)
+            .await
+            .map_err(map_lcm_error)?;
+        self.canonicalize_lcm_summary_sources(snapshot, &provider, &session_id, &mut expansion)
+            .await?;
+        Ok(expansion)
+    }
+
+    pub(crate) async fn encode_lcm_source_cursor(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        binding: &str,
+        next_source_offset: usize,
+    ) -> Result<String, SessionTemporalExecutionError> {
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let authenticator = GlobalDbCursorKeyProvider::from_snapshot(&read, snapshot)
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        encode_cursor(
+            snapshot,
+            &lcm_source_cursor_sort_key(binding, next_source_offset),
+            &authenticator,
+        )
+        .map_err(map_lcm_cursor_error)
+    }
+
+    pub(crate) async fn decode_lcm_source_cursor(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        binding: &str,
         encoded: &str,
-    ) -> Result<usize, CompatibilityCursorError> {
+    ) -> Result<usize, SessionTemporalExecutionError> {
         let read = self
             .db
             .read_snapshot()
             .await
-            .map_err(|_| CompatibilityCursorError::Unavailable)?;
-        compatibility_cursor::decode_expand_cursor(&read, binding, encoded).await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let authenticator = GlobalDbCursorKeyProvider::from_snapshot(&read, snapshot)
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let sort_key =
+            verify_cursor(encoded, snapshot, &authenticator).map_err(map_lcm_cursor_error)?;
+        parse_lcm_source_cursor_offset(binding, &sort_key)
     }
 
-    pub(crate) async fn describe_compatible(
+    async fn canonicalize_lcm_summary_sources(
         &self,
-        request: AuthorizedSessionDescribeRequest,
-    ) -> Result<AuthorizedSessionDescribeResult, CompatibilityReadError> {
-        compatibility::describe_authorized(self.db, request).await
-    }
-
-    pub(crate) async fn expand_compatible(
-        &self,
-        request: AuthorizedSessionExpandRequest,
-    ) -> Result<AuthorizedSessionExpandResult, CompatibilityReadError> {
-        compatibility::expand_authorized(self.db, request).await
+        snapshot: &TemporalExecutionSnapshot,
+        provider: &str,
+        session_id: &SessionId,
+        expansion: &mut LcmExpandResponse,
+    ) -> Result<(), SessionTemporalExecutionError> {
+        if expansion.summary_sources.is_empty() {
+            return Ok(());
+        }
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        for source in &mut expansion.summary_sources {
+            let target = match &source.source_ref {
+                LcmSourceRef::RawMessage { store_id } => LcmExpandTarget::RawMessage {
+                    store_id: *store_id,
+                },
+                LcmSourceRef::SummaryNode { node_id } => LcmExpandTarget::SummaryNode {
+                    node_id: node_id.clone(),
+                },
+            };
+            let direct =
+                direct::resolve_expand_target(&read, provider, session_id, &target).await?;
+            let bytes = hydration::hydrate_authorized_anchor_bytes(
+                &read,
+                &self.db.storage_root,
+                snapshot,
+                &direct.anchor_id,
+            )
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let canonical_content = String::from_utf8(bytes.to_vec())
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            replace_summary_source_content(source, &canonical_content)?;
+        }
+        Ok(())
     }
 
     async fn freeze(
@@ -318,9 +412,13 @@ impl SessionTemporalExecutionPort for GlobalDbSessionTemporalExecution<'_> {
             )
             .await
             .map_err(SessionTemporalExecutionError::Kernel)?;
-            Ok(SessionTemporalExecutionReport::new(
+            let source_coverage = result
+                .snapshot
+                .source_coverage()
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            Ok(SessionTemporalExecutionReport::from_source_coverage(
                 result,
-                SessionDataFreshness::Fresh,
+                source_coverage,
             ))
         })
     }
@@ -357,5 +455,121 @@ fn map_control_error(
             SessionTemporalExecutionError::Empty
         }
         _ => SessionTemporalExecutionError::Unavailable,
+    }
+}
+
+fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
+    match error {
+        LcmError::SummaryNodeNotFound
+        | LcmError::PayloadNotFound
+        | LcmError::PayloadMissing
+        | LcmError::PayloadGcd => SessionTemporalExecutionError::Deleted,
+        LcmError::PayloadNotOwnedBySession | LcmError::SummarySourceNotOwnedBySession => {
+            SessionTemporalExecutionError::Denied
+        }
+        _ => SessionTemporalExecutionError::Unavailable,
+    }
+}
+
+fn replace_summary_source_content(
+    source: &mut LcmExpandedSummarySource,
+    canonical_content: &str,
+) -> Result<(), SessionTemporalExecutionError> {
+    let total_chars = canonical_content.chars().count();
+    let (offset, limit) = source
+        .content_range
+        .as_ref()
+        .map(|range| {
+            let offset = usize::try_from(range.offset)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let limit = usize::try_from(range.limit)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            Ok((offset, limit))
+        })
+        .transpose()?
+        .unwrap_or((0, total_chars));
+    let offset = offset.min(total_chars);
+    let content = canonical_content
+        .chars()
+        .skip(offset)
+        .take(limit)
+        .collect::<String>();
+    let returned_chars = content.chars().count();
+    let truncated = offset > 0 || offset.saturating_add(returned_chars) < total_chars;
+    source.content.clone_from(&content);
+    source.content_truncated = truncated;
+    if let Some(range) = source.content_range.as_mut() {
+        range.offset =
+            u64::try_from(offset).map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        range.limit =
+            u64::try_from(limit).map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        range.returned_chars = u64::try_from(returned_chars)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        range.total_chars =
+            u64::try_from(total_chars).map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        range.truncated = truncated;
+    }
+    if let Some(raw) = source.raw_message.as_mut() {
+        raw.content.clone_from(&content);
+    }
+    if let Some(summary) = source.summary_node.as_deref_mut() {
+        summary.summary_text = content;
+    }
+    Ok(())
+}
+
+fn lcm_source_cursor_sort_key(binding: &str, next_source_offset: usize) -> StableSortKey {
+    StableSortKey {
+        normalized_score_micros: 0,
+        knowledge_at_micros: 0,
+        stable_id: format!("lcm-source:{binding}:{next_source_offset}"),
+    }
+}
+
+fn parse_lcm_source_cursor_offset(
+    binding: &str,
+    sort_key: &StableSortKey,
+) -> Result<usize, SessionTemporalExecutionError> {
+    if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
+        return Err(SessionTemporalExecutionError::Denied);
+    }
+    let prefix = format!("lcm-source:{binding}:");
+    let offset = sort_key
+        .stable_id
+        .strip_prefix(&prefix)
+        .ok_or(SessionTemporalExecutionError::Denied)?;
+    offset
+        .parse()
+        .map_err(|_| SessionTemporalExecutionError::Denied)
+}
+
+fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
+    match error {
+        CursorError::RootMismatch
+        | CursorError::SessionMismatch
+        | CursorError::WrongAccess
+        | CursorError::TemporalModeMismatch
+        | CursorError::GrainMismatch => SessionTemporalExecutionError::WrongScope,
+        CursorError::Malformed
+        | CursorError::Tampered
+        | CursorError::FilterMismatch
+        | CursorError::SortKeyMismatch => SessionTemporalExecutionError::Denied,
+        CursorError::Expired
+        | CursorError::UnknownOrExpiredKey
+        | CursorError::WrongRequest
+        | CursorError::SchemaMismatch
+        | CursorError::RankingMismatch
+        | CursorError::ConfigurationMismatch
+        | CursorError::GenerationMismatch
+        | CursorError::ParticipantManifestMismatch
+        | CursorError::EpochMismatch
+        | CursorError::SourceWatermarkMismatch
+        | CursorError::ProjectionWatermarkMismatch
+        | CursorError::IndexWatermarkMismatch
+        | CursorError::SummaryWatermarkMismatch
+        | CursorError::KeyIdMismatch
+        | CursorError::KeyVersionMismatch
+        | CursorError::KeyUnavailable
+        | CursorError::InvalidKeyMaterial => SessionTemporalExecutionError::Unavailable,
     }
 }

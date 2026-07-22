@@ -7,6 +7,7 @@ pub mod ranking;
 pub mod resolution;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use thiserror::Error;
 use tracedecay_domain::{
@@ -14,6 +15,7 @@ use tracedecay_domain::{
     ContextOmissionReasonV1, HydrationStateV1, RetrievalAnchorId, SessionSummaryRecordV1,
     TemporalAssertionKindV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
+use zeroize::Zeroizing;
 
 use self::context::assembly::assemble_context_with_frames_controlled;
 use self::context::{
@@ -41,16 +43,82 @@ use self::resolution::types::{
 pub struct TemporalKernelRequest {
     pub snapshot: TemporalExecutionSnapshot,
     pub query: String,
+    pub direct_anchor: Option<RetrievalAnchorId>,
     pub cursor: Option<String>,
     pub limit: usize,
     pub diversity: DiversityLimits,
     pub context_budget: ContextBudget,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct TemporalHydratedResult {
+    anchor_id: RetrievalAnchorId,
+    state: HydrationStateV1,
+    content: Option<Zeroizing<Vec<u8>>>,
+}
+
+impl TemporalHydratedResult {
+    fn available(anchor_id: RetrievalAnchorId, content: Zeroizing<Vec<u8>>) -> Self {
+        Self {
+            anchor_id,
+            state: HydrationStateV1::Available,
+            content: Some(content),
+        }
+    }
+
+    fn unavailable(anchor_id: RetrievalAnchorId, state: HydrationStateV1) -> Self {
+        Self {
+            anchor_id,
+            state,
+            content: None,
+        }
+    }
+
+    pub fn anchor_id(&self) -> &RetrievalAnchorId {
+        &self.anchor_id
+    }
+
+    pub const fn state(&self) -> HydrationStateV1 {
+        self.state
+    }
+
+    pub fn content(&self) -> Option<&[u8]> {
+        self.content.as_deref().map(Vec::as_slice)
+    }
+
+    fn from_batch(batch: HydrationBatch) -> Vec<Self> {
+        let mut results = Vec::with_capacity(batch.available.len() + batch.unavailable.len());
+        for payload in batch.available {
+            let (anchor_id, content) = payload.into_parts();
+            results.push(Self::available(anchor_id, content));
+        }
+        for unavailable in batch.unavailable {
+            let (anchor_id, state) = unavailable.into_parts();
+            results.push(Self::unavailable(anchor_id, state));
+        }
+        results
+    }
+}
+
+impl fmt::Debug for TemporalHydratedResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TemporalHydratedResult")
+            .field("anchor_id", &self.anchor_id)
+            .field("state", &self.state)
+            .field(
+                "content",
+                &self.content.as_ref().map(|content| content.len()),
+            )
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemporalKernelResult {
     pub snapshot: TemporalExecutionSnapshot,
     pub ranked: Vec<RankedCandidate>,
+    pub hydrated: Vec<TemporalHydratedResult>,
     pub context: CompactContext,
     pub coverage: TemporalCoverageCountsV1,
     pub conflicts: Vec<CompactContextConflictV1>,
@@ -104,12 +172,15 @@ pub async fn execute_temporal_kernel(
         .map(|cursor| verify_cursor(cursor, snapshot, authenticator))
         .transpose()?;
     check_control(snapshot)?;
-    let plan = if request.query.trim().is_empty()
+    let plan = if let Some(anchor_id) = request.direct_anchor.as_ref() {
+        candidates::plan_anchor(anchor_id)
+    } else if request.query.trim().is_empty()
         && snapshot.temporal_mode() == TemporalModeV1::Forensic
         && matches!(
             snapshot.request().retrieval_scope(),
             TemporalRetrievalScope::Session(_)
-        ) {
+        )
+    {
         candidates::plan_scope_candidates()
     } else {
         candidates::plan_candidates(&request.query)
@@ -253,12 +324,14 @@ pub async fn execute_temporal_kernel(
     };
 
     let summary_omissions = public_summary_omissions(&summary_eligibility);
+    let hydrated = TemporalHydratedResult::from_batch(hydration);
     Ok(TemporalKernelResult {
         coverage: context.bundle.coverage,
         conflicts: context.bundle.conflicts.clone(),
         lineage: context.bundle.lineage.clone(),
         snapshot: snapshot.clone(),
         ranked,
+        hydrated,
         context,
         summary_omissions,
         next_cursor,

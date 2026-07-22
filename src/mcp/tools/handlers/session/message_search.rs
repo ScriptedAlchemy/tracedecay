@@ -6,7 +6,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CompactContextLineageEdgeV1, HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId,
-    TemporalCoverageCountsV1, TemporalModeV1,
+    SessionSourceCoverageV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
 
 use super::lcm_args::{
@@ -411,6 +411,8 @@ pub(crate) struct SessionTemporalMetadataView {
     pub(crate) anchors: Vec<RetrievalAnchorId>,
     pub(crate) watermarks: SessionTemporalWatermarksView,
     pub(crate) coverage: TemporalCoverageCountsV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) source_coverage: Vec<SessionSourceCoverageV1>,
     pub(crate) cursor: Option<String>,
     pub(crate) explanations: Vec<SessionRetrievalExplanationView>,
     pub(crate) authorized_root: Option<String>,
@@ -664,15 +666,22 @@ fn temporal_value(
         SessionDataFreshness::Stored { generation_lag } => {
             json!({ "state": "stored", "generation_lag": generation_lag })
         }
+        SessionDataFreshness::Partial { generation_lag } => {
+            json!({ "state": "partial", "generation_lag": generation_lag })
+        }
     };
-    json!({
+    let mut value = json!({
         "anchors": temporal.anchors,
         "watermarks": temporal.watermarks,
         "coverage": temporal.coverage,
         "cursor": temporal.cursor,
         "explanations": temporal.explanations,
         "freshness": freshness,
-    })
+    });
+    if !temporal.source_coverage.is_empty() {
+        value["source_coverage"] = json!(temporal.source_coverage);
+    }
+    value
 }
 
 const fn refresh_next_action() -> SessionRetrievalNextActionView {
@@ -808,8 +817,11 @@ fn render_service_outcome(
             payload["status"] = json!("partial");
             payload["outcome"] = json!("partial");
             payload["omitted"] = json!(omitted);
-            let refresh_required =
-                request.catch_up && matches!(freshness, SessionDataFreshness::Stored { .. });
+            let refresh_required = request.catch_up
+                && matches!(
+                    freshness,
+                    SessionDataFreshness::Stored { .. } | SessionDataFreshness::Partial { .. }
+                );
             apply_page(&mut payload, page, freshness);
             apply_refresh_guidance(&mut payload, refresh_required);
         }
@@ -1083,7 +1095,10 @@ mod cutover_tests {
     use std::sync::Mutex;
 
     use serde_json::{Value, json};
-    use tracedecay_domain::{RetrievalAnchorId, TemporalCoverageCountsV1};
+    use tracedecay_domain::{
+        RetrievalAnchorId, SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1,
+        SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1,
+    };
 
     use super::{
         SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
@@ -1147,12 +1162,29 @@ mod cutover_tests {
                 unknown: 3,
                 redacted: 4,
             },
+            source_coverage: Vec::new(),
             cursor: Some("cursor.next".to_string()),
             explanations: vec![SessionRetrievalExplanationView {
                 anchor: RetrievalAnchorId::new("anchor.message.1").unwrap(),
                 summary: "exact phrase and current evidence".to_string(),
             }],
             authorized_root: None,
+        }
+    }
+
+    fn temporal_with_stale_source() -> SessionTemporalMetadataView {
+        SessionTemporalMetadataView {
+            source_coverage: vec![
+                SessionSourceCoverageV1::from_frontiers(
+                    SessionSourceIdV1::new("cursor").unwrap(),
+                    SessionSourceFrontierV1::new(10),
+                    SessionSourceFrontierV1::new(5),
+                    SessionSourceFrontierV1::new(10),
+                    SessionTemporalCoverageRequestV1::new(TemporalModeV1::Current),
+                )
+                .unwrap(),
+            ],
+            ..temporal()
         }
     }
 
@@ -1417,7 +1449,7 @@ mod cutover_tests {
     #[tokio::test]
     async fn stale_freshness_precondition_returns_coverage_and_typed_refresh_action() {
         let service = RecordingService::with_outcome(SessionRetrievalServiceOutcome::Stale {
-            temporal: temporal(),
+            temporal: temporal_with_stale_source(),
             freshness: SessionDataFreshness::Stored { generation_lag: 5 },
         });
         let result = handle_message_search_with_service(
@@ -1442,6 +1474,22 @@ mod cutover_tests {
         assert_eq!(payload["temporal"]["coverage"]["visible"], 1);
         assert_eq!(payload["temporal"]["coverage"]["hidden"], 2);
         assert_eq!(payload["temporal"]["freshness"]["generation_lag"], 5);
+        assert_eq!(
+            payload["temporal"]["source_coverage"][0]["source_id"],
+            "cursor"
+        );
+        assert_eq!(
+            payload["temporal"]["source_coverage"][0]["observed_frontier"],
+            10
+        );
+        assert_eq!(
+            payload["temporal"]["source_coverage"][0]["committed_frontier"],
+            5
+        );
+        assert_eq!(
+            payload["temporal"]["source_coverage"][0]["reason"]["kind"],
+            "projection_behind_source"
+        );
         assert_eq!(payload["catch_up_performed"], false);
         assert_eq!(payload["catch_up_failures"], json!([]));
     }

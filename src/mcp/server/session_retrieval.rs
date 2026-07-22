@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    ActorId, PayloadReferenceV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
-    TemporalCoverageCountsV1, TemporalModeV1, WorktreeId,
+    ActorId, HydrationStateV1, PayloadReferenceV1, ProjectId, RepositoryId, RetrievalAnchorId,
+    RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, TemporalModeV1, WorktreeId,
 };
 
 use crate::application::context::{
@@ -25,17 +25,14 @@ use crate::application::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionTemporalExecutionError, SessionTemporalQuery,
 };
 use crate::daemon::session_temporal_refresh_scheduler::{
     SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
     SessionTemporalRefreshUnavailableReason, SessionTemporalRefreshWake,
     SessionTemporalRefreshWorkerStatus,
 };
-use crate::global_db::{
-    AuthorizedSessionDescribeRequest, AuthorizedSessionExpandCursorBinding,
-    AuthorizedSessionExpandRequest, CompatibilityReadError, CompatibilityTemporalMetadata,
-    GlobalDb, GlobalDbSessionTemporalExecution, ProjectRegistryContext,
-};
+use crate::global_db::{GlobalDb, GlobalDbSessionTemporalExecution, ProjectRegistryContext};
 use crate::mcp::tools::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
@@ -45,10 +42,13 @@ use crate::mcp::tools::{
     SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
     SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
-use crate::query::temporal::TemporalKernelResult;
-use crate::query::temporal::context::{TokenPolicy, VersionedTokenEstimator};
+use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use crate::query::temporal::ports::TemporalExecutionSnapshot;
-use crate::sessions::lcm::LcmExpandTarget;
+use crate::query::temporal::ranking::DiversityLimits;
+use crate::query::temporal::{TemporalHydratedResult, TemporalKernelResult};
+use crate::sessions::lcm::{
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
+};
 use crate::sessions::{SessionMessageSearchResult, SessionMessageType, SessionSearchScope};
 use crate::tracedecay::TraceDecay;
 
@@ -339,8 +339,7 @@ impl DaemonSessionRetrievalService {
         })
     }
 
-    fn request_context(&self, command: &SessionRetrievalCommand) -> Option<RequestContext> {
-        let provider = command.query().provider();
+    fn request_context(&self, provider: Option<&str>) -> Option<RequestContext> {
         let capability = message_search_digest(
             b"tracedecay.mcp.message-search.capability.v1\0",
             &self.root.identity,
@@ -370,6 +369,34 @@ impl DaemonSessionRetrievalService {
         ))
     }
 
+    async fn execute_temporal_query(
+        &self,
+        query: SessionTemporalQuery,
+    ) -> SessionRetrievalOutcome<TemporalKernelResult> {
+        let Some(context) = self.request_context(query.provider()) else {
+            return SessionRetrievalOutcome::Unavailable;
+        };
+        let grant_id = match self.root.store_scope {
+            SessionRetrievalStoreScope::Project => "grant.mcp.message-search.project",
+            SessionRetrievalStoreScope::Profile => "grant.mcp.message-search.profile",
+        };
+        let service = SessionRetrievalService::new(
+            DaemonSessionRetrievalAuthorizer {
+                identity: self.root.identity.clone(),
+                session_id: query.session_id().clone(),
+                retrieval_scope: query.retrieval_scope().clone(),
+                temporal_mode: query.temporal_mode(),
+                grain: query.grain(),
+                provider: query.provider().map(str::to_owned),
+                grant_id,
+            },
+            GlobalDbSessionTemporalExecution::new(self.database.as_ref()),
+            MessageSearchWordEstimator,
+            self.configuration,
+        );
+        service.retrieve(&context, query).await
+    }
+
     async fn execute_command(
         &self,
         command: SessionRetrievalCommand,
@@ -394,32 +421,7 @@ impl DaemonSessionRetrievalService {
                 ),
             );
         }
-        let Some(context) = self.request_context(&command) else {
-            return SessionRetrievalServiceOutcome::Unavailable(
-                SessionRetrievalUnavailable::without_worker(
-                    SessionRetrievalUnavailableReason::RequestContextInvalid,
-                ),
-            );
-        };
-        let grant_id = match self.root.store_scope {
-            SessionRetrievalStoreScope::Project => "grant.mcp.message-search.project",
-            SessionRetrievalStoreScope::Profile => "grant.mcp.message-search.profile",
-        };
-        let service = SessionRetrievalService::new(
-            DaemonSessionRetrievalAuthorizer {
-                identity: self.root.identity.clone(),
-                session_id: command.query().session_id().clone(),
-                retrieval_scope: command.query().retrieval_scope().clone(),
-                temporal_mode: command.query().temporal_mode(),
-                grain: command.query().grain(),
-                provider: command.query().provider().map(str::to_owned),
-                grant_id,
-            },
-            GlobalDbSessionTemporalExecution::new(self.database.as_ref()),
-            MessageSearchWordEstimator,
-            self.configuration,
-        );
-        let outcome = service.retrieve(&context, command.query().clone()).await;
+        let outcome = self.execute_temporal_query(command.query().clone()).await;
         self.public_outcome(outcome, &command).await
     }
 
@@ -498,6 +500,7 @@ impl DaemonSessionRetrievalService {
         let mut anchors = Vec::new();
         let mut explanations = Vec::new();
         let mut coverage = TemporalCoverageCountsV1::default();
+        let mut source_coverage = Vec::new();
         let mut watermarks = SessionTemporalWatermarksView::default();
         let mut cursor = None;
         for item in items {
@@ -511,14 +514,19 @@ impl DaemonSessionRetrievalService {
             coverage.hidden = coverage.hidden.saturating_add(item.coverage.hidden);
             coverage.unknown = coverage.unknown.saturating_add(item.coverage.unknown);
             coverage.redacted = coverage.redacted.saturating_add(item.coverage.redacted);
+            if let Ok(receipt) = item.snapshot.source_coverage() {
+                source_coverage.extend(receipt.sources().iter().cloned());
+            }
             if item.next_cursor.is_some() {
                 cursor = item.next_cursor.clone();
             }
-            for ranked in item.ranked {
-                let result = self.hydrate_result(&item.snapshot, &ranked).await?;
+            for ranked in &item.ranked {
+                let result = self
+                    .hydrate_result(&item.snapshot, ranked, &item.hydrated)
+                    .await?;
                 anchors.push(ranked.anchor_id.clone());
                 explanations.push(SessionRetrievalExplanationView {
-                    anchor: ranked.anchor_id,
+                    anchor: ranked.anchor_id.clone(),
                     summary: format!(
                         "temporal rank {} at {}",
                         ranked.normalized_score_micros, ranked.knowledge_at_micros
@@ -529,12 +537,15 @@ impl DaemonSessionRetrievalService {
                 }
             }
         }
+        source_coverage.sort_by(|left, right| left.source_id().cmp(right.source_id()));
+        source_coverage.dedup_by(|left, right| left.source_id() == right.source_id());
         Some(SessionRetrievalPageView {
             results,
             temporal: SessionTemporalMetadataView {
                 anchors,
                 watermarks,
                 coverage,
+                source_coverage,
                 cursor,
                 explanations,
                 authorized_root: self.root.authorized_root.clone(),
@@ -546,9 +557,17 @@ impl DaemonSessionRetrievalService {
         &self,
         snapshot: &TemporalExecutionSnapshot,
         ranked: &crate::query::temporal::ranking::RankedCandidate,
+        hydrated: &[TemporalHydratedResult],
     ) -> Option<SessionMessageSearchResult> {
+        let content = hydrated
+            .iter()
+            .find(|hydrated| {
+                hydrated.anchor_id() == &ranked.anchor_id
+                    && hydrated.state() == HydrationStateV1::Available
+            })?
+            .content()?;
         let message = GlobalDbSessionTemporalExecution::new(self.database.as_ref())
-            .hydrate_authorized_occurrence(snapshot, &ranked.anchor_id)
+            .session_message_from_hydrated_occurrence(snapshot, &ranked.anchor_id, content)
             .await
             .ok()?;
         let session = self
@@ -565,7 +584,7 @@ impl DaemonSessionRetrievalService {
         })
     }
 
-    fn lcm_authorization_digest(&self, provider: &str) -> String {
+    fn lcm_authorization_binding(&self, provider: &str) -> String {
         format!(
             "sha256:{}",
             hex::encode(message_search_digest(
@@ -576,24 +595,101 @@ impl DaemonSessionRetrievalService {
         )
     }
 
-    fn lcm_temporal_view(
+    fn lcm_binding(
         &self,
-        temporal: CompatibilityTemporalMetadata,
-    ) -> SessionTemporalMetadataView {
+        kind: &str,
+        provider: &str,
+        session_id: &SessionId,
+        target: &str,
+        grain: RetrievalGrainV1,
+        content_slice: Option<LcmContentSlice>,
+        source_limit: Option<usize>,
+    ) -> String {
+        let encoded = json!({
+            "version": 1,
+            "kind": kind,
+            "provider": provider,
+            "session_id": session_id.as_str(),
+            "target": target,
+            "grain": grain.as_str(),
+            "content_offset": content_slice.map(|slice| slice.offset),
+            "content_limit": content_slice.map(|slice| slice.limit),
+            "source_limit": source_limit,
+            "authorization": self.lcm_authorization_binding(provider),
+        })
+        .to_string();
+        format!("sha256:{}", hex::encode(Sha256::digest(encoded.as_bytes())))
+    }
+
+    fn lcm_temporal_view(&self, result: &TemporalKernelResult) -> SessionTemporalMetadataView {
+        let watermarks = result.snapshot.watermarks();
         SessionTemporalMetadataView {
-            anchors: temporal.anchors,
+            anchors: result
+                .ranked
+                .iter()
+                .map(|ranked| ranked.anchor_id.clone())
+                .collect(),
             watermarks: SessionTemporalWatermarksView {
-                generation: temporal.watermarks.generation,
-                source: temporal.watermarks.source,
-                projection: temporal.watermarks.projection,
-                index: temporal.watermarks.index,
-                summary: temporal.watermarks.summary,
+                generation: watermarks.generation,
+                source: watermarks.source,
+                projection: watermarks.projection,
+                index: watermarks.index,
+                summary: watermarks.summary,
             },
-            coverage: temporal.coverage,
-            cursor: None,
-            explanations: Vec::new(),
+            coverage: result.coverage,
+            source_coverage: result
+                .snapshot
+                .source_coverage()
+                .map(|receipt| receipt.sources().to_vec())
+                .unwrap_or_default(),
+            cursor: result.next_cursor.clone(),
+            explanations: result
+                .ranked
+                .iter()
+                .map(|ranked| SessionRetrievalExplanationView {
+                    anchor: ranked.anchor_id.clone(),
+                    summary: format!(
+                        "temporal rank {} at {}",
+                        ranked.normalized_score_micros, ranked.knowledge_at_micros
+                    ),
+                })
+                .collect(),
             authorized_root: self.root.authorized_root.clone(),
         }
+    }
+
+    fn lcm_direct_query(
+        &self,
+        session_id: SessionId,
+        provider: &str,
+        grain: RetrievalGrainV1,
+        temporal_mode: TemporalModeV1,
+        retrieval_scope: SessionRetrievalScope,
+        direct_anchor: Option<RetrievalAnchorId>,
+        binding: String,
+    ) -> Option<SessionTemporalQuery> {
+        let query = SessionTemporalQuery::new(
+            session_id,
+            Some(provider.to_string()),
+            "",
+            None,
+            temporal_mode,
+            grain,
+            1,
+            DiversityLimits::unbounded(),
+            ContextBudget {
+                max_bytes: MESSAGE_SEARCH_MAX_BYTES,
+                max_tokens: MESSAGE_SEARCH_MAX_BYTES / 4,
+                estimator_version: "words-v1".to_string(),
+            },
+        )
+        .ok()?
+        .with_retrieval_scope(retrieval_scope)
+        .with_compatibility_filter_digest(binding);
+        Some(match direct_anchor {
+            Some(anchor_id) => query.with_direct_anchor(anchor_id),
+            None => query,
+        })
     }
 
     async fn execute_lcm_describe(
@@ -607,29 +703,86 @@ impl DaemonSessionRetrievalService {
             return LcmDescribeServiceOutcome::Unavailable(unavailable);
         }
         self.calls.fetch_add(1, Ordering::Relaxed);
-        let request = match AuthorizedSessionDescribeRequest::new(
-            command.provider(),
-            command.session_id().as_str(),
-            command.target().clone(),
-            command.grain(),
-            self.lcm_authorization_digest(command.provider()),
-        ) {
-            Ok(request) => request,
-            Err(error) => return describe_compatibility_error(error),
-        };
-        let result = match GlobalDbSessionTemporalExecution::new(self.database.as_ref())
-            .describe_compatible(request)
+        let executor = GlobalDbSessionTemporalExecution::new(self.database.as_ref());
+        let target = command.target().clone();
+        let direct = match executor
+            .resolve_lcm_describe_target(command.provider(), command.session_id(), &target)
             .await
         {
-            Ok(result) => result,
-            Err(error) => return describe_compatibility_error(error),
+            Ok(direct) => direct,
+            Err(error) => return describe_execution_error(error),
         };
+        let binding = self.lcm_binding(
+            "describe",
+            command.provider(),
+            command.session_id(),
+            &lcm_describe_target_key(&target),
+            command.grain(),
+            None,
+            None,
+        );
+        let temporal_mode = if direct.is_some() {
+            TemporalModeV1::Current
+        } else {
+            TemporalModeV1::Forensic
+        };
+        let Some(query) = self.lcm_direct_query(
+            command.session_id().clone(),
+            command.provider(),
+            command.grain(),
+            temporal_mode,
+            SessionRetrievalScope::Session(command.session_id().clone()),
+            direct.as_ref().map(|direct| direct.anchor_id.clone()),
+            binding,
+        ) else {
+            return LcmDescribeServiceOutcome::Denied;
+        };
+        let outcome = self.execute_temporal_query(query).await;
+        let result = match outcome {
+            SessionRetrievalOutcome::Complete { mut items, .. }
+            | SessionRetrievalOutcome::Partial { mut items, .. } => items.pop(),
+            SessionRetrievalOutcome::CompleteZero { .. } if direct.is_none() => None,
+            SessionRetrievalOutcome::CompleteZero { .. } => {
+                return LcmDescribeServiceOutcome::Deleted;
+            }
+            terminal => return describe_retrieval_outcome(terminal),
+        };
+        let state = match (direct.as_ref(), result.as_ref()) {
+            (Some(direct), Some(result)) => match hydration_state(result, &direct.anchor_id) {
+                Some(HydrationStateV1::Available) => HydrationStateV1::Available,
+                Some(state) => return describe_hydration_state(state),
+                None => {
+                    return LcmDescribeServiceOutcome::Unavailable(
+                        SessionRetrievalUnavailable::without_worker(
+                            SessionRetrievalUnavailableReason::HydrationUnavailable,
+                        ),
+                    );
+                }
+            },
+            (Some(_), None) => return LcmDescribeServiceOutcome::Deleted,
+            (None, _) => HydrationStateV1::Available,
+        };
+        let description = match executor
+            .render_lcm_describe(LcmDescribeRequest {
+                provider: command.provider().to_string(),
+                session_id: command.session_id().as_str().to_string(),
+                target,
+            })
+            .await
+        {
+            Ok(description) => description,
+            Err(error) => return describe_execution_error(error),
+        };
+        let temporal = result.as_ref().map_or_else(
+            || self.empty_temporal(),
+            |result| self.lcm_temporal_view(result),
+        );
         LcmDescribeServiceOutcome::Complete {
-            description: result.description,
-            temporal: self.lcm_temporal_view(result.temporal),
-            grain: result.grain,
-            state: result.state,
-            lineage: result.lineage,
+            description,
+            temporal,
+            grain: command.grain(),
+            state,
+            lineage: result.map_or_else(Vec::new, |result| result.lineage),
         }
     }
 
@@ -643,43 +796,6 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    fn lcm_expand_cursor_binding(
-        &self,
-        command: &LcmExpandServiceCommand,
-    ) -> Option<AuthorizedSessionExpandCursorBinding> {
-        AuthorizedSessionExpandCursorBinding::new(
-            command.provider(),
-            command.session_id().as_str(),
-            Self::lcm_expand_target_key(command.target()),
-            command.grain(),
-            command.content_slice().offset,
-            command.content_slice().limit,
-            command.source_limit(),
-            self.lcm_authorization_digest(command.provider()),
-        )
-        .ok()
-    }
-
-    async fn encode_lcm_expand_cursor(
-        &self,
-        command: &LcmExpandServiceCommand,
-        source_offset: usize,
-    ) -> Option<String> {
-        let binding = self.lcm_expand_cursor_binding(command)?;
-        GlobalDbSessionTemporalExecution::new(self.database.as_ref())
-            .encode_expand_cursor(binding, source_offset)
-            .await
-            .ok()
-    }
-
-    async fn decode_lcm_expand_cursor(&self, command: &LcmExpandServiceCommand) -> Option<usize> {
-        let binding = self.lcm_expand_cursor_binding(command)?;
-        GlobalDbSessionTemporalExecution::new(self.database.as_ref())
-            .decode_expand_cursor(&binding, command.cursor()?)
-            .await
-            .ok()
-    }
-
     async fn execute_lcm_expand(
         &self,
         command: LcmExpandServiceCommand,
@@ -691,55 +807,118 @@ impl DaemonSessionRetrievalService {
             return LcmExpandServiceOutcome::Unavailable(unavailable);
         }
         self.calls.fetch_add(1, Ordering::Relaxed);
-        let source_offset = if command.cursor().is_some() {
-            let Some(offset) = self.decode_lcm_expand_cursor(&command).await else {
-                return LcmExpandServiceOutcome::Denied;
-            };
-            offset
-        } else {
-            command.source_offset()
-        };
-        let request = match AuthorizedSessionExpandRequest::new(
-            command.provider(),
-            command.session_id().as_str(),
-            command.target().clone(),
-            command.grain(),
-            command.content_slice(),
-            source_offset,
-            command.source_limit(),
-            self.lcm_authorization_digest(command.provider()),
-        ) {
-            Ok(request) => request,
-            Err(error) => return expand_compatibility_error(error),
-        };
-        let result = match GlobalDbSessionTemporalExecution::new(self.database.as_ref())
-            .expand_compatible(request)
+        let executor = GlobalDbSessionTemporalExecution::new(self.database.as_ref());
+        let target = command.target().clone();
+        let direct = match executor
+            .resolve_lcm_expand_target(command.provider(), command.session_id(), &target)
             .await
         {
-            Ok(result) => result,
-            Err(error) => return expand_compatibility_error(error),
+            Ok(direct) => direct,
+            Err(error) => return expand_execution_error(error),
         };
-        let mut temporal = self.lcm_temporal_view(result.temporal);
-        if let Some(offset) = result
-            .expansion
+        let binding = self.lcm_binding(
+            "expand",
+            command.provider(),
+            command.session_id(),
+            &Self::lcm_expand_target_key(&target),
+            command.grain(),
+            Some(command.content_slice()),
+            command.source_limit(),
+        );
+        let retrieval_scope = if matches!(&target, LcmExpandTarget::RawMessage { .. })
+            && direct.owner_session_id.as_str() != command.session_id().as_str()
+        {
+            SessionRetrievalScope::AllSessionsInAuthorizedRoot
+        } else {
+            SessionRetrievalScope::Session(command.session_id().clone())
+        };
+        let Some(query) = self.lcm_direct_query(
+            command.session_id().clone(),
+            command.provider(),
+            command.grain(),
+            TemporalModeV1::Current,
+            retrieval_scope,
+            Some(direct.anchor_id.clone()),
+            binding.clone(),
+        ) else {
+            return LcmExpandServiceOutcome::Denied;
+        };
+        let outcome = self.execute_temporal_query(query).await;
+        let result = match outcome {
+            SessionRetrievalOutcome::Complete { mut items, .. }
+            | SessionRetrievalOutcome::Partial { mut items, .. } => match items.pop() {
+                Some(result) => result,
+                None => return LcmExpandServiceOutcome::Deleted,
+            },
+            SessionRetrievalOutcome::CompleteZero { .. } => {
+                return LcmExpandServiceOutcome::Deleted;
+            }
+            terminal => return expand_retrieval_outcome(terminal),
+        };
+        let canonical_content = match hydration_state(&result, &direct.anchor_id) {
+            Some(HydrationStateV1::Available) => result
+                .hydrated
+                .iter()
+                .find(|hydrated| hydrated.anchor_id() == &direct.anchor_id)
+                .and_then(|hydrated| hydrated.content())
+                .and_then(|content| std::str::from_utf8(content).ok()),
+            Some(state) => return expand_hydration_state(state),
+            None => None,
+        };
+        let Some(canonical_content) = canonical_content else {
+            return LcmExpandServiceOutcome::Unavailable(
+                SessionRetrievalUnavailable::without_worker(
+                    SessionRetrievalUnavailableReason::HydrationUnavailable,
+                ),
+            );
+        };
+        let source_offset = match command.cursor() {
+            Some(cursor) => match executor
+                .decode_lcm_source_cursor(&result.snapshot, &binding, cursor)
+                .await
+            {
+                Ok(offset) => offset,
+                Err(error) => return expand_execution_error(error),
+            },
+            None => command.source_offset(),
+        };
+        let expansion = match executor
+            .render_lcm_expand(
+                &result.snapshot,
+                LcmExpandRequest {
+                    provider: command.provider().to_string(),
+                    session_id: command.session_id().as_str().to_string(),
+                    target,
+                    content_slice: Some(command.content_slice()),
+                    source_offset,
+                    source_limit: command.source_limit(),
+                },
+                canonical_content,
+            )
+            .await
+        {
+            Ok(expansion) => expansion,
+            Err(error) => return expand_execution_error(error),
+        };
+        let mut temporal = self.lcm_temporal_view(&result);
+        if let Some(offset) = expansion
             .source_pagination
             .as_ref()
             .and_then(|pagination| pagination.next_source_offset)
         {
-            let Some(cursor) = self.encode_lcm_expand_cursor(&command, offset).await else {
-                return LcmExpandServiceOutcome::Unavailable(
-                    SessionRetrievalUnavailable::without_worker(
-                        SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
-                    ),
-                );
+            match executor
+                .encode_lcm_source_cursor(&result.snapshot, &binding, offset)
+                .await
+            {
+                Ok(cursor) => temporal.cursor = Some(cursor),
+                Err(error) => return expand_execution_error(error),
             };
-            temporal.cursor = Some(cursor);
         }
         LcmExpandServiceOutcome::Complete {
-            expansion: result.expansion,
+            expansion,
             temporal,
-            grain: result.grain,
-            state: result.state,
+            grain: command.grain(),
+            state: HydrationStateV1::Available,
         }
     }
 }
@@ -764,13 +943,76 @@ impl SessionRetrievalServicePort for DaemonSessionRetrievalService {
     }
 }
 
-fn describe_compatibility_error(error: CompatibilityReadError) -> LcmDescribeServiceOutcome {
+fn lcm_describe_target_key(target: &LcmDescribeTarget) -> String {
+    match target {
+        LcmDescribeTarget::Session => "session".to_string(),
+        LcmDescribeTarget::SummaryNode { node_id } => format!("summary:{node_id}"),
+        LcmDescribeTarget::ExternalPayload { payload_ref } => format!("payload:{payload_ref}"),
+    }
+}
+
+fn hydration_state(
+    result: &TemporalKernelResult,
+    anchor_id: &RetrievalAnchorId,
+) -> Option<HydrationStateV1> {
+    result
+        .hydrated
+        .iter()
+        .find(|hydrated| hydrated.anchor_id() == anchor_id)
+        .map(|hydrated| hydrated.state())
+}
+
+fn describe_hydration_state(state: HydrationStateV1) -> LcmDescribeServiceOutcome {
+    match state {
+        HydrationStateV1::Locked => LcmDescribeServiceOutcome::Locked,
+        HydrationStateV1::Redacted => LcmDescribeServiceOutcome::Redacted,
+        HydrationStateV1::Deleted | HydrationStateV1::RetentionExpired => {
+            LcmDescribeServiceOutcome::Deleted
+        }
+        HydrationStateV1::Unauthorized => LcmDescribeServiceOutcome::Denied,
+        HydrationStateV1::Available
+        | HydrationStateV1::RetainedButUnavailable
+        | HydrationStateV1::UnverifiableLegacy => {
+            LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::HydrationUnavailable,
+            ))
+        }
+    }
+}
+
+fn expand_hydration_state(state: HydrationStateV1) -> LcmExpandServiceOutcome {
+    match state {
+        HydrationStateV1::Locked => LcmExpandServiceOutcome::Locked,
+        HydrationStateV1::Redacted => LcmExpandServiceOutcome::Redacted,
+        HydrationStateV1::Deleted | HydrationStateV1::RetentionExpired => {
+            LcmExpandServiceOutcome::Deleted
+        }
+        HydrationStateV1::Unauthorized => LcmExpandServiceOutcome::Denied,
+        HydrationStateV1::Available
+        | HydrationStateV1::RetainedButUnavailable
+        | HydrationStateV1::UnverifiableLegacy => {
+            LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::HydrationUnavailable,
+            ))
+        }
+    }
+}
+
+fn describe_execution_error(error: SessionTemporalExecutionError) -> LcmDescribeServiceOutcome {
     match error {
-        CompatibilityReadError::Locked => LcmDescribeServiceOutcome::Locked,
-        CompatibilityReadError::Redacted => LcmDescribeServiceOutcome::Redacted,
-        CompatibilityReadError::Deleted => LcmDescribeServiceOutcome::Deleted,
-        CompatibilityReadError::Denied => LcmDescribeServiceOutcome::Denied,
-        CompatibilityReadError::Unavailable => {
+        SessionTemporalExecutionError::Locked => LcmDescribeServiceOutcome::Locked,
+        SessionTemporalExecutionError::Redacted => LcmDescribeServiceOutcome::Redacted,
+        SessionTemporalExecutionError::Deleted => LcmDescribeServiceOutcome::Deleted,
+        SessionTemporalExecutionError::WrongScope => LcmDescribeServiceOutcome::WrongScope,
+        SessionTemporalExecutionError::Denied => LcmDescribeServiceOutcome::Denied,
+        SessionTemporalExecutionError::BudgetExhausted => {
+            LcmDescribeServiceOutcome::BudgetExhausted
+        }
+        SessionTemporalExecutionError::Cancelled => LcmDescribeServiceOutcome::Cancelled,
+        SessionTemporalExecutionError::Stale { .. }
+        | SessionTemporalExecutionError::Unavailable
+        | SessionTemporalExecutionError::Empty
+        | SessionTemporalExecutionError::Kernel(_) => {
             LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
             ))
@@ -778,13 +1020,71 @@ fn describe_compatibility_error(error: CompatibilityReadError) -> LcmDescribeSer
     }
 }
 
-fn expand_compatibility_error(error: CompatibilityReadError) -> LcmExpandServiceOutcome {
+fn expand_execution_error(error: SessionTemporalExecutionError) -> LcmExpandServiceOutcome {
     match error {
-        CompatibilityReadError::Locked => LcmExpandServiceOutcome::Locked,
-        CompatibilityReadError::Redacted => LcmExpandServiceOutcome::Redacted,
-        CompatibilityReadError::Deleted => LcmExpandServiceOutcome::Deleted,
-        CompatibilityReadError::Denied => LcmExpandServiceOutcome::Denied,
-        CompatibilityReadError::Unavailable => {
+        SessionTemporalExecutionError::Locked => LcmExpandServiceOutcome::Locked,
+        SessionTemporalExecutionError::Redacted => LcmExpandServiceOutcome::Redacted,
+        SessionTemporalExecutionError::Deleted => LcmExpandServiceOutcome::Deleted,
+        SessionTemporalExecutionError::WrongScope => LcmExpandServiceOutcome::WrongScope,
+        SessionTemporalExecutionError::Denied => LcmExpandServiceOutcome::Denied,
+        SessionTemporalExecutionError::BudgetExhausted => LcmExpandServiceOutcome::BudgetExhausted,
+        SessionTemporalExecutionError::Cancelled => LcmExpandServiceOutcome::Cancelled,
+        SessionTemporalExecutionError::Stale { .. }
+        | SessionTemporalExecutionError::Unavailable
+        | SessionTemporalExecutionError::Empty
+        | SessionTemporalExecutionError::Kernel(_) => {
+            LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+            ))
+        }
+    }
+}
+
+fn describe_retrieval_outcome(
+    outcome: SessionRetrievalOutcome<TemporalKernelResult>,
+) -> LcmDescribeServiceOutcome {
+    match outcome {
+        SessionRetrievalOutcome::WrongScope => LcmDescribeServiceOutcome::WrongScope,
+        SessionRetrievalOutcome::Locked => LcmDescribeServiceOutcome::Locked,
+        SessionRetrievalOutcome::Redacted => LcmDescribeServiceOutcome::Redacted,
+        SessionRetrievalOutcome::Deleted => LcmDescribeServiceOutcome::Deleted,
+        SessionRetrievalOutcome::Denied => LcmDescribeServiceOutcome::Denied,
+        SessionRetrievalOutcome::BudgetExhausted => LcmDescribeServiceOutcome::BudgetExhausted,
+        SessionRetrievalOutcome::Cancelled => LcmDescribeServiceOutcome::Cancelled,
+        SessionRetrievalOutcome::Stale { .. } | SessionRetrievalOutcome::Unavailable => {
+            LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+            ))
+        }
+        SessionRetrievalOutcome::Complete { .. }
+        | SessionRetrievalOutcome::CompleteZero { .. }
+        | SessionRetrievalOutcome::Partial { .. } => {
+            LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+            ))
+        }
+    }
+}
+
+fn expand_retrieval_outcome(
+    outcome: SessionRetrievalOutcome<TemporalKernelResult>,
+) -> LcmExpandServiceOutcome {
+    match outcome {
+        SessionRetrievalOutcome::WrongScope => LcmExpandServiceOutcome::WrongScope,
+        SessionRetrievalOutcome::Locked => LcmExpandServiceOutcome::Locked,
+        SessionRetrievalOutcome::Redacted => LcmExpandServiceOutcome::Redacted,
+        SessionRetrievalOutcome::Deleted => LcmExpandServiceOutcome::Deleted,
+        SessionRetrievalOutcome::Denied => LcmExpandServiceOutcome::Denied,
+        SessionRetrievalOutcome::BudgetExhausted => LcmExpandServiceOutcome::BudgetExhausted,
+        SessionRetrievalOutcome::Cancelled => LcmExpandServiceOutcome::Cancelled,
+        SessionRetrievalOutcome::Stale { .. } | SessionRetrievalOutcome::Unavailable => {
+            LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+            ))
+        }
+        SessionRetrievalOutcome::Complete { .. }
+        | SessionRetrievalOutcome::CompleteZero { .. }
+        | SessionRetrievalOutcome::Partial { .. } => {
             LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
             ))

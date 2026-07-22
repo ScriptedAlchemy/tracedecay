@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
@@ -9,10 +11,12 @@ use super::ports::{
     TemporalParticipantManifest, TemporalRetrievalScope,
 };
 
-const CURSOR_FORMAT_VERSION: &str = "1";
+const CURSOR_FORMAT_VERSION: &str = "2";
 const MAX_CURSOR_PAYLOAD_HEX_BYTES: usize = 2 * 65_536;
 const MAX_CURSOR_KEY_ID_HEX_BYTES: usize = 2 * 1024;
 const MAX_SORT_KEY_STABLE_ID_BYTES: usize = 4 * 1024;
+pub(crate) const CURSOR_LIFETIME_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+pub(crate) const CURSOR_CLOCK_SKEW_MICROS: i64 = 5 * 60 * 1_000_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -68,6 +72,10 @@ pub enum CursorError {
     SummaryWatermarkMismatch,
     #[error("cursor stable sort key changed or is invalid")]
     SortKeyMismatch,
+    #[error("cursor expired or has an invalid validity window")]
+    Expired,
+    #[error("cursor signing key is unknown or expired")]
+    UnknownOrExpiredKey,
     #[error("cursor signing key is unavailable")]
     KeyUnavailable,
     #[error("cursor signing key material is invalid")]
@@ -77,6 +85,8 @@ pub enum CursorError {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CursorPayload {
+    issued_at_micros: i64,
+    expires_at_micros: i64,
     request_digest: String,
     filter_digest: String,
     root_digest: String,
@@ -108,10 +118,16 @@ impl CursorPayload {
     fn from_snapshot(
         snapshot: &TemporalExecutionSnapshot,
         last_sort_key: StableSortKey,
+        issued_at_micros: i64,
     ) -> Result<Self, CursorError> {
         validate_sort_key(&last_sort_key)?;
         snapshot.cursor_key().ok_or(CursorError::KeyUnavailable)?;
+        let expires_at_micros = issued_at_micros
+            .checked_add(CURSOR_LIFETIME_MICROS)
+            .ok_or(CursorError::Malformed)?;
         Ok(Self {
+            issued_at_micros,
+            expires_at_micros,
             request_digest: snapshot.request_digest().as_str().to_string(),
             filter_digest: snapshot.filter_digest().as_str().to_string(),
             root_digest: snapshot.root_digest().as_str().to_string(),
@@ -148,9 +164,18 @@ impl CursorPayload {
 pub fn encode_cursor(
     snapshot: &TemporalExecutionSnapshot,
     last_sort_key: &StableSortKey,
-    authenticator: &impl SessionCursorAuthenticator,
+    authenticator: &(impl SessionCursorAuthenticator + ?Sized),
 ) -> Result<String, CursorError> {
-    let payload = CursorPayload::from_snapshot(snapshot, last_sort_key.clone())?;
+    encode_cursor_at(snapshot, last_sort_key, authenticator, now_micros()?)
+}
+
+fn encode_cursor_at(
+    snapshot: &TemporalExecutionSnapshot,
+    last_sort_key: &StableSortKey,
+    authenticator: &(impl SessionCursorAuthenticator + ?Sized),
+    issued_at_micros: i64,
+) -> Result<String, CursorError> {
+    let payload = CursorPayload::from_snapshot(snapshot, last_sort_key.clone(), issued_at_micros)?;
     let payload_bytes = serde_json::to_vec(&payload).map_err(|_| CursorError::Malformed)?;
     let payload_hex = hex::encode(payload_bytes);
     let key_ref = snapshot.cursor_key().ok_or(CursorError::KeyUnavailable)?;
@@ -174,7 +199,16 @@ pub fn encode_cursor(
 pub fn verify_cursor(
     encoded: &str,
     expected: &TemporalExecutionSnapshot,
-    authenticator: &impl SessionCursorAuthenticator,
+    authenticator: &(impl SessionCursorAuthenticator + ?Sized),
+) -> Result<StableSortKey, CursorError> {
+    verify_cursor_at(encoded, expected, authenticator, now_micros()?)
+}
+
+fn verify_cursor_at(
+    encoded: &str,
+    expected: &TemporalExecutionSnapshot,
+    authenticator: &(impl SessionCursorAuthenticator + ?Sized),
+    now_micros: i64,
 ) -> Result<StableSortKey, CursorError> {
     let mut parts = encoded.split('.');
     let version = parts.next().ok_or(CursorError::Malformed)?;
@@ -210,13 +244,6 @@ pub fn verify_cursor(
         key_id,
         version: key_version,
     };
-    let expected_key = expected.cursor_key().ok_or(CursorError::KeyUnavailable)?;
-    if routed_key.key_id != expected_key.key_id {
-        return Err(CursorError::KeyIdMismatch);
-    }
-    if routed_key.version != expected_key.version {
-        return Err(CursorError::KeyVersionMismatch);
-    }
 
     let authenticated = format!("{version}.{key_id_hex}.{key_version_text}.{payload_hex}");
     let signature = CursorSignature::from_hex(signature_hex).map_err(|_| CursorError::Malformed)?;
@@ -233,6 +260,14 @@ pub fn verify_cursor(
     if canonical != payload_bytes || payload_hex != hex::encode(&payload_bytes) {
         return Err(CursorError::Malformed);
     }
+    verify_validity_window(&payload, now_micros)?;
+    let expected_key = expected.cursor_key().ok_or(CursorError::KeyUnavailable)?;
+    if routed_key.key_id != expected_key.key_id {
+        return Err(CursorError::KeyIdMismatch);
+    }
+    if routed_key.version != expected_key.version {
+        return Err(CursorError::KeyVersionMismatch);
+    }
     verify_bindings(&payload, expected)?;
     validate_sort_key(&payload.last_sort_key)?;
     Ok(payload.last_sort_key)
@@ -242,7 +277,7 @@ pub fn verify_cursor_for_sort_key(
     encoded: &str,
     expected: &TemporalExecutionSnapshot,
     expected_sort_key: &StableSortKey,
-    authenticator: &impl SessionCursorAuthenticator,
+    authenticator: &(impl SessionCursorAuthenticator + ?Sized),
 ) -> Result<(), CursorError> {
     let actual = verify_cursor(encoded, expected, authenticator)?;
     if &actual != expected_sort_key {
@@ -338,6 +373,30 @@ fn validate_sort_key(sort_key: &StableSortKey) -> Result<(), CursorError> {
     Ok(())
 }
 
+fn verify_validity_window(payload: &CursorPayload, now_micros: i64) -> Result<(), CursorError> {
+    let expected_expiry = payload
+        .issued_at_micros
+        .checked_add(CURSOR_LIFETIME_MICROS)
+        .ok_or(CursorError::Expired)?;
+    let latest_accepted_issue = now_micros.saturating_add(CURSOR_CLOCK_SKEW_MICROS);
+    if payload.issued_at_micros < 0
+        || payload.expires_at_micros != expected_expiry
+        || payload.issued_at_micros > latest_accepted_issue
+        || now_micros >= payload.expires_at_micros
+    {
+        return Err(CursorError::Expired);
+    }
+    Ok(())
+}
+
+fn now_micros() -> Result<i64, CursorError> {
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CursorError::Malformed)?
+        .as_micros();
+    i64::try_from(micros).map_err(|_| CursorError::Malformed)
+}
+
 const fn temporal_cutoff(mode: TemporalModeV1) -> Option<i64> {
     match mode {
         TemporalModeV1::AsOf { cutoff } => Some(cutoff.0),
@@ -347,7 +406,7 @@ const fn temporal_cutoff(mode: TemporalModeV1) -> Option<i64> {
 
 const fn map_key_error(error: CursorKeyError) -> CursorError {
     match error {
-        CursorKeyError::Unavailable => CursorError::KeyUnavailable,
+        CursorKeyError::Unavailable => CursorError::UnknownOrExpiredKey,
         CursorKeyError::InvalidMaterial => CursorError::InvalidKeyMaterial,
         CursorKeyError::AuthenticationFailed => CursorError::Tampered,
     }
@@ -368,6 +427,8 @@ mod tests {
         TemporalExecutionSnapshot, TemporalParticipantGeneration, TemporalParticipantManifest,
         TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks,
     };
+
+    const TEST_NOW_MICROS: i64 = 1_800_000_000_000_000;
 
     struct KeyAuth {
         key: SignedCursorKeyRefV1,
@@ -547,13 +608,76 @@ mod tests {
     #[test]
     fn cursor_round_trip_is_restart_stable_and_canonical() {
         let provider = auth(7);
-        let encoded = encode_cursor(&snapshot('2', 13), &sort_key(), &provider).expect("encode");
+        let encoded = encode_cursor_at(&snapshot('2', 13), &sort_key(), &provider, TEST_NOW_MICROS)
+            .expect("encode");
         assert_eq!(encoded.split('.').count(), 5);
 
         let restarted_auth = auth(7);
-        let decoded = verify_cursor(&encoded, &snapshot('2', 13), &restarted_auth)
-            .expect("same persisted key verifies after restart");
+        let decoded = verify_cursor_at(
+            &encoded,
+            &snapshot('2', 13),
+            &restarted_auth,
+            TEST_NOW_MICROS,
+        )
+        .expect("same persisted key verifies after restart");
         assert_eq!(decoded, sort_key());
+    }
+
+    #[test]
+    fn cursor_expiry_is_bounded_and_skew_is_limited() {
+        let provider = auth(8);
+        let expected = snapshot('2', 13);
+        let encoded =
+            encode_cursor_at(&expected, &sort_key(), &provider, TEST_NOW_MICROS).expect("encode");
+        let payload_hex = encoded.split('.').nth(3).expect("payload");
+        let payload: CursorPayload =
+            serde_json::from_slice(&hex::decode(payload_hex).expect("payload hex"))
+                .expect("payload json");
+        assert_eq!(payload.issued_at_micros, TEST_NOW_MICROS);
+        assert_eq!(
+            payload.expires_at_micros,
+            TEST_NOW_MICROS + CURSOR_LIFETIME_MICROS
+        );
+        assert_eq!(
+            verify_cursor_at(
+                &encoded,
+                &expected,
+                &provider,
+                payload.expires_at_micros - 1,
+            ),
+            Ok(sort_key())
+        );
+        assert_eq!(
+            verify_cursor_at(&encoded, &expected, &provider, payload.expires_at_micros,),
+            Err(CursorError::Expired)
+        );
+        assert_eq!(
+            verify_cursor_at(
+                &encoded,
+                &expected,
+                &provider,
+                TEST_NOW_MICROS - CURSOR_CLOCK_SKEW_MICROS,
+            ),
+            Ok(sort_key())
+        );
+        assert_eq!(
+            verify_cursor_at(
+                &encoded,
+                &expected,
+                &provider,
+                TEST_NOW_MICROS - CURSOR_CLOCK_SKEW_MICROS - 1,
+            ),
+            Err(CursorError::Expired)
+        );
+
+        let key_ref = expected.cursor_key().expect("snapshot key");
+        let overlong = mutate_and_resign(&encoded, key_ref, &provider, |payload| {
+            payload.expires_at_micros += 1;
+        });
+        assert_eq!(
+            verify_cursor_at(&overlong, &expected, &provider, TEST_NOW_MICROS),
+            Err(CursorError::Expired)
+        );
     }
 
     #[test]
@@ -721,19 +845,59 @@ mod tests {
     }
 
     #[test]
-    fn honest_key_rotation_reports_precise_route_mismatch_before_mac() {
-        let auth = auth(15);
-        let encoded = encode_cursor(&snapshot('2', 13), &sort_key(), &auth).expect("encode");
+    fn authenticated_retained_key_reports_rotation_after_mac() {
+        struct CountingAuth {
+            inner: KeyAuth,
+            verify_calls: std::sync::atomic::AtomicUsize,
+        }
+        impl SessionCursorAuthenticator for CountingAuth {
+            fn sign(
+                &self,
+                key: &SignedCursorKeyRefV1,
+                authenticated: &[u8],
+            ) -> Result<CursorSignature, CursorKeyError> {
+                self.inner.sign(key, authenticated)
+            }
+            fn verify(
+                &self,
+                key: &SignedCursorKeyRefV1,
+                authenticated: &[u8],
+                signature: &CursorSignature,
+            ) -> Result<(), CursorKeyError> {
+                self.verify_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.inner.verify(key, authenticated, signature)
+            }
+        }
+        let auth = CountingAuth {
+            inner: auth(15),
+            verify_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let encoded = encode_cursor_at(
+            &snapshot('2', 13),
+            &sort_key(),
+            &auth.inner,
+            TEST_NOW_MICROS,
+        )
+        .expect("encode");
         let rotated_id = snapshot_for_key("session-1", '2', 13, "key-2", 1);
         let rotated_version = snapshot_for_key("session-1", '2', 13, "key-1", 2);
 
         assert_eq!(
-            verify_cursor(&encoded, &rotated_id, &auth),
+            verify_cursor_at(&encoded, &rotated_id, &auth, TEST_NOW_MICROS),
             Err(CursorError::KeyIdMismatch)
         );
         assert_eq!(
-            verify_cursor(&encoded, &rotated_version, &auth),
+            auth.verify_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            verify_cursor_at(&encoded, &rotated_version, &auth, TEST_NOW_MICROS),
             Err(CursorError::KeyVersionMismatch)
+        );
+        assert_eq!(
+            auth.verify_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2
         );
     }
 
@@ -893,7 +1057,10 @@ mod tests {
         let snapshot = snapshot('2', 13);
         let key_id = hex::encode(b"key-1");
         let oversized_payload = "ab".repeat(MAX_CURSOR_PAYLOAD_HEX_BYTES / 2 + 1);
-        let forged = format!("1.{key_id}.1.{oversized_payload}.{}", "00".repeat(32));
+        let forged = format!(
+            "{CURSOR_FORMAT_VERSION}.{key_id}.1.{oversized_payload}.{}",
+            "00".repeat(32)
+        );
         assert_eq!(
             verify_cursor(&forged, &snapshot, &auth),
             Err(CursorError::Malformed)
@@ -901,7 +1068,10 @@ mod tests {
         assert_eq!(auth.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 
         let oversized_key = "ab".repeat(MAX_CURSOR_KEY_ID_HEX_BYTES / 2 + 1);
-        let forged_key = format!("1.{oversized_key}.1.abcd.{}", "00".repeat(32));
+        let forged_key = format!(
+            "{CURSOR_FORMAT_VERSION}.{oversized_key}.1.abcd.{}",
+            "00".repeat(32)
+        );
         assert_eq!(
             verify_cursor(&forged_key, &snapshot, &auth),
             Err(CursorError::Malformed)
@@ -1046,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn key_rotation_skips_mac_when_route_mismatches() {
+    fn unknown_routes_and_tampering_do_not_disclose_rotation() {
         struct CountingAuth {
             inner: KeyAuth,
             verify_calls: std::sync::atomic::AtomicUsize,
@@ -1074,24 +1244,43 @@ mod tests {
             inner: auth(29),
             verify_calls: std::sync::atomic::AtomicUsize::new(0),
         };
-        let encoded = encode_cursor(&snapshot('2', 13), &sort_key(), &auth.inner).expect("encode");
-        let rotated_id = snapshot_for_key("session-1", '2', 13, "key-2", 1);
+        let encoded = encode_cursor_at(
+            &snapshot('2', 13),
+            &sort_key(),
+            &auth.inner,
+            TEST_NOW_MICROS,
+        )
+        .expect("encode");
+        let mut unknown_route = encoded.split('.').map(str::to_string).collect::<Vec<_>>();
+        unknown_route[1] = hex::encode("unknown-key");
         assert_eq!(
-            verify_cursor(&encoded, &rotated_id, &auth),
-            Err(CursorError::KeyIdMismatch)
+            verify_cursor_at(
+                &unknown_route.join("."),
+                &snapshot_for_key("session-1", '2', 13, "key-2", 1),
+                &auth,
+                TEST_NOW_MICROS,
+            ),
+            Err(CursorError::UnknownOrExpiredKey)
         );
         assert_eq!(
             auth.verify_calls.load(std::sync::atomic::Ordering::SeqCst),
-            0
+            1
         );
-        let rotated_version = snapshot_for_key("session-1", '2', 13, "key-1", 2);
+
+        let mut tampered = encoded.split('.').map(str::to_string).collect::<Vec<_>>();
+        tampered[3].push('0');
         assert_eq!(
-            verify_cursor(&encoded, &rotated_version, &auth),
-            Err(CursorError::KeyVersionMismatch)
+            verify_cursor_at(
+                &tampered.join("."),
+                &snapshot_for_key("session-1", '2', 13, "key-2", 1),
+                &auth,
+                TEST_NOW_MICROS,
+            ),
+            Err(CursorError::Tampered)
         );
         assert_eq!(
             auth.verify_calls.load(std::sync::atomic::Ordering::SeqCst),
-            0
+            2
         );
     }
 }

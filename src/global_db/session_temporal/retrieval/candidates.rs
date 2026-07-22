@@ -155,7 +155,8 @@ pub(super) async fn require_candidate_root_authority(
                  LIMIT 1
              )"
         }
-        CandidateChannel::Scope
+        CandidateChannel::Anchor
+        | CandidateChannel::Scope
         | CandidateChannel::ExactMessage
         | CandidateChannel::Phrase
         | CandidateChannel::Entity
@@ -261,6 +262,20 @@ pub(super) async fn query_candidate_clause(
                 "scope scans require an exact session",
             ));
         }
+        (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Anchor) => (
+            ROOT_ANCHOR_CANDIDATE_QUERY,
+            vec![
+                root_project_key.ok_or_else(|| {
+                    read_message(CANDIDATE_OPERATION, "authorized root is missing")
+                })?,
+                provider,
+                SqlValue::Text(clause.value.clone()),
+                SqlValue::Integer(cursor.knowledge_at),
+                SqlValue::Text(cursor.session_id.clone()),
+                SqlValue::Text(cursor.stable_id.clone()),
+                SqlValue::Integer(limit),
+            ],
+        ),
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::ExactMessage) => (
             ROOT_EXACT_CANDIDATE_QUERY,
             vec![
@@ -359,6 +374,18 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(anchor_cap),
                 SqlValue::Integer(metadata_cap),
                 SqlValue::Integer(item_cap),
+                SqlValue::Integer(limit),
+            ],
+        ),
+        (TemporalRetrievalScope::Session(session_id), CandidateChannel::Anchor) => (
+            ANCHOR_CANDIDATE_QUERY,
+            vec![
+                SqlValue::Text(session_id.as_str().to_string()),
+                SqlValue::Integer(generation),
+                provider,
+                SqlValue::Text(clause.value.clone()),
+                SqlValue::Integer(cursor.knowledge_at),
+                SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(limit),
             ],
         ),
@@ -481,6 +508,7 @@ pub(super) fn candidate_from_row(
 pub(super) const fn candidate_score(channel: CandidateChannel) -> i64 {
     match channel {
         CandidateChannel::Scope => 100,
+        CandidateChannel::Anchor => 1_100,
         CandidateChannel::ExactMessage => 1_000,
         CandidateChannel::Phrase => 800,
         CandidateChannel::Entity => 700,

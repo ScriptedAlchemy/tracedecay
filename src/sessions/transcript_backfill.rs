@@ -111,9 +111,10 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
     // cancellation or an update failure rolls this whole batch back.
     let stats = apply_updates(conn, &updates).await?;
     if stats.dated > 0 || stats.usage_added > 0 {
-        eprintln!(
-            "Backfilled {} timestamp(s) and {} usage record(s) for legacy messages from transcripts.",
-            stats.dated, stats.usage_added
+        tracing::info!(
+            timestamps = stats.dated,
+            usage_records = stats.usage_added,
+            "backfilled legacy transcript message facts"
         );
     }
     Some(stats)
@@ -526,9 +527,10 @@ pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<Structured
     }
 
     if stats.inserted > 0 {
-        eprintln!(
-            "Backfilled {} structured transcript row(s) across {} file(s).",
-            stats.inserted, stats.files_scanned
+        tracing::info!(
+            rows = stats.inserted,
+            files = stats.files_scanned,
+            "backfilled structured transcript rows"
         );
     }
     Some(stats)

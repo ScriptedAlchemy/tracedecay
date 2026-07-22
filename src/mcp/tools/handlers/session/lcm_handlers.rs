@@ -236,6 +236,7 @@ fn lcm_temporal_fields(temporal: &SessionTemporalMetadataView) -> Value {
         "watermarks": temporal.watermarks,
         "authorized_root": temporal.authorized_root,
         "coverage": temporal.coverage,
+        "source_coverage": temporal.source_coverage,
         "explanations": temporal.explanations,
         "next_cursor": temporal.cursor,
     })
@@ -251,6 +252,7 @@ fn apply_lcm_temporal_fields(payload: &mut Value, temporal: &SessionTemporalMeta
         "watermarks",
         "authorized_root",
         "coverage",
+        "source_coverage",
         "explanations",
         "next_cursor",
     ] {
@@ -1483,8 +1485,9 @@ mod compatibility_tests {
 
     use tempfile::TempDir;
     use tracedecay_domain::{
-        HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
-        TemporalModeV1,
+        HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
+        SessionSourceFrontierV1, SessionSourceIdV1, SessionTemporalCoverageRequestV1,
+        TemporalCoverageCountsV1, TemporalModeV1,
     };
 
     use super::super::message_search::{
@@ -1602,6 +1605,16 @@ mod compatibility_tests {
                 unknown: 0,
                 redacted: 0,
             },
+            source_coverage: vec![
+                SessionSourceCoverageV1::from_frontiers(
+                    SessionSourceIdV1::new("claude").unwrap(),
+                    SessionSourceFrontierV1::new(9),
+                    SessionSourceFrontierV1::new(9),
+                    SessionSourceFrontierV1::new(9),
+                    SessionTemporalCoverageRequestV1::new(TemporalModeV1::Current),
+                )
+                .unwrap(),
+            ],
             cursor: cursor.map(str::to_string),
             explanations: vec![SessionRetrievalExplanationView {
                 anchor: RetrievalAnchorId::new("anchor.compatibility.1").unwrap(),
@@ -2024,6 +2037,11 @@ mod compatibility_tests {
         assert_eq!(response["anchors"][0], "anchor.compatibility.1");
         assert_eq!(response["watermarks"]["generation"], 9);
         assert_eq!(response["coverage"]["visible"], 1);
+        assert_eq!(response["source_coverage"][0]["source_id"], "claude");
+        assert_eq!(
+            response["source_coverage"][0]["reason"]["kind"],
+            "caught_up"
+        );
         assert!(response["lineage"].is_array());
     }
 
@@ -2089,6 +2107,7 @@ mod compatibility_tests {
         assert_eq!(response["grain"], "occurrence");
         assert_eq!(response["state"], "available");
         assert_eq!(response["next_cursor"], "opaque-next");
+        assert_eq!(response["source_coverage"][0]["source_id"], "claude");
     }
 
     #[tokio::test]
@@ -2176,6 +2195,7 @@ mod compatibility_tests {
             "canonical context only"
         );
         assert_eq!(response["next_cursor"], "expand-query-next");
+        assert_eq!(response["source_coverage"][0]["source_id"], "claude");
     }
 
     #[tokio::test]

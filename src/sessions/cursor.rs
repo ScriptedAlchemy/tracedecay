@@ -1509,10 +1509,10 @@ impl TranscriptSource for CursorSweepSource {
                     .iter()
                     .all(|candidate| paths_equal(candidate, project_root)) => {}
             _ => {
-                eprintln!(
-                    "Skipping Cursor transcript sweep for {}: project slug '{slug}' is ambiguous \
-                     (another existing directory also encodes to it).",
-                    project_root.display()
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    %slug,
+                    "skipping Cursor transcript sweep because project slug is ambiguous"
                 );
                 return Vec::new();
             }

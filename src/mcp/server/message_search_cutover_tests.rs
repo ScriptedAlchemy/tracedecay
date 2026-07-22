@@ -151,12 +151,43 @@ fn mcp_session_adapters_have_no_local_lcm_storage_authority() {
         "lcm_anchor_state",
         "lcm_temporal_metadata",
         "lcm_occurrence_anchor",
+        "hydrate_authorized_occurrence",
+        "describe_compatible",
+        "expand_compatible",
+        "compatibility_cursor",
+        "encode_lcm_expand_cursor",
+        "decode_lcm_expand_cursor",
     ] {
         assert!(
             !server.contains(forbidden),
             "MCP server must delegate `{forbidden}` through typed session ports"
         );
     }
+}
+
+#[test]
+fn temporal_lcm_adapters_use_the_shared_cursor_codec() {
+    let temporal_executor = include_str!("../../global_db/session_temporal/mod.rs");
+
+    for forbidden in [
+        "compatibility_cursor",
+        "describe_compatible",
+        "expand_compatible",
+        "AuthorizedSessionExpandCursorBinding",
+    ] {
+        assert!(
+            !temporal_executor.contains(forbidden),
+            "temporal executor must not retain `{forbidden}`"
+        );
+    }
+    assert!(
+        temporal_executor.contains("encode_cursor("),
+        "LCM source continuation must use the canonical cursor codec"
+    );
+    assert!(
+        temporal_executor.contains("verify_cursor("),
+        "LCM source continuation must verify with the canonical cursor codec"
+    );
 }
 
 fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {

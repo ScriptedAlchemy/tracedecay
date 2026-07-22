@@ -2,7 +2,9 @@ use std::fmt;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{ContextOmissionReasonV1, RetrievalGrainV1, SessionId, TemporalModeV1};
+use tracedecay_domain::{
+    ContextOmissionReasonV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
+};
 
 use crate::application::context::{
     PolicyDigest, RequestContext, ResolvedSessionIdentity, SessionOwner,
@@ -64,6 +66,7 @@ pub struct SessionTemporalQuery {
     retrieval_scope: SessionRetrievalScope,
     provider: Option<String>,
     query: String,
+    direct_anchor: Option<RetrievalAnchorId>,
     compatibility_filter_digest: Option<String>,
     cursor: Option<String>,
     temporal_mode: TemporalModeV1,
@@ -114,6 +117,7 @@ impl SessionTemporalQuery {
             retrieval_scope,
             provider,
             query: query.into(),
+            direct_anchor: None,
             compatibility_filter_digest: None,
             cursor,
             temporal_mode,
@@ -150,6 +154,12 @@ impl SessionTemporalQuery {
     #[must_use]
     pub(crate) fn with_compatibility_filter_digest(mut self, digest: String) -> Self {
         self.compatibility_filter_digest = Some(digest);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_direct_anchor(mut self, anchor_id: RetrievalAnchorId) -> Self {
+        self.direct_anchor = Some(anchor_id);
         self
     }
 
@@ -393,6 +403,10 @@ where
             self.configuration.ranking_version,
             configuration_digest,
         );
+        let execution = match query.direct_anchor.clone() {
+            Some(anchor_id) => execution.with_direct_anchor(anchor_id),
+            None => execution,
+        };
         let expected_execution = execution.clone();
         let result = match context
             .run_interruptible(self.execution.execute(execution, &self.estimator), || {
@@ -472,7 +486,13 @@ fn map_report(
             .saturating_add(result.summary_omissions.len()),
     )
     .unwrap_or(u64::MAX);
-    let omitted = coverage_omitted.max(explicit_omitted);
+    let freshness_omitted = match freshness {
+        SessionDataFreshness::Partial { generation_lag } => generation_lag.max(1),
+        SessionDataFreshness::Fresh | SessionDataFreshness::Stored { .. } => 0,
+    };
+    let omitted = coverage_omitted
+        .max(explicit_omitted)
+        .max(freshness_omitted);
     let has_partial_coverage =
         omitted != 0 || !omissions.is_empty() || !result.summary_omissions.is_empty();
     if result.ranked.is_empty() {
@@ -538,10 +558,20 @@ fn map_report(
         if !freshness_policy.accepts(freshness) {
             return SessionRetrievalOutcome::Stale { freshness };
         }
+        if matches!(freshness, SessionDataFreshness::Partial { .. }) {
+            return SessionRetrievalOutcome::Partial {
+                items: vec![result],
+                freshness,
+                omitted,
+            };
+        }
         if has_partial_coverage || result.next_cursor.is_some() || coverage.visible != 0 {
             return SessionRetrievalOutcome::Unavailable;
         }
-        return SessionRetrievalOutcome::CompleteZero { freshness };
+        return SessionRetrievalOutcome::Complete {
+            items: vec![result],
+            freshness,
+        };
     }
     if !freshness_policy.accepts(freshness) {
         return SessionRetrievalOutcome::Stale { freshness };
@@ -572,9 +602,7 @@ fn map_execution_error(
         SessionTemporalExecutionError::Deleted => SessionRetrievalOutcome::Deleted,
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
         SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
-        SessionTemporalExecutionError::Empty => SessionRetrievalOutcome::CompleteZero {
-            freshness: SessionDataFreshness::Fresh,
-        },
+        SessionTemporalExecutionError::Empty => SessionRetrievalOutcome::Unavailable,
         SessionTemporalExecutionError::BudgetExhausted => SessionRetrievalOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
@@ -599,9 +627,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 SessionRetrievalOutcome::BudgetExhausted
             }
             TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
-            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::CompleteZero {
-                freshness: SessionDataFreshness::Fresh,
-            },
+            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::Unavailable,
             TemporalPortError::InvalidBinding { .. }
             | TemporalPortError::DuplicateParticipant
             | TemporalPortError::ZeroGeneration
@@ -615,9 +641,11 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | CursorError::FilterMismatch
             | CursorError::TemporalModeMismatch
             | CursorError::GrainMismatch => SessionRetrievalOutcome::WrongScope,
-            CursorError::Malformed | CursorError::Tampered | CursorError::SortKeyMismatch => {
-                SessionRetrievalOutcome::Denied
-            }
+            CursorError::Malformed
+            | CursorError::Tampered
+            | CursorError::Expired
+            | CursorError::UnknownOrExpiredKey
+            | CursorError::SortKeyMismatch => SessionRetrievalOutcome::Denied,
             CursorError::WrongRequest
             | CursorError::SchemaMismatch
             | CursorError::RankingMismatch
@@ -767,6 +795,7 @@ fn digest_request(
         session_id: Option<&'a str>,
         provider: Option<&'a str>,
         query: &'a str,
+        direct_anchor: Option<String>,
         compatibility_filter_digest: Option<&'a str>,
         temporal_mode: &'static str,
         cutoff_micros: Option<i64>,
@@ -786,7 +815,7 @@ fn digest_request(
 
     let limits = query.execution_limits;
     sha256_json(&RequestBinding {
-        format_version: 3,
+        format_version: 4,
         actor_id: context.actor_id().as_str(),
         grant_id: grant.id().as_str(),
         grant_revision: grant.revision(),
@@ -798,6 +827,7 @@ fn digest_request(
         session_id: query.retrieval_scope.session_id().map(SessionId::as_str),
         provider: query.provider.as_deref(),
         query: &query.query,
+        direct_anchor: query.direct_anchor.as_ref().map(ToString::to_string),
         compatibility_filter_digest: query.compatibility_filter_digest.as_deref(),
         temporal_mode: query.temporal_mode.as_str(),
         cutoff_micros: match query.temporal_mode {
@@ -863,10 +893,12 @@ fn digest_filters(query: &SessionTemporalQuery) -> String {
         temporal_mode: &'static str,
         cutoff_micros: Option<i64>,
         grain: &'static str,
+        direct_anchor: Option<String>,
+        compatibility_filter_digest: Option<&'a str>,
     }
 
     sha256_json(&FilterBinding {
-        format_version: 1,
+        format_version: 2,
         query: &query.query,
         scope_kind: query.retrieval_scope.kind(),
         session_id: query.retrieval_scope.session_id().map(SessionId::as_str),
@@ -877,6 +909,8 @@ fn digest_filters(query: &SessionTemporalQuery) -> String {
             TemporalModeV1::Current | TemporalModeV1::Evolution | TemporalModeV1::Forensic => None,
         },
         grain: query.grain.as_str(),
+        direct_anchor: query.direct_anchor.as_ref().map(ToString::to_string),
+        compatibility_filter_digest: query.compatibility_filter_digest.as_deref(),
     })
 }
 

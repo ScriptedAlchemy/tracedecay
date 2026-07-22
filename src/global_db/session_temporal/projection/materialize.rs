@@ -227,7 +227,8 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
         batch_ordinal.saturating_add(1),
         committed_records,
         updated_at,
-    );
+    )
+    .with_source_coverage(recovery.source_coverage(source_through)?);
     Ok(Some((progress, batch)))
 }
 

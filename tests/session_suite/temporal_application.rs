@@ -500,6 +500,7 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
                 TemporalKernelResult {
                     snapshot,
                     ranked,
+                    hydrated: Vec::new(),
                     context: CompactContext {
                         rendered: String::new(),
                         bundle: CompactContextBundleV1 {

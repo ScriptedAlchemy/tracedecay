@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1, UtcMicros,
-    WorktreeId,
+    ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
+    TemporalModeV1, UtcMicros, WorktreeId,
 };
 
 use super::super::support::tool_json_with_md;
@@ -108,6 +108,8 @@ pub(crate) struct SessionRefreshProgressView {
     pub(crate) session_id: String,
     pub(crate) frontier: SessionRefreshFrontierView,
     pub(crate) coverage: SessionRefreshCoverageView,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) source_coverage: Vec<SessionSourceCoverageV1>,
     pub(crate) committed_batches: u64,
     pub(crate) committed_records: u64,
     pub(crate) updated_at: i64,
@@ -119,6 +121,8 @@ pub(crate) struct SessionRefreshReceiptView {
     pub(crate) session_id: String,
     pub(crate) frontier: SessionRefreshFrontierView,
     pub(crate) coverage: SessionRefreshCoverageView,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) source_coverage: Vec<SessionSourceCoverageV1>,
     pub(crate) state: String,
     pub(crate) failure_code: Option<String>,
     pub(crate) terminal_at: i64,

@@ -4,6 +4,47 @@
 use super::common::*;
 use super::*;
 
+fn source_coverage() -> tracedecay_domain::SessionSourceCoverageReceiptV1 {
+    let request = tracedecay_domain::SessionTemporalCoverageRequestV1::new(
+        tracedecay_domain::TemporalModeV1::Current,
+    );
+    tracedecay_domain::SessionSourceCoverageReceiptV1::new(
+        request.clone(),
+        vec![
+            tracedecay_domain::SessionSourceCoverageV1::from_frontiers(
+                tracedecay_domain::SessionSourceIdV1::new("cursor").unwrap(),
+                tracedecay_domain::SessionSourceFrontierV1::new(10),
+                tracedecay_domain::SessionSourceFrontierV1::new(8),
+                tracedecay_domain::SessionSourceFrontierV1::new(10),
+                request,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn refresh_begin_request_preserves_temporal_coverage_mode() {
+    let session_id = session("session.coverage-mode");
+    let frontier = SessionRefreshFrontierV1::new(10, 8).unwrap();
+    let current = SessionRefreshBeginOrJoinRequestV1::new(session_id.clone(), frontier);
+    let forensic = SessionRefreshBeginOrJoinRequestV1::new(session_id, frontier)
+        .with_coverage_request(tracedecay_domain::SessionTemporalCoverageRequestV1::new(
+            tracedecay_domain::TemporalModeV1::Forensic,
+        ));
+
+    assert_eq!(
+        current.coverage_request().mode(),
+        tracedecay_domain::TemporalModeV1::Current
+    );
+    assert_eq!(
+        forensic.coverage_request().mode(),
+        tracedecay_domain::TemporalModeV1::Forensic
+    );
+    assert!(!current.is_equivalent_to(&forensic));
+}
+
 #[test]
 fn refresh_progress_is_persistable_and_terminal_receipts_preserve_coverage() {
     let session_id = session("session.fixture");
@@ -37,6 +78,37 @@ fn refresh_progress_is_persistable_and_terminal_receipts_preserve_coverage() {
         SessionRefreshCompletionRequestV1::new(operation_id, session_id, frontier, coverage(),),
         Err(SessionStoreError::InvalidRefreshState { .. })
     ));
+}
+
+#[test]
+fn refresh_progress_and_receipts_preserve_typed_source_coverage() {
+    let source_coverage = source_coverage();
+    assert_eq!(
+        source_coverage.aggregate_state(),
+        tracedecay_domain::SessionSourceCoverageAggregateStateV1::Stale
+    );
+    let progress = SessionRefreshProgressV1::new(
+        operation_id(),
+        session("session.source-coverage"),
+        SessionRefreshFrontierV1::new(10, 8).unwrap(),
+        coverage(),
+        1,
+        8,
+        UtcMicros(100),
+    )
+    .with_source_coverage(source_coverage.clone());
+    assert_eq!(progress.source_coverage(), Some(&source_coverage));
+
+    let completion = SessionRefreshCompletionRequestV1::new(
+        operation_id(),
+        session("session.source-coverage"),
+        SessionRefreshFrontierV1::new(10, 10).unwrap(),
+        coverage(),
+    )
+    .unwrap();
+    let receipt = SessionRefreshReceiptV1::completed(completion, UtcMicros(110))
+        .with_source_coverage(source_coverage.clone());
+    assert_eq!(receipt.source_coverage(), Some(&source_coverage));
 }
 
 #[test]

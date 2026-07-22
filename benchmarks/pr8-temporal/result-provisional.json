@@ -11,6 +11,140 @@
       "status": "provisional"
     }
   },
+  "direct_acceptance": {
+    "acceptance_status": "provisional",
+    "current_acceptance": null,
+    "runtime_gates_executed": false,
+    "criteria": {
+      "cursor_expiry_and_rotation": {
+        "evidence_status": "present_unexecuted",
+        "implementation_evidence": {
+          "clock_skew_micros": 300000000,
+          "cursor_lifetime_micros": 86400000000,
+          "mac_first_classification": true,
+          "retained_key_rotation": true,
+          "retained_key_restart_reload": true,
+          "status": "present_unexecuted"
+        },
+        "production_apis": [
+          "query::temporal::cursor::{encode_cursor, verify_cursor}",
+          "global_db::session_temporal::cursor_keys::GlobalDbCursorKeyProvider"
+        ],
+        "tests": [
+          "query::temporal::cursor::tests::cursor_expiry_is_bounded_and_skew_is_limited",
+          "query::temporal::cursor::tests::cursor_tampering_is_rejected_before_binding_checks",
+          "query::temporal::cursor::tests::authenticated_retained_key_reports_rotation_after_mac",
+          "query::temporal::cursor::tests::unknown_routes_and_tampering_do_not_disclose_rotation",
+          "global_db::session_temporal::cursor_keys::tests::loaded_provider_never_requeries_after_rotation",
+          "global_db::session_temporal::cursor_keys::tests::retained_keys_verify_but_cannot_sign_until_the_expiry_boundary",
+          "global_db::session_temporal::cursor_keys::tests::restart_reloads_retained_verification_keys"
+        ]
+      },
+      "per_source_freshness": {
+        "evidence_status": "present_unexecuted",
+        "implementation_evidence": {
+          "aggregate_partial_and_stale": true,
+          "coverage_intervals_and_reasons": true,
+          "mcp_metadata": true,
+          "projector_frontiers": true,
+          "real_source_frontiers": true,
+          "refresh_keys_and_terminal_receipts": true,
+          "restart_and_replay": true,
+          "status": "present_unexecuted"
+        },
+        "production_apis": [
+          "tracedecay_domain::{SessionSourceCoverageV1, SessionSourceCoverageReceiptV1, SessionRefreshKeyV1}",
+          "application::session::{SessionDataFreshness, SessionTemporalExecutionReport, SessionRefreshService}",
+          "global_db::session_temporal::{GlobalDbSessionTemporalExecution, GlobalDbSessionTemporalStore}",
+          "mcp::tools::handlers::session::{message_search, session_refresh}"
+        ],
+        "tests": [
+          "source_freshness_tests::validity_intervals_reject_empty_and_reversed_bounds",
+          "source_freshness_tests::source_freshness_is_derived_from_observed_projected_and_target_frontiers",
+          "source_freshness_tests::aggregate_receipt_preserves_sources_and_mixed_freshness",
+          "source_freshness_tests::refresh_key_canonicalizes_sources_and_round_trips",
+          "application::session::types::tests::aggregate_freshness_is_derived_from_typed_source_coverage",
+          "refresh::refresh_progress_and_receipts_preserve_typed_source_coverage",
+          "temporal_refresh::projection_batch_and_progress_commit_atomically_and_replay_exactly",
+          "temporal_refresh::recovery_is_read_only_and_deterministic_across_reopen",
+          "daemon::session_temporal_refresh_scheduler::tests::restart_after_materialization_resumes_from_durable_receipts",
+          "mcp::tools::handlers::session::message_search::cutover_tests::stale_freshness_precondition_returns_coverage_and_typed_refresh_action",
+          "mcp::tools::handlers::session::session_refresh::tests::status_progress_is_stable_in_json_and_markdown",
+          "mcp::tools::handlers::session::session_refresh::tests::terminal_receipt_preserves_failure_and_coverage_details"
+        ]
+      },
+      "session_derived_spans_and_bursts": {
+        "evidence_status": "absent",
+        "reason": "no callable session-derived span/burst contract, projection, persistence, or retrieval API is present to test against the checked-in session fixtures"
+      },
+      "sole_kernel_cutover": {
+        "evidence_status": "present_unexecuted",
+        "fixture": "tests/fixtures/provider_normalization/codex/",
+        "implementation_evidence": {
+          "canonical_request": true,
+          "cursor_verification": true,
+          "direct_anchor_selection": true,
+          "hydration": true,
+          "shared_cursor": true,
+          "source_coverage": true,
+          "status": "present_unexecuted"
+        },
+        "production_path": "SessionRetrievalService::retrieve -> GlobalDbSessionTemporalExecution::execute -> execute_temporal_kernel",
+        "production_surfaces": [
+          "tracedecay_lcm_describe",
+          "tracedecay_lcm_expand",
+          "tracedecay_lcm_expand_query"
+        ],
+        "tests": [
+          "temporal_privacy::sanitized_capture_stays_private_through_temporal_summary_and_context",
+          "temporal_application::canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemera",
+          "query::temporal::candidates::tests::direct_anchor_plan_is_exact_and_singleton",
+          "temporal_application::production_occurrence_hydration_is_nonempty_and_external_payload_is_immutable",
+          "mcp::tools::handlers::session::lcm_handlers::compatibility_tests::cursor_failures_and_legacy_numeric_cursor_are_typed_without_db_fallback",
+          "mcp::tools::handlers::session::lcm_handlers::compatibility_tests::describe_maps_summary_target_to_typed_service_and_adds_temporal_metadata",
+          "mcp::tools::handlers::session::lcm_handlers::compatibility_tests::expand_maps_raw_alias_and_preserves_bounded_legacy_expansion",
+          "mcp::tools::handlers::session::lcm_handlers::compatibility_tests::describe_and_expand_without_service_never_probe_legacy_storage",
+          "mcp::tools::handlers::session::lcm_handlers::compatibility_tests::expand_query_translates_search_through_the_retrieval_service",
+          "mcp::tools::handlers::session::lcm_handlers::compatibility_tests::expand_query_translates_node_ids_through_summary_expansion"
+        ]
+      }
+    },
+    "parent_runtime_gates": [
+      "cargo test --test session_suite --all-features temporal_privacy::sanitized_capture_stays_private_through_temporal_summary_and_context",
+      "cargo test --lib --all-features query::temporal::cursor::tests::cursor_expiry_is_bounded_and_skew_is_limited",
+      "cargo test --lib --all-features query::temporal::cursor::tests::cursor_tampering_is_rejected_before_binding_checks",
+      "cargo test --lib --all-features query::temporal::cursor::tests::authenticated_retained_key_reports_rotation_after_mac",
+      "cargo test --lib --all-features query::temporal::cursor::tests::unknown_routes_and_tampering_do_not_disclose_rotation",
+      "cargo test --lib --all-features global_db::session_temporal::cursor_keys::tests::loaded_provider_never_requeries_after_rotation",
+      "cargo test --lib --all-features global_db::session_temporal::cursor_keys::tests::retained_keys_verify_but_cannot_sign_until_the_expiry_boundary",
+      "cargo test --lib --all-features global_db::session_temporal::cursor_keys::tests::restart_reloads_retained_verification_keys",
+      "cargo test -p tracedecay-domain --lib source_freshness_tests::validity_intervals_reject_empty_and_reversed_bounds",
+      "cargo test -p tracedecay-domain --lib source_freshness_tests::source_freshness_is_derived_from_observed_projected_and_target_frontiers",
+      "cargo test -p tracedecay-domain --lib source_freshness_tests::aggregate_receipt_preserves_sources_and_mixed_freshness",
+      "cargo test -p tracedecay-domain --lib source_freshness_tests::refresh_key_canonicalizes_sources_and_round_trips",
+      "cargo test --lib --all-features application::session::types::tests::aggregate_freshness_is_derived_from_typed_source_coverage",
+      "cargo test -p tracedecay-store --test session_contract --all-features refresh::refresh_progress_and_receipts_preserve_typed_source_coverage",
+      "cargo test --test session_suite --all-features temporal_refresh::projection_batch_and_progress_commit_atomically_and_replay_exactly",
+      "cargo test --test session_suite --all-features temporal_refresh::recovery_is_read_only_and_deterministic_across_reopen",
+      "cargo test --lib --all-features daemon::session_temporal_refresh_scheduler::tests::restart_after_materialization_resumes_from_durable_receipts",
+      "cargo test --lib --all-features mcp::tools::handlers::session::message_search::cutover_tests::stale_freshness_precondition_returns_coverage_and_typed_refresh_action",
+      "cargo test --lib --all-features mcp::tools::handlers::session::session_refresh::tests::status_progress_is_stable_in_json_and_markdown",
+      "cargo test --lib --all-features mcp::tools::handlers::session::session_refresh::tests::terminal_receipt_preserves_failure_and_coverage_details",
+      "cargo test --test session_suite --all-features temporal_application::canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemera",
+      "cargo test --lib --all-features query::temporal::candidates::tests::direct_anchor_plan_is_exact_and_singleton",
+      "cargo test --test session_suite --all-features temporal_application::production_occurrence_hydration_is_nonempty_and_external_payload_is_immutable",
+      "cargo test --lib --all-features mcp::tools::handlers::session::lcm_handlers::compatibility_tests::cursor_failures_and_legacy_numeric_cursor_are_typed_without_db_fallback",
+      "cargo test --lib --all-features mcp::tools::handlers::session::lcm_handlers::compatibility_tests::describe_maps_summary_target_to_typed_service_and_adds_temporal_metadata",
+      "cargo test --lib --all-features mcp::tools::handlers::session::lcm_handlers::compatibility_tests::expand_maps_raw_alias_and_preserves_bounded_legacy_expansion",
+      "cargo test --lib --all-features mcp::tools::handlers::session::lcm_handlers::compatibility_tests::describe_and_expand_without_service_never_probe_legacy_storage",
+      "cargo test --lib --all-features mcp::tools::handlers::session::lcm_handlers::compatibility_tests::expand_query_translates_search_through_the_retrieval_service",
+      "cargo test --lib --all-features mcp::tools::handlers::session::lcm_handlers::compatibility_tests::expand_query_translates_node_ids_through_summary_expansion",
+      "scripts/run-pr8-temporal-benchmark.sh --dry-run",
+      "cargo bench --bench session_temporal --all-features -- --run",
+      "cargo check --all-features",
+      "cargo test --workspace --all-features"
+    ]
+  },
   "measurement": {
     "inferential_claim": false,
     "measured_repetitions": 30,
@@ -266,5 +400,5 @@
   },
   "workload_id": "pr8-session-temporal-v1",
   "workload_manifest": "benchmarks/pr8-temporal/workload-v1.json",
-  "workload_manifest_sha256": "01412bf85128a14c894bebd66d7de5568b884b1a2864bd3add5be425aaca1a1a"
+  "workload_manifest_sha256": "13b3fc8ca6f1f061d584d27ab5e565a77a52de19a6a16860683c53c9d1ece69c"
 }

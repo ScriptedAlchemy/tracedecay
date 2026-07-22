@@ -3,7 +3,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1,
-    SessionRefreshOperationIdV1, SignedCursorKeyRefV1, TemporalCoverageCountsV1, UtcMicros,
+    SessionRefreshKeyV1, SessionRefreshOperationIdV1, SessionRefreshSourceTargetV1,
+    SessionSourceCoverageReceiptV1, SessionSourceCoverageV1, SessionSourceFrontierV1,
+    SessionSourceIdV1, SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1,
+    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionRefreshBeginOrJoinReceiptV1,
@@ -50,6 +53,8 @@ pub enum SessionRefreshRestartStateV1 {
 pub struct SessionRefreshRecoveryV1 {
     operation_id: SessionRefreshOperationIdV1,
     session_id: SessionId,
+    source_targets: Vec<SessionRefreshSourceTargetV1>,
+    coverage_request: SessionTemporalCoverageRequestV1,
     source_frontier: u64,
     target_frontier: SessionRefreshFrontierV1,
     candidate_generation: SessionProjectionGenerationV1,
@@ -68,6 +73,18 @@ impl SessionRefreshRecoveryV1 {
 
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+
+    pub fn source_id(&self) -> &SessionSourceIdV1 {
+        self.source_targets[0].source_id()
+    }
+
+    pub fn source_targets(&self) -> &[SessionRefreshSourceTargetV1] {
+        &self.source_targets
+    }
+
+    pub fn coverage_request(&self) -> &SessionTemporalCoverageRequestV1 {
+        &self.coverage_request
     }
 
     pub const fn target_frontier(&self) -> SessionRefreshFrontierV1 {
@@ -104,6 +121,30 @@ impl SessionRefreshRecoveryV1 {
 
     pub const fn restart_state(&self) -> SessionRefreshRestartStateV1 {
         self.restart_state
+    }
+
+    pub fn source_coverage(
+        &self,
+        committed_through: u64,
+    ) -> SessionStoreResult<SessionSourceCoverageReceiptV1> {
+        let sources = self
+            .source_targets
+            .iter()
+            .map(|target| {
+                SessionSourceCoverageV1::from_frontiers(
+                    target.source_id().clone(),
+                    target.observed_frontier(),
+                    SessionSourceFrontierV1::new(
+                        committed_through.min(target.observed_frontier().value()),
+                    ),
+                    target.target_watermark(),
+                    self.coverage_request.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SessionStoreError::from)?;
+        SessionSourceCoverageReceiptV1::new(self.coverage_request.clone(), sources)
+            .map_err(SessionStoreError::from)
     }
 }
 
@@ -183,7 +224,7 @@ impl GlobalDb {
                     request.session_id().as_str(),
                     operation_id.as_str(),
                     request_digest.as_str(),
-                    encode_frontier(request.target_frontier()),
+                    encode_refresh_target(&request)?,
                     accepted_at.0,
                 ],
             )
@@ -439,6 +480,12 @@ impl GlobalDb {
             request.coverage(),
         )
         .await?;
+        let mut request = request;
+        if request.source_coverage().is_none()
+            && let Some(source_coverage) = progress.source_coverage().cloned()
+        {
+            request = request.with_source_coverage(source_coverage);
+        }
         if request.frontier().committed_through() != binding.target_frontier {
             return Err(SessionStoreError::InvalidStateTransition {
                 context: "refresh completion target coverage",
@@ -477,6 +524,9 @@ impl GlobalDb {
             "complete",
             progress.frontier(),
             progress.coverage(),
+            request
+                .source_coverage()
+                .or_else(|| progress.source_coverage()),
             None,
             terminal_at,
         )
@@ -521,10 +571,22 @@ impl GlobalDb {
             request.operation_id(),
             request.frontier(),
             request.coverage(),
+            request.source_coverage(),
             seeded_at,
             FAIL_REFRESH,
         )
         .await?;
+        let mut normalized_request = SessionRefreshFailureRequestV1::new(
+            request.operation_id().clone(),
+            request.session_id().clone(),
+            request.frontier(),
+            *request.coverage(),
+            request.failure_code().as_str(),
+        )?;
+        if let Some(source_coverage) = progress.source_coverage().cloned() {
+            normalized_request = normalized_request.with_source_coverage(source_coverage);
+        }
+        let request = normalized_request;
         let terminal_at = terminal_timestamp(&progress, FAIL_REFRESH)?;
         terminate_candidate(
             &transaction,
@@ -551,6 +613,9 @@ impl GlobalDb {
             "failed",
             progress.frontier(),
             progress.coverage(),
+            request
+                .source_coverage()
+                .or_else(|| progress.source_coverage()),
             Some(request.failure_code().as_str()),
             terminal_at,
         )
@@ -595,10 +660,21 @@ impl GlobalDb {
             request.operation_id(),
             request.frontier(),
             request.coverage(),
+            request.source_coverage(),
             seeded_at,
             CANCEL_REFRESH,
         )
         .await?;
+        let mut normalized_request = SessionRefreshCancellationRequestV1::new(
+            request.operation_id().clone(),
+            request.session_id().clone(),
+            request.frontier(),
+            *request.coverage(),
+        );
+        if let Some(source_coverage) = progress.source_coverage().cloned() {
+            normalized_request = normalized_request.with_source_coverage(source_coverage);
+        }
+        let request = normalized_request;
         let terminal_at = terminal_timestamp(&progress, CANCEL_REFRESH)?;
         terminate_candidate(
             &transaction,
@@ -625,6 +701,9 @@ impl GlobalDb {
             "cancelled",
             progress.frontier(),
             progress.coverage(),
+            request
+                .source_coverage()
+                .or_else(|| progress.source_coverage()),
             None,
             terminal_at,
         )
@@ -691,6 +770,8 @@ fn refresh_binding_digest(
         "session_id": request.session_id().as_str(),
         "source_frontier": request.target_frontier().committed_through(),
         "target_frontier": request.target_frontier().observed_through(),
+        "refresh_key": request.refresh_key(),
+        "coverage_request": request.coverage_request(),
     }))
     .map_err(|error| storage(BEGIN_REFRESH, error))?;
     Ok(digest_bytes(&encoded))
@@ -727,6 +808,18 @@ fn encode_frontier(frontier: SessionRefreshFrontierV1) -> String {
     .to_string()
 }
 
+fn encode_refresh_target(
+    request: &SessionRefreshBeginOrJoinRequestV1,
+) -> SessionStoreResult<String> {
+    serde_json::to_string(&json!({
+        "committed_through": request.target_frontier().committed_through(),
+        "coverage_request": request.coverage_request(),
+        "observed_through": request.target_frontier().observed_through(),
+        "refresh_key": request.refresh_key(),
+    }))
+    .map_err(|error| storage(BEGIN_REFRESH, error))
+}
+
 fn decode_frontier(encoded: &str) -> SessionStoreResult<SessionRefreshFrontierV1> {
     let value: Value =
         serde_json::from_str(encoded).map_err(|error| storage(READ_REFRESH, error))?;
@@ -737,6 +830,33 @@ fn decode_frontier(encoded: &str) -> SessionStoreResult<SessionRefreshFrontierV1
         .as_u64()
         .ok_or_else(|| storage_message(READ_REFRESH, "refresh committed frontier is invalid"))?;
     SessionRefreshFrontierV1::new(observed, committed)
+}
+
+fn decode_refresh_target(
+    encoded: &str,
+) -> SessionStoreResult<(
+    SessionRefreshFrontierV1,
+    SessionTemporalCoverageRequestV1,
+    Option<SessionRefreshKeyV1>,
+)> {
+    let value: Value =
+        serde_json::from_str(encoded).map_err(|error| storage(READ_REFRESH, error))?;
+    let frontier = decode_frontier(encoded)?;
+    let coverage_request = value
+        .get("coverage_request")
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|error| storage(READ_REFRESH, error))
+        })
+        .transpose()?
+        .unwrap_or_else(|| SessionTemporalCoverageRequestV1::new(TemporalModeV1::Current));
+    let refresh_key = value
+        .get("refresh_key")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|error| storage(READ_REFRESH, error))
+        })
+        .transpose()?;
+    Ok((frontier, coverage_request, refresh_key))
 }
 
 fn decode_watermarks(encoded: &str) -> SessionStoreResult<SessionFrozenWatermarksV1> {
@@ -776,25 +896,44 @@ fn decode_u64(value: &Value, field: &'static str) -> SessionStoreResult<u64> {
         .ok_or_else(|| storage_message(READ_REFRESH, format!("{field} is invalid")))
 }
 
-fn encode_coverage(coverage: &TemporalCoverageCountsV1) -> String {
+fn encode_coverage(
+    coverage: &TemporalCoverageCountsV1,
+    source_coverage: Option<&SessionSourceCoverageReceiptV1>,
+) -> String {
     json!({
         "hidden": coverage.hidden,
         "redacted": coverage.redacted,
+        "source_coverage": source_coverage,
         "unknown": coverage.unknown,
         "visible": coverage.visible,
     })
     .to_string()
 }
 
-fn decode_coverage(encoded: &str) -> SessionStoreResult<TemporalCoverageCountsV1> {
+fn decode_coverage(
+    encoded: &str,
+) -> SessionStoreResult<(
+    TemporalCoverageCountsV1,
+    Option<SessionSourceCoverageReceiptV1>,
+)> {
     let value: Value =
         serde_json::from_str(encoded).map_err(|error| storage(READ_REFRESH, error))?;
-    Ok(TemporalCoverageCountsV1 {
-        visible: decode_u64(&value, "visible")?,
-        hidden: decode_u64(&value, "hidden")?,
-        unknown: decode_u64(&value, "unknown")?,
-        redacted: decode_u64(&value, "redacted")?,
-    })
+    let source_coverage = value
+        .get("source_coverage")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| storage(READ_REFRESH, error))?;
+    Ok((
+        TemporalCoverageCountsV1 {
+            visible: decode_u64(&value, "visible")?,
+            hidden: decode_u64(&value, "hidden")?,
+            unknown: decode_u64(&value, "unknown")?,
+            redacted: decode_u64(&value, "redacted")?,
+        },
+        source_coverage,
+    ))
 }
 
 async fn read_joinable_operation_by_digest(
@@ -990,6 +1129,7 @@ fn progress_logically_equal(
         && left.session_id() == right.session_id()
         && left.frontier() == right.frontier()
         && left.coverage() == right.coverage()
+        && left.source_coverage() == right.source_coverage()
         && left.committed_batches() == right.committed_batches()
         && left.committed_records() == right.committed_records()
 }
@@ -1212,7 +1352,7 @@ async fn insert_progress(
             progress.operation_id().as_str(),
             frontier_i64(progress_ordinal, PERSIST_REFRESH)?,
             encode_frontier(progress.frontier()),
-            encode_coverage(progress.coverage()),
+            encode_coverage(progress.coverage(), progress.source_coverage()),
             frontier_i64(progress.committed_batches(), PERSIST_REFRESH)?,
             frontier_i64(progress.committed_records(), PERSIST_REFRESH)?,
             progress.updated_at().0,
@@ -1344,11 +1484,12 @@ fn decode_progress(
 ) -> SessionStoreResult<SessionRefreshProgressV1> {
     let frontier_json: String = row.get(0).map_err(|error| storage(READ_REFRESH, error))?;
     let coverage_json: String = row.get(1).map_err(|error| storage(READ_REFRESH, error))?;
-    Ok(SessionRefreshProgressV1::new(
+    let (coverage, source_coverage) = decode_coverage(&coverage_json)?;
+    let progress = SessionRefreshProgressV1::new(
         operation_id,
         session_id,
         decode_frontier(&frontier_json)?,
-        decode_coverage(&coverage_json)?,
+        coverage,
         decode_nonnegative_i64(
             row.get(2).map_err(|error| storage(READ_REFRESH, error))?,
             READ_REFRESH,
@@ -1358,7 +1499,11 @@ fn decode_progress(
             READ_REFRESH,
         )?,
         UtcMicros(row.get(4).map_err(|error| storage(READ_REFRESH, error))?),
-    ))
+    );
+    Ok(match source_coverage {
+        Some(source_coverage) => progress.with_source_coverage(source_coverage),
+        None => progress,
+    })
 }
 
 async fn require_exact_terminal_progress(
@@ -1389,6 +1534,7 @@ async fn require_or_seed_terminal_progress(
     operation_id: &SessionRefreshOperationIdV1,
     frontier: SessionRefreshFrontierV1,
     coverage: &TemporalCoverageCountsV1,
+    source_coverage: Option<&SessionSourceCoverageReceiptV1>,
     terminal_at: UtcMicros,
     operation: &'static str,
 ) -> SessionStoreResult<SessionRefreshProgressV1> {
@@ -1422,6 +1568,10 @@ async fn require_or_seed_terminal_progress(
         0,
         terminal_at,
     );
+    let progress = match source_coverage {
+        Some(source_coverage) => progress.with_source_coverage(source_coverage.clone()),
+        None => progress,
+    };
     insert_progress(conn, &progress, 0)
         .await
         .map_err(|error| match error {
@@ -1574,6 +1724,7 @@ async fn insert_terminal_receipt(
     state: &str,
     frontier: SessionRefreshFrontierV1,
     coverage: &TemporalCoverageCountsV1,
+    source_coverage: Option<&SessionSourceCoverageReceiptV1>,
     failure_code: Option<&str>,
     terminal_at: UtcMicros,
 ) -> SessionStoreResult<()> {
@@ -1587,7 +1738,7 @@ async fn insert_terminal_receipt(
             operation_id.as_str(),
             state,
             encode_frontier(frontier),
-            encode_coverage(coverage),
+            encode_coverage(coverage, source_coverage),
             failure_code,
             terminal_at.0,
         ],
@@ -1629,14 +1780,23 @@ fn decode_receipt(
     let failure_code: Option<String> = row.get(3).map_err(|error| storage(READ_REFRESH, error))?;
     let terminal_at = UtcMicros(row.get(4).map_err(|error| storage(READ_REFRESH, error))?);
     let frontier = decode_frontier(&frontier_json)?;
-    let coverage = decode_coverage(&coverage_json)?;
+    let (coverage, source_coverage) = decode_coverage(&coverage_json)?;
     match state.as_str() {
-        "complete" => Ok(SessionRefreshReceiptV1::completed(
-            SessionRefreshCompletionRequestV1::new(operation_id, session_id, frontier, coverage)?,
-            terminal_at,
-        )),
-        "failed" => Ok(SessionRefreshReceiptV1::failed(
-            SessionRefreshFailureRequestV1::new(
+        "complete" => {
+            let request = SessionRefreshCompletionRequestV1::new(
+                operation_id,
+                session_id,
+                frontier,
+                coverage,
+            )?;
+            let request = match source_coverage {
+                Some(source_coverage) => request.with_source_coverage(source_coverage),
+                None => request,
+            };
+            Ok(SessionRefreshReceiptV1::completed(request, terminal_at))
+        }
+        "failed" => {
+            let request = SessionRefreshFailureRequestV1::new(
                 operation_id,
                 session_id,
                 frontier,
@@ -1644,13 +1804,26 @@ fn decode_receipt(
                 failure_code.ok_or_else(|| {
                     storage_message(READ_REFRESH, "failed refresh receipt has no failure code")
                 })?,
-            )?,
-            terminal_at,
-        )),
-        "cancelled" => Ok(SessionRefreshReceiptV1::cancelled(
-            SessionRefreshCancellationRequestV1::new(operation_id, session_id, frontier, coverage),
-            terminal_at,
-        )),
+            )?;
+            let request = match source_coverage {
+                Some(source_coverage) => request.with_source_coverage(source_coverage),
+                None => request,
+            };
+            Ok(SessionRefreshReceiptV1::failed(request, terminal_at))
+        }
+        "cancelled" => {
+            let request = SessionRefreshCancellationRequestV1::new(
+                operation_id,
+                session_id,
+                frontier,
+                coverage,
+            );
+            let request = match source_coverage {
+                Some(source_coverage) => request.with_source_coverage(source_coverage),
+                None => request,
+            };
+            Ok(SessionRefreshReceiptV1::cancelled(request, terminal_at))
+        }
         _ => Err(storage_message(
             READ_REFRESH,
             "refresh receipt terminal state is invalid",
@@ -1668,6 +1841,7 @@ fn require_exact_completion(
         request.session_id(),
         request.frontier(),
         request.coverage(),
+        request.source_coverage(),
         SessionRefreshTerminalStateV1::Complete,
         None,
     )
@@ -1683,6 +1857,7 @@ fn require_exact_failure(
         request.session_id(),
         request.frontier(),
         request.coverage(),
+        request.source_coverage(),
         SessionRefreshTerminalStateV1::Failed,
         Some(request.failure_code()),
     )
@@ -1698,6 +1873,7 @@ fn require_exact_cancellation(
         request.session_id(),
         request.frontier(),
         request.coverage(),
+        request.source_coverage(),
         SessionRefreshTerminalStateV1::Cancelled,
         None,
     )
@@ -1710,6 +1886,7 @@ fn require_exact_terminal(
     session_id: &SessionId,
     frontier: SessionRefreshFrontierV1,
     coverage: &TemporalCoverageCountsV1,
+    source_coverage: Option<&SessionSourceCoverageReceiptV1>,
     state: SessionRefreshTerminalStateV1,
     failure_code: Option<&SessionRefreshFailureCodeV1>,
 ) -> SessionStoreResult<()> {
@@ -1717,6 +1894,7 @@ fn require_exact_terminal(
         || receipt.session_id() != session_id
         || receipt.frontier() != frontier
         || receipt.coverage() != coverage
+        || source_coverage.is_some_and(|expected| receipt.source_coverage() != Some(expected))
         || receipt.state() != state
         || receipt.failure_code() != failure_code
     {
@@ -1734,6 +1912,11 @@ async fn read_running_recoveries(
     let mut rows = conn
         .query(
             "SELECT operation.operation_id, operation.session_id,
+                    COALESCE((
+                        SELECT MIN(source.provider)
+                        FROM sessions AS source
+                        WHERE source.session_id = operation.session_id
+                    ), 'all'),
                     operation.target_frontier_json, binding.generation,
                     binding.source_frontier, binding.target_frontier,
                     binding.frozen_watermarks_json, binding.projector_version,
@@ -1772,41 +1955,60 @@ async fn read_running_recoveries(
                 .map_err(|error| storage(READ_REFRESH, error))?,
         )
         .map_err(|error| storage(READ_REFRESH, error))?;
+        let provider: String = row.get(2).map_err(|error| storage(READ_REFRESH, error))?;
         let target_frontier_json: String =
-            row.get(2).map_err(|error| storage(READ_REFRESH, error))?;
+            row.get(3).map_err(|error| storage(READ_REFRESH, error))?;
+        let (target_frontier, coverage_request, refresh_key) =
+            decode_refresh_target(&target_frontier_json)?;
+        let source_targets = match refresh_key {
+            Some(refresh_key) => refresh_key.sources().to_vec(),
+            None => vec![
+                SessionRefreshSourceTargetV1::new(
+                    SessionSourceIdV1::new(format!("{}:{provider}", session_id.as_str()))
+                        .map_err(SessionStoreError::from)?,
+                    SessionSourceFrontierV1::new(target_frontier.observed_through()),
+                    SessionSourceFrontierV1::new(target_frontier.observed_through()),
+                )
+                .map_err(SessionStoreError::from)?,
+            ],
+        };
         let generation = decode_generation_i64(
-            row.get(3).map_err(|error| storage(READ_REFRESH, error))?,
-            READ_REFRESH,
-        )?;
-        let source_frontier = decode_nonnegative_i64(
             row.get(4).map_err(|error| storage(READ_REFRESH, error))?,
             READ_REFRESH,
         )?;
-        let target_frontier = decode_nonnegative_i64(
+        let source_frontier = decode_nonnegative_i64(
             row.get(5).map_err(|error| storage(READ_REFRESH, error))?,
             READ_REFRESH,
         )?;
-        let watermarks_json: String = row.get(6).map_err(|error| storage(READ_REFRESH, error))?;
+        let binding_target_frontier = decode_nonnegative_i64(
+            row.get(6).map_err(|error| storage(READ_REFRESH, error))?,
+            READ_REFRESH,
+        )?;
+        let watermarks_json: String = row.get(7).map_err(|error| storage(READ_REFRESH, error))?;
         let binding = RefreshBinding {
             generation,
             source_frontier,
-            target_frontier,
+            target_frontier: binding_target_frontier,
             watermarks: decode_watermarks(&watermarks_json)?,
-            projector_version: row.get(7).map_err(|error| storage(READ_REFRESH, error))?,
-            config_digest: row.get(8).map_err(|error| storage(READ_REFRESH, error))?,
-            binding_digest: row.get(9).map_err(|error| storage(READ_REFRESH, error))?,
+            projector_version: row.get(8).map_err(|error| storage(READ_REFRESH, error))?,
+            config_digest: row.get(9).map_err(|error| storage(READ_REFRESH, error))?,
+            binding_digest: row.get(10).map_err(|error| storage(READ_REFRESH, error))?,
         };
         pending.push((
             operation_id,
             session_id,
-            decode_frontier(&target_frontier_json)?,
+            source_targets,
+            coverage_request,
+            target_frontier,
             binding,
         ));
     }
     drop(rows);
 
     let mut recoveries = Vec::with_capacity(pending.len());
-    for (operation_id, session_id, target_frontier, binding) in pending {
+    for (operation_id, session_id, source_targets, coverage_request, target_frontier, binding) in
+        pending
+    {
         let progress = read_progress(conn, &session_id, &operation_id).await?;
         let restart_state = match progress.as_ref() {
             None => SessionRefreshRestartStateV1::BeginProjection,
@@ -1830,6 +2032,8 @@ async fn read_running_recoveries(
         recoveries.push(SessionRefreshRecoveryV1 {
             operation_id,
             session_id,
+            source_targets,
+            coverage_request,
             source_frontier: binding.source_frontier,
             target_frontier,
             candidate_generation: binding.generation,
