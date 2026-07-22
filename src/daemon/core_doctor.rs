@@ -110,6 +110,7 @@ fn doctor_runtime_unavailable(
             "status": "unavailable",
             "reason": "session_store_unavailable",
         },
+        "semantic_runtime": doctor_semantic_runtime_status(),
     })
 }
 
@@ -491,7 +492,33 @@ async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> 
         Some(db) => json!(db.literal_workspace_placeholder_transcript_paths(10).await),
         None => json!([]),
     };
+    value["semantic_runtime"] = doctor_semantic_runtime_status();
     value
+}
+
+fn doctor_semantic_runtime_status() -> serde_json::Value {
+    use crate::application::semantic_runtime::{
+        SemanticFallbackReasonV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
+    };
+
+    let Some(owner) = crate::semantic_code::shared_lifecycle_owner() else {
+        return serde_json::to_value(SemanticRuntimeStatusV1::new(
+            None,
+            SemanticRuntimeStateV1::Unavailable {
+                reason: SemanticFallbackReasonV1::RuntimeUnavailable,
+            },
+        ))
+        .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }));
+    };
+    let status = owner.status();
+    let state = match status.state.as_ref() {
+        Some(lifecycle) => crate::semantic_code::lifecycle_to_runtime_state(lifecycle),
+        None => SemanticRuntimeStateV1::Unavailable {
+            reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
+        },
+    };
+    serde_json::to_value(SemanticRuntimeStatusV1::new(None, state))
+        .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
 
 pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
