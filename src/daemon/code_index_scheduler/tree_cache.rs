@@ -159,3 +159,78 @@ impl SavedTreeCacheV1 {
         self.total_bytes
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::code_index::chunks::content_digest;
+    use tree_sitter::Parser;
+
+    fn parse(source: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&crate::extraction::ts_provider::try_language("rust").expect("rust lang"))
+            .expect("set language");
+        parser.parse(source, None).expect("parse")
+    }
+
+    fn input(path: &str, source: &str) -> SavedTreeInputV1 {
+        let bytes: Arc<[u8]> = Arc::from(source.as_bytes().to_vec());
+        SavedTreeInputV1 {
+            path: path.to_owned(),
+            digest: content_digest(&bytes),
+            tree: parse(source),
+            bytes,
+        }
+    }
+
+    #[test]
+    fn entry_bound_evicts_least_recently_used() {
+        let mut cache = SavedTreeCacheV1::with_bounds("sha256:key".to_owned(), 2, usize::MAX);
+        cache.commit_batch(
+            "sha256:key",
+            vec![
+                input("a.rs", "fn a() {}\n"),
+                input("b.rs", "fn b() {}\n"),
+                input("c.rs", "fn c() {}\n"),
+            ],
+        );
+        assert_eq!(cache.len(), 2, "entry bound evicts down to capacity");
+    }
+
+    #[test]
+    fn byte_bound_evicts_until_within_budget() {
+        // Each source is well over 8 bytes, so a tiny byte budget forces the
+        // cache down to a single retained entry.
+        let mut cache = SavedTreeCacheV1::with_bounds("sha256:key".to_owned(), 100, 16);
+        cache.commit_batch(
+            "sha256:key",
+            vec![
+                input("a.rs", "fn alpha() {}\n"),
+                input("b.rs", "fn beta() {}\n"),
+            ],
+        );
+        assert!(cache.len() <= 1, "byte budget bounds the retained set");
+        assert!(cache.total_bytes() <= 16);
+    }
+
+    #[test]
+    fn foreign_identity_key_clears_the_cache() {
+        let mut cache = SavedTreeCacheV1::new("sha256:worktree-a".to_owned());
+        cache.commit_batch("sha256:worktree-a", vec![input("a.rs", "fn a() {}\n")]);
+        assert_eq!(cache.len(), 1);
+        // A commit stamped with a different worktree identity must never merge:
+        // the cache clears rather than serve a cross-worktree tree.
+        cache.commit_batch("sha256:worktree-b", vec![input("b.rs", "fn b() {}\n")]);
+        assert_eq!(cache.len(), 0, "foreign identity clears, never mixes");
+    }
+
+    #[test]
+    fn retained_tree_round_trips_for_input_edit() {
+        let mut cache = SavedTreeCacheV1::new("sha256:key".to_owned());
+        cache.commit_batch("sha256:key", vec![input("a.rs", "fn a() {}\n")]);
+        let retained = cache.get("a.rs").expect("prior tree retained");
+        assert_eq!(retained.bytes.as_ref(), b"fn a() {}\n");
+        assert!(cache.get("missing.rs").is_none(), "a miss just full-parses");
+    }
+}
