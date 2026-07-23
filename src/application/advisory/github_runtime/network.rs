@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -570,6 +569,7 @@ impl GitHubReadOnlyClientV1 {
         )
     }
 
+    #[allow(dead_code)] // Plan 37 PR-review CI jobs — staged
     pub(crate) fn read_workflow_jobs<'a>(
         &'a self,
         context: &'a RequestContext,

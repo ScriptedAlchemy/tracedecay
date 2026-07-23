@@ -1,4 +1,3 @@
-#![allow(dead_code)] // white-box test include of in-flight module
 //! Digest-addressed model artifact store with verified resumable import
 //! (Plan 31 "Model and offline lifecycle", packet
 //! `pr10/prep-artifact-manifest`).
@@ -26,7 +25,7 @@
 //!
 //! QUARANTINE: not reachable from production code yet; no network types, no
 //! query/retrieval wiring, profile-independent retention, and GC.
-
+#![allow(dead_code)] // staged model artifact store; Plan 31 (fastembed) — not yet wired
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;

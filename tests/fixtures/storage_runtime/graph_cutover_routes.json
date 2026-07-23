@@ -2,7 +2,6 @@
   "native_reader": "crates/tracedecay-rusqlite-runtime/src/graph/read.rs",
   "native_mutation": "crates/tracedecay-rusqlite-runtime/src/graph/mutation.rs",
   "physical_attachment": "crates/tracedecay-rusqlite-runtime/src/graph/attachment.rs",
-  "legacy_adapter": "src/daemon/store_runtime/graph_compat.rs",
   "read_variants": [
     "GraphStats",
     "GraphNode",

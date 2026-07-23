@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 // Rust guideline compliant 2025-10-17
 //! Kimi Code CLI agent integration.
 //!

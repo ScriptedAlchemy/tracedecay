@@ -1,6 +1,8 @@
+use static_assertions::assert_not_impl_any;
 use tracedecay_domain::{
-    PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalScope, RetrievalSnapshot,
-    SanitizerRevision, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark,
+    EphemeralSanitizedQueryViewV1, PrincipalId, QueryNormalizationRevision, RetrievalBudget,
+    RetrievalScope, RetrievalSnapshot, SanitizerRevision, SingleRootScopeV1, TemporalModeV1,
+    UtcMicros, VectorWatermark,
 };
 
 use super::{digest_id, id};
@@ -90,17 +92,12 @@ fn raw_query_dto_rejects_oversized_input_before_execution_state_exists() {
 
 #[test]
 fn query_view_source_has_no_clone_or_serde_surface() {
-    let source =
-        include_str!("../../../../crates/tracedecay-domain/src/code_intelligence/search.rs");
-    let start = source
-        .find("pub struct EphemeralSanitizedQueryViewV1")
-        .expect("query view declaration");
-    let prefix = &source[..start];
-    let derive_start = prefix.rfind("#[derive").expect("query view derive");
-    let declaration = &source[derive_start..start];
-    assert!(!declaration.contains("Clone"));
-    assert!(!declaration.contains("Serialize"));
-    assert!(!declaration.contains("Deserialize"));
+    assert_not_impl_any!(
+        EphemeralSanitizedQueryViewV1:
+            Clone,
+            serde::Serialize,
+            serde::de::DeserializeOwned
+    );
 
     let boundary_source = include_str!("../request.rs");
     let raw_start = boundary_source

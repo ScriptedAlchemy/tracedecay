@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use libsql::{Connection, params};
 use serde::{Serialize, de::DeserializeOwned};
 use tracedecay_domain::{

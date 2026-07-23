@@ -4,8 +4,6 @@
   "validation": "crates/tracedecay-rusqlite-runtime/src/backup/validation.rs",
   "maintenance": "crates/tracedecay-rusqlite-runtime/src/maintenance/coordinator.rs",
   "registry": "src/daemon/store_runtime/registry.rs",
-  "graph_compat": "src/daemon/store_runtime/graph_compat.rs",
-  "global_compat": "src/daemon/store_runtime/global_compat.rs",
   "forbidden_writable_fallbacks": [
     "Builder::new_local",
     "Connection::open",

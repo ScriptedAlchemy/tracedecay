@@ -1,8 +1,8 @@
 # Provider-observation pipeline benchmark
 
 The directory keeps its PR5 name for artifact provenance. Workload schema 3 is
-the PR6 multi-provider acceptance harness; the earlier checked-in results remain
-historical PR5 evidence and are not current PR6 acceptance.
+the historical PR6 multi-provider Linux benchmark; the checked-in results are
+descriptive measurements, not PR acceptance authority.
 
 The versioned [workload](workload-v1.json) runs production scan/parse,
 normalization, sanitizer, authoritative commit, projection/V1 fold, bounded
@@ -14,7 +14,7 @@ turn per round in catalog order, records every turn, and validates an
 eight-provider maximum turn distance. Each provider input is a bounded copy of
 the checked-in native fixtures named in the workload; unique identities and
 secret-shaped canaries are injected into those native shapes and the canaries
-must be absent from durable observations. The acceptance result embeds a versioned
+must be absent from durable observations. The historical result embeds a versioned
 `provider-observation-performance-result-v1` containing per-provider raw
 parse/commit/replay/pipeline/no-op samples, p50/p95/p99 distributions,
 throughput, CPU, process write I/O, database growth, peak RSS, bounded replay backlog, and
@@ -33,15 +33,14 @@ an unnecessary incompatible schema-v2 claim. A normal test deserializes the
 complete manifest with unknown fields denied, executes every production adapter
 once, and proves each repeat is a durable no-op.
 
-Current acceptance artifacts must include the nested
+The latest historical measurement includes the nested
 `provider_observation_performance` result and `hook_telemetry_readiness`
-evidence. [evidence-index.json](evidence-index.json) identifies
+diagnostic. [evidence-index.json](evidence-index.json) identifies
 [result-2026-07-16-00d3d73a.json](result-2026-07-16-00d3d73a.json) as the
-`current_acceptance`. All three earlier artifacts remain `historical_stale`, so
-the retired-evidence validator intentionally does not require fields introduced
-by the new workload.
+legacy `current_acceptance`; that field is deprecated and grants no authority.
+Earlier artifacts remain `historical_stale`.
 
-The acceptance result embeds hook telemetry readiness as
+The measurement embeds hook telemetry readiness as
 `hook-telemetry-baseline-readiness-v1`, not as a measured baseline. It reads the
 redacted fixtures under `tests/fixtures/host_events` directly, records each
 fixture path and SHA-256 identity, and computes compact canonical request-byte
@@ -53,16 +52,12 @@ on instrumented hosts; Hermes coverage remains partial. Checked-in distributions
 and aggregate timeout/disposition counts remain explicitly unavailable rather
 than being represented as zero.
 
-An acceptance result uses result schema 2 against workload schema 3. It embeds
-SHA-256 identities for the manifest, native fixtures, all compiled harness
-sources, and executing test binary. The runner requires a clean commit, expands
-that exact commit with `git archive`, writes and hashes a full tracked-source
-manifest, makes the source snapshot read-only, and validates every compiler
-input before and after measurement. It invokes ordinary Cargo without setting a
-target directory, so stock Cargo and cargo-slot select their normal target. Test
-data is created beside the executing test binary inside that selected target.
-The result also records the host target, Rust/Cargo versions, normalized Rust
-flags, wrapper identities, and Cargo-config identity.
+The legacy schema records real SHA-256 identities for workload members and
+native fixtures plus the host target, Rust/Cargo versions, kernel, and hardware.
+Those source/content digests remain useful provenance. Do not recreate the
+former clean-checkout archive, tracked-source snapshot, compiler-input
+attestation, or evidence-only commit workflow. Run ordinary Cargo against the
+working checkout and report the source revision and dirty state truthfully.
 
 Linux `/proc` is the explicit measurement platform contract. Preflight requires
 all measured interfaces, a successful write of `5` to
@@ -72,40 +67,23 @@ contain measurements only for successful Linux evidence runs. Unsupported
 platforms reject at preflight; the harness never substitutes numeric zero for
 an unavailable counter. Zero is reserved for an available counter that
 actually measured no work, including the strict repeat-ingest no-op assertion.
-The module still compiles on non-Linux targets; an attempted evidence run there
-with the manifest's exact Cargo command executes the ignored test and rejects
-the unsupported platform at preflight. Direct Cargo invocations on Linux also
-reject because they lack the clean-build attestation supplied by the runner.
-CPU identity accepts common x86, ARM, POWER, and other Linux
+The module still compiles on non-Linux targets; an attempted measurement there
+rejects the unsupported platform at preflight. CPU identity accepts common x86,
+ARM, POWER, and other Linux
 `/proc/cpuinfo` labels.
 
 Every replayed authoritative payload is checked for canary removal and a
 payload-bound sanitization receipt, and every folded V1 message is checked for
 exact identity, role, text, and canary absence. These assertions and V1 point reads run after
-each phase snapshot, so correctness verification is not charged to latency,
+each measured phase, so correctness verification is not charged to latency,
 CPU, I/O, or storage-growth measurements. The run also requires zero legacy
 transcript writes: the observation projector is the only V1 message writer,
 and compatibility transcript counters report those projector outputs.
 The timed no-op retry replays after the durable end cursor and must return zero
 new observations; a full replay verifies unchanged cardinality afterward.
 
-Evidence uses a two-commit workflow:
-
-1. Commit all code, native fixtures, and manifest changes, then start from that
-   clean commit.
-2. Run the command below. It creates one schema-2 result, updates
-   [evidence-index.json](evidence-index.json), and runs the strict directory
-   validator. Commit only that result, the index, and this README's measured
-   summary as the evidence-only follow-up. Do not change product, harness, or
-   workload files in the evidence commit.
-
-The runner removes partial result/index changes on failure. The index permits
-the checked historical artifact but the finalization gate requires exactly one
-fully typed current acceptance artifact and rejects unindexed, duplicate, or
-unknown-field results.
-
-The current [acceptance result](result-2026-07-16-00d3d73a.json) was captured
-from clean commit `00d3d73a06403480487207986506f9b3c4d1df43` with 3 warmups and
+The historical [measurement result](result-2026-07-16-00d3d73a.json) records
+source revision `00d3d73a06403480487207986506f9b3c4d1df43` with 3 warmups and
 30 independent measured repetitions of 64 records (30 × 64 = 1,920 records).
 The raw artifact records the Linux kernel, CPU, memory, Rust/Cargo toolchains,
 every repetition, and the nearest-rank/sample-standard-deviation method.
@@ -121,10 +99,10 @@ every repetition, and the nearest-rank/sample-standard-deviation method.
   observation-count delta, and coordinator work counters.
 - Round-robin fairness: maximum provider turn distance 8.
 
-The former [acceptance result](result-2026-07-16-8d53b4a9.json) remains
+The earlier [measurement result](result-2026-07-16-8d53b4a9.json) remains
 `historical_stale` after the PR6 provider-ingestion correctness changes.
 
-The former [acceptance result](result-2026-07-15-0c289212.json) remains
+The earlier [measurement result](result-2026-07-15-0c289212.json) remains
 `historical_stale` because it predates workload schema 3.
 
 The [historical result](result-2026-07-15-b05b4cd5.json) was captured from clean
@@ -132,8 +110,8 @@ commit `b05b4cd570ab8e3385604c0fef31902fdc3f1e8b`.
 
 > **Historical/stale evidence:** this result predates schema 2 provenance and
 > complete workload validation. Its JSON carries
-> `"evidence_status": "historical_stale"` and is rejected as acceptance
-> evidence by normal tests. Retain it only for provenance.
+> `"evidence_status": "historical_stale"` and is not current product evidence.
+> Retain it only for provenance.
 
 ```console
 scripts/run-pr5-observation-benchmark.sh

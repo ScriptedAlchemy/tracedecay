@@ -1,10 +1,10 @@
-#![allow(dead_code)] // white-box test include of in-flight module
 //! Production lifecycle boundary for the bounded embedding-session pool.
 //!
 //! A service owns the admitted projection/artifact authority, an owned runtime
 //! factory, and the currently published pool. Restart and reload construct a
 //! complete replacement before one atomic state swap; callers therefore see
 //! either the old pool or the replacement, never a half-reloaded runtime.
+#![allow(dead_code)] // staged embedding runtime service; Plan 31 — not yet wired
 
 use std::error::Error;
 use std::fmt;

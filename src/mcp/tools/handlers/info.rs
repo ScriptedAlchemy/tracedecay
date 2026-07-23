@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Status, files, `type_hierarchy`, body, todos, `simplify_scan`, `port_status`,
 //! `port_order` tool handlers.
 
@@ -378,6 +377,7 @@ pub(super) fn handle_active_project(
 }
 
 /// Handles `tracedecay_storage_status` tool calls.
+#[allow(dead_code)] // Plan 21 storage_status handler — not yet registered
 pub(super) async fn handle_storage_status(
     cg: &TraceDecay,
     args: Value,

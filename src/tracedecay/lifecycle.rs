@@ -138,12 +138,9 @@ impl TraceDecay {
             std::process::id()
         ));
         let authority = DatabaseAuthority::acquire_test(&db_path, "latest schema version")?;
-        let (db, _) = GraphLibsqlCompatDriver::open(
-            GraphStoreOpenMode::Initialize,
-            &db_path,
-            &authority,
-        )
-        .await?;
+        let (db, _) =
+            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::Initialize, &db_path, &authority)
+                .await?;
         let version = Self::schema_version(&db, "latest_schema_version").await;
         db.close();
         delete_db_files(&db_path);
@@ -424,12 +421,8 @@ impl TraceDecay {
             // writable open below; do not force offline recovery for it. The
             // read-only open runs its own integrity validation, so the damage
             // can surface either as its open error or as a problem row here.
-            match GraphLibsqlCompatDriver::open(
-                GraphStoreOpenMode::ReadOnly,
-                &db_path,
-                &authority,
-            )
-            .await
+            match GraphLibsqlCompatDriver::open(GraphStoreOpenMode::ReadOnly, &db_path, &authority)
+                .await
             {
                 Ok((verification, _)) => {
                     let integrity = verification.quick_check_report().await;

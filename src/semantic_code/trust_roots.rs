@@ -17,7 +17,7 @@
 //! admitted outside tests.
 //!
 //! QUARANTINE: no I/O, no network access, not reachable from production code.
-
+#![allow(dead_code)] // model trust roots; Plan 31 packet pr10 — staged
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;

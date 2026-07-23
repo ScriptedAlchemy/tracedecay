@@ -110,7 +110,6 @@ fn holdout_seal_is_committed_and_verified_without_reading_labels() {
     }
 }
 
-
 #[test]
 fn plan15_fixture_bundle_cross_validates_real_checkpoint_artifacts() {
     let bundle = fixtures::load_fixture_bundle();

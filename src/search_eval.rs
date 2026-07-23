@@ -16,7 +16,6 @@ pub use self::candidate_output::{
     write_generate_outputs,
 };
 
-
 use self::holdout::load_direct_holdout_labels;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -34,13 +33,14 @@ use tracedecay_domain::{
     EvidenceIndexEntryV1, EvidenceIndexId, EvidenceIndexV1, ExactAdmissionOracleV1,
     FixtureAuthorityV1, FixtureContentDigest, FixtureFileDigestV1, FixtureManifestDigest,
     FixtureManifestV1, HoldoutLabelAuthorityV1, HoldoutSealDigest, HoldoutSealV1, LabelSetDigest,
-    LabelSetId, LabelSetV1, QueryFamilyV1, QueryWorkloadV1, RelevanceJudgmentV1,
-    RunManifestDigest, RunManifestV1, SavedCandidateSetV1, TemporalEventV1, WorkloadDigest,
+    LabelSetId, LabelSetV1, QueryFamilyV1, QueryWorkloadV1, RelevanceJudgmentV1, RunManifestDigest,
+    RunManifestV1, SavedCandidateSetV1, TemporalEventV1, WorkloadDigest,
 };
 
 const ZERO_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 const REPORT_DIGEST_DOMAIN: &str = "tracedecay.search-quality-report.v1";
-pub const PR9_ACCEPTANCE_DECISION_EXPRESSION: &str = "pr9_candidate_matrix_complete && bound_label_authority in [deterministic,human_authoritative]";
+pub const PR9_ACCEPTANCE_DECISION_EXPRESSION: &str =
+    "pr9_candidate_matrix_complete && bound_label_authority in [deterministic,human_authoritative]";
 
 #[derive(Debug, Error)]
 pub enum SearchEvalError {
@@ -410,7 +410,8 @@ fn evaluate_locked_quality(
             "direct human-authoritative holdout labels and frozen exact/lexical/graph candidates validated for this locked run".to_string()
         }
     };
-    let accepted_evidence = build_accepted_pr9_evidence(run, saved_candidates, &acceptance_rationale)?;
+    let accepted_evidence =
+        build_accepted_pr9_evidence(run, saved_candidates, &acceptance_rationale)?;
     accepted_evidence
         .validate_structure_for_run(
             run,
@@ -827,8 +828,9 @@ fn required_holdout_artifact(seal: &HoldoutSealV1) -> RequiredExternalArtifactV1
         kind: "direct_holdout_labels".to_string(),
         locator: seal.locator.clone(),
         digest: seal.seal_digest.clone(),
-        reason: "direct filesystem locked-quality holdout labels with canonical digests are required"
-            .to_string(),
+        reason:
+            "direct filesystem locked-quality holdout labels with canonical digests are required"
+                .to_string(),
     }
 }
 
@@ -1099,7 +1101,6 @@ fn sha256_bytes(bytes: &[u8]) -> String {
     }
     encoded
 }
-
 
 #[cfg(test)]
 mod tests {

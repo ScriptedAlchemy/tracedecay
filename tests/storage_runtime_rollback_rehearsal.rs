@@ -14,8 +14,6 @@ struct RollbackFixture {
     validation: String,
     maintenance: String,
     registry: String,
-    graph_compat: String,
-    global_compat: String,
     forbidden_writable_fallbacks: Vec<String>,
 }
 
@@ -132,20 +130,6 @@ fn stale_authority_is_fenced_at_registry_and_adapter_boundaries() {
         ),
         "registry lookup must return a typed stale-authority fence"
     );
-
-    for (path, impl_type) in [
-        (&fixture.graph_compat, "GraphRuntimeCompat"),
-        (&fixture.global_compat, "GlobalDbRuntimeCompat"),
-    ] {
-        let adapter = RustAst::parse(path);
-        let method_paths = adapter.method_paths(impl_type, "submit_binding_outcome");
-        let function_paths = adapter.function_paths("submit_binding_outcome");
-        assert!(
-            has_path_suffix(&method_paths, "RuntimeSubmitOutcomeV1::Fenced")
-                || has_path_suffix(&function_paths, "RuntimeSubmitOutcomeV1::Fenced"),
-            "{impl_type} must reject stale write authority"
-        );
-    }
 
     let maintenance = RustAst::parse(&fixture.maintenance);
     assert!(

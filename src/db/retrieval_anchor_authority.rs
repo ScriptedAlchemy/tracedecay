@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use libsql::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecordV2, UtcMicros};
@@ -337,6 +336,7 @@ async fn current_disposition_tx(
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // Plan 13 anchor-disposition test scaffolding — pending tests
 async fn append_anchor_disposition_inner(
     connection: &Connection,
     record: &RetrievalAnchorDispositionRecordV1,
@@ -407,6 +407,7 @@ async fn append_anchor_disposition_inner(
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // Plan 13 anchor-disposition test scaffolding — pending tests
 pub(crate) async fn append_anchor_disposition(
     connection: &Connection,
     record: &RetrievalAnchorDispositionRecordV1,

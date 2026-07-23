@@ -174,7 +174,7 @@ pub(crate) fn fixture() -> Fixture {
 }
 
 pub(crate) fn invoke(request: &Value) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tracedecay-rusqlite-parity"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tracedecay-rusqlite-parity-probe"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

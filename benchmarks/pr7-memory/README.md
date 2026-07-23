@@ -9,7 +9,7 @@ acceptance snapshot, signature, trust root, or attestation in this directory.
 | Path | Role |
 |---|---|
 | [workload-v1.json](workload-v1.json) | Versioned phase/workload pin (historical measurement shape) |
-| [evidence-index.json](evidence-index.json) | Status pointer (`pending`; `current_acceptance` null) |
+| [evidence-index.json](evidence-index.json) | Legacy status pointer (`pending`; deprecated `current_acceptance` remains null) |
 | [result-provisional.json](result-provisional.json) | Historical local timings only — not accepted evidence |
 
 ## Status: pending

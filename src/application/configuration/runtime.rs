@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Retained daemon composition for the configuration control plane.
 //!
 //! This module owns only lifetime and delegation. Resolution, validation,
@@ -44,6 +43,7 @@ type SharedConfigurationControlPlane = Arc<dyn ConfigurationControlPlane + Send 
 /// local transport.
 pub struct ProjectConfigurationRuntime {
     configuration: PinnedRuntimeConfiguration,
+    #[allow(dead_code)] // Plan 20 config control-plane — staged
     control_plane: SharedConfigurationControlPlane,
     client: Arc<ProductionConfigurationDaemonClient>,
 }
@@ -84,6 +84,7 @@ impl ProjectConfigurationRuntime {
         &self.configuration
     }
 
+    #[allow(dead_code)] // Plan 20 config control-plane — staged
     pub(crate) fn control_plane(&self) -> SharedConfigurationControlPlane {
         Arc::clone(&self.control_plane)
     }

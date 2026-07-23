@@ -201,7 +201,9 @@ mod tests {
             .await
         {
             StoreRuntimeOpenResult::Published(handle) => handle,
-            other => panic!("profile publication failed: {other:?}"),
+            other @ StoreRuntimeOpenResult::Failed(_) => {
+                panic!("profile publication failed: {other:?}")
+            }
         };
         let pin = match registry.profile_authority_pin(&profile_shard()) {
             ProfileAuthorityPinResult::Pinned(pin) => pin,
@@ -216,7 +218,9 @@ mod tests {
             .await
         {
             StoreRuntimeOpenResult::Published(handle) => handle,
-            other => panic!("code publication failed: {other:?}"),
+            other @ StoreRuntimeOpenResult::Failed(_) => {
+                panic!("code publication failed: {other:?}")
+            }
         };
 
         let ready = code.physical_snapshot();

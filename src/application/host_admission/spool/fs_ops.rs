@@ -1,13 +1,11 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use std::fs::File;
 use std::io;
 use std::path::Path;
 
 use tracedecay_application::framed_log::{
     DirectorySyncPolicy, append_durable, file_len as shared_file_len,
-    read_bounded as shared_read_bounded, sync_parent_directory as shared_sync_parent_directory,
+    sync_parent_directory as shared_sync_parent_directory,
     tighten_existing_file as shared_tighten_existing_file, truncate_file as shared_truncate_file,
-    validate_regular_or_missing as shared_validate_regular,
     with_owned_temp_publish as shared_with_owned_temp_publish,
 };
 
@@ -23,20 +21,12 @@ pub(crate) fn file_len(path: &Path) -> Result<u64, SpoolError> {
     shared_file_len(path).map_err(io_error)
 }
 
-pub(crate) fn validate_regular_or_missing(path: &Path) -> Result<bool, SpoolError> {
-    shared_validate_regular(path).map_err(io_error)
-}
-
 pub(crate) fn tighten_existing_file(path: &Path) -> Result<(), SpoolError> {
     shared_tighten_existing_file(path).map_err(io_error)
 }
 
 pub(crate) fn sync_parent_directory(path: &Path) -> Result<(), SpoolError> {
     shared_sync_parent_directory(path, DIRECTORY_POLICY).map_err(io_error)
-}
-
-pub(crate) fn read_bounded(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, SpoolError> {
-    shared_read_bounded(path, maximum).map_err(io_error)
 }
 
 fn replace_file_atomically(

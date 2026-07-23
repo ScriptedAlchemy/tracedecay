@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight CLI output helpers
 //! Compact human-view contract for CLI and MCP presenters.
 
 use super::view::{CanonicalHumanView, HumanFieldValue};
@@ -21,6 +20,7 @@ impl MarkdownView {
         }
     }
 
+    #[allow(dead_code)] // Plan 21 CLI output helper — staged
     pub const fn revision(&self) -> u32 {
         self.revision
     }

@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Graph query and navigation tool definitions.
 
 use serde_json::json;
@@ -661,6 +660,7 @@ pub(super) fn def_read() -> ToolDefinition {
     )
 }
 
+#[allow(dead_code)] // Plan 21 call_chain tool def — not yet registered
 pub(super) fn def_call_chain() -> ToolDefinition {
     def(
         "tracedecay_call_chain",
@@ -691,6 +691,7 @@ pub(super) fn def_call_chain() -> ToolDefinition {
     )
 }
 
+#[allow(dead_code)] // Plan 21 file_dependents tool def — not yet registered
 pub(super) fn def_file_dependents() -> ToolDefinition {
     def(
         "tracedecay_file_dependents",

@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -1005,6 +1004,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         self.bind_route(route, key);
     }
 
+    #[allow(dead_code)] // in-flight daemon route binding — staged
     fn bind_or_insert_route(
         &mut self,
         route: ProjectRouteKey,
@@ -2091,6 +2091,7 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
 }
 
 #[cfg(unix)]
+#[allow(dead_code)] // in-flight authenticated socket serving — staged
 async fn serve_authenticated_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,

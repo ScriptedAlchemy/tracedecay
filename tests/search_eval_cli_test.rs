@@ -224,7 +224,9 @@ fn cli_help_exposes_no_packet_seal_or_owner_arguments() {
         "blinded-packet",
     ] {
         assert!(
-            !help.to_ascii_lowercase().contains(&banned.to_ascii_lowercase()),
+            !help
+                .to_ascii_lowercase()
+                .contains(&banned.to_ascii_lowercase()),
             "CLI help unexpectedly exposes {banned}:\n{help}"
         );
     }

@@ -1,8 +1,8 @@
 //! Cargo manifest contract guards.
 //!
-//! Validates the approved workspace shape through PR13 (exact package set,
-//! dependency aliases, and target snapshot), classifies physical Cargo
-//! manifests without name heuristics, and enumerates git-tracked Rust sources.
+//! Validates driver-neutral workspace dependency and target boundaries,
+//! classifies physical Cargo manifests without name heuristics, and enumerates
+//! git-tracked Rust sources without freezing an exact package/target snapshot.
 
 use crate::module_scanner::{normalize_identifier, normalize_relative, resolve_reachable_sources};
 use crate::query_kernel::query_kernel_violations;
@@ -29,130 +29,8 @@ const QUERY_ALLOWED_PACKAGES: &[&str] = &[
     "tracedecay-tool-catalog",
     "zeroize",
 ];
-const PR8_WORKSPACE_MANIFESTS: &[&str] = &[
-    "Cargo.toml",
-    "crates/tracedecay-api/Cargo.toml",
-    "crates/tracedecay-application/Cargo.toml",
-    "crates/tracedecay-domain/Cargo.toml",
-    "crates/tracedecay-hooks/Cargo.toml",
-    "crates/tracedecay-policy/Cargo.toml",
-    "crates/tracedecay-rusqlite-parity/Cargo.toml",
-    "crates/tracedecay-rusqlite-runtime/Cargo.toml",
-    "crates/tracedecay-sqlite-parity-protocol/Cargo.toml",
-    "crates/tracedecay-store/Cargo.toml",
-    "crates/tracedecay-tool-catalog/Cargo.toml",
-];
-const PR8_TARGET_SNAPSHOT: &[&str] = &[
-    "tracedecay-api|tracedecay_api|lib|crates/tracedecay-api/src/lib.rs",
-    "tracedecay-application|tracedecay_application|lib|crates/tracedecay-application/src/lib.rs",
-    "tracedecay-application|authorization_non_disclosure|test|crates/tracedecay-application/tests/authorization_non_disclosure.rs",
-    "tracedecay-application|authorization_recheck|test|crates/tracedecay-application/tests/authorization_recheck.rs",
-    "tracedecay-application|callable_code_queries|test|crates/tracedecay-application/tests/callable_code_queries.rs",
-    "tracedecay-application|catalog_contributions|test|crates/tracedecay-application/tests/catalog_contributions.rs",
-    "tracedecay-application|deadline_cancellation|test|crates/tracedecay-application/tests/deadline_cancellation.rs",
-    "tracedecay-application|diagnostic_provider_identity|test|crates/tracedecay-application/tests/diagnostic_provider_identity.rs",
-    "tracedecay-application|effect_receipts|test|crates/tracedecay-application/tests/effect_receipts.rs",
-    "tracedecay-application|evidence_contract|test|crates/tracedecay-application/tests/evidence_contract.rs",
-    "tracedecay-application|feedback_cycle|test|crates/tracedecay-application/tests/feedback_cycle.rs",
-    "tracedecay-application|four_pillar_milestone|test|crates/tracedecay-application/tests/four_pillar_milestone.rs",
-    "tracedecay-application|planner_boundary|test|crates/tracedecay-application/tests/planner_boundary.rs",
-    "tracedecay-application|policy_composition|test|crates/tracedecay-application/tests/policy_composition.rs",
-    "tracedecay-application|pr13_advisory_runtime|test|crates/tracedecay-application/tests/pr13_advisory_runtime.rs",
-    "tracedecay-application|surface_binding_parity|test|crates/tracedecay-application/tests/surface_binding_parity.rs",
-    "tracedecay-application|retrieval_primitives|test|crates/tracedecay-application/tests/retrieval_primitives.rs",
-    "tracedecay-application|stream_contract|test|crates/tracedecay-application/tests/stream_contract.rs",
-    "tracedecay-hooks|tracedecay_hooks|lib|crates/tracedecay-hooks/src/lib.rs",
-    "tracedecay-domain|tracedecay_domain|lib|crates/tracedecay-domain/src/lib.rs",
-    "tracedecay-domain|code_search_contract|test|crates/tracedecay-domain/tests/code_search_contract.rs",
-    "tracedecay-domain|configuration_contract|test|crates/tracedecay-domain/tests/configuration_contract.rs",
-    "tracedecay-domain|feedback_contract|test|crates/tracedecay-domain/tests/feedback_contract.rs",
-    "tracedecay-domain|git_index_transaction_contract|test|crates/tracedecay-domain/tests/git_index_transaction_contract.rs",
-    "tracedecay-domain|git_topology_anchor_contract|test|crates/tracedecay-domain/tests/git_topology_anchor_contract.rs",
-    "tracedecay-domain|integration_catalog_contract|test|crates/tracedecay-domain/tests/integration_catalog_contract.rs",
-    "tracedecay-domain|observation_contract|test|crates/tracedecay-domain/tests/observation_contract.rs",
-    "tracedecay-domain|repository_state_contract|test|crates/tracedecay-domain/tests/repository_state_contract.rs",
-    "tracedecay-domain|search_eval_acceptance_contract|test|crates/tracedecay-domain/tests/search_eval_acceptance_contract.rs",
-    "tracedecay-domain|session_contract|test|crates/tracedecay-domain/tests/session_contract.rs",
-    "tracedecay-policy|tracedecay_policy|lib|crates/tracedecay-policy/src/lib.rs",
-    "tracedecay-policy|routing_admission|test|crates/tracedecay-policy/tests/routing_admission.rs",
-    "tracedecay-policy|sink_recheck|test|crates/tracedecay-policy/tests/sink_recheck.rs",
-    "tracedecay-policy|source_authorization|test|crates/tracedecay-policy/tests/source_authorization.rs",
-    "tracedecay-rusqlite-parity|tracedecay_rusqlite_parity|lib|crates/tracedecay-rusqlite-parity/src/lib.rs",
-    "tracedecay-rusqlite-parity|tracedecay-rusqlite-parity|bin|crates/tracedecay-rusqlite-parity/src/main.rs",
-    "tracedecay-rusqlite-parity|subprocess_protocol|test|crates/tracedecay-rusqlite-parity/tests/subprocess_protocol.rs",
-    "tracedecay-rusqlite-runtime|tracedecay_rusqlite_runtime|lib|crates/tracedecay-rusqlite-runtime/src/lib.rs",
-    "tracedecay-rusqlite-runtime|storage-runtime-evidence|bin|crates/tracedecay-rusqlite-runtime/src/bin/storage_runtime_evidence.rs",
-    "tracedecay-rusqlite-runtime|repository_attachment|test|crates/tracedecay-rusqlite-runtime/tests/repository_attachment.rs",
-    "tracedecay-rusqlite-runtime|runtime_actor|test|crates/tracedecay-rusqlite-runtime/tests/runtime_actor.rs",
-    "tracedecay-rusqlite-runtime|s5_s10|test|crates/tracedecay-rusqlite-runtime/tests/s5_s10.rs",
-    "tracedecay-rusqlite-runtime|s5_snapshot_restart|test|crates/tracedecay-rusqlite-runtime/tests/s5_snapshot_restart.rs",
-    "tracedecay-sqlite-parity-protocol|tracedecay_sqlite_parity_protocol|lib|crates/tracedecay-sqlite-parity-protocol/src/lib.rs",
-    "tracedecay-store|tracedecay_store|lib|crates/tracedecay-store/src/lib.rs",
-    "tracedecay-store|configuration_contract|test|crates/tracedecay-store/tests/configuration_contract.rs",
-    "tracedecay-store|diagnostics_contract|test|crates/tracedecay-store/tests/diagnostics_contract.rs",
-    "tracedecay-store|external_source_commit|test|crates/tracedecay-store/tests/external_source_commit.rs",
-    "tracedecay-store|session_contract|test|crates/tracedecay-store/tests/session_contract.rs",
-    "tracedecay-store|storage_runtime_contract|test|crates/tracedecay-store/tests/storage_runtime_contract.rs",
-    "tracedecay-tool-catalog|tracedecay_tool_catalog|lib|crates/tracedecay-tool-catalog/src/lib.rs",
-    "tracedecay-tool-catalog|manifest_contract|test|crates/tracedecay-tool-catalog/tests/manifest_contract.rs",
-    "tracedecay-tool-catalog|profile_budget|test|crates/tracedecay-tool-catalog/tests/profile_budget.rs",
-    "tracedecay-tool-catalog|retrieval_contract|test|crates/tracedecay-tool-catalog/tests/retrieval_contract.rs",
-    "tracedecay-tool-catalog|snapshot_contract|test|crates/tracedecay-tool-catalog/tests/snapshot_contract.rs",
-    "tracedecay|tracedecay|lib|src/lib.rs",
-    "tracedecay|tracedecay|bin|src/main.rs",
-    "tracedecay|tracedecay-rusqlite-parity|bin|src/bin/tracedecay-rusqlite-parity.rs",
-    "tracedecay|tracedecay-search-eval|bin|src/bin/tracedecay-search-eval.rs",
-    "tracedecay|bench_extract|example|examples/bench_extract.rs",
-    "tracedecay|agent_suite|test|tests/agent_suite/main.rs",
-    "tracedecay|api_application_parity|test|tests/api_application_parity.rs",
-    "tracedecay|architecture_boundaries|test|tests/architecture_boundaries/main.rs",
-    "tracedecay|automation_runner_test|test|tests/automation_runner_test/main.rs",
-    "tracedecay|catalog_composition_contract|test|tests/catalog_composition_contract.rs",
-    "tracedecay|code_index_chunks|bench|benches/code_index_chunks.rs",
-    "tracedecay|code_index_suite|test|tests/code_index_suite/main.rs",
-    "tracedecay|core_cli_suite|test|tests/core_cli_suite/main.rs",
-    "tracedecay|cross_host_handoff_test|test|tests/cross_host_handoff_test.rs",
-    "tracedecay|daemon_fault_harness_test|test|tests/daemon_fault_harness_test.rs",
-    "tracedecay|daemon_suite|test|tests/daemon_suite/main.rs",
-    "tracedecay|dashboard_api_test|test|tests/dashboard_api_test/main.rs",
-    "tracedecay|extraction_suite|test|tests/extraction_suite/main.rs",
-    "tracedecay|graph_suite|test|tests/graph_suite/main.rs",
-    "tracedecay|hermes_suite|test|tests/hermes_suite/main.rs",
-    "tracedecay|hooks_lsp_suite|test|tests/hooks_lsp_suite/main.rs",
-    "tracedecay|host_event_fixture_test|test|tests/host_event_fixture_test.rs",
-    "tracedecay|lcm_gc_report_compat|test|tests/lcm_gc_report_compat.rs",
-    "tracedecay|mcp_suite|test|tests/mcp_suite/main.rs",
-    "tracedecay|memory_suite|test|tests/memory_suite/main.rs",
-    "tracedecay|pr10_artifact_runtime_prep_test|test|tests/pr10_artifact_runtime_prep_test.rs",
-    "tracedecay|pr10_vector_generation_prep_test|test|tests/pr10_vector_generation_prep_test.rs",
-    "tracedecay|pr11_pr12_runtime_acceptance|test|tests/pr11_pr12_runtime_acceptance.rs",
-    "tracedecay|pr12_production_reachability|test|tests/pr12_production_reachability.rs",
-    "tracedecay|pr13_advisory_runtime_acceptance|test|tests/pr13_advisory_runtime_acceptance.rs",
-    "tracedecay|pr13_daemon_runtime_acceptance|test|tests/pr13_daemon_runtime_acceptance.rs",
-    "tracedecay|pr13_host_bundle_acceptance|test|tests/pr13_host_bundle_acceptance.rs",
-    "tracedecay|search_eval_cli_test|test|tests/search_eval_cli_test.rs",
-    "tracedecay|search_eval_holdout_authority_test|test|tests/search_eval_holdout_authority_test.rs",
-    "tracedecay|search_quality_suite|test|tests/search_quality_suite/main.rs",
-    "tracedecay|semantic_search_suite|test|tests/semantic_search_suite/main.rs",
-    "tracedecay|session_suite|test|tests/session_suite/main.rs",
-    "tracedecay|storage_runtime_graph_cutover|test|tests/storage_runtime_graph_cutover.rs",
-    "tracedecay|storage_runtime_open_boundary|test|tests/storage_runtime_open_boundary.rs",
-    "tracedecay|storage_runtime_rollback_rehearsal|test|tests/storage_runtime_rollback_rehearsal.rs",
-    "tracedecay|storage_runtime_rusqlite_suite|test|tests/storage_runtime_rusqlite_suite/main.rs",
-    "tracedecay|storage_runtime_s8_cutover|test|tests/storage_runtime_s8_cutover.rs",
-    "tracedecay|storage_runtime_suite|test|tests/storage_runtime_suite/main.rs",
-    "tracedecay|storage_suite|test|tests/storage_suite/main.rs",
-    "tracedecay|tool_client_transport|test|tests/tool_client_transport.rs",
-    "tracedecay|transcript_ingest_suite|test|tests/transcript_ingest_suite/main.rs",
-    "tracedecay|update_health_pass_test|test|tests/update_health_pass_test.rs",
-    "tracedecay|v2_corpus_suite|test|tests/v2_corpus_suite.rs",
-    "tracedecay|large_repos|bench|benches/large_repos.rs",
-    "tracedecay|queries|bench|benches/queries.rs",
-    "tracedecay|repos|bench|benches/repos.rs",
-    "tracedecay|session_temporal|bench|benches/session_temporal.rs",
-    "tracedecay|build-script-build|custom-build|build.rs",
-];
-const PR8_ROOT_PACKAGE_ALIASES: &[(&str, &str)] = &[
+const TEST_WORKSPACE_MANIFESTS: &[&str] = &["Cargo.toml", "crates/tracedecay-domain/Cargo.toml"];
+const ALLOWED_ROOT_PACKAGE_ALIASES: &[(&str, &str)] = &[
     (
         "tracedecay-medium-treesitters",
         "tokensave-medium-treesitters",
@@ -230,7 +108,7 @@ pub(crate) struct CargoSourceLayout {
     pub(crate) target_roots: BTreeSet<PathBuf>,
     pub(crate) tracked_roots: BTreeSet<PathBuf>,
     workspace_manifests: BTreeSet<PathBuf>,
-    pub(crate) pr8_violations: BTreeSet<String>,
+    pub(crate) boundary_violations: BTreeSet<String>,
 }
 
 pub(crate) fn cargo_source_layout(repository: &Path) -> Result<CargoSourceLayout, String> {
@@ -270,8 +148,7 @@ fn parse_cargo_source_layout(
     let mut tracked_roots: BTreeSet<PathBuf> =
         REPOSITORY_SOURCE_ROOTS.iter().map(PathBuf::from).collect();
     let mut workspace_manifests = BTreeSet::new();
-    let mut pr8_violations = BTreeSet::new();
-    let mut target_snapshot = BTreeSet::new();
+    let mut boundary_violations = BTreeSet::new();
 
     for package in packages {
         if !workspace_members.contains(&package.id) {
@@ -283,15 +160,6 @@ fn parse_cargo_source_layout(
             "workspace package manifest",
         )?;
         workspace_manifests.insert(manifest_path.clone());
-        if let Some(expected_name) = expected_pr8_package_name(&manifest_path)
-            && package.name != expected_name
-        {
-            pr8_violations.insert(format!(
-                "{} must declare PR8 package name {expected_name}, found {}",
-                manifest_path.display(),
-                package.name
-            ));
-        }
         let package_root = manifest_path
             .parent()
             .ok_or_else(|| format!("manifest has no parent: {}", manifest_path.display()))?;
@@ -300,15 +168,12 @@ fn parse_cargo_source_layout(
         }
 
         if manifest_path == Path::new("Cargo.toml") {
-            validate_query_dependency_aliases(&package.dependencies, &mut pr8_violations);
-        } else if PR8_WORKSPACE_MANIFESTS
-            .iter()
-            .any(|allowed| manifest_path == Path::new(allowed))
-        {
+            validate_query_dependency_aliases(&package.dependencies, &mut boundary_violations);
+        } else {
             validate_contract_package_dependencies(
                 &manifest_path,
                 &package.dependencies,
-                &mut pr8_violations,
+                &mut boundary_violations,
             );
         }
 
@@ -319,7 +184,7 @@ fn parse_cargo_source_layout(
                 match canonical_repository_relative(repository, &target.src_path) {
                     Ok(path) => path,
                     Err(error) => {
-                        pr8_violations.insert(format!(
+                        boundary_violations.insert(format!(
                             "{} target {} has invalid source path: {error}",
                             manifest_path.display(),
                             target.name
@@ -327,20 +192,13 @@ fn parse_cargo_source_layout(
                         target_path.clone()
                     }
                 };
-            validate_pr8_target(
+            validate_target_boundary(
                 &manifest_path,
                 &package.name,
                 &target,
                 &canonical_target_path,
-                &mut pr8_violations,
+                &mut boundary_violations,
             );
-            target_snapshot.insert(format!(
-                "{}|{}|{}|{}",
-                package.name,
-                target.name,
-                target.kind.join(","),
-                canonical_target_path.display()
-            ));
             target_roots.insert(target_path);
         }
     }
@@ -357,60 +215,12 @@ fn parse_cargo_source_layout(
         }
     }
 
-    let expected_manifests: BTreeSet<_> =
-        PR8_WORKSPACE_MANIFESTS.iter().map(PathBuf::from).collect();
-    for missing in expected_manifests.difference(&workspace_manifests) {
-        pr8_violations.insert(format!(
-            "required PR8 workspace member is missing: {}",
-            missing.display()
-        ));
-    }
-    for extra in workspace_manifests.difference(&expected_manifests) {
-        pr8_violations.insert(format!(
-            "additional PR8 workspace member is forbidden: {}",
-            extra.display()
-        ));
-    }
-    let expected_targets: BTreeSet<_> = PR8_TARGET_SNAPSHOT
-        .iter()
-        .map(|target| target.to_string())
-        .collect();
-    for missing in expected_targets.difference(&target_snapshot) {
-        pr8_violations.insert(format!("required PR8 Cargo target is missing: {missing}"));
-    }
-    for extra in target_snapshot.difference(&expected_targets) {
-        pr8_violations.insert(format!("additional PR8 Cargo target is forbidden: {extra}"));
-    }
-
     Ok(CargoSourceLayout {
         target_roots,
         tracked_roots,
         workspace_manifests,
-        pr8_violations,
+        boundary_violations,
     })
-}
-
-fn expected_pr8_package_name(manifest_path: &Path) -> Option<&'static str> {
-    match manifest_path.to_str() {
-        Some("Cargo.toml") => Some("tracedecay"),
-        Some("crates/tracedecay-api/Cargo.toml") => Some("tracedecay-api"),
-        Some("crates/tracedecay-application/Cargo.toml") => Some("tracedecay-application"),
-        Some("crates/tracedecay-domain/Cargo.toml") => Some("tracedecay-domain"),
-        Some("crates/tracedecay-hooks/Cargo.toml") => Some("tracedecay-hooks"),
-        Some("crates/tracedecay-policy/Cargo.toml") => Some("tracedecay-policy"),
-        Some("crates/tracedecay-rusqlite-parity/Cargo.toml") => {
-            Some("tracedecay-rusqlite-parity")
-        }
-        Some("crates/tracedecay-rusqlite-runtime/Cargo.toml") => {
-            Some("tracedecay-rusqlite-runtime")
-        }
-        Some("crates/tracedecay-sqlite-parity-protocol/Cargo.toml") => {
-            Some("tracedecay-sqlite-parity-protocol")
-        }
-        Some("crates/tracedecay-store/Cargo.toml") => Some("tracedecay-store"),
-        Some("crates/tracedecay-tool-catalog/Cargo.toml") => Some("tracedecay-tool-catalog"),
-        _ => None,
-    }
 }
 
 fn validate_query_dependency_aliases(
@@ -420,14 +230,14 @@ fn validate_query_dependency_aliases(
     for dependency in dependencies {
         let alias = dependency.rename.as_deref().unwrap_or(&dependency.name);
         if let Some(rename) = &dependency.rename
-            && !PR8_ROOT_PACKAGE_ALIASES
+            && !ALLOWED_ROOT_PACKAGE_ALIASES
                 .iter()
                 .any(|(allowed_alias, package)| {
                     rename.as_str() == *allowed_alias && dependency.name.as_str() == *package
                 })
         {
             violations.insert(format!(
-                "root package dependency alias {rename} -> {} is not in the exact PR8 alias snapshot",
+                "root package dependency alias {rename} -> {} is not in the approved dependency alias set",
                 dependency.name
             ));
         }
@@ -524,7 +334,7 @@ fn allowed_package_for_query_root(root: &str) -> Option<&'static str> {
         .find(|package| normalize_identifier(package) == root)
 }
 
-fn validate_pr8_target(
+fn validate_target_boundary(
     manifest_path: &Path,
     package_name: &str,
     target: &CargoTarget,
@@ -533,7 +343,7 @@ fn validate_pr8_target(
 ) {
     if target.kind.len() != 1 {
         violations.insert(format!(
-            "{} package {package_name} target {} has non-exact kinds {:?}",
+            "{} package {package_name} target {} has ambiguous target kinds {:?}",
             manifest_path.display(),
             target.name,
             target.kind
@@ -752,14 +562,7 @@ pub(crate) fn git_tracked_paths(repository: &Path) -> Result<Vec<PathBuf>, Strin
 }
 
 fn tracked_paths_with_required_manifests(repository: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut paths = git_tracked_paths(repository)?;
-    for required in PR8_WORKSPACE_MANIFESTS {
-        let required = PathBuf::from(required);
-        if repository.join(&required).is_file() && !paths.contains(&required) {
-            paths.push(required);
-        }
-    }
-    Ok(paths)
+    git_tracked_paths(repository)
 }
 
 pub(crate) fn inspect_physical_manifest_paths(
@@ -824,7 +627,6 @@ pub(crate) fn inspect_physical_manifest_paths(
         }
     }
 
-    let expected: BTreeSet<_> = PR8_WORKSPACE_MANIFESTS.iter().map(PathBuf::from).collect();
     let mut manifests = BTreeSet::new();
     let mut canonical_owners = BTreeMap::<PathBuf, PathBuf>::new();
     for logical in candidates {
@@ -861,20 +663,6 @@ pub(crate) fn inspect_physical_manifest_paths(
                 canonical.display()
             ));
         }
-        if !expected.contains(&logical) {
-            violations.insert(format!(
-                "additional tracked first-party Cargo package is forbidden by PR8: {} ({})",
-                logical.display(),
-                physical_manifest_description(&absolute)?
-            ));
-        }
-    }
-
-    for missing in expected.difference(&manifests) {
-        violations.insert(format!(
-            "required tracked first-party Cargo manifest is missing: {}",
-            missing.display()
-        ));
     }
     Ok(PhysicalManifestLayout {
         manifests,
@@ -949,53 +737,6 @@ fn manifest_classification(path: &Path) -> ManifestClassification {
     } else {
         ManifestClassification::FirstParty
     }
-}
-
-fn physical_manifest_description(manifest_path: &Path) -> Result<String, String> {
-    let source = fs::read_to_string(manifest_path)
-        .map_err(|error| format!("cannot read {}: {error}", manifest_path.display()))?;
-    let manifest: toml::Table = toml::from_str(&source)
-        .map_err(|error| format!("cannot parse {}: {error}", manifest_path.display()))?;
-    let package_name = manifest
-        .get("package")
-        .and_then(toml::Value::as_table)
-        .and_then(|package| package.get("name"))
-        .and_then(toml::Value::as_str)
-        .unwrap_or("<virtual>");
-    let mut targets = Vec::new();
-    if let Some(lib) = manifest.get("lib").and_then(toml::Value::as_table) {
-        targets.push(format!(
-            "lib {} at {}",
-            lib.get("name")
-                .and_then(toml::Value::as_str)
-                .unwrap_or(package_name),
-            lib.get("path")
-                .and_then(toml::Value::as_str)
-                .unwrap_or("src/lib.rs")
-        ));
-    }
-    for (kind, key) in [("bin", "bin"), ("bench", "bench")] {
-        if let Some(entries) = manifest.get(key).and_then(toml::Value::as_array) {
-            for entry in entries.iter().filter_map(toml::Value::as_table) {
-                targets.push(format!(
-                    "{kind} {} at {}",
-                    entry
-                        .get("name")
-                        .and_then(toml::Value::as_str)
-                        .unwrap_or("<default>"),
-                    entry
-                        .get("path")
-                        .and_then(toml::Value::as_str)
-                        .unwrap_or("<default>")
-                ));
-            }
-        }
-    }
-    Ok(if targets.is_empty() {
-        format!("package {package_name}; default targets")
-    } else {
-        format!("package {package_name}; {}", targets.join(", "))
-    })
 }
 
 #[test]
@@ -1209,9 +950,11 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
         .into_iter()
         .collect()
     );
-    assert_eq!(
-        layout.workspace_manifests,
-        PR8_WORKSPACE_MANIFESTS.iter().map(PathBuf::from).collect()
+    assert!(layout.workspace_manifests.contains(Path::new("Cargo.toml")));
+    assert!(
+        layout
+            .workspace_manifests
+            .contains(Path::new("crates/tracedecay-rusqlite-runtime/Cargo.toml"))
     );
 }
 
@@ -1302,11 +1045,11 @@ fn metadata_contract_rejects_package_aliases_extra_members_and_query_targets() {
     ] {
         assert!(
             layout
-                .pr8_violations
+                .boundary_violations
                 .iter()
                 .any(|violation| violation.contains(expected)),
             "metadata contract missed {expected}: {:?}",
-            layout.pr8_violations
+            layout.boundary_violations
         );
     }
 }
@@ -1380,7 +1123,7 @@ fn physical_manifest_contract_classifies_paths_without_name_heuristics() {
 fn physical_manifest_contract_rejects_symlinked_crates() {
     let temporary = tempfile::tempdir().expect("create symlinked manifest fixture");
     let repository = temporary.path();
-    for path in PR8_WORKSPACE_MANIFESTS {
+    for path in TEST_WORKSPACE_MANIFESTS {
         let path = repository.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n").unwrap();
@@ -1391,7 +1134,7 @@ fn physical_manifest_contract_rejects_symlinked_crates() {
         repository.join("components/engine"),
     )
     .unwrap();
-    let mut tracked = PR8_WORKSPACE_MANIFESTS
+    let mut tracked = TEST_WORKSPACE_MANIFESTS
         .iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
@@ -1437,7 +1180,7 @@ fn physical_manifest_contract_rejects_outside_rust_symlinks() {
 fn physical_manifest_contract_discovers_inside_rust_symlinks() {
     let temporary = tempfile::tempdir().expect("create inside Rust symlink fixture");
     let repository = temporary.path();
-    for path in PR8_WORKSPACE_MANIFESTS {
+    for path in TEST_WORKSPACE_MANIFESTS {
         let path = repository.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n").unwrap();
@@ -1451,7 +1194,7 @@ fn physical_manifest_contract_discovers_inside_rust_symlinks() {
         repository.join("src/query/safe.rs"),
     )
     .unwrap();
-    let mut tracked = PR8_WORKSPACE_MANIFESTS
+    let mut tracked = TEST_WORKSPACE_MANIFESTS
         .iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();

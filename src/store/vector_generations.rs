@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Immutable semantic vector-generation storage.
 //!
 //! The deterministic state machine is retained as a test oracle. Production
@@ -6,7 +5,7 @@
 //! using a revisioned compare-and-swap so generation publication and the
 //! active pointer become visible together. No separate vector database or
 //! approximate index is introduced.
-
+#![allow(dead_code)] // Plan 25/31 semantic vector storage — test oracle + staged persistence
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};

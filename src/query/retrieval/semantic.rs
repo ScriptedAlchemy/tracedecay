@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Quarantined PR10 exact-flat semantic retrieval lane.
 //!
 //! The lane consumes only an admitted embedding projection, a request-local
@@ -153,6 +152,7 @@ impl EphemeralQueryEmbeddingV1 {
         })
     }
 
+    #[allow(dead_code)] // Plan 31 semantic retrieval accessor — staged
     pub(crate) fn values(&self) -> &[f32] {
         &self.values
     }

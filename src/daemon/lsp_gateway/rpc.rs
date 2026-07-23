@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! JSON-RPC 2.0 framing helpers, parameter parsing, and gateway response encoding.
 
 use serde_json::{Map, Value, json};
@@ -102,6 +101,7 @@ pub(super) fn semantic_response_value(response: SemanticResponse) -> Value {
     }
 }
 
+#[allow(dead_code)] // Plan 35 gateway diagnostic — staged
 pub(super) fn gateway_diagnostic_value(value: GatewayDocumentDiagnostics) -> Value {
     document_diagnostic_report_value(value.report)
 }

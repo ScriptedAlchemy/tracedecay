@@ -49,7 +49,9 @@ async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
         for join in joins {
             match join.wait().await {
                 StoreRuntimeOpenResult::Published(handle) => handles.push(handle),
-                other => panic!("publication failed: {other:?}"),
+                other @ StoreRuntimeOpenResult::Failed(_) => {
+                    panic!("publication failed: {other:?}")
+                }
             }
         }
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);

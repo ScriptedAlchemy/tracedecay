@@ -37,8 +37,8 @@ not separate crate-first work queues.
   sources use bounded fair scheduling, atomic cursor/projection commits, and a
   staged bounded projection rebuild rather than provider-local durable state.
 - Executable native host fixtures and typed hook-telemetry readiness now replace
-  prose-only provider claims. The clean PR6 benchmark acceptance is
-  recorded by commit `05da230e`; PR6 is complete.
+  prose-only provider claims. Commit `05da230e` records the historical PR6
+  Linux benchmark measurement; PR6 is complete.
 
 ## Storage and authority
 
@@ -67,8 +67,8 @@ Every PR13–PR20 section in
    PR.
 4. Delete legacy or duplicate paths once the production route and recovery
    boundary permit it.
-5. Accept the PR with a direct product journey, the focused failure/recovery
-   behavior that protects it, and the relevant aggregate gate.
+5. Accept the PR with a direct product journey, focused failure/recovery
+   behavior, and normal CI.
 6. Defer only work named in that PR's **Not in this PR** section.
 
 Contracts, schemas, adapters, ports, dispatch, packaging, instrumentation, and
@@ -102,8 +102,8 @@ Medium-confidence models, algorithms, topology choices, renderers, ranking
 profiles, calibration methods, and performance mechanisms remain versioned
 measured candidates. Low-confidence or causal product-effect claims are not
 requirements or acceptance criteria without direct TraceDecay intervention
-evidence. Optional features remain disabled only until their stated product
-acceptance gate passes.
+evidence. Optional features remain disabled until direct product tests and the
+applicable developer evaluation justify activation.
 
 Every product quantifier preserves its raw value, unit, denominator, coverage,
 cohort, temporal delta, provenance, uncertainty kind, and calibration validity.
@@ -118,8 +118,9 @@ isolation; authentication at actual network boundaries; and
 confirmation/rollback/CAS for destructive Git, host, or protected
 configuration operations. Numbered plans keep only the operation-local check
 that protects a real boundary and attach it to direct product acceptance.
-They do not add standalone privacy/security matrices, proof packets,
-attestations, or gates.
+The authoritative acceptance rule in
+[00-plan-set-index.md](00-plan-set-index.md) applies to every active and
+historical plan.
 
 PR12 transport and PR18 SDK contracts prove structural, semantic, and lifecycle
 compatibility against supported old and current consumers. Direct fault,
@@ -144,8 +145,8 @@ non-product and never justify implementation or CI by themselves.
 
 The current executable slice is always [NEXT.md](NEXT.md). This roadmap is
 contributor documentation, never daemon input, workflow input, product state, or
-a source of completion truth. PR #421 merges only after PR20 and stable
-aggregate verification.
+a source of completion truth. PR #421 merges only after PR20, direct product
+tests, and normal cross-platform CI are stable.
 
 ## Release
 

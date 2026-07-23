@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight CLI dispatch not yet wired
 //! CLI construction of transport-neutral catalog dispatches.
 //!
 //! Command parsing remains in the command tree. This module accepts already
@@ -17,13 +16,16 @@ use tracedecay::daemon_client::{
 use tracedecay_application::{CancellationSignal, Deadline, PageRequest, RequestId};
 use tracedecay_tool_catalog::BindingSurface;
 
+#[allow(dead_code)] // Plan 21 CLI dispatch surface — staged
 pub type CliDispatchInput<T> = DispatchInput<T>;
+#[allow(dead_code)] // Plan 21 CLI dispatch surface — staged
 pub type CliDispatchError = DispatchError;
 
 /// Resolves the CLI binding and constructs the canonical invocation.
 ///
 /// Presentation format remains in the canonical invocation only until a later
 /// caller converts it at the application boundary.
+#[allow(dead_code)] // Plan 21 CLI dispatch surface — staged
 pub fn resolve_cli_dispatch<T>(
     resolver: &impl BindingResolver,
     input: CliDispatchInput<T>,
@@ -68,6 +70,7 @@ pub async fn resolve_cli_application_surface(
     execute_application_surface(operation, dispatched, client).await
 }
 
+#[allow(dead_code)] // Plan 21 CLI dispatch surface — staged
 pub fn resolve_cli_application_surface_dispatch(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,

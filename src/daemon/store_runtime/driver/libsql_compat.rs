@@ -12,6 +12,15 @@ pub(crate) enum GraphStoreOpenMode {
 }
 
 /// Daemon-owned compatibility driver for the existing graph database.
+///
+/// This is the single S11 seam for the graph engine swap. Every production
+/// graph open (`initialize`/`open`/`open_read_only`) is funneled through here
+/// rather than calling `Database::{initialize,open,open_read_only}` directly,
+/// so the eventual rusqlite runtime registry has exactly one call site to
+/// replace when it takes ownership of graph opens. The only permitted direct
+/// graph opens outside this driver are one-shot migration inspection
+/// (`crate::migrate`) and `#[cfg(test)]` fixtures, both enforced by the
+/// `tests/storage_runtime_open_boundary.rs` allowlist gate.
 pub(crate) struct GraphLibsqlCompatDriver;
 
 impl GraphLibsqlCompatDriver {

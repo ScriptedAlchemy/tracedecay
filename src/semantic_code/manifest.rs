@@ -14,7 +14,7 @@
 //! QUARANTINE: this module is not reachable from production code yet. It
 //! performs no I/O, no network access, and no query/retrieval wiring. It is
 //! pure values plus validation, matching the PR9 contract-spine style.
-
+#![allow(dead_code)] // signed model artifact manifest; Plan 31 — staged
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};

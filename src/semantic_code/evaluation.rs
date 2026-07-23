@@ -4,6 +4,7 @@
 //! wire formats plus validation. It performs no I/O, executes no benchmark,
 //! reads no fixture or label data, makes no quality decision, and has no
 //! activation or promotion authority.
+#![allow(dead_code)] // PR10 semantic benchmark schemas; Plan 15 search-quality-eval — staged
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

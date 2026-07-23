@@ -172,11 +172,11 @@ impl StoreRuntimeRegistry {
             (binding, attempt, updates, join, eviction)
         };
 
-        if let Some(eviction) = eviction {
-            if let Err(failure) = self.complete_project_code_eviction(eviction) {
-                self.fail_reserved_open(&key, attempt, &updates, failure.clone());
-                return StoreRuntimeOpenBegin::Rejected(failure);
-            }
+        if let Some(eviction) = eviction
+            && let Err(failure) = self.complete_project_code_eviction(eviction)
+        {
+            self.fail_reserved_open(&key, attempt, &updates, failure.clone());
+            return StoreRuntimeOpenBegin::Rejected(failure);
         }
 
         let registry = self.clone();

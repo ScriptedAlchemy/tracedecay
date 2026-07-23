@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -19,6 +18,7 @@ pub(crate) enum HookV2Dispatch {
     NotApplicable,
     Handled {
         guidance: Option<String>,
+        #[allow(dead_code)] // Plan 07 hook transport disposition — reserved
         disposition: HookTransportDispositionV1,
     },
 }

@@ -1493,7 +1493,7 @@ fn temporal_kernel_sources_respect_dependency_boundary() {
         physical_manifest_layout(&repository).expect("inspect tracked physical Cargo manifests");
     assert!(
         physical.violations.is_empty(),
-        "PR8 permits only its exact first-party manifest snapshot, including the private storage parity and runtime crates:\n{}",
+        "workspace manifests violate driver-neutral dependency boundaries:\n{}",
         physical
             .violations
             .iter()
@@ -1504,10 +1504,10 @@ fn temporal_kernel_sources_respect_dependency_boundary() {
 
     let layout = cargo_source_layout(&repository).expect("inspect Cargo workspace membership");
     assert!(
-        layout.pr8_violations.is_empty(),
-        "PR8 workspace/dependency/target contract must match the exact frozen storage-runtime snapshot:\n{}",
+        layout.boundary_violations.is_empty(),
+        "workspace dependencies or targets violate query/runtime boundaries:\n{}",
         layout
-            .pr8_violations
+            .boundary_violations
             .iter()
             .map(|violation| format!("  - {violation}"))
             .collect::<Vec<_>>()

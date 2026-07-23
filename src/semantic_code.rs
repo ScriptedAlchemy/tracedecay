@@ -1,3 +1,4 @@
+#![allow(dead_code)] // in-flight semantic runtime root; Plan 31 native fastembed semantic code search
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};

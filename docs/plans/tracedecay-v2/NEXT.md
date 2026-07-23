@@ -3,8 +3,8 @@
 **Status:** active execution slice.
 
 PR8 is complete. PR9 and PR10 have callable code-index, lexical/graph, vector-
-generation, FastEmbed, exact-flat, calibration, and fallback implementations,
-but their locked quality/resource acceptance remains open. PR11's application,
+generation, FastEmbed, exact-flat, calibration, and fallback implementations;
+their direct quality/resource evaluation remains pending. PR11's application,
 policy, catalog, configuration, Git, and feedback-cycle core is implemented.
 The current delivery slice closes PR12/PR13 production reachability, host
 delivery, all-feature distribution, and the incremental indexing behavior
@@ -29,8 +29,8 @@ Ship one production path in which:
   with the default feature set equal to `--all-features`, including FastEmbed
   and bundled ORT.
 
-PR14 remains blocked until PR12/PR13 production contracts and aggregate gates
-are stable.
+PR14 remains blocked until PR12/PR13 production contracts, direct tests, and
+normal CI are stable.
 
 ## Worktree-aware incremental indexing contract
 
@@ -86,8 +86,8 @@ are stable.
    scheduling while keeping project open and ordinary search non-blocking.
 5. Add worktree/edit/no-op/rename/delete/overflow/cancellation/restart
    regressions and current/10x performance evidence.
-6. Run focused crate tests, all-feature workspace gates, release builds,
-   package/install checks, platform checks, and the aggregate distribution gate.
+6. Run focused crate tests, all-feature workspace checks, release builds,
+   package/install checks, and normal Linux/macOS/Windows CI.
 
 ## Direct verification
 

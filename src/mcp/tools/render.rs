@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Output-format rendering for MCP tool responses.
 
 use std::fmt::Write as _;
@@ -37,11 +36,13 @@ pub(super) fn wants_json(args: &Value) -> bool {
 }
 
 /// Serializes a canonical pre-admission problem for MCP structured content.
+#[allow(dead_code)] // Plan 21 output unification helper — staged
 pub(super) fn application_problem_value(problem: &ApplicationProblem) -> serde_json::Result<Value> {
     serde_json::to_value(problem)
 }
 
 /// Returns the common non-disclosing unknown-or-unauthorized problem value.
+#[allow(dead_code)] // Plan 21 output unification helper — staged
 pub(super) fn concealed_problem_value() -> serde_json::Result<Value> {
     application_problem_value(&concealed_not_found_or_not_authorized())
 }

@@ -1,10 +1,10 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Typed JSON-RPC 2.0 / LSP 3.17 session actor.
 //!
 //! The actor accepts already-authenticated, already-framed payloads from the
 //! bridge. It is intentionally not a raw socket tunnel: every accepted method
 //! is parsed, lifecycle-gated, root-gated, bounded, and dispatched through a
 //! typed gateway/provider port.
+#![allow(dead_code)] // Plan 35 daemon LSP gateway — session actor not yet serving
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;

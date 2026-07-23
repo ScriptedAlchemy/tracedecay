@@ -5,6 +5,7 @@
 //! queues bounded background download via maintained hf-hub/FastEmbed
 //! capability, verifies immutable length+SHA-256 pins, and atomically installs
 //! into a TraceDecay-owned store. Search never downloads or waits.
+#![allow(dead_code)] // fastembed model lifecycle; Plan 31 — staged
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

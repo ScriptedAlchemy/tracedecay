@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 // Rust guideline compliant 2025-10-17
 //! Central orchestrator for the code graph.
 //!
@@ -75,6 +74,7 @@ impl TraceDecay {
         self.context_scout_owner.as_ref()
     }
 
+    #[allow(dead_code)] // Plan 22 context-scout model config — staged
     pub(crate) async fn configure_context_scout_model(
         &self,
         config: &crate::automation::config::AutomationConfig,

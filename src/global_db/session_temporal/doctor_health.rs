@@ -2,8 +2,7 @@
 //!
 //! Diagnosis is production-mounted; repair helpers remain available for Doctor
 //! tests and exclusive-maintenance callers that are still landing.
-
-#![allow(dead_code)]
+#![allow(dead_code)] // Doctor repair lane still landing; see module doc (Plan 23)
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

@@ -1047,8 +1047,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tracedecay_domain::{
         ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkV1, ManifestDigest,
-        ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionReplayReasonV1,
-        VectorGenerationIdV1,
+        ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, VectorGenerationIdV1,
     };
 
     use crate::semantic_code::{
@@ -1065,18 +1064,18 @@ mod tests {
 
     fn vector_generation(value: char) -> VectorGenerationIdV1 {
         VectorGenerationIdV1::new(
-            ManifestDigest::new(format!("sha256:{}", value.to_string().repeat(64)))
-                .expect("manifest digest"),
+            canonical_sha256(&("semantic.test.vector-generation", value)).expect("manifest digest"),
         )
     }
 
     fn projection_key() -> ProjectionKeyV1 {
-        ProjectionKeyV1 {
-            kind: ProjectionKindV1::Embedding,
-            schema_revision: "embedding.test.v1".to_owned(),
-            profile_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
-                .expect("projection profile digest"),
-        }
+        // Derive the projection key from the same admitted authority the query
+        // runtime binds against so `profile_digest` is the canonical digest the
+        // embedding projection produces, rather than a non-canonical placeholder.
+        crate::semantic_code::session_pool::tests::authority()
+            .projection()
+            .projection_key()
+            .clone()
     }
 
     fn pointer(vector: char, source: char) -> SemanticGenerationPointerV1 {

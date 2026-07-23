@@ -2,11 +2,11 @@
 
 ## Status / role
 
-Status: active PR9 implementation and acceptance authority. The current
+Status: active PR9 implementation and product-test authority. The current
 checkout contains callable deterministic indexing, chunk/lineage, Git/impact,
 diagnostic/test, exact, lexical, and graph paths. PR9 is not complete until the
-direct behavioral and locked quality gates in this plan and Plan 15 pass.
-PR9 must accept one complete single-root vertical:
+direct behavioral tests, Plan 15 Linux evaluation, and normal CI pass.
+PR9 must deliver one complete single-root vertical:
 deterministic code indexing, immutable generations, generation-bound Git/
 diagnostic/test evidence, and accepted exact/lexical/graph retrieval. Start as
 a focused module; extract `tracedecay-code-index` only when independent reuse,
@@ -18,14 +18,14 @@ Generation-bound diagnostics compose with the daemon gateway defined by
 [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 [Plan 15](15-search-quality-evaluation-and-retrieval-research.md) exclusively
 owns retrieval-research design, corpus/label policy, quality metrics, candidate
-profile comparison, thresholds, and promotion decisions. PR9 implements the
-frozen lexical/chunk contracts and emits measurements; it does not tune or
-promote retrieval policy.
+profile comparison, thresholds, and activation recommendations. PR9 implements the
+versioned lexical/chunk contracts and emits measurements; it does not tune or
+activate retrieval policy.
 
 Plan 25 owns code-generation, chunking, graph, and generation-bound evidence
-semantics for PR9. Plan 15 owns quality acceptance. Plan 31 is the later PR10
-consumer of accepted chunks and lexical/graph fallback behavior; application,
-transport, and dashboard plans consume the accepted operations later. None of
+semantics for PR9. Plan 15 owns quality evaluation. Plan 31 is the later PR10
+consumer of tested chunks and lexical/graph fallback behavior; application,
+transport, and dashboard plans consume the tested operations later. None of
 those consumers must reproduce an old module path, Rust type spelling, suite
 spine, fixture filename, or benchmark script.
 
@@ -36,7 +36,7 @@ sanitized repository snapshots. Incremental builds reuse unchanged work,
 preserve symbol lineage, and attach Git, diagnostics, and tests to the exact
 source generation they describe. PR9 then serves those generations through the
 Plan 15 exact/lexical/graph contracts with a non-demotable exact tier,
-deterministic compact-candidate fusion, late hydration, and an accepted frozen
+deterministic compact-candidate fusion, late hydration, and a versioned
 lexical profile whose named fallback subpayload PR10 must preserve byte-for-byte
 when semantics are unavailable.
 
@@ -452,10 +452,10 @@ pub struct ProjectionBatchReceiptV1 {
 
 PR9 remains unfinished. The checkpoints below describe required product
 behavior and direct evidence. Paths, symbol names, test-module registration,
-fixture filenames, benchmark entrypoints, and aggregate-acceptance spine names
-are historical implementation suggestions only. The gate audits callable
-index/search behavior, checked-in quality fixtures, direct regressions, and the
-locked Plan 15 outcome.
+fixture filenames, benchmark entrypoints, and old acceptance-spine names are
+historical implementation suggestions only. Completion uses callable
+index/search behavior, direct regressions, the Plan 15 Linux evaluation, and
+normal CI.
 
 1. **Contract and intake behavior:** define typed sanitized snapshots,
    generation manifests, extraction batches, lineage candidates, test
@@ -475,10 +475,9 @@ locked Plan 15 outcome.
 3. **Independent authorities:** implement three disjoint authorities:
    Plan 36 read-only Git status/diff/history/blame/`HunkRef` ports and native
    adapters; generation-bound clean diagnostic persistence/query fixtures; and
-   the frozen Plan 15 real sanitized corpus, manifest validator, exact
-   admission oracles, authorization canaries, and raw baseline
-   instrumentation. Synthetic fixtures may prove contracts but cannot stand in
-   for locked quality or resource evidence.
+   the versioned Plan 15 real sanitized corpus, exact-admission oracles,
+   authorization canaries, and raw Linux baseline instrumentation. Synthetic
+   fixtures may prove contracts but cannot replace the real developer eval.
 4. **Generations, incrementality, and lineage:** implement immutable planning,
    sealing, incremental change classification, and evidence-backed lineage.
    Direct regressions cover duplicate watcher events, save-without-change,
@@ -502,26 +501,23 @@ locked Plan 15 outcome.
    terms, field filters, shuffled producer order, fixed-point fusion,
    source/file caps, pagination, denial non-interference, partial coverage, and
    rank-before-hydrate behavior.
-8. **Locked lexical evaluation and promotion:** freeze the run manifest before
-   holdout access, save each lane's compact candidate list, execute Plan 15's
-   PR9 ablations, and emit exactly one terminal outcome. Only `accepted`
-   creates promotion evidence. Freeze the accepted
-   exact-tier rules, profile digest, named fallback-subpayload bytes, saved
-   candidate lists, and result/evidence anchors as PR10 inputs.
-9. **Measurement and aggregate acceptance:** use a reproducible checked-in
-   workload and retained raw evidence to record clean, warm one-file, deletion,
+8. **Lexical evaluation and activation:** run Plan 15's direct comparisons on
+   the sanitized Linux workload and report `pass`, `fail`, or `pending`.
+   Preserve the versioned exact-tier rules, profile digest, and named
+   fallback-subpayload bytes as PR10 inputs; do not create a holdout, run
+   manifest, owner receipt, or promotion packet.
+9. **Measurement and verification:** use a reproducible checked-in Linux
+   workload and retained raw samples to record clean, warm one-file, deletion,
    no-op, chunker/model-key replay, and
    incompatible full-rebuild cases at current and 10x corpus sizes. Report
    files parsed, chunks added/changed/deleted/reused, projection calls, bytes,
    wall time, CPU, and peak RSS separately; end-to-end performance work owns
    product resource budgets and Plan 15 owns quality interpretation. The
-   workload manifest pins
-   exact file/byte/chunk counts, content and descriptor digests, language
-   strata, seed, runtime/hardware manifest, and cache state. The frozen
-   evaluation method retains enough raw independent repetitions to support its
-   reported quantiles and uncertainty. Run focused direct regressions,
-   architecture boundaries, relevant platform and migration/privacy gates, the
-   applicable all-feature gate, and the accepted Plan 15 comparison before
+   workload revision records exact file/byte/chunk counts, real content and
+   descriptor digests, language strata, seed, runtime/hardware summary, and
+   cache state. Retain the raw samples needed for every reported statistic.
+   Run focused direct regressions, architecture boundaries, migration/privacy
+   tests, the applicable all-feature CI, and the Plan 15 comparison before
    declaring PR9 complete.
 
 ## Acceptance
@@ -598,7 +594,7 @@ locked Plan 15 outcome.
   structural-search implementation, and PR9 retains the production compilation
   measurements used by end-to-end performance comparison.
 - Exact and lexical lanes are independently disableable and inspectable, use
-  one frozen generation, and emit Plan 15 `CompactCandidate` values without a
+  one immutable generation, and emit Plan 15 `CompactCandidate` values without a
   code-specific ranking kernel. One hundred shuffled producer/completion runs
   produce byte-identical IDs, order, contributions, explanations, coverage,
   and cursors.
@@ -606,12 +602,11 @@ locked Plan 15 outcome.
   compiler/runtime error, CLI flag, tool name, configuration key, and commit
   identifier precedes every approximate-only result. Exact admission
   precision, false promotion, and protected-stratum support are reported.
-- The accepted PR9 exact+lexical+graph baseline is frozen by content and
-  revision with its profile, manifests, saved candidate lists,
-  fallback-subpayload bytes, evidence mapping, and rollback profile. Acceptance
-  depends on validated callable behavior and evidence content, not a historical
-  artifact filename. A `blocked`, `rejected`, `inconclusive`, `invalid_run`, or
-  `runtime_fallback_observed` result does not complete PR9.
+- The PR9 exact+lexical+graph baseline is versioned with its profile and
+  fallback-subpayload bytes. Completion depends on validated callable behavior,
+  direct tests, a passing Linux evaluation, and normal CI, not a historical
+  artifact filename, saved-candidate packet, evidence map, or acceptance
+  snapshot. A failed or pending result does not complete PR9.
 - Working/staged/range Git, history, blame, rename, binary, merge, and
   `HunkRef` fixtures retain native Git identity and independent Git/code/
   diagnostic/test watermarks. No code-index row becomes Git object or patch

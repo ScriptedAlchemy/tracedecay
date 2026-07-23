@@ -33,6 +33,7 @@
 //!   packet, so deadlines are modelled here as a `Duration` against the
 //!   injected pool clock and cancellation as the [`CancellationSignal`] trait;
 //!   the integrator adapts `RetrievalBudget` onto both.
+#![allow(dead_code)] // PR10 fastembed adapter; Plan 31 — staged
 
 #[cfg(feature = "semantic-fastembed")]
 use fastembed::{

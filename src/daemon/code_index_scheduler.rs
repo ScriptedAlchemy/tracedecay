@@ -1,9 +1,9 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Daemon-owned scheduling and reconciliation for production code generations.
 //!
 //! Notify events are bounded wake-up hints only. Every run reconstructs its
 //! source snapshot from gix's HEAD-tree/index/worktree status before content
 //! digests decide whether publication is necessary.
+#![allow(dead_code)] // Plan 25 code-intelligence indexing — reconciliation surface staged
 
 use std::{
     collections::{BTreeMap, BTreeSet},

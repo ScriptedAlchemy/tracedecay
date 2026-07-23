@@ -2785,20 +2785,26 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
 /// without opening another database or resolving configuration independently.
 #[derive(Clone)]
 pub struct OwnedGlobalDbConfigurationControlStore {
-    db: Arc<GlobalDb>,
+    /// The retained project-runtime database handle, or `None` when the store
+    /// has no durable sessions.db yet (a read-only open of a never-writable
+    /// store). Every operation fails closed with [`ConfigurationError::Unavailable`]
+    /// while the store is absent.
+    db: Option<Arc<GlobalDb>>,
 }
 
 impl OwnedGlobalDbConfigurationControlStore {
-    /// Retains an existing daemon project-runtime database handle.
-    pub fn from_project_runtime_db(db: Arc<GlobalDb>) -> Self {
+    /// Retains an existing daemon project-runtime database handle, or an absent
+    /// (`None`) handle for a read-only open with no durable configuration store.
+    pub fn from_project_runtime_db(db: Option<Arc<GlobalDb>>) -> Self {
         Self { db }
     }
 }
 
 impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
     fn current(&self) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         Box::pin(async move {
+            let db = db.ok_or(ConfigurationError::Unavailable)?;
             let store = GlobalDbConfigurationControlStore::new(db.as_ref());
             store.current().await
         })
@@ -2809,10 +2815,11 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         operation: &ProtectedChange,
     ) -> ConfigurationOperationFuture<'_, ()> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let plan = plan.clone();
         let operation = operation.clone();
         Box::pin(async move {
+            let db = db.ok_or(ConfigurationError::Unavailable)?;
             let store = GlobalDbConfigurationControlStore::new(db.as_ref());
             store.save_plan(&plan, &operation).await
         })
@@ -2822,9 +2829,10 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         &self,
         plan_id: &ChangePlanId,
     ) -> ConfigurationOperationFuture<'_, Option<ProtectedChangePlan>> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let plan_id = plan_id.clone();
         Box::pin(async move {
+            let db = db.ok_or(ConfigurationError::Unavailable)?;
             let store = GlobalDbConfigurationControlStore::new(db.as_ref());
             store.load_plan(&plan_id).await
         })
@@ -2836,11 +2844,12 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         mutation: &DirectConfigurationMutation,
         expected_revision: &ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let authority = authority.clone();
         let mutation = mutation.clone();
         let expected_revision = expected_revision.clone();
         Box::pin(async move {
+            let db = db.ok_or(ConfigurationError::Unavailable)?;
             let store = GlobalDbConfigurationControlStore::new(db.as_ref());
             store
                 .commit_direct(&authority, &mutation, &expected_revision)
@@ -2855,12 +2864,13 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let authority = authority.clone();
         let request = request.clone();
         let plan = plan.clone();
         let evidence = evidence.clone();
         Box::pin(async move {
+            let db = db.ok_or(ConfigurationError::Unavailable)?;
             let store = GlobalDbConfigurationControlStore::new(db.as_ref());
             store
                 .commit_protected(&authority, &request, &plan, &evidence)
@@ -2874,10 +2884,11 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         rollback: &ConfigurationRollbackRequest,
         now: UtcMicros,
     ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let authority = authority.clone();
         let rollback = rollback.clone();
         Box::pin(async move {
+            let db = db.ok_or(ConfigurationError::Unavailable)?;
             let store = GlobalDbConfigurationControlStore::new(db.as_ref());
             store.dry_run_rollback(&authority, &rollback, now).await
         })
@@ -2890,12 +2901,13 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let authority = authority.clone();
         let request = request.clone();
         let plan = plan.clone();
         let evidence = evidence.clone();
         Box::pin(async move {
+            let db = db.ok_or(ConfigurationError::Unavailable)?;
             let store = GlobalDbConfigurationControlStore::new(db.as_ref());
             store
                 .apply_rollback(&authority, &request, &plan, &evidence)
@@ -2908,10 +2920,11 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         actor: &AuthorizedActor,
         query: &ConfigurationAuditQuery,
     ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let actor = actor.clone();
         let query = query.clone();
         Box::pin(async move {
+            let db = db.ok_or(ConfigurationError::Unavailable)?;
             let store = GlobalDbConfigurationControlStore::new(db.as_ref());
             ConfigurationControlStore::audit(&store, &actor, &query).await
         })
@@ -2921,9 +2934,10 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         &self,
         actor: &AuthorizedActor,
     ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let actor = actor.clone();
         Box::pin(async move {
+            let db = db.ok_or(ConfigurationError::Unavailable)?;
             let store = GlobalDbConfigurationControlStore::new(db.as_ref());
             store.observed_state(&actor).await
         })
@@ -2937,11 +2951,12 @@ impl CredentialWritePort for OwnedGlobalDbConfigurationControlStore {
         write: &WriteOnlyCredentialMutation,
         expected_revision: &ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let authority = authority.clone();
         let write = write.clone();
         let expected_revision = expected_revision.clone();
         Box::pin(async move {
+            let db = db.ok_or(ConfigurationError::Unavailable)?;
             let store = GlobalDbConfigurationControlStore::new(db.as_ref());
             store
                 .write_reference(&authority, &write, &expected_revision)
@@ -4414,8 +4429,8 @@ mod tests {
     async fn owned_global_control_adapter_retains_runtime_db_and_preserves_cas() {
         let (_directory, _path, db, root) = global_setup().await;
         let runtime_db = Arc::new(db);
-        let store = OwnedGlobalDbConfigurationControlStore::from_project_runtime_db(Arc::clone(
-            &runtime_db,
+        let store = OwnedGlobalDbConfigurationControlStore::from_project_runtime_db(Some(
+            Arc::clone(&runtime_db),
         ));
         drop(runtime_db);
 

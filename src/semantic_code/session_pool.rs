@@ -25,6 +25,7 @@
 //! (one admitted domain projection/privacy authority) and ESCALATION-4
 //! (deadlines as `Duration` against the injected clock, bridged from PR9
 //! `RetrievalBudget`) shape this file directly.
+#![allow(dead_code)] // PR10 embedding session pool; Plan 31 — staged
 
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;

@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Project registry, runtime, and automation admin tool definitions.
 
 use serde_json::json;
@@ -36,6 +35,7 @@ pub(super) fn def_active_project() -> ToolDefinition {
     )
 }
 
+#[allow(dead_code)] // Plan 21 storage_status tool def — not yet registered
 pub(super) fn def_storage_status() -> ToolDefinition {
     def_always_load(
         "tracedecay_storage_status",

@@ -567,7 +567,7 @@ fn snapshot_fingerprint(
                 message: format!("could not inspect copied snapshot for sealing: {error}"),
             })?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let read = file.read(&mut buffer).map_err(|error| {
             RusqliteParityInfrastructureErrorV1::Snapshot {

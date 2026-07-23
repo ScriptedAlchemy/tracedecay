@@ -2,11 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::{
-    CandidateListV1, EvalCandidateAnchorV1, EvalCandidateV1, EvalOutcomeV1,
-    EvalPartitionV1, EvalQueryV1, EvalRunScopeV1, EvaluationFixtureBundleV1, EvidenceIndexV1,
-    FixtureAuthorityV1, FixtureContentDigest, FixtureManifestV1, HoldoutLabelAuthorityV1,
-    LabelSetDigest, LabelSetId, LabelSetV1, QueryWorkloadV1, RelevanceJudgmentV1, RetrieverLaneId,
-    RunManifestV1, SavedCandidateSetDigest, SavedCandidateSetV1, WorkloadDigest,
+    CandidateListV1, EvalCandidateAnchorV1, EvalCandidateV1, EvalOutcomeV1, EvalPartitionV1,
+    EvalQueryV1, EvalRunScopeV1, EvaluationFixtureBundleV1, EvidenceIndexV1, FixtureAuthorityV1,
+    FixtureContentDigest, FixtureManifestV1, HoldoutLabelAuthorityV1, LabelSetDigest, LabelSetId,
+    LabelSetV1, QueryWorkloadV1, RelevanceJudgmentV1, RetrieverLaneId, RunManifestV1,
+    SavedCandidateSetDigest, SavedCandidateSetV1, WorkloadDigest,
 };
 
 const ZERO_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -104,7 +104,6 @@ fn pre_holdout_access_validation_rejects_contract_only_authority() {
         .unwrap_err();
     assert!(error.to_string().contains("locked-quality"));
 }
-
 
 #[test]
 fn saved_candidate_ablations_filter_frozen_lists_without_mutating_them() {
@@ -224,12 +223,6 @@ fn domain_exposes_structure_checks_not_receipt_authority_injection() {
     assert!(!source.contains("receipt_authority: &A"));
     assert!(source.contains("validate_structure_for_run"));
 }
-
-
-
-
-
-
 
 #[test]
 fn contamination_membership_is_bidirectional() {

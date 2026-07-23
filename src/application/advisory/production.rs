@@ -114,7 +114,7 @@ pub fn open_pr13_advisory_production_authorities(
     )
     .ok_or(Pr13AdvisoryProductionOpenErrorV1::ProximityAuthorityUnavailable)?;
     let configuration =
-        OwnedGlobalDbConfigurationControlStore::from_project_runtime_db(project_runtime_db);
+        OwnedGlobalDbConfigurationControlStore::from_project_runtime_db(Some(project_runtime_db));
     let ci = open_production_ci_provider_authorities_v1(ci_config, ci_retained, ci_code_anchors)
         .map_err(|_| Pr13AdvisoryProductionOpenErrorV1::CiAuthorityUnavailable)?;
     let (ci_source, ci_exact_evidence) = ci.into_registrar_parts();

@@ -2,7 +2,8 @@
 
 Linux measurement harness for PR8 temporal retrieval latency phases.
 This directory records descriptive sample quantiles and directly executed
-behavioral test outcomes only.
+behavioral test outcomes only. It is not an acceptance snapshot, receipt,
+manifest, or gate.
 
 ## Fixtures
 
@@ -20,7 +21,7 @@ Runtime sanitizer provenance for those fixtures is in
 | Path | Role |
 |---|---|
 | [workload-v1.json](workload-v1.json) | Versioned workload/config pin |
-| [evidence-index.json](evidence-index.json) | Points at provisional measurement file (`current_acceptance` always null here) |
+| [evidence-index.json](evidence-index.json) | Legacy pointer to the provisional measurement (`current_acceptance` is deprecated and always null) |
 | [result-provisional.json](result-provisional.json) | Linux measurement + observed focused-test outcomes |
 
 ## Commands

@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_domain::{FixtureContentDigest, HoldoutLabelAuthorityV1, HoldoutSealV1, RelevanceJudgmentV1};
+use tracedecay_domain::{
+    FixtureContentDigest, HoldoutLabelAuthorityV1, HoldoutSealV1, RelevanceJudgmentV1,
+};
 
 #[derive(Debug, Error)]
 pub enum HoldoutAuthorityError {

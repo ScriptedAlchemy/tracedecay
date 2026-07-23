@@ -615,6 +615,27 @@ cargo check \
 cat "$repo/tests/distribution/fastembed/semantic_unavailable_tests.rs.inc" \
   >>"$root_package/src/query/retrieval/semantic/tests.rs"
 echo "distribution acceptance: checking typed semantic fallback and strict unavailability"
+ort_lib_path=${ORT_LIB_PATH:-$(python3 - <<'PY'
+import os
+from pathlib import Path
+
+cache_root = Path(
+    os.environ.get("ORT_CACHE_DIR", Path.home() / ".cache" / "ort.pyke.io")
+)
+names = {"libonnxruntime.a", "libonnxruntime.dylib", "onnxruntime.lib"}
+candidates = [
+    path
+    for path in cache_root.glob("dfbin/**/*")
+    if path.is_file()
+    and (path.name in names or path.name.startswith("libonnxruntime.so"))
+]
+if candidates:
+    print(max(candidates, key=lambda path: path.stat().st_mtime).parent)
+PY
+)}
+[[ -n $ort_lib_path ]] ||
+  die "cached ONNX Runtime library is unavailable for the offline semantic test"
+export ORT_LIB_PATH="$ort_lib_path"
 CARGO_NET_OFFLINE=true cargo test \
   --manifest-path "$root_package/Cargo.toml" \
   --release \

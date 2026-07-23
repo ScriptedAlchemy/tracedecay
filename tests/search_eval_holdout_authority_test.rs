@@ -17,7 +17,9 @@ fn direct_loader_rejects_agent_adjudicated_authority_without_owner_imports() {
     let err = load_direct_holdout_labels(&path, None).expect_err("agent authority rejected");
     let message = err.to_string();
     assert!(
-        message.contains("parse") || message.contains("unknown variant") || message.contains("agent_adjudicated"),
+        message.contains("parse")
+            || message.contains("unknown variant")
+            || message.contains("agent_adjudicated"),
         "unexpected error: {message}"
     );
 }

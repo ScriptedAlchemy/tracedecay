@@ -940,7 +940,9 @@ pub fn runtime_configuration_for_layout(
 /// configuration database or resolving a second snapshot.
 pub(crate) struct OpenedRuntimeConfiguration {
     pub(crate) configuration: PinnedRuntimeConfiguration,
-    pub(crate) database: Arc<GlobalDb>,
+    /// The opened configuration control store, or `None` when the store has no
+    /// durable sessions.db yet (a read-only open of a never-writable store).
+    pub(crate) database: Option<Arc<GlobalDb>>,
 }
 
 /// Loads and publishes the durable current configuration for a resolved store
@@ -1012,7 +1014,7 @@ pub(crate) async fn open_runtime_configuration_for_layout(
     install_pinned_runtime_configuration(configuration.clone())?;
     Ok(OpenedRuntimeConfiguration {
         configuration,
-        database,
+        database: Some(database),
     })
 }
 
@@ -1032,16 +1034,20 @@ pub(crate) async fn open_runtime_configuration_for_layout_read_only(
     layout: &crate::storage::StoreLayout,
 ) -> Result<OpenedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
-    let database = Arc::new(
-        GlobalDb::open_read_only_at(&layout.sessions_db_path)
-            .await
-            .ok_or_else(|| {
-                config_error(format!(
-                    "configuration authority unavailable: no durable store at '{}'",
-                    layout.sessions_db_path.display()
-                ))
-            })?,
-    );
+    let Some(database) = GlobalDb::open_read_only_at(&layout.sessions_db_path).await else {
+        // A store that was never opened writable has no durable sessions.db.
+        // Read-only inspection must not require the writable-open side effect:
+        // resolve the registry default snapshot as a typed absent-store state
+        // and report the configuration control store as unavailable, so writes
+        // still guard rather than silently succeeding.
+        let configuration = read_only_default_runtime_configuration(target)?;
+        install_pinned_runtime_configuration(configuration.clone())?;
+        return Ok(OpenedRuntimeConfiguration {
+            configuration,
+            database: None,
+        });
+    };
+    let database = Arc::new(database);
     let store = GlobalDbConfigurationControlStore::new(database.as_ref());
     let current = store.current().await.map_err(map_configuration_error)?;
     let configuration =
@@ -1049,8 +1055,29 @@ pub(crate) async fn open_runtime_configuration_for_layout_read_only(
     install_pinned_runtime_configuration(configuration.clone())?;
     Ok(OpenedRuntimeConfiguration {
         configuration,
-        database,
+        database: Some(database),
     })
+}
+
+/// Builds the registry-default runtime configuration for a read-only open of a
+/// store that has no durable configuration history yet. This mirrors the
+/// snapshot a fresh writable open would migrate in, but stays entirely
+/// in-memory so inspecting a never-opened store never mutates it.
+fn read_only_default_runtime_configuration(
+    target: RuntimeConfigurationTarget,
+) -> Result<PinnedRuntimeConfiguration> {
+    let registry = registry::ConfigurationRegistry::core()
+        .map_err(|error| config_error(format!("configuration registry unavailable: {error}")))?;
+    let resolution = resolver::resolve_configuration(&registry, &[]).map_err(|error| {
+        config_error(format!(
+            "configuration authority unavailable: could not resolve default snapshot: {error}"
+        ))
+    })?;
+    let revision_id =
+        ConfigurationRevisionId::new("configuration.read_only.default.v1").map_err(|error| {
+            config_error(format!("invalid default configuration revision: {error}"))
+        })?;
+    PinnedRuntimeConfiguration::new(target, revision_id, resolution.snapshot)
 }
 
 pub async fn load_runtime_configuration_for_layout_read_only(

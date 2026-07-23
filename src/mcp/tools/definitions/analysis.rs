@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Code-health and architecture analysis tool definitions.
 
 use serde_json::json;
@@ -35,6 +34,7 @@ pub(super) fn def_dead_code() -> ToolDefinition {
     )
 }
 
+#[allow(dead_code)] // Plan 21 module_api tool def — not yet registered
 pub(super) fn def_module_api() -> ToolDefinition {
     def(
         "tracedecay_module_api",

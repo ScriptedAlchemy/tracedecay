@@ -136,14 +136,21 @@ fn s8_attachment_bundle_is_inert_until_registry_mount() {
 
 #[test]
 fn s8_production_mount_exposes_repository_and_health_data_ports() {
-    let attachment = RustAst::parse("crates/tracedecay-rusqlite-runtime/src/repository/attachment.rs");
+    let attachment =
+        RustAst::parse("crates/tracedecay-rusqlite-runtime/src/repository/attachment.rs");
     let factory_methods = attachment.method_names("RepositoryPhysicalAttachmentFactory");
     assert!(
         factory_methods.contains("attach"),
         "S8 production cutover requires a real repository attachment factory"
     );
     let attachment_methods = attachment.method_names("RepositoryRuntimePhysicalAttachment");
-    for required in ["dispatch_submit", "dispatch_read", "drain", "close_and_join", "snapshot"] {
+    for required in [
+        "dispatch_submit",
+        "dispatch_read",
+        "drain",
+        "close_and_join",
+        "snapshot",
+    ] {
         assert!(
             attachment_methods.contains(required),
             "S8 production attachment omitted data-port method {required}"

@@ -1,17 +1,17 @@
 # PR10: Native FastEmbed semantic code search
 
-**Status:** active PR10 implementation and acceptance authority. The current
+**Status:** active PR10 implementation and product-test authority. The current
 checkout contains callable FastEmbed, exact-flat, vector-generation,
 calibration, fallback, and runtime-routing artifacts, but PR10 remains
-unfinished until the locked Plan 15 comparison and every parent acceptance
-gate pass. PR9 must still ship and accept the exact/lexical/graph fallback and
-exact-tier evidence before PR10 can activate semantics. Those PR9 results
-become immutable runtime prerequisites only after PR9 acceptance.
+unfinished until the Plan 15 Linux comparison, direct tests, and normal CI
+pass. PR9 must still ship and test the exact/lexical/graph fallback and
+exact-tier behavior before PR10 can activate semantics. Those versioned PR9
+results become immutable runtime prerequisites for semantic composition.
 
 Plan 31 owns the PR10 semantic adapter, projection/runtime, and direct
-acceptance. Plan 15 owns quality promotion, while Plan 25 owns the PR9 code
+testing. Plan 15 owns quality evaluation, while Plan 25 owns the PR9 code
 generation and lexical/graph prerequisite. Plans 09/10/11/12/14 are later
-application and surface consumers. Consumers audit accepted callable behavior,
+application and surface consumers. Consumers audit tested callable behavior,
 quality fixtures, and direct regressions; they do not rebuild PR9/PR10 by old
 module, type, fixture, benchmark, or suite-spine names.
 
@@ -45,10 +45,11 @@ Exact results remain authoritative without a model; similarity alone never prove
 - Daemon/application orchestration schedules changed eligible chunks and
   rebuilds. Plan 04 owns deterministic projection, checkpoint, retry, and
   publication semantics, not scheduling policy.
-- Plan 15 exclusively owns retrieval-research design, frozen corpora and
+- Plan 15 exclusively owns retrieval-research design, versioned corpora and
   labels, metrics and strata, candidate profile comparison, thresholds, and
-  promotion decisions. PR10 implements measured profiles and emits evidence;
-  it cannot tune or promote itself from aggregate or public benchmark results.
+  activation recommendations. PR10 implements measured profiles and emits
+  results; it cannot tune or activate itself from aggregate or public benchmark
+  rank.
 - Plans 10/11/20/21 expose the same application operations through API,
   dashboard, configuration, CLI, and MCP.
 
@@ -226,7 +227,7 @@ an optional reranker profile. Manifests pin actual model/tokenizer/config bytes,
 licenses, runtime/build identity, dimensions, normalization, metric, device,
 threads, batching, and resource ceilings. Implementation selects maintained
 crate/runtime versions during PR10; activated model and reranker profiles still
-require Plan 15's locked promotion decision. This plan contains no stale crate
+require a passing Plan 15 evaluation. This plan contains no stale crate
 or model-version pin.
 
 Install/import verifies artifacts before activation. Queries never download a
@@ -280,7 +281,7 @@ explicit strict-semantic request yields the typed unavailable result.
 ## Query and redundancy
 
 Search resolves exact scope and frozen generation first, reproduces the
-accepted PR9 exact+lexical+graph baseline, then adds a compatible semantic
+versioned PR9 exact+lexical+graph baseline, then adds a compatible semantic
 candidate list. Fusion is stable and explainable; Plan 15's exact-admission
 authority keeps exact identifiers, paths, quoted phrases, errors, tool names,
 and configuration keys in a non-demotable tier. The first production semantic
@@ -326,9 +327,9 @@ The Plan-05 query pipeline executes these phases without combining them:
    existing exact tier remains lexicographically first and cannot be demoted by
    graph/semantic scores, diversity, or reranking. PR10 evaluates semantic
    weighting/fusion candidates—including exact rational RRF if proposed—on
-   saved candidate lists; no algorithm, constant, or weight activates without
-   Plan 15 acceptance.
-5. Use the complete comparator and diversity policy from the accepted generic
+   the same recorded candidate inputs; no algorithm, constant, or weight
+   activates without a passing Plan 15 evaluation.
+5. Use the complete comparator and diversity policy from the tested generic
    profile. The cursor binds emitted identities, ordered overflow, every lane
    continuation, profile/generation/projection digests, and authorization
    epoch. Input insertion order, hash order, and completion order cannot affect
@@ -349,8 +350,8 @@ The Plan-05 query pipeline executes these phases without combining them:
 
 Plan 15's generic `FusionProfile` pins the selected algorithm, lane features/
 weights, candidate budgets, diversity caps, protected exact classes, rerank
-budget, hydration budget, and total comparator. Plan 15 selects and promotes
-that profile from locked evidence; Plan 05 implements it, and Plan 31 supplies
+budget, hydration budget, and total comparator. Plan 15 recommends that profile
+from direct evaluation; Plan 05 implements it, and Plan 31 supplies
 only the semantic lane, artifact/runtime/projection implementation, and
 measurements.
 
@@ -405,19 +406,19 @@ measurements.
 
 ## Plan 15 evaluation handoff and migration
 
-PR10 ships a frozen sanitized corpus covering exact names, natural-language
+PR10 ships a versioned sanitized corpus covering exact names, natural-language
 intent, mixed queries, renamed symbols, same-name cross-scope cases, no-answer
 queries, generated/vendor noise, large symbols, unsupported languages, and
 incremental edits. It measures exact-hit retention, precision/recall/MRR/nDCG,
 wrong-scope and no-answer error, worst strata, build/update time, p50/p95/p99,
 CPU/RSS, model/vector/cache bytes, cancellation, and offline behavior.
 
-Plan 15 owns this corpus's partition/label policy, metrics, uncertainty method,
-protected strata, practical margins, stopping rule, thresholds, and promotion
-decision. PR10 owns reproducible execution and immutable result anchors.
-Activation requires Plan 15's digest-locked accepted report showing no scope/privacy or
-protected exact/no-answer/wrong-scope/worst-stratum regression, demonstrated
-semantic gain, and declared current/10x resource budgets. Sensitive or
+Plan 15 owns this corpus's partition/label policy, metrics, thresholds, and
+activation recommendation. PR10 owns reproducible Linux execution and truthful
+`pass`, `fail`, or `pending` summaries. Activation requires a passing Plan 15
+evaluation showing no scope/privacy or protected
+exact/no-answer/wrong-scope regression, demonstrated semantic gain, and
+declared current/10x Linux resource observations. Sensitive or
 ineligible bytes never enter documents, artifacts, metrics, explanations, or
 model-assisted routes.
 
@@ -432,13 +433,12 @@ Legacy vectors are never trusted or republished. Migration records
 `rebuild_from_retained_eligible_code | drop_with_receipt | quarantine_unreadable`
 and proves every active generation was rebuilt from canonical documents.
 
-## Current delivered-artifact audit
+## Current delivery audit
 
-The audit below separates callable delivery from locked acceptance. A present
-source file or type name is not acceptance by itself; the cited direct
-regressions invoke the relevant boundary. The checked-in PR10 packet validates
-these bindings statically, while its result remains non-promoting and pending
-the parent executions.
+The audit below separates callable delivery from pending direct execution. A
+present source file or type name is not completion by itself; the cited direct
+regressions invoke the relevant boundary. Static fixture validation is useful,
+but the current Linux evaluation remains pending.
 
 - **Library-first FastEmbed:** delivered. The root manifest keeps
   `fastembed` optional with upstream defaults disabled, the
@@ -446,15 +446,14 @@ the parent executions.
   `FastEmbedEmbeddingRuntime::open_session` uses FastEmbed's user-defined local
   byte constructor. Native model execution and resource evidence remain
   pending.
-- **Default equals all features:** delivered in the root feature manifest. The
-  packet validator compares the declared root feature set with `default`
-  structurally rather than searching for a feature name. The aggregate build
-  gate remains a parent execution.
+- **Default equals all features:** delivered in the root feature manifest.
+  Normal Linux/macOS/Windows CI builds and tests that default-feature product
+  posture.
 - **Local verified model bytes only:** delivered at the runtime boundary.
   Model, tokenizer, and config bytes come from the installed manifest members;
   runtime construction has no hub, ambient-cache, download, external-process,
-  or network-inference path. The packet validates the callable constructor and
-  integrity reads; native-platform execution remains pending.
+  or network-inference path. Direct tests validate the callable constructor and
+  integrity reads; cross-platform runtime coverage belongs to normal CI.
 - **Exact-flat semantic baseline:** delivered by
   `SemanticCodeRetriever`/`SemanticVectorReadPort::scan_exact_flat`, with direct
   deterministic ordering, provenance, generation, and coverage regression in
@@ -474,25 +473,25 @@ the parent executions.
 - **Calibrated abstention:** delivered. Missing or shifted calibration invokes
   no semantic authority and preserves fallback; distance and margin rejection
   are versioned and generation-bound. Strict semantic returns typed unavailable.
-  Locked threshold selection remains pending.
+  Linux threshold evaluation remains pending.
 - **Byte-stable PR9 fallback:** delivered at the semantic service boundary.
   Direct regressions retain the caller-owned validated fallback object through
-  augmentation and every tested abstention path. The frozen accepted PR9 bytes
-  and parent fallback digest remain pending PR9 acceptance.
-- **Locked evidence before activation:** not yet accepted. Current runtime
+  augmentation and every tested abstention path. The versioned PR9 fallback
+  bytes and digest remain pending direct PR9 verification.
+- **Evaluation before activation:** still pending. Current runtime
   routing requires an observed current activation receipt and rejects an
-  indexing receipt, but the Plan 15 accepted report, promotion-evidence
-  consumption, current/10x measurements, native-platform runs, and rollback
-  drill are still absent. `result-pending.json` therefore keeps activation
-  false and records no report, fallback, promotion, or gate receipt.
+  indexing receipt, but the Plan 15 Linux evaluation, current/10x measurements,
+  normal cross-platform CI, and rollback drill are still incomplete.
+  `result-pending.json` therefore keeps activation false and truthfully reports
+  `pending`.
 
 ## Planned behavioral delivery and direct verification
 
-PR10 remains unfinished. The checkpoints below are behavioral delivery gates.
+PR10 remains unfinished. The checkpoints below are required product behavior.
 Paths, type spellings, fixture filenames, benchmark entrypoints, and test-suite
-registration are non-normative historical suggestions. Acceptance follows the
-callable semantic operation, checked-in quality evidence, direct regressions,
-and Plan 15's locked result.
+registration are non-normative historical suggestions. Completion follows the
+callable semantic operation, direct regressions, the Plan 15 Linux evaluation,
+and normal CI.
 
 1. **Contracts and capability admission:** add semantic-only domain values,
    ports, manifest validators, ephemeral query-view rules, and split in-memory
@@ -527,19 +526,19 @@ and Plan 15's locked result.
    domain-keyed caches, payload-safe receipts, active/rollback pointer CAS, and
    cold offline rollback. Direct regressions cover hydration, authorization,
    privacy-domain isolation, activation, and rollback.
-6. **Locked evaluation:** use reproducible checked-in workloads,
-   rebuild-only migration, saved PR9 and semantic candidate lists, immutable
-   Plan 15 report inputs, exact-flat oracle comparisons, channel/fusion/
-   calibration/rerank ablations, privacy/non-interference checks, and current/
-   10x resource evidence. Optional ANN and reranker branches begin only after
-   the exact-flat shadow checkpoint and cannot enter the critical path without
-   an accepted locked comparison.
-7. **Activation and aggregate acceptance:** only an `accepted` Plan 15 outcome
-   may create promotion evidence or activate semantics. Run staged shadow/
-   cohort eligibility, rollback, migration, privacy, native-platform,
-   architecture, all-feature, and aggregate gates. Status and Doctor behavior
-   is accepted through the production semantic service; PR10 does not create a
-   temporary public semantic endpoint or reserve later surface contracts.
+6. **Developer evaluation:** use reproducible checked-in Linux workloads,
+   rebuild-only migration, exact-flat oracle comparisons, focused
+   channel/fusion/calibration/rerank ablations, privacy/non-interference checks,
+   and current/10x resource observations. Optional ANN and reranker branches
+   begin only after the exact-flat shadow checkpoint and cannot enter the
+   critical path without a passing comparison.
+7. **Activation and verification:** only a passing Plan 15 result may make
+   semantics eligible for the existing configuration activation. Run staged
+   shadow/cohort behavior, rollback, migration, privacy, architecture, direct
+   tests, Linux evaluation, and normal all-feature cross-platform CI. Status
+   and Doctor behavior is tested through the production semantic service;
+   PR10 does not create a temporary public semantic endpoint or reserve later
+   surface contracts.
 
 A reproducible projection workload measures clean, warm one-symbol, deletion,
 no-op, model-key replay, cancellation, and incompatible rebuild. A query
@@ -549,8 +548,8 @@ including p50/p95/p99, CPU, peak RSS, model/vector/cache bytes, candidates per
 channel, chunks embedded/reused/deleted, hydration fetch count, and fallback.
 Channel ablations use equal candidate budgets; exact flat-vector search is the
 semantic oracle. End-to-end performance work consumes these production
-measurements, while Plan 15 owns quality/resource trade-off and promotion
-policy.
+measurements, while Plan 15 owns quality/resource trade-off and activation
+recommendations.
 
 The query workload also overlaps queries with a blocked projection worker and
 with staged, partial, failed, cancelled, stale, and incompatible generations.
@@ -561,38 +560,34 @@ compatible generation and active pointer become visible in one atomic step.
 
 Each workload manifest pins corpus/query digests, exact file/chunk/query counts,
 language/source strata, seed, model/projection/fusion revisions, hardware and
-runtime manifest, cache state, and concurrency. The 10x workload contains
+runtime summary, cache state, and concurrency. The 10x workload contains
 exactly ten times the eligible chunks of the current workload without copying
-quality labels across partitions. The frozen evaluation method requires enough
-independent warm and measured samples at concurrency 1 and the declared
-saturation concurrency to support p50/p95/p99 and uncertainty claims. Reports
-retain all samples needed to recompute percentiles.
+quality labels across partitions. Reports retain the raw Linux samples needed
+for every statistic and label unsupported p99 or uncertainty claims `pending`.
 
 ### Hard activation barrier
 
-No locked semantic comparison starts until callable PR9 exact/lexical/graph
-behavior passes direct regressions and its accepted profile, exact-tier
-contract, saved candidate lists, fallback-subpayload bytes, validated quality
-fixtures, and accepted lexical evidence are frozen by content and revision.
-Historical artifact-name parity is not part of this barrier. No activation
-occurs unless Plan 15 returns
-`accepted`, authorization/scope leakage is zero, protected exact results are
+No semantic comparison starts until callable PR9 exact/lexical/graph behavior
+passes direct regressions and its versioned profile, exact-tier contract,
+fallback-subpayload bytes, and quality fixtures are identified by real
+content/revision digests. Historical artifact-name parity is not part of this
+barrier. No activation occurs unless Plan 15 reports `pass`,
+authorization/scope leakage is zero, protected exact results are
 unchanged, the PR9 fallback subpayload is byte-identical, generation
 compatibility holds, search-during-indexing leaves PR9 bytes and rank
 unchanged, incomplete or stale generations contribute nothing, all
 resource ceilings pass, and cold offline rollback succeeds.
 
-A `blocked`, `inconclusive`, `rejected`, `invalid_run`, or
-`runtime_fallback_observed` result leaves semantics disabled and no semantic
-profile eligible.
+A `fail` or `pending` result leaves semantics disabled and no semantic profile
+eligible.
 
 ## Acceptance
 
 PR10 is complete when semantic projection, atomic publication, PR9-preserving
 search, bounded generic fusion/reranking/redundancy, artifact/offline lifecycle,
-configuration, production status/Doctor behavior, locked
-corpus/resource/privacy gates, fault recovery, rollback, and rebuild-only
-migration pass direct tests. PR11/PR12/PR14 still own application, public
+configuration, production status/Doctor behavior, corpus/resource/privacy
+tests, fault recovery, rollback, rebuild-only migration, the Linux developer
+evaluation, and normal CI pass. PR11/PR12/PR14 still own application, public
 transport, and dashboard adapters. No separate
 semantic endpoint, vector database, browser inference runtime, or model-specific
 transport is introduced. Queries never silently substitute a model/revision,
@@ -609,7 +604,7 @@ semantic similarity as identity, impact, lineage, or equivalence.
   digest, and wrong-key entries; crash/cancellation leaves the previous active
   pointer unchanged and no partial projection queryable. Queries issued while
   projection is blocked complete through exact/lexical/graph without waiting
-  and match the frozen PR9 fallback bytes and rank. Only a complete compatible
+  and match the versioned PR9 fallback bytes and rank. Only a complete compatible
   generation published with its active pointer in one atomic step may add the
   semantic lane.
 - The semantic adapter emits a separately inspectable generic
@@ -649,6 +644,6 @@ semantic similarity as identity, impact, lineage, or equivalence.
   publication, and deletion of active/rollback artifacts. Query execution
   performs zero network/import/cache-discovery operations.
 - The checked-in benchmark corpus contains only sanitized fixtures and expected
-  opaque anchors; raw private queries/source are absent. Promotion requires the
-  Plan 15 locked report and cannot be inferred from public rank or aggregate
-  gain.
+  opaque anchors; raw private queries/source are absent. Activation requires a
+  passing Plan 15 evaluation and cannot be inferred from public rank or
+  aggregate gain.

@@ -135,11 +135,6 @@
       "disposition": "daemon-owned temporary graph compatibility driver pending S11"
     },
     {
-      "path": "src/daemon/store_runtime/graph_compat.rs",
-      "callee": "Database::initialize",
-      "disposition": "test-only graph compatibility fixture"
-    },
-    {
       "path": "src/daemon/store_runtime/rusqlite_parity.rs",
       "callee": "Builder::new_local",
       "disposition": "process-isolated parity fixture"

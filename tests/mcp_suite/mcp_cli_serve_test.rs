@@ -1,6 +1,7 @@
 use crate::common;
 
 #[cfg(unix)]
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 #[cfg(unix)]
@@ -960,6 +961,39 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
         canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
         canonical_path_string(cwd_project.path()),
         "discovered cwd project should be preferred over MCP initialize roots"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unexpanded_template_path_prefers_initialize_roots_over_discovered_cwd() {
+    let home = TempDir::new().unwrap();
+    let cwd_project = init_project_with_file(home.path(), "pub fn cwd_project_marker() {}\n").await;
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_runtime(
+        home.path(),
+        cwd_project.path(),
+        Some(OsStr::new("${workspaceFolder}")),
+        json!({
+            "roots": [{
+                "uri": file_uri(active.path()),
+                "name": "active"
+            }]
+        }),
+    );
+
+    assert!(
+        output.status.success(),
+        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(active.path()),
+        "an unexpanded host template must defer routing to MCP initialize roots"
     );
 }
 

@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Graph traversal tool handlers: `search`, `context`, `callers`, `callees`,
 //! `impact`, `node`, `similar`, `rename_preview`, `callers_for`, `by_qualified_name`,
 //! `signature`.
@@ -858,6 +857,7 @@ pub(super) async fn handle_find_exact_symbol(
 
 /// Handles `tracedecay_call_chain` tool calls. Finds the shortest directed
 /// call path from `from_id` to `to_id` along outgoing `Calls` edges.
+#[allow(dead_code)] // Plan 21 call_chain handler — not yet registered
 pub(super) async fn handle_call_chain(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let from_id = args
         .get("from_id")
@@ -922,6 +922,7 @@ pub(super) async fn handle_call_chain(cg: &TraceDecay, args: Value) -> Result<To
 }
 
 /// Handles `tracedecay_file_dependents` tool calls.
+#[allow(dead_code)] // Plan 21 file_dependents handler — not yet registered
 pub(super) async fn handle_file_dependents(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let file =
         args.get("file")

@@ -241,7 +241,9 @@ async fn replace_native_alias_with_legacy(db: &GlobalDb, project_path: &Path, pr
 }
 
 async fn create_conflicting_schema_view(db_path: &Path, view_name: &str) {
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
         .execute_batch(&format!(
@@ -446,7 +448,9 @@ async fn try_open_at_reports_observation_projection_schema_failure() {
 async fn try_open_at_rejects_observation_table_without_authority_constraints() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
         .execute_batch(
@@ -473,7 +477,9 @@ async fn try_open_at_rejects_observation_table_without_authority_constraints() {
     assert_eq!(operation, "validate global database authority schema");
     assert!(message.contains("observations"), "{message}");
 
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     let mut rows = raw_conn
         .query(
@@ -504,7 +510,9 @@ async fn legacy_idempotency_and_non_autoincrement_observations_migrate_canonical
     let db_path = dir.path().join("global.db");
     let (legacy_observation, legacy_cursor) = schema_authority_fixture(41, "legacy");
     let legacy_receipt = legacy_observation.receipt();
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
         .execute_batch(
@@ -644,7 +652,9 @@ async fn legacy_idempotency_and_non_autoincrement_observations_migrate_canonical
 async fn schema_validation_accepts_equivalent_table_level_primary_key() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
         .execute_batch(
@@ -676,7 +686,9 @@ async fn legacy_code_projects_columns_migrate_without_losing_registry_data() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
         .execute_batch(
@@ -766,7 +778,9 @@ async fn legacy_code_projects_columns_migrate_without_losing_registry_data() {
 async fn schema_validation_rejects_incomplete_registry_table() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
         .execute_batch(
@@ -820,7 +834,9 @@ async fn schema_validation_rejects_partial_required_index() {
 async fn schema_validation_rejects_hidden_generated_registry_column() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
         .execute_batch(
@@ -1677,7 +1693,9 @@ async fn malformed_source_cursor_fails_before_missing_authority_is_repaired() {
             .contains("invalid source cursor authority JSON"),
         "{error}"
     );
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     let mut rows = raw_conn
         .query(
@@ -2126,7 +2144,9 @@ async fn conflicting_projection_outcomes_are_rejected_atomically() {
             .contains("exactly one skip outcome without an alias"),
         "{error}"
     );
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     let mut rows = raw_conn
         .query("SELECT COUNT(*) FROM projection_queue", ())
@@ -2345,7 +2365,9 @@ async fn try_open_at_prevalidates_projects_before_canonical_migration() {
     std::fs::create_dir(&project).unwrap();
     let legacy = format!("{}/.", project.display());
     let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
         .execute_batch(
@@ -2379,7 +2401,9 @@ async fn try_open_at_prevalidates_projects_before_canonical_migration() {
         "{message}"
     );
 
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     let mut rows = raw_conn
         .query("SELECT path FROM projects", ())
@@ -2405,7 +2429,9 @@ async fn canonical_project_migration_rolls_back_insert_when_delete_fails() {
     let legacy = format!("{}/.", project.display());
     let canonical = project.display().to_string();
     let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
         .execute_batch(
@@ -2434,7 +2460,9 @@ async fn canonical_project_migration_rolls_back_insert_when_delete_fails() {
     };
     assert!(error.to_string().contains("delete rejected"), "{error}");
 
-    let raw_db = libsql_local::open_local_database(&db_path, false).await.unwrap();
+    let raw_db = libsql_local::open_local_database(&db_path, false)
+        .await
+        .unwrap();
     let raw_conn = raw_db.connect().unwrap();
     let mut rows = raw_conn
         .query(
@@ -3622,7 +3650,9 @@ fn explicit_project_path_selector_keeps_names_and_paths_separate() {
 async fn session_column_migration_tolerates_duplicate_column_race() {
     // In-memory DB: the duplicate-column race only needs one connection,
     // so the on-disk sqlite file adds nothing but I/O.
-    let db = libsql_local::open_local_database(Path::new(":memory:"), false).await.unwrap();
+    let db = libsql_local::open_local_database(Path::new(":memory:"), false)
+        .await
+        .unwrap();
     let conn = db.connect().unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (

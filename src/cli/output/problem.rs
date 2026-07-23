@@ -1,8 +1,8 @@
-#![allow(dead_code)] // in-flight CLI output helpers
 //! Non-disclosing problem helpers shared by CLI presenters.
 
 use tracedecay_application::{ApplicationProblem, ApplicationProblemKind};
 
+#[allow(dead_code)] // Plan 21 CLI problem output — staged
 pub fn concealed_not_found_or_not_authorized() -> ApplicationProblem {
     tracedecay::daemon_client::concealed_not_found_or_not_authorized()
 }
@@ -10,6 +10,7 @@ pub fn concealed_not_found_or_not_authorized() -> ApplicationProblem {
 /// Stable semantic exit class. Numeric process-code policy is selected by the
 /// CLI entry point; it must not collapse these application states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Plan 21 CLI exit-class — staged
 pub enum CliExitClass {
     InvalidRequest,
     NotFoundOrNotAuthorized,
@@ -23,6 +24,7 @@ pub enum CliExitClass {
 }
 
 /// Exhaustive application-problem to CLI exit-class mapping.
+#[allow(dead_code)] // Plan 21 CLI exit-class — staged
 pub fn exit_class(problem: &ApplicationProblem) -> CliExitClass {
     match problem.kind() {
         ApplicationProblemKind::InvalidRequest => CliExitClass::InvalidRequest,

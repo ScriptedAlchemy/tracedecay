@@ -281,6 +281,10 @@ async fn cold_doctor_graph_value(
     if doctor_sidecar_size(graph_path, "-wal") > 0 {
         return Err("project_store_uncheckpointed_wal");
     }
+    // S11: route through the runtime registry once client handles exist. This is
+    // the offline/cold doctor path: it inspects a store by path without a live
+    // daemon, so no StoreRuntimeHandle is reachable to serve a GraphQuickCheck
+    // read. Until S11 exposes client handles, keep the direct read-only open.
     let database = if doctor_uses_rollback_journal(graph_path) {
         // A rollback-journal store can be checked with SQLite's ordinary
         // read-only lock protocol without creating WAL/SHM sidecars. This
@@ -391,6 +395,12 @@ async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> 
     if cold {
         return cold_doctor_runtime_value_for_paths(project_path, &graph_path, &session_path).await;
     }
+    // S11: route through the runtime registry once client handles exist. The
+    // warm doctor still resolves a store by path from the handshake and has no
+    // StoreRuntimeHandle in scope, so the health probe below runs PRAGMA
+    // quick-check style reads over a direct read-only open (already funneled
+    // through the single graph seam, GraphLibsqlCompatDriver) instead of
+    // dispatch_read(GraphQuickCheck)/dispatch_read(TemporalHealth).
     let graph = match doctor_read_only_database(&graph_path, "doctor graph read-only").await {
         Ok(graph) => graph,
         Err("store_missing") => {

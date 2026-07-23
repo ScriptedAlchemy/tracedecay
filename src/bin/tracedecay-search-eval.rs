@@ -72,7 +72,10 @@ enum Command {
         repo_root: PathBuf,
         #[arg(long)]
         workload: Option<PathBuf>,
-        #[arg(long, default_value = "benchmarks/search-quality/runs/candidate-outputs")]
+        #[arg(
+            long,
+            default_value = "benchmarks/search-quality/runs/candidate-outputs"
+        )]
         output_root: PathBuf,
         #[arg(long, value_delimiter = ',')]
         profiles: Option<Vec<String>>,

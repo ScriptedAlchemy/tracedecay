@@ -953,7 +953,6 @@ async fn immutable_summary_exact_replay_keeps_frozen_lineage_after_close() {
 }
 
 #[tokio::test]
-#[ignore = "PR8 blocker: production open rejects immutable-summary sanitization receipt authority"]
 async fn immutable_summary_exact_replay_survives_production_open() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_lcm_db_path(&tmp);

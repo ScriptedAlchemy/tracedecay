@@ -14,30 +14,23 @@ struct GraphCutoverFixture {
     native_reader: String,
     native_mutation: String,
     physical_attachment: String,
-    legacy_adapter: String,
     read_variants: Vec<String>,
     mutation_variants: Vec<String>,
     attachment_api: Vec<String>,
 }
 
 #[test]
-fn graph_read_routes_have_legacy_and_native_parity() {
+fn graph_read_routes_cover_the_native_reader() {
     let fixture: GraphCutoverFixture =
         serde_json::from_str(GRAPH_ROUTES).expect("decode graph route fixture");
     let native = RustAst::parse(&fixture.native_reader);
-    let legacy = RustAst::parse(&fixture.legacy_adapter);
     let native_paths = native.method_paths("GraphReaderExecutor", "execute_read");
-    let legacy_paths = legacy.function_paths("dispatch_graph_read");
 
     for variant in &fixture.read_variants {
         let path = format!("RuntimeReadOperationV1::{variant}");
         assert!(
             has_path_suffix(&native_paths, &path),
             "native graph reader omitted {path}"
-        );
-        assert!(
-            has_path_suffix(&legacy_paths, &path),
-            "legacy graph compatibility route omitted {path}"
         );
     }
 }

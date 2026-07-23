@@ -2,11 +2,11 @@ mod access;
 mod analytics;
 mod connection;
 mod coverage;
-pub(crate) mod libsql_local;
 mod edges;
 mod evidence_assembly;
 mod files;
 mod fingerprints;
+pub(crate) mod libsql_local;
 mod maintenance;
 mod memory_v2;
 mod metadata;
@@ -16,6 +16,9 @@ mod redundancy_pairs;
 mod retrieval_anchor_authority;
 pub(crate) mod retrieval_anchor_schema;
 mod rows;
+// S11: unreferenced since the dead pre-cutover adapters were removed; the S1
+// runtime lane re-wires these graph read/maintenance facades to the registry.
+#[allow(dead_code)]
 pub(crate) mod runtime_compat;
 mod search;
 mod sql;

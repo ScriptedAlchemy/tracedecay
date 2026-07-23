@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Closed, authenticated daemon invocation protocol.
 //!
 //! This module deliberately accepts a small typed operation set after the
@@ -1046,6 +1045,7 @@ pub(crate) struct DaemonFeedbackResult {
 }
 
 pub(crate) struct DaemonFeedbackInvocationRequest {
+    #[allow(dead_code)] // in-flight feedback request field — staged
     pub(crate) request_id: RequestId,
     pub(crate) operation: DaemonInvocationOperation,
     pub(crate) request_handle: String,
@@ -1632,6 +1632,7 @@ impl DaemonPrimitiveRuntimeRegistrar {
         Ok(dispatch)
     }
 
+    #[allow(dead_code)] // in-flight route unregister — staged
     pub(crate) async fn unregister(&self, project_root: &Path) -> bool {
         let runtime = self
             .service
@@ -1881,6 +1882,7 @@ impl DaemonInvocationService {
     /// Returns the retained semantic scheduling handle for `project_root`,
     /// or the sole mounted handle when no root is given and exactly one
     /// project is registered.
+    #[allow(dead_code)] // Plan 31 semantic runtime accessor — staged
     pub(crate) async fn semantic_runtime(
         &self,
         project_root: Option<&Path>,
@@ -2402,6 +2404,7 @@ fn concealed_application_problem(request_id: String) -> DaemonInvocationResponse
     )
 }
 
+#[allow(dead_code)] // PR12 primitive + Plan 37 feedback publication — staged
 impl DaemonInvocationService {
     pub(crate) fn operation_events(&self) -> OperationEventAuthority {
         self.operation_events.clone()

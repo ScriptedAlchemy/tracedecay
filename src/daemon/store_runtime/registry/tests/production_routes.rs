@@ -125,12 +125,18 @@ fn sessions_request(project: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpe
 
 fn assert_health_route(handle: &StoreRuntimeHandle) {
     assert!(
-        !matches!(handle.binding().shard_id.scope, StoreShardScopeV1::Code { .. }),
+        !matches!(
+            handle.binding().shard_id.scope,
+            StoreShardScopeV1::Code { .. }
+        ),
         "S8 production routes must not mount code shards"
     );
     let snapshot = handle.physical_snapshot();
     assert!(snapshot.healthy, "mounted runtime must report healthy");
-    assert!(snapshot.writer_present, "mounted runtime must retain a writer");
+    assert!(
+        snapshot.writer_present,
+        "mounted runtime must retain a writer"
+    );
     assert!(
         snapshot.reader_handles >= 1,
         "mounted runtime must retain reserved readers"

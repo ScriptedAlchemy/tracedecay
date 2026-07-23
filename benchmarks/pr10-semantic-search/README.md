@@ -1,32 +1,32 @@
-# PR10 locked semantic-search evaluation packet
+# PR10 semantic-search developer evaluation
 
-This packet freezes the PR10 evaluation shape without claiming that locked
-acceptance has run. It audits delivered callable boundaries and direct
-regressions, then keeps activation disabled until the parent executes the
-locked quality and runtime gates.
+This directory contains a Linux-only developer workload and static fixture
+validation. It is not a PR acceptance packet, gate, holdout, owner receipt, or
+activation authority. `result-pending.json` reports the current evaluation
+truthfully; semantic activation remains a separate product configuration
+operation protected by runtime compatibility and rollback checks.
 
-`workload-v1.json` pins the real sanitized repository corpus and query bytes,
+`workload-v1.json` records the real sanitized repository corpus and query bytes,
 the production FastEmbed and vector-service boundaries, the exact-flat oracle,
 equal-budget hybrid and reranking candidates, cohort/generation-bound
 calibration and abstention, byte-identical PR9 fallback, current/10x resource
-strata, and cold offline rollback. It also pins library-first/default-equals-all
+strata, and cold offline rollback behavior. It also records library-first/default-equals-all
 feature behavior, local versioned-manifest SHA-256-verified model bytes,
 asynchronous semantic projection, non-blocking exact/lexical/graph search during
 indexing, omission of every non-current generation, strict-semantic typed
 unavailability, and atomic visibility of a complete compatible generation.
 
-OS matrix execution (Linux/Windows/macOS default-feature product lifecycle) is
-owned by PR13 host CI, not this eval packet.
+Normal Linux/macOS/Windows CI owns default-feature product build, test,
+package, install, and lifecycle coverage. Developer benchmarking stays
+Linux-only.
 
-The profile matrix deliberately keeps ANN, late interaction, and quantization
-as evidence-gated research candidates. The exact-flat production scan is the
-semantic oracle. Neither aggregate quality nor public benchmark rank can
-activate a candidate.
+ANN, late interaction, and quantization remain research candidates. The
+exact-flat production scan is the semantic oracle. Neither a checked-in file
+nor public benchmark rank can activate a candidate.
 
-`result-pending.json` stays non-authoritative: no measured locked samples,
-fallback digest, locked report, or promotion evidence. Parent-gate receipts may
-record truthful `executed_contract` or `blocked` states, but outcome remains
-`pending` and semantics stay disabled until a locked accepted report exists.
+`result-pending.json` stays non-authoritative and reports `pending` until the
+Linux workload executes. It never stores owner approval, reveal state, gate
+receipts, or promotion evidence.
 
 Run the local contract without Cargo:
 
@@ -35,7 +35,7 @@ python3 benchmarks/pr10-semantic-search/validate_packet.py
 python3 -m unittest discover -s tests/search-quality -p "test_*.py"
 ```
 
-Strict mode is a negative acceptance check:
+Strict mode verifies that pending input does not claim success:
 
 ```text
 python3 benchmarks/pr10-semantic-search/validate_packet.py --strict

@@ -2,8 +2,7 @@
 //!
 //! Call sites still land behind these facades during S8, so unused helpers are
 //! retained until every live open routes through the registry adapters.
-
-#![allow(dead_code)]
+#![allow(dead_code)] // S8 storage-runtime cutover compat ports; see module doc
 
 use std::path::Path;
 

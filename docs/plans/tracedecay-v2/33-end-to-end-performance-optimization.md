@@ -3,19 +3,19 @@
 ## Status / role
 
 PR20 begins after PR19 convergence. It measures the production journeys shipped
-by PR13–PR19, optimizes their demonstrated bottlenecks, retains only accepted
-comparisons, and publishes one stable aggregate result. Instrumentation belongs
+by PR13–PR19, optimizes their demonstrated bottlenecks, retains only measured
+improvements, and publishes one concise summary. Instrumentation belongs
 to the production paths and existing observability system; PR20 does not create
 a benchmark service, performance protocol, execution ledger, leaderboard, or
-parallel product path. Accepted production observability and comparison
-artifacts are the only durable evidence for optimization disposition.
+parallel product path. Production observability and simple Linux before/after
+measurements are sufficient developer evidence.
 
 Names and layouts of earlier benchmarks, baselines, soak packets, matrices,
 scorecards, and profiling harnesses are historical evidence, not prerequisites
 or artifacts that PR20 must recreate. Persisted measurement descriptors and
-published performance profiles retain compatibility obligations; acceptance
-otherwise follows the production-journey measurements, semantic guardrails,
-platform coverage, and regression behavior below.
+published performance profiles retain compatibility obligations; completion
+otherwise follows Linux developer measurements, direct semantic/regression
+tests, and normal cross-platform CI.
 
 ## User outcome
 
@@ -32,9 +32,9 @@ resource-intensive without changing their meaning:
 - startup, upgrade, migration, recovery, representative focused checks, and
   tests.
 
-When evidence cannot distinguish a practical improvement from noise or does
-not cover a required platform, stratum, or failure mode, PR20 reports
-`insufficient_evidence` and keeps the accepted implementation.
+When a Linux comparison cannot distinguish a practical improvement from noise
+or misses a required failure mode, PR20 reports `pending` or `fail` and keeps
+the current implementation.
 
 ## End-to-end production path
 
@@ -50,73 +50,42 @@ not cover a required platform, stratum, or failure mode, PR20 reports
    mechanism it changes and the practical user-visible effect it intends to
    improve; intuition, paper results, placeholder numbers, or a synthetic
    microbenchmark cannot select it.
-4. Compare baseline and candidate on the same compatible subject, workload,
-   corpus, configuration, platform/hardware class, cache preparation, arrival
-   model, and correctness oracle. Establish A/A noise before A/B, use paired
-   effects and intervals, and predeclare practical improvement and regression
-   margins.
-5. Promote only when the improvement clears its practical margin and every
-   semantic, project-isolation, authority, quality, lifecycle, resource, and recovery
-   guard remains within its harm margin on required Linux and Windows strata.
+4. Compare baseline and candidate on the same Linux host, source revision,
+   workload, corpus, configuration, cache preparation, arrival model, and
+   correctness oracle. Record raw samples and practical deltas.
+5. Retain a candidate only when the Linux result improves materially and
+   direct tests preserve semantic, project-isolation, authority, quality,
+   lifecycle, resource, and recovery behavior.
 6. Activate through a versioned performance profile that pins the exact prior
-   accepted profile. Runtime rollback returns only to that verified profile and
-   preserves durable evidence and in-flight effect fencing.
-7. Publish the accepted comparison through existing observability artifacts.
-   Rejected, provisional, incompatible, or insufficient comparisons are not
-   retained as accepted baselines or improvements.
+   profile. Runtime rollback returns only to that verified profile and
+   preserves runtime receipts and in-flight effect fencing.
+7. Publish a truthful `pass`, `fail`, or `pending` summary. Normal
+   Linux/macOS/Windows CI verifies default-feature product support; it is not a
+   benchmark matrix.
 
-If no compatible accepted baseline exists, PR20 first measures the real
-production journey on a clean immutable subject. It does not invent, transfer,
-or fill a baseline with sentinel values.
+If no compatible baseline exists, PR20 first measures the real production
+journey from an explicitly recorded source revision and environment. It does
+not create a clean/content-addressed checkout snapshot or fill a baseline with
+sentinel values.
 
-### Measurement and evidence rules
+### Measurement rules
 
-- Freeze the supported decision/estimand, population/unit, immutable baseline
-  and candidate builds, workload/corpus/environment/oracle/configuration
-  identities, platform/hardware class, cache preparation, open- or closed-loop
-  arrivals and bursts, timeout/retry/think-time policy, sample/block floors,
-  balanced randomized AB/BA order, A/A noise method, interval estimator,
-  stopping/exclusion rule, protected strata/coverage/tail support, practical
-  margins, and correctness/resource guards before candidate results are seen.
-  Changing any identity creates a new comparison.
-- Every offered open-loop request enters scheduled-arrival-to-terminal at its
-  actual completion, cancellation, timeout, shed, or failure. Retries are
-  linked distinct attempts. Report offered, admitted, started, completed,
-  cancelled, timed out, shed, retried, failed, unknown, censored, queue age,
-  saturation, and post-load recovery so coordinated omission and survivor bias
-  cannot manufacture a win.
-- One paired baseline/candidate block is the experimental unit. The empirical
-  quantile and paired cluster-bootstrap 95% interval are frozen in advance.
-  Quantile gates require at least 20 independent paired blocks and 100 expected
-  tail observations: at least 200 terminal observations for p50, 2,000 for
-  p95, and 10,000 for p99 per protected stratum. Tail observations span all
-  blocks and no block contributes more than 10 percent. Lower support is
-  reportable only as `insufficient_evidence`.
-- A/A is eligible only when twice its p95 absolute paired effect is no greater
-  than the frozen practical margin. Improvement requires the paired 95 percent
-  interval to clear the improvement margin; each one-sided harm bound stays
-  within its regression margin. Point estimates, aggregate means, p-values,
-  transferred thresholds, or post-result margin changes never gate.
-- Report process-tree RSS/PSS, anonymous/file-backed RSS, live heap,
-  allocation churn/retention/fragmentation, SQLite/cache/result/queue/
-  generation bytes, CPU, database/generation/temp size, I/O, and write
-  amplification, provider tokens/cost with provenance, and attempted/
-  committed/reconciled/unknown/prevented-duplicate/retried effects where
-  supported. Linux reports cgroup v2 `memory.peak`
-  separately and never labels it RSS; Windows uses supported process-tree and
-  job/container high-water boundaries. Missing child-process coverage or
-  profiler-overhead evidence prevents a memory claim.
-- Memory attribution freezes cold, warm, idle, concurrent-client, and
-  post-eviction workloads and separates live heap, allocator retention/
-  fragmentation, SQLite page cache/mmap, immutable generations, result/
-  coalescing buffers, queues, watchers, and profiler overhead before changing
-  allocator, pool, cache, or eviction policy.
-- The maximum interval half-width and stopping checkpoints are frozen. The last
-  two declared checkpoints must stabilize that half-width within 10 percent or
-  the result remains `insufficient_evidence`.
-- Production telemetry is bounded, non-blocking, redacted, and records drop
-  counts through reserved control capacity. Paths, prompts, source, symbols,
-  argv/stdin, provider output, environment, errors, and secrets are forbidden.
+- Record the baseline/candidate source revisions, Linux host/toolchain/runtime,
+  workload/corpus/configuration, cache preparation, arrival model, timeout and
+  retry policy, command, and correctness oracle. Real source/content digests
+  may identify those inputs without creating a checkout snapshot.
+- Use the same inputs for baseline and candidate, alternate execution order
+  when practical, and retain raw samples. Report offered, completed,
+  cancelled, timed out, shed, retried, failed, queue delay, and recovery where
+  those states apply.
+- Report only statistics supported by the sample count. p50/p95/p99, intervals,
+  or memory claims that the run cannot support are `pending`, not inferred.
+- Record wall time, CPU, process-tree RSS/PSS or Linux cgroup v2
+  `memory.peak`, bytes, I/O, write amplification, and provider tokens/cost
+  where observable. Name the measurement method and profiler overhead.
+- Production telemetry remains bounded, non-blocking, and redacted. Paths,
+  prompts, source, symbols, argv/stdin, provider output, environment, errors,
+  and secrets are forbidden.
 
 ## PR20 implementation defaults
 
@@ -125,10 +94,10 @@ or fill a baseline with sentinel values.
   Python soak harness for process-tree observations. These replace custom
   telemetry collectors, resource sampling, and microbenchmark plumbing while
   retaining the real-journey oracle and production observability ownership.
-- Keep the frozen workload, A/A noise, paired comparison, practical margins,
-  platform and resource strata, tail support, cancellation/retry accounting,
-  and semantic/recovery equivalence rules below. If process-tree, platform, or
-  profiler-overhead coverage is missing, report `insufficient_evidence`.
+- Keep the versioned Linux workload, same-input comparison, practical delta,
+  cancellation/retry accounting, and semantic/recovery equivalence rules
+  below. If process-tree or profiler-overhead coverage is missing, report the
+  affected claim as `pending`.
 - Do not create a benchmark service, performance protocol, execution ledger,
   or new measurement authority. A library or harness that cannot feed the
   existing bounded redacted diagnostics and reproducible comparison artifacts
@@ -236,21 +205,21 @@ or fill a baseline with sentinel values.
   rank buckets, unique/final-top-k contribution, source freshness/coverage/
   denial, and labeled Recall@K/nDCG where an oracle exists.
 - Exact, lexical, graph, temporal, task/session, diagnostic, and semantic
-  ablations use the same frozen total candidate budget; unused budget is not
-  silently moved. Reranker comparisons use byte-identical saved candidates.
+  ablations use the same versioned total candidate budget; unused budget is not
+  silently moved. Reranker comparisons use the same recorded candidate input.
   Exact flat-vector scan remains the ANN oracle, and ANN reports average, tail,
   minimum recall, zero-recall queries, and measured break-even.
 - Preserve deterministic order, exact tiers, temporal truth, stable cursors,
   coverage, explanations, and lexical fallback. Bound cross-project fan-out,
   graph traversal, reranking, buffering, and client concurrency with explicit
   partial/unavailable coverage.
-- Context comparisons pin the same work/acceptance identity and report
+- Context comparisons pin the same work and source identity and report
   required/included/independently relevant/irrelevant/stale/truncated/unknown
   authorized anchors, precision at 1/3/5, required-anchor coverage, bytes/
-  tokens, assembly latency, time to first valid action, rediscovery, accepted
+  tokens, assembly latency, time to first valid action, rediscovery, verified
   correctness, rework, and censored/unknown outcomes. Completed status, lower
   latency, token reduction, or worker self-report never substitutes for
-  independently accepted quality.
+  independently verified quality.
 - Batch affected-test traversal by breadth-first frontier while retaining the
   exact exhaustive sorted set and deterministic distance-ranked
   recommendations.
@@ -330,7 +299,7 @@ or fill a baseline with sentinel values.
 
 #### Developer build and verification
 
-- Freeze stock-Cargo clean, exact no-op, private body, public signature/type,
+- Record stock-Cargo clean, exact no-op, private body, public signature/type,
   macro/proc-macro, build-script/asset, feature/dependency/manifest, and
   focused-test edit classes with explicit package, target, features, test
   target, and toolchain.
@@ -353,20 +322,20 @@ parallel storage authority, semantics-changing shortcut, hidden fallback,
 performance-only cache of protected payloads, or machine-local build policy is
 ineligible.
 
-### Accept, roll out, and clean up
+### Verify, roll out, and clean up
 
 - Run direct journey, semantic-equivalence, crash/restart, overload,
-  cancellation, and recovery tests for the touched path, then one aggregate
-  repository gate.
-- Retain the optimized implementation and its accepted comparison only when the
-  full gate passes.
+  cancellation, and recovery tests for the touched path plus normal repository
+  CI.
+- Retain the optimized implementation only when direct tests pass and the Linux
+  comparison reports `pass`.
 - Remove rejected candidate code, temporary profiling hooks, candidate-only
   flags, placeholder/provisional baselines, and standalone harness/protocol
   scaffolding. Production instrumentation used for health and regression
   diagnosis remains bounded and non-blocking.
-- Publish one concise aggregate of accepted journey improvements. There is no
+- Publish one concise summary of measured journey improvements. There is no
   combined performance score.
-- Existing Observatory/Costs views may render accepted comparison identity,
+- Existing Observatory/Costs views may render comparison identity,
   support/coverage, intervals/margins, stage/resource/effect evidence, and
   disposition from the canonical backend result. They contain no client-side
   formula and do not become a separate benchmark product.
@@ -374,7 +343,7 @@ ineligible.
 ### Runtime rollout and rollback
 
 - Activate a candidate through a versioned profile that names the exact prior
-  accepted profile and exposes an explicit rollback operation; there is no
+  profile and exposes an explicit rollback operation; there is no
   “latest profile” lookup.
 - Side-effect-free paths may shadow the candidate. Effectful paths use the
   owning operation's normal receipts and fencing rather than a separate
@@ -384,7 +353,7 @@ ineligible.
   prior profile. In-flight work remains under its owning workflow's
   reconciliation rules.
 - Missing or noisy comparison evidence prevents activation or reports
-  `insufficient_evidence`; it does not create epochs, fixed-window rituals, or
+  `pending`; it does not create epochs, fixed-window rituals, or
   a standalone canary gate.
 
 ## Semantic and safety constraints
@@ -404,15 +373,15 @@ ineligible.
 - Explicit Git mutation preserves preview freshness, index-lock ownership,
   atomicity, receipts, and rejection of autonomous branch, ref, worktree,
   history, or remote mutation.
-- Linux and Windows use their supported process/resource boundaries. A gain on
-  one platform cannot hide a regression or missing evidence on the other.
+- Linux developer measurements use Linux process/resource boundaries. Normal
+  Linux/macOS/Windows CI must remain green for the default-feature product.
 
 ## Direct acceptance
 
-- Every promoted change starts from an observed bottleneck in a shipped
-  PR13–PR19 journey and has a reproducible accepted baseline/candidate
-  comparison. Schema-only, declaration-only, synthetic placeholder, and
-  planning-artifact evidence is inadmissible.
+- Every retained change starts from an observed bottleneck in a shipped
+  PR13–PR19 journey and has a reproducible Linux baseline/candidate comparison.
+  Schema-only, declaration-only, synthetic placeholder, and planning-artifact
+  evidence is inadmissible.
 - Paired evidence clears the frozen practical improvement margin; required
   latency, throughput, memory, CPU, disk, write-amplification, no-op,
   startup/recovery, cancellation, timeout, shed, retry, failure, unknown,
@@ -420,13 +389,11 @@ ineligible.
 - Journey tests prove semantic equivalence and cover concurrent load,
   cancellation, daemon reconnect, crash/restart, WAL/checkpoint interruption,
   projector/generation recovery, cache loss, provider failure, and overload.
-- Linux and Windows comparisons are accepted for each promoted cross-platform
-  path. Unsupported platform dimensions are explicit and cannot be pooled into
-  a passing result.
-- Missing compatible baseline, excessive A/A noise, insufficient tail support,
-  partial child-process/resource coverage, stale or dirty subject identity, or
-  incomplete correctness coverage produces `insufficient_evidence` and no
-  rollout.
+- Default-feature product tests pass in normal Linux/macOS/Windows CI for each
+  retained cross-platform path; developer benchmarks remain Linux-only.
+- Missing compatible baseline, noisy samples, unsupported tail statistics,
+  partial child-process/resource coverage, or incomplete correctness coverage
+  produces `pending` or `fail` and no rollout.
 - Fabricated or incompatible baseline lineage, missing raw aggregate lineage,
   post-result threshold changes, coordinated
   omission/survivor bias, hidden protected strata, or measurement-artifact
@@ -436,18 +403,16 @@ ineligible.
   on semantic divergence, authority violation, wrong-scope evidence,
   hidden fallback, duplicate or unknown unsafe effect, secret disclosure,
   deterministic-order failure, or recovery failure.
-- The final aggregate gate passes with only accepted production changes and
-  accepted comparison artifacts present.
+- Direct product tests, normal CI, and the Linux comparison pass.
 
 ## Replacement and deletion
 
 PR20 removes candidate implementations that did not pass, temporary
 performance-only services and protocols, execution ledgers, generated
 scorecards, placeholder baselines, synthetic acceptance packets, and
-comparison artifacts that are provisional, rejected, incompatible, or
-insufficient. Existing observability may retain the typed operational outcome
-needed to explain why no rollout occurred, but it must not present that outcome
-as an accepted baseline or gain.
+obsolete comparison artifacts. Existing observability may retain the typed
+operational outcome needed to explain why no rollout occurred, but it must not
+present a failed or pending outcome as a gain.
 
 ## Not in PR20
 

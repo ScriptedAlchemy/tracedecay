@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Shared adapter-to-daemon dispatch contracts.
 //!
 //! This module deliberately owns request correlation and transport-neutral
@@ -538,10 +537,20 @@ impl InvocationCancellationPolicy {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DaemonInvocationError {
-    Cancelled { stage: CancellationStage },
-    TimedOut { stage: CancellationStage },
-    Saturated { class: DaemonAdmissionClass },
-    Backpressured { stage: CancellationStage },
+    Cancelled {
+        stage: CancellationStage,
+    },
+    TimedOut {
+        stage: CancellationStage,
+    },
+    #[allow(dead_code)] // reserved backpressure state — staged
+    Saturated {
+        class: DaemonAdmissionClass,
+    },
+    #[allow(dead_code)] // reserved backpressure state — staged
+    Backpressured {
+        stage: CancellationStage,
+    },
     Unavailable,
 }
 

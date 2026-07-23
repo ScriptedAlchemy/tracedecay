@@ -181,6 +181,10 @@ fn proxy_serve_handshake(
     original_cwd: Option<&Path>,
     timings: bool,
 ) -> Result<crate::daemon::DaemonHandshake> {
+    let unexpanded_template_path = path_arg
+        .as_deref()
+        .and_then(unexpanded_template_variable)
+        .is_some();
     let path = sanitize_serve_path_arg(path_arg);
     let explicit_path = path.is_some();
     let mut project_path = if explicit_path {
@@ -193,8 +197,17 @@ fn proxy_serve_handshake(
     // `serve` is a database-free proxy. It may consult only an already-pinned
     // in-memory snapshot; missing authority disables implicit auto-init rather
     // than reading legacy `config.json` from the client process.
+    // A never-opened project has no pinned snapshot, so `cached_sync_config`
+    // fails. Follow the schema default (auto-init enabled) in that case rather
+    // than failing closed: otherwise a discovery-mode client sitting in an
+    // unindexed git worktree would surrender routing to MCP initialize roots
+    // (or the daemon's own cwd) instead of initializing the client's cwd. This
+    // mirrors the same default fallback in `resolve_daemon_initialize_route`.
     let auto_init_root = (!initialized
-        && crate::config::cached_sync_config(&project_path).is_ok_and(|config| config.auto_init))
+        && crate::config::cached_sync_config(&project_path).map_or_else(
+            |_| crate::config::SyncConfig::default().auto_init,
+            |config| config.auto_init,
+        ))
     .then(|| crate::worktree::git_worktree_root(&project_path))
     .flatten();
     if let Some(root) = auto_init_root.as_ref() {
@@ -211,11 +224,13 @@ fn proxy_serve_handshake(
         telemetry_timings,
         auto_init_root.is_some(),
     )?;
-    // An explicit path remains authoritative. Discovery-mode clients may use
-    // initialize roots only when cwd neither resolved nor can be auto-inited,
-    // matching the local resolver's fallback order.
+    // An explicit path remains authoritative. A literal host template means
+    // the host failed to provide that path, so initialize roots must replace
+    // any incidental process-cwd discovery (for example Cursor launching the
+    // MCP process from $HOME). Ordinary discovery-mode clients retain cwd
+    // precedence when cwd resolved or can be auto-initialized.
     handshake.allow_initialize_root_routing =
-        !explicit_path && !initialized && auto_init_root.is_none();
+        unexpanded_template_path || (!explicit_path && !initialized && auto_init_root.is_none());
     Ok(handshake)
 }
 

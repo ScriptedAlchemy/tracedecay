@@ -4,8 +4,7 @@
 //! operations. It never accepts a generic Git subcommand, flags, ref, or
 //! working-tree path from a caller. Daemon code supplies already validated,
 //! preview-bound patch material and performs the journaled recovery protocol.
-
-#![allow(dead_code)]
+#![allow(dead_code)] // PR11/Plan 36 git index transactions — staged ops
 
 use std::env;
 use std::ffi::OsStr;

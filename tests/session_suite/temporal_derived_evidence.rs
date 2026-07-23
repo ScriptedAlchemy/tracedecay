@@ -123,94 +123,95 @@ async fn project_and_activate(
 async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
     let tmp = TempDir::new().unwrap();
     let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
     let session_id = session("session.temporal.derived.identity");
-    let first = occurrence(
-        &session_id,
-        &persist_observation(&db, &session_id, 0, "derived-alpha pipeline").await,
-    );
-    let second = occurrence(
-        &session_id,
-        &persist_observation_with_lineage(
-            &db,
+    let oneshot;
+    {
+        let db = open_lcm_db(&tmp).await;
+        let first = occurrence(
             &session_id,
-            1,
-            "derived-beta pipeline",
-            AnchorProvenanceRelationV2::Supersedes,
-            first.retrieval_anchor_id.clone(),
-            None,
-        )
-        .await,
-    );
-    let edge = parent_message_copy(&second, &first);
-    let assertion = assertion(&second, &first);
-    let store = GlobalDbSessionTemporalStore::new(&db);
+            &persist_observation(&db, &session_id, 0, "derived-alpha pipeline").await,
+        );
+        let second = occurrence(
+            &session_id,
+            &persist_observation_with_lineage(
+                &db,
+                &session_id,
+                1,
+                "derived-beta pipeline",
+                AnchorProvenanceRelationV2::Supersedes,
+                first.retrieval_anchor_id.clone(),
+                None,
+            )
+            .await,
+        );
+        let edge = parent_message_copy(&second, &first);
+        let assertion = assertion(&second, &first);
+        let store = GlobalDbSessionTemporalStore::new(&db);
 
-    // One-shot rebuild into generation 2.
-    begin_candidate(&store, &session_id, 2, 2).await;
-    // Parallel building generation for incremental parity.
-    begin_candidate(&store, &session_id, 3, 2).await;
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            2,
-            2,
-            vec![first.clone(), second.clone()],
-            vec![edge.clone()],
-            vec![assertion.clone()],
-        ))
-        .await
-        .unwrap();
-    // Incremental rebuild into generation 3.
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            3,
-            2,
-            vec![first.clone()],
-            vec![],
-            vec![],
-        ))
-        .await
-        .unwrap();
-    store
-        .persist_session_temporal_projection_batch(
-            batch(
+        // One-shot rebuild into generation 2.
+        begin_candidate(&store, &session_id, 2, 2).await;
+        // Parallel building generation for incremental parity.
+        begin_candidate(&store, &session_id, 3, 2).await;
+        store
+            .persist_session_temporal_projection_batch(batch(
+                &session_id,
+                2,
+                2,
+                vec![first.clone(), second.clone()],
+                vec![edge.clone()],
+                vec![assertion.clone()],
+            ))
+            .await
+            .unwrap();
+        // Incremental rebuild into generation 3.
+        store
+            .persist_session_temporal_projection_batch(batch(
                 &session_id,
                 3,
                 2,
-                vec![second.clone()],
-                vec![edge],
-                vec![assertion],
+                vec![first.clone()],
+                vec![],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        store
+            .persist_session_temporal_projection_batch(
+                batch(
+                    &session_id,
+                    3,
+                    2,
+                    vec![second.clone()],
+                    vec![edge],
+                    vec![assertion],
+                )
+                .with_checkpoint(1, 2, 2)
+                .unwrap(),
             )
-            .with_checkpoint(1, 2, 2)
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+            .await
+            .unwrap();
 
-    let oneshot = derived_identity_rows(&path, session_id.as_str(), 2).await;
-    let incremental = derived_identity_rows(&path, session_id.as_str(), 3).await;
-    assert_eq!(
-        oneshot, incremental,
-        "one-shot and incremental rebuilds must mint identical derived identities"
-    );
-    assert!(!oneshot.is_empty());
+        oneshot = derived_identity_rows(&path, session_id.as_str(), 2).await;
+        let incremental = derived_identity_rows(&path, session_id.as_str(), 3).await;
+        assert_eq!(
+            oneshot, incremental,
+            "one-shot and incremental rebuilds must mint identical derived identities"
+        );
+        assert!(!oneshot.is_empty());
 
-    store
-        .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(
-                session_id.clone(),
-                generation(3),
-                snapshot(&session_id, 1, 2),
+        store
+            .activate_session_temporal_generation(
+                SessionGenerationActivationRequestV1::new(
+                    session_id.clone(),
+                    generation(3),
+                    snapshot(&session_id, 1, 2),
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+            .await
+            .unwrap();
+    }
 
-    drop(store);
-    drop(db);
     let reopened = GlobalDb::open_at(&path).await.expect("reopen");
     let store = GlobalDbSessionTemporalStore::new(&reopened);
     let snapshot = store

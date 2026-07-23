@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
 use tracedecay_application::{
     AuthorizationPortOutcome, RequestContext, ResolvedScope, SourceAuthorizationSnapshot,
@@ -122,6 +121,7 @@ type RuntimePortV1<R, A> = GitHubReadOnlyConnector<RuntimeTransportV1<A>, R>;
 pub struct GitHubReviewRuntimeOwnerV1<R, A> {
     coordinator: GitHubReviewRefreshCoordinatorV1<RuntimePortV1<R, A>, ProjectGitHubReviewStoreV1>,
     source_access: GitHubSourceAccessV1,
+    #[allow(dead_code)] // Plan 37 CI client — staged
     client: GitHubReadOnlyClientV1,
 }
 
@@ -134,6 +134,7 @@ where
         self.source_access.lifecycle
     }
 
+    #[allow(dead_code)] // Plan 37 CI client — staged
     pub(crate) fn ci_client(&self, context: &RequestContext) -> Option<&GitHubReadOnlyClientV1> {
         self.source_access.allows(context).then_some(&self.client)
     }

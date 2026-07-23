@@ -141,7 +141,7 @@ pub(super) async fn open_published(
 ) -> StoreRuntimeHandle {
     match registry.open(request).await {
         StoreRuntimeOpenResult::Published(handle) => handle,
-        other => panic!("open failed: {other:?}"),
+        other @ StoreRuntimeOpenResult::Failed(_) => panic!("open failed: {other:?}"),
     }
 }
 

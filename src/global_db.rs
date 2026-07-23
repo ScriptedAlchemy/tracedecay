@@ -388,6 +388,11 @@ pub async fn repair_session_temporal_store(db_path: &Path) -> crate::errors::Res
     }
     let authority = DatabaseAuthority::for_runtime(db_path, "repair session temporal store")?;
     let canonical_path = authority.canonical_database_path().to_path_buf();
+    // S11: repair intentionally bypasses the `GlobalDb::open_local` seam. It runs
+    // before schema/pragma negotiation on a possibly-damaged store and needs a
+    // bare connection (no writer slot, no journal-mode setup), so it opens the
+    // raw store directly. Route through the runtime registry's repair path once
+    // S11 makes owned handles originate from the canonical registry.
     let db = crate::db::libsql_local::open_local_database(&canonical_path, false)
         .await
         .map_err(|error| global_db_operation_error("open session temporal repair store", error))?;
@@ -1357,6 +1362,13 @@ impl GlobalDb {
         &self.db_path
     }
 
+    /// Single physical-open seam for owned global/profile/session stores.
+    ///
+    /// Every `GlobalDb` constructor funnels its authorized `libsql` open through
+    /// this one function so the owned-store open path has exactly one call site.
+    /// This is the pending-S11 seam: once every live handle originates from the
+    /// canonical `StoreRuntimeRegistry`, this method is what the registry mount
+    /// replaces, and the direct `libsql_local` open below disappears with it.
     async fn open_local(
         db_path: &Path,
         read_only: bool,

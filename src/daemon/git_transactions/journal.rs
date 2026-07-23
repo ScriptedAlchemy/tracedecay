@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 //! Durable journal transitions for daemon-owned Git index mutations.
 
 use thiserror::Error;
@@ -18,6 +17,7 @@ pub(crate) enum GitIndexJournalError {
     #[error(transparent)]
     Store(#[from] GitIndexTransactionStoreError),
     #[error("git index receipt outcome does not map to a legal journal terminal phase")]
+    #[allow(dead_code)] // PR11/Plan 36 terminal outcome variant — staged
     InvalidTerminalOutcome,
 }
 

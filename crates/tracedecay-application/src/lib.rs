@@ -10,6 +10,7 @@ pub mod authorization;
 pub mod configuration;
 pub mod context;
 pub mod diagnostics;
+pub mod doctor;
 pub mod external_source;
 pub mod feedback;
 pub mod framed_log;
@@ -43,6 +44,11 @@ pub use diagnostics::{
     GenerationDiagnosticHistoryPort, GenerationDiagnosticHistoryRequest, ProviderCoverage,
     ProviderDocumentIdentity, ProviderFreshness, ProviderOrigin, ProviderProvenance,
     ProviderSourceIdentity, RevisionDigest,
+};
+pub use doctor::{
+    DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
+    DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
+    DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
 };
 pub use error::ApplicationContractError;
 pub use external_source::{

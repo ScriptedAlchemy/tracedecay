@@ -60,14 +60,14 @@ use tracedecay_domain::{
     CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkV1, ComponentRevision,
     DiversityPolicy, DiversityPolicyId, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision,
     ExactClass, FileOccurrenceId, FusionProfile, FusionProfileId, LanguageId, ManifestDigest,
-    PolicyRevisionId, Pr9FallbackSubpayload, PrincipalId, PrivacyDomainId, ProjectionBatchReceiptV1,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, PublicRetrieverStatus, QueryDigest, QueryMac, QueryNormalizationRevision,
-    RelationEdgeKindV1, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrievalFailure,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SnapshotFileDispositionV1,
-    TemporalModeV1, UtcMicros, VectorWatermark,
+    PolicyRevisionId, Pr9FallbackSubpayload, PrincipalId, PrivacyDomainId,
+    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, PublicRetrieverStatus, QueryDigest, QueryMac,
+    QueryNormalizationRevision, RelationEdgeKindV1, RepositoryId, RetrievalAnchorId,
+    RetrievalBudget, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrieverKind, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
+    SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros, VectorWatermark,
 };
 
 const WORKLOAD_RELATIVE: &str = "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json";
@@ -373,7 +373,9 @@ pub fn load_candidate_workload(path: &Path) -> Result<CandidateWorkloadV1, Candi
     Ok(workload)
 }
 
-pub fn workload_digest(workload: &CandidateWorkloadV1) -> Result<String, CandidateOutputError> {
+pub fn compute_workload_digest(
+    workload: &CandidateWorkloadV1,
+) -> Result<String, CandidateOutputError> {
     canonical_sha256(workload)
 }
 
@@ -426,7 +428,7 @@ pub fn sealed_holdout_input(
     queries.sort_by(|left, right| left.query_id.cmp(&right.query_id));
     Ok(SealedHoldoutInputV1 {
         schema_version: 1,
-        workload_digest: workload_digest(workload)?,
+        workload_digest: compute_workload_digest(workload)?,
         partition: "sealed_holdout".to_owned(),
         source_commit: workload.source_repository_commit.clone(),
         holdout_labels_included: false,
@@ -444,7 +446,7 @@ pub fn generate_candidate_outputs(
         Path::to_path_buf,
     );
     let workload = load_candidate_workload(&workload_path)?;
-    let workload_digest = workload_digest(&workload)?;
+    let workload_digest = compute_workload_digest(&workload)?;
     let sealed_holdout_input = sealed_holdout_input(&workload)?;
 
     let published = publish_corpus(options.repo_root, &workload)?;
@@ -1011,10 +1013,7 @@ fn publish_corpus(
             source,
         })?;
         let file_occurrence_id = id::<FileOccurrenceId>(&format!("file.{}", document.document_id))?;
-        file_to_document.insert(
-            file_occurrence_id.as_str().to_owned(),
-            document.clone(),
-        );
+        file_to_document.insert(file_occurrence_id.as_str().to_owned(), document.clone());
         let language = id::<LanguageId>(&document.language)?;
         let indexable = language_registry.descriptor(&language).is_some();
         files.push(SanitizedCodeFileV1 {
@@ -1043,9 +1042,11 @@ fn publish_corpus(
     let mut identity_bytes = Vec::new();
     for document in &workload.corpus {
         let absolute = repo_root.join(&document.path);
-        identity_bytes.extend(fs::read(&absolute).map_err(|source| CandidateOutputError::Read {
-            path: absolute,
-            source,
+        identity_bytes.extend(fs::read(&absolute).map_err(|source| {
+            CandidateOutputError::Read {
+                path: absolute,
+                source,
+            }
         })?);
     }
     let snapshot = SanitizedCodeSnapshotV1 {
@@ -1081,10 +1082,10 @@ fn publish_corpus(
         max_snapshot_age_micros: None,
     };
     let store = SharedPublicationStore::default();
-    let mut owner =
-        open_production_code_index_owner_v1(config, store, ApplyingProjectionSink).map_err(
-            |error| CandidateOutputError::Contract(format!("open production owner: {error}")),
-        )?;
+    let mut owner = open_production_code_index_owner_v1(config, store, ApplyingProjectionSink)
+        .map_err(|error| {
+            CandidateOutputError::Contract(format!("open production owner: {error}"))
+        })?;
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
@@ -1232,7 +1233,9 @@ fn prove_cancellation(
 }
 
 fn graph_seeds_from_outcomes(
-    exact: &RetrieverOutcome<tracedecay_domain::RetrieverBatch<crate::query::retrieval::exact::ExactLaneEvidence>>,
+    exact: &RetrieverOutcome<
+        tracedecay_domain::RetrieverBatch<crate::query::retrieval::exact::ExactLaneEvidence>,
+    >,
     lexical: &RetrieverOutcome<
         tracedecay_domain::RetrieverBatch<crate::query::retrieval::lexical::LexicalLaneEvidence>,
     >,
@@ -1240,7 +1243,8 @@ fn graph_seeds_from_outcomes(
     let mut seeds = Vec::new();
     let mut seen_occurrences = BTreeSet::new();
     let mut seen_symbols = BTreeSet::new();
-    let mut push_seed = |binding: &CodeCandidateBindingV1, seeds: &mut Vec<CodeCandidateBindingV1>| {
+    let mut push_seed = |binding: &CodeCandidateBindingV1,
+                         seeds: &mut Vec<CodeCandidateBindingV1>| {
         let Some(symbol) = binding.occurrence.symbol.as_ref() else {
             return;
         };
@@ -1252,7 +1256,8 @@ fn graph_seeds_from_outcomes(
         }
         seeds.push(binding.clone());
     };
-    if let RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } = exact
+    if let RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } =
+        exact
     {
         for evidence in batch.evidence_by_occurrence.values() {
             push_seed(&evidence.binding, &mut seeds);
@@ -1304,7 +1309,7 @@ fn fusion_profile(
     let score_domain_calibrations = [
         (RetrieverKind::ExactLiteral, "score.exact.candidate.v1"),
         (RetrieverKind::Lexical, "score.lexical.candidate.v1"),
-        (RetrieverKind::Graph, "score.graph.candidate.v1"),
+        (RetrieverKind::Graph, "score.graph.daemon.v1"),
         (RetrieverKind::Semantic, "score.semantic.candidate.v1"),
     ]
     .into_iter()

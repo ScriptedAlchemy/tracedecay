@@ -6,13 +6,6 @@ description = "Bundled SQLite runtime for TraceDecay storage adapters"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
-[features]
-default = ["bundled-sqlite"]
-# Standalone package builds and evidence binaries keep a private amalgamation.
-# Root production links disable this feature so rusqlite resolves against the
-# system libsqlite3 while libsql retains its transitional embedded copy.
-bundled-sqlite = ["rusqlite/bundled"]
-
 [[bin]]
 name = "storage-runtime-evidence"
 path = "src/bin/storage_runtime_evidence.rs"

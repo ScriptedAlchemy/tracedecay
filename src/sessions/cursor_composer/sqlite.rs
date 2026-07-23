@@ -80,9 +80,10 @@ pub(crate) struct ReadOnlyDb {
 pub(crate) async fn open_readonly_immutable(db_path: &Path) -> Option<ReadOnlyDb> {
     let uri = crate::sqlite_read_snapshot::immutable_uri(db_path).ok()?;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::from_bits_retain(SQLITE_OPEN_URI);
-    let db = crate::db::libsql_local::open_local_database_with_flags(std::path::Path::new(&uri), flags)
-        .await
-        .ok()?;
+    let db =
+        crate::db::libsql_local::open_local_database_with_flags(std::path::Path::new(&uri), flags)
+            .await
+            .ok()?;
     let conn = db.connect().ok()?;
     // Belt-and-suspenders against ever mutating the live store.
     let _ = conn.execute_batch("PRAGMA query_only = ON;").await;

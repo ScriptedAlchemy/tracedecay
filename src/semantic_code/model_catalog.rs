@@ -3,6 +3,7 @@
 //! Catalog entries pin source revision, license, member lengths, and SHA-256
 //! digests. There are no signatures or trust roots — integrity is the
 //! declared length + digest identity, matching the distribution fixture.
+#![allow(dead_code)] // fastembed model catalog; Plan 31 — staged
 
 use std::collections::{BTreeMap, BTreeSet};
 
