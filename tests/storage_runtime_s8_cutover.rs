@@ -17,6 +17,11 @@ struct S8CutoverFixture {
     families: Vec<FamilyFixture>,
     write_routes: Vec<Route>,
     read_routes: Vec<Route>,
+    // Read vocabulary variants that this repository executor explicitly does
+    // not own (their execute arm rejects rather than routing to a family
+    // executor). Tracked so the vocabulary stays fully accounted for.
+    #[serde(default)]
+    read_unowned_variants: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,11 +68,12 @@ fn profile_project_and_session_reads_share_the_closed_runtime_route() {
     let fixture: S8CutoverFixture =
         serde_json::from_str(S8_ROUTES).expect("decode S8 route fixture");
     let repository = RustAst::parse(&fixture.repository_module);
-    let expected_variants = fixture
+    let mut expected_variants = fixture
         .read_routes
         .iter()
         .map(|route| route.variant.clone())
         .collect::<BTreeSet<_>>();
+    expected_variants.extend(fixture.read_unowned_variants.iter().cloned());
     // The read operation vocabulary now lives in the `tracedecay-store` runtime
     // port, re-exported through the repository module; assert against its
     // definition site while the executor routing below stays on the module.
@@ -80,6 +86,14 @@ fn profile_project_and_session_reads_share_the_closed_runtime_route() {
 
     let paths = repository.method_paths("ConcreteRepositoryReadExecutor", "execute");
     let calls = repository.method_calls("ConcreteRepositoryReadExecutor", "execute");
+    // Unowned variants must still be handled explicitly by the executor (their
+    // arm rejects), never silently fall through the read dispatch.
+    for variant in &fixture.read_unowned_variants {
+        assert!(
+            has_path_suffix(&paths, &format!("RepositoryReadOperationV1::{variant}")),
+            "S8 unowned read variant {variant} is not explicitly handled by the executor"
+        );
+    }
     for route in fixture.read_routes {
         assert!(
             has_path_suffix(

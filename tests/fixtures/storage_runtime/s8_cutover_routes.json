@@ -82,5 +82,9 @@
       "variant": "Session",
       "callee": ".session.execute_read"
     }
+  ],
+  "read_unowned_variants": [
+    "Code",
+    "Effects"
   ]
 }
