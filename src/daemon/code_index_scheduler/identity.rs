@@ -13,7 +13,6 @@
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use tracedecay_domain::{CommitId, RefId, RepositoryId, TreeId, WorktreeId};
 
@@ -205,16 +204,22 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 /// Cheap content signature over the loose `refs/heads` tree.
 ///
 /// Walks the tree recursively (branch refs can be nested, e.g.
-/// `refs/heads/feature/x`), collecting `(relative name, mtime-nanos, size)` for
-/// every file into a sorted, hashed digest. This is O(number of loose refs),
-/// not O(repository size), and — unlike the parent directory's mtime — it moves
-/// when an existing ref file is rewritten in place. Returns `None` when the
-/// tree is absent (all refs packed, or not a repository).
+/// `refs/heads/feature/x`), hashing each ref's relative name together with its
+/// content (the target object id). Loose refs are a handful of ~41-byte files,
+/// so this is O(number of loose refs) and independent of repository size.
+///
+/// Content — not the parent directory's mtime — is the signal: an in-place
+/// loose-ref rewrite (`git update-ref` on an existing branch) rewrites the ref
+/// file's bytes without changing the directory mtime, and often without
+/// changing the file's size (object ids are fixed width) or its mtime beyond
+/// coarse filesystem resolution. Hashing the bytes catches it unconditionally.
+/// Returns `None` when the tree is absent (all refs packed, or not a
+/// repository).
 fn refs_heads_signature(dir: &Path) -> Option<String> {
     if !dir.exists() {
         return None;
     }
-    let mut entries: Vec<(String, u128, u64)> = Vec::new();
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
         let Ok(read) = std::fs::read_dir(&current) else {
@@ -222,10 +227,10 @@ fn refs_heads_signature(dir: &Path) -> Option<String> {
         };
         for entry in read.flatten() {
             let path = entry.path();
-            let Ok(meta) = entry.metadata() else {
+            let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if meta.is_dir() {
+            if file_type.is_dir() {
                 stack.push(path);
                 continue;
             }
@@ -234,22 +239,19 @@ fn refs_heads_signature(dir: &Path) -> Option<String> {
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
-            let mtime_nanos = meta
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|delta| delta.as_nanos())
-                .unwrap_or(0);
-            entries.push((rel, mtime_nanos, meta.len()));
+            let content = std::fs::read(&path).unwrap_or_default();
+            entries.push((rel, content));
         }
     }
     entries.sort();
-    let mut buffer = String::new();
-    for (name, mtime_nanos, size) in entries {
-        use std::fmt::Write as _;
-        let _ = write!(buffer, "{name}\0{mtime_nanos}\0{size}\n");
+    let mut buffer = Vec::new();
+    for (name, content) in entries {
+        buffer.extend_from_slice(name.as_bytes());
+        buffer.push(0);
+        buffer.extend_from_slice(&content);
+        buffer.push(0xff);
     }
-    Some(super::sha256_hex(buffer.as_bytes()))
+    Some(super::sha256_hex(&buffer))
 }
 
 /// Resolve the git-dir (worktree-local) and common-dir (repository-shared)
@@ -391,6 +393,51 @@ mod tests {
         assert!(
             after.differs_from(&before),
             "a commit moves .git/HEAD or refs and must be detected"
+        );
+    }
+
+    #[test]
+    fn git_metadata_fingerprint_detects_in_place_loose_ref_rewrite() {
+        let repo = init_repo(&[("src/lib.rs", "pub fn a() {}\n")]);
+        // Two commits so an older object id exists to rewind the branch to.
+        let first = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .expect("utf8 sha")
+        .trim()
+        .to_owned();
+        std::fs::write(repo.path().join("src/lib.rs"), "pub fn a() { let _ = 1; }\n").unwrap();
+        git(repo.path(), &["commit", "-qam", "second"]);
+        let branch = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(["symbolic-ref", "--short", "HEAD"])
+                .output()
+                .expect("symbolic-ref")
+                .stdout,
+        )
+        .expect("utf8 branch")
+        .trim()
+        .to_owned();
+
+        let before = GitMetadataFingerprintV1::capture(repo.path());
+        // Rewrite the current branch ref in place to the older commit without
+        // touching HEAD or the index. This changes only the loose ref file's
+        // bytes; the parent directory mtime and the 41-byte size are unchanged,
+        // so only a content-aware refs/heads signature can observe it.
+        git(
+            repo.path(),
+            &["update-ref", &format!("refs/heads/{branch}"), &first],
+        );
+        let after = GitMetadataFingerprintV1::capture(repo.path());
+        assert!(
+            after.differs_from(&before),
+            "an in-place loose-ref rewrite must be detected by the refs signature"
         );
     }
 }
