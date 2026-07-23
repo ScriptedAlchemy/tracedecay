@@ -1174,6 +1174,7 @@ fn session_store_row_matches(table: SessionStoreTableV1, row: &SessionStoreRowV1
     // a `matches!` shape list leaves open.
     let expected = match row {
         SessionStoreRowV1::Observations { .. } => SessionStoreTableV1::Observations,
+        SessionStoreRowV1::SourceCursors { .. } => SessionStoreTableV1::SourceCursors,
         SessionStoreRowV1::Sessions { .. } => SessionStoreTableV1::Sessions,
         SessionStoreRowV1::SessionMessages { .. } => SessionStoreTableV1::SessionMessages,
         SessionStoreRowV1::SessionSchemaMigrations { .. } => {
@@ -1211,6 +1212,7 @@ fn session_store_row_matches(table: SessionStoreTableV1, row: &SessionStoreRowV1
 fn session_store_row_digest(row: &SessionStoreRowV1) -> &str {
     match row {
         SessionStoreRowV1::Observations { row_digest, .. }
+        | SessionStoreRowV1::SourceCursors { row_digest, .. }
         | SessionStoreRowV1::Sessions { row_digest, .. }
         | SessionStoreRowV1::SessionMessages { row_digest, .. }
         | SessionStoreRowV1::SessionSchemaMigrations { row_digest, .. }
@@ -1233,6 +1235,7 @@ fn session_store_cursor_matches(table: SessionStoreTableV1, cursor: &SessionStor
     // cursor variant must be listed here or the crate fails to compile.
     let expected = match cursor {
         SessionStoreCursorV1::Observations { .. } => SessionStoreTableV1::Observations,
+        SessionStoreCursorV1::SourceCursors { .. } => SessionStoreTableV1::SourceCursors,
         SessionStoreCursorV1::Sessions { .. } => SessionStoreTableV1::Sessions,
         SessionStoreCursorV1::SessionMessages { .. } => SessionStoreTableV1::SessionMessages,
         SessionStoreCursorV1::SessionSchemaMigrations { .. } => {
@@ -1476,7 +1479,7 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
     #[test]
     fn session_store_shape_helpers_accept_new_temporal_and_summary_families() {
         let digest = format!("sha256:{}", "1".repeat(64));
-        let cases: [(SessionStoreTableV1, SessionStoreRowV1, SessionStoreCursorV1); 5] = [
+        let cases: [(SessionStoreTableV1, SessionStoreRowV1, SessionStoreCursorV1); 6] = [
             (
                 SessionStoreTableV1::SessionTemporalProjectionReceipts,
                 SessionStoreRowV1::SessionTemporalProjectionReceipts {
@@ -1548,6 +1551,18 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
                 },
                 SessionStoreCursorV1::SessionSummaryNodes {
                     summary_id: "summary-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::SourceCursors,
+                SessionStoreRowV1::SourceCursors {
+                    source_json: "{\"source\":\"s\"}".to_owned(),
+                    scope_json: "{\"scope\":\"p\"}".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::SourceCursors {
+                    source_json: "{\"source\":\"s\"}".to_owned(),
+                    scope_json: "{\"scope\":\"p\"}".to_owned(),
                 },
             ),
         ];
