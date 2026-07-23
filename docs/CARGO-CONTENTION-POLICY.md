@@ -1,7 +1,8 @@
 # Cargo build-directory policy
 
-TraceDecay development uses stock Cargo. A normal checkout builds into its own
-repo-local `target/` directory:
+TraceDecay development supports stock Cargo 1.97.1 and transparent local Cargo
+shims. A normal checkout builds final artifacts into its own repo-local
+`target/` directory:
 
 ```sh
 cargo check
@@ -14,6 +15,14 @@ serializes concurrent commands that share a target directory, so a
 `Blocking waiting for file lock on build directory` message means another
 build owns that directory; it does not indicate database corruption or a
 stalled TraceDecay process.
+
+On machines with cargo-slot installed, the shim may place Cargo's intermediate
+build directory in a leased fast-cache slot. It must leave final artifacts and
+repo-relative configuration outputs in this checkout's `target/` directory,
+must not append wrapper options to `cargo xtask` or other subcommand arguments,
+and must not forward rustc-only path-remapping flags to rustdoc. An explicit
+`CARGO_TARGET_DIR` or `--target-dir` remains authoritative and bypasses slot
+allocation.
 
 ## Contended checkouts
 
