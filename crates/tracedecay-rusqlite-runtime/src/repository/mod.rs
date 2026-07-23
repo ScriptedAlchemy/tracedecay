@@ -36,7 +36,8 @@ pub use session::SessionExecutor;
 // the moved types so existing `repository::` paths keep resolving across the
 // workspace.
 pub use tracedecay_store::{
-    DiagnosticReadOperationV1, DiagnosticReadResultV1, FactReadOperationV1, FactReadResultV1,
+    CodeReadOperationV1, CodeReadResultV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
+    EffectsReadOperationV1, EffectsReadResultV1, FactReadOperationV1, FactReadResultV1,
     ObservationReadOperationV1, ObservationReadResultV1, ProfileReadOperationV1,
     ProfileReadResultV1, ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1,
     RepositoryReadResultV1, SessionReadOperationV1, SessionReadResultV1, StoredObservationRowV1,
@@ -113,6 +114,12 @@ impl ConcreteRepositoryReadExecutor {
                 .session
                 .execute_read(snapshot, operation)
                 .map(RepositoryReadResultV1::Session),
+            RepositoryReadOperationV1::Code(_) => Err(rusqlite::Error::InvalidParameterName(
+                "repository attachment does not own code reads".to_owned(),
+            )),
+            RepositoryReadOperationV1::Effects(_) => Err(rusqlite::Error::InvalidParameterName(
+                "repository attachment does not own effects reads".to_owned(),
+            )),
         }
     }
 }
