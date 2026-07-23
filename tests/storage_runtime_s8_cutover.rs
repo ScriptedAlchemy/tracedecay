@@ -12,6 +12,7 @@ const S8_ROUTES: &str = include_str!("fixtures/storage_runtime/s8_cutover_routes
 #[derive(Debug, Deserialize)]
 struct S8CutoverFixture {
     repository_module: String,
+    read_vocabulary_module: String,
     parity_fixture: String,
     families: Vec<FamilyFixture>,
     write_routes: Vec<Route>,
@@ -67,8 +68,12 @@ fn profile_project_and_session_reads_share_the_closed_runtime_route() {
         .iter()
         .map(|route| route.variant.clone())
         .collect::<BTreeSet<_>>();
+    // The read operation vocabulary now lives in the `tracedecay-store` runtime
+    // port, re-exported through the repository module; assert against its
+    // definition site while the executor routing below stays on the module.
+    let vocabulary = RustAst::parse(&fixture.read_vocabulary_module);
     assert_eq!(
-        repository.enum_variants("RepositoryReadOperationV1"),
+        vocabulary.enum_variants("RepositoryReadOperationV1"),
         expected_variants,
         "S8 repository read vocabulary drifted from its route matrix"
     );

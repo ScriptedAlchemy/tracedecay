@@ -1,5 +1,6 @@
 {
   "repository_module": "crates/tracedecay-rusqlite-runtime/src/repository/mod.rs",
+  "read_vocabulary_module": "crates/tracedecay-store/src/runtime/repository_read.rs",
   "parity_fixture": "crates/tracedecay-rusqlite-runtime/src/repository/fixtures.rs",
   "families": [
     {
