@@ -1,0 +1,55 @@
+{
+  "schema": "tracedecay.search-quality-direct-evaluation-record.v1",
+  "description": "Direct offline evaluation of the checked-in PR9/PR10 search-quality fixtures via `tracedecay-search-eval`. No network, no model runtime, no owner receipts, gates, packets, or attestation. Provenance digests are recorded as evidence, never as promotion gates.",
+  "generated_by": [
+    "cargo run --bin tracedecay-search-eval -- validate",
+    "cargo run --bin tracedecay-search-eval -- generate-candidates --profiles pr9-fallback",
+    "cargo run --bin tracedecay-search-eval -- compare --require-outcome accepted"
+  ],
+  "inputs": {
+    "fixture_root": "tests/fixtures/search_quality",
+    "candidate_workload": "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json",
+    "fixture_manifest_digest": "sha256:5da56cc98447ff962e62ad0cb2757e0c4936f514dfa82265c5402bcc2b56a4f4",
+    "run_manifest_digest": "sha256:3db745fc343cbfc00e9bbb173979474bdd3d324e5f5bf87c65f2357e803f3fe1",
+    "development_label_digest": "sha256:0e5070b732f39482aa11a8e70ca90785567871e894d93688eec0024cfb70c231",
+    "holdout_seal_digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de",
+    "candidate_workload_digest": "sha256:61f6252eb2827a87cc8ee8185bffa444d16ac3afa64933f35d0036dcec2184d2"
+  },
+  "steps": [
+    {
+      "step": "validate",
+      "status": "pass",
+      "query_count": 31,
+      "development_query_count": 22,
+      "sealed_holdout_query_count": 9,
+      "detail": "All fixture bytes and canonical digests match the frozen manifest; authority is contract_only."
+    },
+    {
+      "step": "generate_candidates",
+      "status": "recorded",
+      "profile": "pr9-fallback",
+      "train_validation_outputs": 2,
+      "sealed_holdout_queries": 15,
+      "holdout_labels_included": false,
+      "detail": "Real CompositionKernel exact/lexical/graph lanes plus the production semantic path (offline PR9 fallback) produced deterministic candidate bytes. Sealed holdout input carries queries only, never labels. Resource/latency samples are machine-local and emitted at run time; they are not frozen here."
+    },
+    {
+      "step": "compare",
+      "outcome": "blocked",
+      "status": "pending",
+      "required_outcome": "accepted",
+      "requirement_satisfied": false,
+      "blocked_on": [
+        {
+          "kind": "direct_holdout_labels",
+          "locator": "direct-filesystem://search-quality/holdout/judgments-v1",
+          "digest": "sha256:09c282aa525296def61e1ac5d7d8b98201296fd3c67acafc9fb531c51ea0b9de",
+          "reason": "direct filesystem locked-quality holdout labels with canonical digests are required"
+        }
+      ],
+      "detail": "The checked-in fixtures are contract_only authority; authoritative direct holdout labels are intentionally not committed, so no accept/reject quality conclusion is produced. Run compare with --holdout-labels and --saved-candidates against a locked-quality run to reach an Accepted or Rejected outcome."
+    }
+  ],
+  "thresholds": "None declared for these fixtures; metrics are reported with status recorded rather than judged against an invented bar.",
+  "conclusion": "Direct evaluation flow runs end-to-end offline. Quality outcome is pending until direct holdout labels for a locked-quality run are supplied."
+}
