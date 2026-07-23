@@ -150,6 +150,7 @@ export function GraphCanvas({
     sigmaRef.current = renderer;
 
     renderer.on('enterNode', ({ node }) => {
+      if (node.startsWith(HALO)) return;
       hovered = node;
       renderer.refresh();
     });
@@ -158,6 +159,7 @@ export function GraphCanvas({
       renderer.refresh();
     });
     renderer.on('clickNode', ({ node }) => {
+      if (node.startsWith(HALO)) return;
       onSelect?.(node);
       // Traveling activation: the struck node fires now; its neighborhood
       // fires one synaptic delay later (real caller/reference edges only).
@@ -169,16 +171,44 @@ export function GraphCanvas({
     });
     renderer.on('clickStage', () => onSelect?.(null));
 
+    // Bloom halos: each warm node carries a companion low-alpha disc behind
+    // it (managed here, invisible to reducers) — shader-free glow.
+    const HALO = '__halo__';
+    const syncHalos = () => {
+      const [hr, hg, hb] = hotRgb;
+      for (const node of [...graph.nodes()]) {
+        if (node.startsWith(HALO)) continue;
+        const heat = field.heatOf(node);
+        const haloId = HALO + node;
+        if (heat > 0.12) {
+          const attrs = graph.getNodeAttributes(node);
+          const halo = {
+            x: attrs['x'],
+            y: attrs['y'],
+            size: (attrs['size'] as number) * (1.6 + 1.4 * heat),
+            color: `rgba(${hr}, ${hg}, ${hb}, ${(0.22 * heat).toFixed(3)})`,
+            label: '',
+            zIndex: 0,
+          };
+          if (graph.hasNode(haloId)) graph.mergeNodeAttributes(haloId, halo);
+          else graph.addNode(haloId, halo);
+        } else if (graph.hasNode(haloId)) {
+          graph.dropNode(haloId);
+        }
+      }
+    };
+
     // Decay loop: runs only while warm; reduced-motion snaps to a single
     // static refresh per strike instead of animating.
     let raf = 0;
     const step = (now: number) => {
       const warm = field.tick(now);
+      syncHalos();
       renderer.refresh();
       raf = warm && !reducedMotion ? requestAnimationFrame(step) : 0;
     };
     const wake = () => {
-      if (reducedMotion) { field.tick(performance.now()); renderer.refresh(); return; }
+      if (reducedMotion) { field.tick(performance.now()); syncHalos(); renderer.refresh(); return; }
       if (!raf) raf = requestAnimationFrame(step);
     };
     if (field.warm) wake();

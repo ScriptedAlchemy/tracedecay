@@ -1,4 +1,8 @@
+import { useEffect, useMemo, useRef } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
+import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
+import { ActivationField } from '../../viz/graph/activation.ts';
+import { useEventStreamState } from '../../data/sse/useEvents.tsx';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -40,6 +44,9 @@ export function BrainPage() {
                 {data.summary.truncated ? ' · truncated' : ''}
               </span>
             </div>
+            <div className="border-b border-edge-subtle p-3">
+              <SynapseMap groups={groups} activeProjectId={data.active_project_id ?? null} />
+            </div>
             <div className="grid grid-cols-2 gap-3 p-4 md:grid-cols-4">
               <StatTile label="repositories" value={data.summary.repo_count} />
               <StatTile label="projects" value={data.summary.project_count} />
@@ -58,6 +65,75 @@ export function BrainPage() {
         );
       }}
     </LegacyBoundary>
+  );
+}
+
+/** The all-projects synapse map: repositories as ganglia hubs, each checkout
+ * a neuron wired to its hub. The active project pulses with live SSE beats;
+ * selecting fires real neighborhoods (see GraphCanvas activation). */
+function SynapseMap({
+  groups,
+  activeProjectId,
+}: {
+  groups: ProjectRepoGroup[];
+  activeProjectId: string | null;
+}) {
+  const selectProject = useScope((s) => s.selectProject);
+  const scope = useScope((s) => s.scope);
+  const activationRef = useRef(new ActivationField({ halfLifeMs: 4200 }));
+  const { state: sseState, lastEventAt } = useEventStreamState();
+
+  const { nodes, edges } = useMemo(() => {
+    const nodes = [] as Array<{ id: string; label: string; kind: string; degree: number }>;
+    const edges = [] as Array<{ source: string; target: string; kind?: string }>;
+    for (const group of groups) {
+      const hubId = `repo:${group.git_common_dir ?? group.label}`;
+      nodes.push({
+        id: hubId,
+        label: group.label,
+        kind: 'repository',
+        degree: Math.max(group.projects.length, 1) * 2,
+      });
+      for (const project of group.projects) {
+        nodes.push({
+          id: project.project_id,
+          label: project.label,
+          kind: project.kind,
+          degree: Math.max(project.store_count + project.graph_scope_count, 1),
+        });
+        edges.push({ source: hubId, target: project.project_id, kind: 'checkout' });
+      }
+    }
+    return { nodes, edges };
+  }, [groups]);
+
+  // The active brain breathes: every live SSE beat strikes the active
+  // project's neuron (and softly, its repository hub). Real liveness only —
+  // no signal, no light.
+  useEffect(() => {
+    if (!activeProjectId || sseState !== 'live' || lastEventAt == null) return;
+    activationRef.current.strike([activeProjectId], 0.8);
+    const hub = groups.find((group) =>
+      group.projects.some((project) => project.project_id === activeProjectId),
+    );
+    if (hub) activationRef.current.strike([`repo:${hub.git_common_dir ?? hub.label}`], 0.35);
+  }, [activeProjectId, sseState, lastEventAt, groups]);
+
+  return (
+    <GraphCanvas
+      nodes={nodes}
+      edges={edges}
+      height={340}
+      activation={activationRef.current}
+      selectedId={scope.kind === 'project' ? scope.projectId : null}
+      onSelect={(id) => {
+        if (id == null || id.startsWith('repo:')) return;
+        const project = groups
+          .flatMap((group) => group.projects)
+          .find((candidate) => candidate.project_id === id);
+        if (project) selectProject(project.project_id, project.label);
+      }}
+    />
   );
 }
 
