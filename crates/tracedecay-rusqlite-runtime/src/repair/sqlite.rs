@@ -357,6 +357,8 @@ fn set_private_directory(path: &Path) -> Result<(), RepairFault> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .map_err(|error| io_fault("protect_quarantine_directory", error))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

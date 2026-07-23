@@ -422,6 +422,8 @@ fn set_private_directory(path: &Path) -> Result<(), BackupFilesystemError> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .map_err(BackupFilesystemError::Io)?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
