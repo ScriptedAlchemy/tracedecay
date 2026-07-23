@@ -170,9 +170,13 @@ delivery phases:
 | PR11 (integration active) | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, analyzer policy/settings, one runtime configuration authority, daemon-serialized `stage_hunks`/`unstage_hunks`/`commit_index` transactions with `HunkRef` compare-and-swap and receipts, and the typed branch-aware feedback-cycle request/result and orchestration ([Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)) — first pillar of the PR11–PR13 read-only/advisory milestone (post-edit diagnostics and impact). |
 | PR12 (integration active) | CLI, MCP, HTTP API, LSP gateway, and output convergence: one revisioned schema authority, dispatcher, binding taxonomy, semantic problem model, capability intersection, and executable lifecycle/stream/cancellation contract; stable errors/cursors, compact Markdown, canonical JSON, managed diagnostics, semantic surface parity, shared Git preview/apply bindings, callable canonical feedback diagnostics/impact reads with HTTP parity, and [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s PR12 slice — [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)'s standard projections plus a negotiated, versioned TraceDecay LSP context extension for diagnostics, impact, affected tests, and test results, and the explicit diagnostics-call trigger/surface bound once through [Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) — completing the post-edit diagnostics-and-impact pillar for LSP/MCP/CLI/HTTP surfaces. Dashboard binding starts in PR14. |
 
-PR9 and later code consumers share one incremental-indexing rule: filesystem
-events only wake bounded work; native `gix` status/index/tree reconciliation
-defines the changed path set; Tree-sitter `InputEdit` plus `changed_ranges`
+PR9 and later code consumers share one incremental-indexing rule: host
+after-file-edit hooks are the primary change hint (with an off-by-default
+opt-in filesystem watcher as a non-agent-driven fallback) and only wake bounded
+work; native `gix` status/index/tree reconciliation, driven lazily by a
+three-tier freshness ladder (per-query `.git` metadata fingerprint, configurable
+bounded-staleness threshold, identity re-resolution backstop), defines the
+changed path set; Tree-sitter `InputEdit` plus `changed_ranges`
 narrows warm parsing; content and descriptor digests suppress no-ops; immutable
 worktree generations keep identity exact; and only changed chunks and evidenced
 dependency closures reach lexical or FastEmbed projection. Partial generations

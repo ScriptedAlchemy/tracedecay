@@ -314,11 +314,17 @@ pub struct ProjectionBatchReceiptV1 {
 ### Generations and incremental reuse
 
 - Build one immutable logical generation from one fenced snapshot.
-- Treat filesystem notifications as wake-up hints, never as the changed-file
-  authority. Use `notify-debouncer-full` with its recommended file-ID cache to
-  coalesce bursts and rename pairs. Reconcile every emitted batch against
-  native `gix` index/worktree/tree status; dropped-event or overflow signals
-  trigger one bounded reconciliation before generation planning.
+- Treat every change signal as a wake-up hint, never as the changed-file
+  authority. Because TraceDecay's edits are agent-driven, host after-file-edit
+  hooks are the primary hint source; a lazy three-tier freshness ladder
+  (per-query `.git` metadata fingerprint, configurable bounded-staleness
+  threshold, identity re-resolution backstop) catches external or out-of-agent
+  mutations without a standing watcher. A recursive `notify` watcher (with its
+  recommended file-ID cache to coalesce bursts and rename pairs) remains an
+  off-by-default opt-in fallback for non-agent-driven setups. Reconcile every
+  hint against native `gix` index/worktree/tree status; dropped-event or
+  overflow signals trigger one bounded reconciliation before generation
+  planning.
 - Use the existing ignore-aware parallel walker for cold discovery. Warm
   batches hash only reconciled candidate paths and reject duplicate event or
   save-without-change work by content plus descriptor digest before parsing.

@@ -38,10 +38,21 @@ normal CI are stable.
    captured-content identity before indexing. Paths and branch labels locate
    candidates but never provide identity or authorize cross-worktree reuse.
 2. Use `gix` status/index/tree primitives to classify committed, staged,
-   unstaged, untracked, deleted, and renamed paths. Filesystem events are hints,
-   not truth. `notify-debouncer-full` with its recommended file-ID cache
-   coalesces bursts and rename pairs; overflow or dropped events trigger one
-   bounded `gix` reconciliation instead of a guessed incremental update.
+   unstaged, untracked, deleted, and renamed paths. `gix` status is the sole
+   truth; every hint is reconciled against it. Because TraceDecay's edits are
+   agent-driven, host after-file-edit hooks are the primary hint source and
+   require no standing filesystem watches. External or out-of-agent mutations
+   are caught by a lazy three-tier freshness ladder evaluated on open, on hook
+   receipt, and at query admission: (tier 1) a cheap per-query `.git` metadata
+   fingerprint (`HEAD`, `index`, `packed-refs`) catches git-mediated changes
+   immediately; (tier 2) a configurable bounded-staleness reconcile threshold
+   re-checks `gix` truth for raw file writes, rsync, and other non-git
+   mutations; (tier 3) identity re-resolution is the backstop, refusing any
+   generation whose exact repository/worktree/ref identity no longer matches.
+   A recursive `notify` watcher remains available as an off-by-default opt-in
+   fallback for non-agent-driven setups; nothing depends on it being enabled,
+   and overflow or dropped events resolve through the same bounded `gix`
+   reconciliation rather than a guessed incremental update.
 3. Cold discovery uses the existing ignore-aware parallel walker. Warm edits
    compare content and descriptor digests before parsing, so duplicate
    notifications and save-without-change perform zero parse, graph, lexical,
