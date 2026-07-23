@@ -12,6 +12,7 @@ import { SettingsPage } from '../workspaces/settings/SettingsPage.tsx';
 import { ExplorerPage } from '../workspaces/explorer/ExplorerPage.tsx';
 import { LoomPage } from '../workspaces/loom/LoomPage.tsx';
 import { AgentsPage } from '../workspaces/agents/AgentsPage.tsx';
+import { DeliveryPage } from '../workspaces/delivery/DeliveryPage.tsx';
 
 const WIRED: Record<string, () => React.JSX.Element> = {
   brain: BrainPage,
@@ -21,6 +22,7 @@ const WIRED: Record<string, () => React.JSX.Element> = {
   sessions: SessionsPage,
   knowledge: KnowledgePage,
   code: CodePage,
+  delivery: DeliveryPage,
   costs: CostsPage,
   automations: AutomationsPage,
   observatory: ObservatoryPage,
