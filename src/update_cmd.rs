@@ -921,8 +921,10 @@ mod tests {
         dogfood_forward_only_target_state, health_pass_failure_result, normalize_bin_path,
         partition_reinstall_results, post_update_binary, post_update_binary_from,
         prepare_post_update_lease, reinstall_failure_result, restart_daemon_service_with,
-        run_install_then_refresh, verify_forward_only_binary_version,
+        run_install_then_refresh,
     };
+    #[cfg(unix)]
+    use super::verify_forward_only_binary_version;
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
 
