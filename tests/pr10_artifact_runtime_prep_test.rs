@@ -32,12 +32,40 @@ pub mod semantic_code {
     pub use crate::model_catalog;
 }
 
+/// Return only the production (non-`cfg(test)`) portion of a source file.
+///
+/// Everything from the first `#[cfg(test)]`-guarded *block* onward is test
+/// scaffolding. A `#[cfg(test)] use ...;` import legitimately sits among the
+/// top-of-file `use` statements and must NOT be treated as the scaffolding
+/// boundary, so those single-line guarded imports are stripped first.
+fn production(source: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut lines = source.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim() == "#[cfg(test)]" {
+            if let Some(next) = lines.peek() {
+                let next = next.trim();
+                if next.starts_with("use ") && next.ends_with(';') {
+                    lines.next(); // drop the guarded `use` line as well
+                    continue;
+                }
+            }
+        }
+        kept.push(line);
+    }
+    let joined = kept.join("\n");
+    joined
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap_or(&joined)
+        .to_string()
+}
+
 #[test]
 fn semantic_runtime_uses_verified_fastembed_bytes_without_network_or_fallback() {
     let artifacts = include_str!("../src/semantic_code/artifact_store.rs");
     let runtime = include_str!("../src/semantic_code/fastembed_adapter.rs");
     let pool = include_str!("../src/semantic_code/session_pool.rs");
-    let production = |source: &'static str| source.split("#[cfg(test)]").next().unwrap_or(source);
     let artifacts = production(artifacts);
     let runtime = production(runtime);
     let pool = production(pool);
