@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { z } from 'zod';
+import { useMemo, useState } from 'react';
+import { Search } from 'lucide-react';
 import {
   DataRow,
   ExplorerSplit,
@@ -7,65 +7,112 @@ import {
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
-import { AnyObject } from '../../data/query/legacy.ts';
+import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
+import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import { MemoryOverviewPayloadSchema, type FactRow } from './contracts.ts';
 
 const BASE = '/api/plugins/holographic';
 
-const OverviewPayload = z
-  .object({ facts: z.array(AnyObject).optional(), items: z.array(AnyObject).optional() })
-  .passthrough();
-
-/** Knowledge: memory facts, evidence, curation status. Semantic map (WebGL
- * scatter) is the phase-2 canvas per the visualization catalog. */
+/** Knowledge: memory facts with trust as the primary visual axis, entity
+ * summary, and fact drill-down. The semantic WebGL map is the phase-2 canvas
+ * per the visualization catalog. */
 export function KnowledgePage() {
-  const status = useLegacy(['memory', 'status'], `${BASE}/status`, AnyObject);
-  const overview = useLegacy(['memory', 'overview'], `${BASE}/`, OverviewPayload);
-  const [selected, setSelected] = useState<Record<string, unknown> | null>(null);
+  const [query, setQuery] = useState('');
+  const [applied, setApplied] = useState('');
+  const overview = useLegacy(
+    ['memory', 'overview', applied],
+    `${BASE}/?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ''}`,
+    MemoryOverviewPayloadSchema,
+  );
+  const [selected, setSelected] = useState<FactRow | null>(null);
 
   return (
     <ExplorerSplit
       filters={
-        <LegacyBoundary title="Memory" pending={status.isPending} result={status.data}>
-          {(data) => (
-            <div className="flex flex-col gap-2">
-              {Object.entries(data)
-                .filter(([, v]) => typeof v === 'number' || typeof v === 'string')
-                .slice(0, 8)
-                .map(([k, v]) => (
-                  <StatTile key={k} label={k.replaceAll('_', ' ')} value={String(v)} />
-                ))}
-            </div>
-          )}
+        <LegacyBoundary
+          title="Memory"
+          pending={overview.isPending}
+          result={overview.data}
+        >
+          {(data) => {
+            const stats = data.holographic.overview;
+            const histogram = (stats?.trust_histogram ?? []).map((b) => ({
+              label: b.label,
+              value: b.count,
+              hint: 'facts',
+            }));
+            return (
+              <div className="flex flex-col gap-3">
+                <form
+                  className="relative"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    setApplied(query.trim());
+                  }}
+                >
+                  <Search
+                    aria-hidden
+                    size={13}
+                    className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-text-muted"
+                  />
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="Search facts"
+                    aria-label="Search facts"
+                    className="h-8 w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
+                  />
+                </form>
+                <div className="grid grid-cols-2 gap-2">
+                  <StatTile label="facts" value={stats?.facts ?? '—'} />
+                  <StatTile label="entities" value={stats?.entities ?? '—'} />
+                </div>
+                {histogram.length > 0 ? (
+                  <figure className="flex flex-col gap-1">
+                    <figcaption className="text-2xs text-text-muted">
+                      trust distribution (0 → 1)
+                    </figcaption>
+                    <ActivityColumns buckets={histogram} height={40} />
+                  </figure>
+                ) : null}
+              </div>
+            );
+          }}
         </LegacyBoundary>
       }
       list={
-        <LegacyBoundary title="Knowledge" pending={overview.isPending} result={overview.data}>
+        <LegacyBoundary
+          title="Facts"
+          pending={overview.isPending}
+          result={overview.data}
+        >
           {(data) => {
-            const rows = data.facts ?? data.items ?? [];
-            if (rows.length === 0)
+            const facts = data.holographic.facts ?? [];
+            if (data.holographic.error) {
               return (
                 <p className="p-6 text-center text-sm text-text-muted">
-                  no facts surfaced by the overview
+                  memory store unavailable: {data.holographic.error}
                 </p>
               );
+            }
+            if (facts.length === 0) {
+              return (
+                <p className="p-6 text-center text-sm text-text-muted">
+                  {applied ? `no facts match “${applied}”` : 'no facts recorded'}
+                </p>
+              );
+            }
             return (
               <div>
-                {rows.map((row, i) => {
-                  const id = String(row['fact_id'] ?? row['id'] ?? i);
-                  const text = String(row['summary'] ?? row['text'] ?? row['content'] ?? id);
-                  const trust = row['trust'] ?? row['confidence'];
-                  return (
-                    <DataRow key={id} selected={selected === row} onSelect={() => setSelected(row)}>
-                      <span className="min-w-0 flex-1 truncate">{text}</span>
-                      {trust !== undefined ? (
-                        <span className="tabular shrink-0 text-2xs text-text-muted">
-                          trust {String(trust)}
-                        </span>
-                      ) : null}
-                    </DataRow>
-                  );
-                })}
+                {facts.map((fact) => (
+                  <FactListRow
+                    key={String(fact.fact_id)}
+                    fact={fact}
+                    selected={selected?.fact_id === fact.fact_id}
+                    onSelect={() => setSelected(fact)}
+                  />
+                ))}
               </div>
             );
           }}
@@ -74,10 +121,111 @@ export function KnowledgePage() {
       inspector={
         selected ? (
           <InspectorPanel title="Fact" onClose={() => setSelected(null)}>
-            <KeyValueTree value={selected} />
+            <div className="flex flex-col gap-3">
+              <TrustGauge score={selected.trust_score} />
+              {selected.content ? (
+                <p className="whitespace-pre-wrap text-xs leading-relaxed">
+                  {selected.content}
+                </p>
+              ) : null}
+              <FeedbackSplit
+                helpful={selected.helpful_count ?? 0}
+                unhelpful={selected.unhelpful_count ?? 0}
+              />
+              <KeyValueTree
+                value={Object.fromEntries(
+                  Object.entries(selected).filter(([k]) => k !== 'content'),
+                )}
+              />
+            </div>
           </InspectorPanel>
         ) : undefined
       }
     />
+  );
+}
+
+function FactListRow({
+  fact,
+  selected,
+  onSelect,
+}: {
+  fact: FactRow;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const summary = useMemo(
+    () => (fact.content ?? String(fact.fact_id)).split('\n')[0] ?? '',
+    [fact],
+  );
+  return (
+    <DataRow selected={selected} onSelect={onSelect}>
+      <TrustBar score={fact.trust_score} />
+      <span className="min-w-0 flex-1 truncate">{summary}</span>
+      {fact.category ? (
+        <span className="shrink-0 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs text-text-muted">
+          {fact.category}
+        </span>
+      ) : null}
+      <span className="tabular w-16 shrink-0 text-right text-2xs text-text-muted">
+        {fact.retrieval_count ?? 0} recalls
+      </span>
+    </DataRow>
+  );
+}
+
+/** Trust rendered as a fixed-width luminance bar: length = score, so a column
+ * of rows reads as a sorted-trust texture at a glance. */
+function TrustBar({ score }: { score: number }) {
+  const clamped = Math.max(0, Math.min(score, 1));
+  return (
+    <span
+      className="relative h-1 w-10 shrink-0 overflow-hidden rounded-full bg-surface-3"
+      role="img"
+      aria-label={`trust ${clamped.toFixed(2)}`}
+    >
+      <span
+        className={cn(
+          'absolute inset-y-0 left-0 rounded-full',
+          clamped >= 0.7 ? 'bg-accent' : clamped >= 0.4 ? 'bg-accent/60' : 'bg-accent/30',
+        )}
+        style={{ width: `${clamped * 100}%` }}
+      />
+    </span>
+  );
+}
+
+function TrustGauge({ score }: { score: number }) {
+  const clamped = Math.max(0, Math.min(score, 1));
+  return (
+    <div className="flex items-center gap-2">
+      <span className="tabular text-lg font-semibold">{clamped.toFixed(2)}</span>
+      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-3">
+        <div
+          className="h-full rounded-full bg-accent"
+          style={{ width: `${clamped * 100}%` }}
+        />
+      </div>
+      <span className="text-2xs text-text-muted">trust</span>
+    </div>
+  );
+}
+
+/** Helpful vs unhelpful feedback as one proportional split bar. */
+function FeedbackSplit({ helpful, unhelpful }: { helpful: number; unhelpful: number }) {
+  const total = helpful + unhelpful;
+  if (total === 0) {
+    return <p className="text-2xs text-text-muted">no feedback recorded</p>;
+  }
+  return (
+    <figure className="flex flex-col gap-1">
+      <div className="flex h-1.5 overflow-hidden rounded-full bg-surface-3">
+        <div className="bg-accent" style={{ width: `${(helpful / total) * 100}%` }} />
+        <div className="bg-state-stale" style={{ width: `${(unhelpful / total) * 100}%` }} />
+      </div>
+      <figcaption className="tabular text-2xs text-text-muted">
+        {helpful} helpful · {unhelpful} unhelpful
+      </figcaption>
+    </figure>
   );
 }
