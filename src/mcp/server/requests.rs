@@ -323,6 +323,16 @@ impl McpServer {
         };
         let cg = self.reopen_if_branch_drifted().await;
         let root = cg.project_root().to_path_buf();
+        // Primary incremental-index hint: deliver the exact touched paths into
+        // the daemon-owned code-index scheduler queue as soon as the routing
+        // event is observed. Independent of host-admission durability so an
+        // after-edit reaches indexing even when effect processing is deferred.
+        // Best-effort: a `false` return (no mounted worktree) is not an error.
+        if !event.rel_paths.is_empty()
+            && let Some(sink) = &self.code_index_hook_sink
+        {
+            let _ = sink(root.clone(), event.rel_paths.clone()).await;
+        }
         let current_branch = crate::branch::current_branch(&root);
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
         let Ok(payload) = hook_events::encode_durable_hook_event_plan(&plan) else {

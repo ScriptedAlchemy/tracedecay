@@ -1682,6 +1682,17 @@ impl DaemonEngine {
             Arc::clone(&route_registered),
             handshake.clone(),
         );
+        // Bridge the daemon-owned code-index scheduler registry into the MCP
+        // hook boundary. Cloning the registry is cheap (Arc-backed map); the
+        // closure erases the daemon-private registry type so `crate::mcp` never
+        // names it. After-edit hooks delivered on this server route their
+        // touched paths straight into the mounted worktree's incremental queue.
+        let code_index_schedulers = self.invocation.code_index_schedulers.clone();
+        let code_index_hook_sink: crate::mcp::server::CodeIndexHookSink =
+            Arc::new(move |root: PathBuf, rel_paths: Vec<String>| {
+                let schedulers = code_index_schedulers.clone();
+                Box::pin(async move { schedulers.notify_hook_paths(&root, &rel_paths).await })
+            });
         let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
             cg,
             handshake.scope_prefix.clone(),
@@ -1704,7 +1715,8 @@ impl DaemonEngine {
                 ),
             },
         )
-        .with_automation_scheduler_reconciler(reconciler);
+        .with_automation_scheduler_reconciler(reconciler)
+        .with_code_index_hook_sink(code_index_hook_sink);
         let candidate = crate::mcp::McpServer::new_with_context(context).await;
         let resolved = self
             .store_administration
@@ -2597,6 +2609,14 @@ async fn portable_project_server(
         .await;
     let accounting_db =
         crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
+    // Route after-edit hooks into the code-index scheduler queue on the
+    // portable broker path too (mirrors the Unix `open_project_server`).
+    let code_index_schedulers = invocation.code_index_schedulers.clone();
+    let code_index_hook_sink: crate::mcp::server::CodeIndexHookSink =
+        Arc::new(move |root: PathBuf, rel_paths: Vec<String>| {
+            let schedulers = code_index_schedulers.clone();
+            Box::pin(async move { schedulers.notify_hook_paths(&root, &rel_paths).await })
+        });
     let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
         cg,
         handshake.scope_prefix.clone(),
@@ -2618,7 +2638,8 @@ async fn portable_project_server(
                 coordinated_background_refresh_writer(store_administration.clone()),
             ),
         },
-    );
+    )
+    .with_code_index_hook_sink(code_index_hook_sink);
     let candidate = crate::mcp::McpServer::new_with_context(context).await;
     let project_id = key
         .owner

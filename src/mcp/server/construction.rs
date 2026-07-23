@@ -51,6 +51,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub(crate) hook_branch_writer: HookBranchWriter,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
+    pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
 }
 
 pub(crate) struct McpServerWriters {
@@ -113,6 +114,7 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
             hook_branch_writer: direct_hook_branch_writer(),
             background_refresh_writer: direct_background_refresh_writer(),
+            code_index_hook_sink: None,
         }
     }
 
@@ -164,7 +166,15 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: writers.dashboard_automation,
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
+            code_index_hook_sink: None,
         }
+    }
+
+    /// Inject the daemon-owned code-index scheduler bridge so after-edit hooks
+    /// deliver touched paths into the incremental indexing queue.
+    pub(crate) fn with_code_index_hook_sink(mut self, sink: super::CodeIndexHookSink) -> Self {
+        self.code_index_hook_sink = Some(sink);
+        self
     }
 
     #[cfg(unix)]

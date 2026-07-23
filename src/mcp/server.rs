@@ -90,6 +90,20 @@ impl ServerStats {
 
 use super::transport::write_wire_oversized_rejection;
 
+/// Future returned by a [`CodeIndexHookSink`] invocation. Resolves to `true`
+/// when a mounted worktree scheduler accepted the touched paths.
+pub(crate) type CodeIndexHookNotifyFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'static>>;
+
+/// Type-erased bridge from the MCP hook boundary to the daemon-owned code-index
+/// scheduler registry. The daemon constructs this closing over its cloneable
+/// `CodeIndexSchedulerRegistryV1`; direct (non-daemon) servers leave it `None`.
+/// Erasing the concrete registry type keeps the daemon-private scheduler type
+/// out of `crate::mcp` while still delivering after-edit paths into the
+/// incremental indexing queue without any standing filesystem watcher.
+pub(crate) type CodeIndexHookSink =
+    Arc<dyn Fn(PathBuf, Vec<String>) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
+
 /// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
@@ -158,6 +172,9 @@ pub struct McpServer {
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     hook_branch_writer: HookBranchWriter,
     background_refresh_writer: BackgroundRefreshWriter,
+    /// Bridge delivering after-edit hook paths into the daemon-owned code-index
+    /// scheduler queue. `None` for direct servers with no scheduler registry.
+    code_index_hook_sink: Option<CodeIndexHookSink>,
     initialize_root_routing_enabled: AtomicBool,
     hook_project_routes: SharedHookProjectRouteCache,
     /// Cached latest-version check result.
@@ -464,6 +481,7 @@ impl McpServer {
             dashboard_automation_writer,
             hook_branch_writer,
             background_refresh_writer,
+            code_index_hook_sink,
         } = context;
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
@@ -597,6 +615,7 @@ impl McpServer {
             dashboard_automation_writer,
             hook_branch_writer,
             background_refresh_writer,
+            code_index_hook_sink,
             initialize_root_routing_enabled: AtomicBool::new(true),
             hook_project_routes: SharedHookProjectRouteCache::default(),
             version_cache: std::sync::Mutex::new(VersionCheckState {
