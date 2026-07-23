@@ -15,6 +15,9 @@ use crate::storage::StoreLayout;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 pub mod heal;
+// Consumed by the unix-only daemon git-watch maintenance path; on other
+// targets only the module's tests reference it.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) mod registry_drift;
 mod temporal_health;
 
