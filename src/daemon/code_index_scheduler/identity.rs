@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use tracedecay_domain::{CommitId, RefId, RepositoryId, TreeId, WorktreeId};
 
@@ -159,7 +160,12 @@ pub(crate) struct GitMetadataFingerprintV1 {
     head: Option<SystemTime>,
     index: Option<SystemTime>,
     packed_refs: Option<SystemTime>,
-    refs_heads: Option<SystemTime>,
+    /// A content signature over the loose `refs/heads` tree: for every ref file
+    /// (recursively), its relative name, mtime, and size. A directory mtime
+    /// alone misses an *in-place* loose-ref rewrite (`git update-ref` on an
+    /// existing branch rewrites the file without changing the parent
+    /// directory's mtime), so the per-file signal is required to observe it.
+    refs_heads: Option<String>,
     /// The literal contents of `.git/HEAD` (e.g. `ref: refs/heads/main`). A
     /// branch switch changes this even when mtime resolution is too coarse to
     /// observe, so content is compared alongside mtimes.
@@ -179,7 +185,7 @@ impl GitMetadataFingerprintV1 {
             head: mtime(&head_path),
             index: mtime(&git_dir.join("index")),
             packed_refs: mtime(&common_dir.join("packed-refs")),
-            refs_heads: mtime(&common_dir.join("refs").join("heads")),
+            refs_heads: refs_heads_signature(&common_dir.join("refs").join("heads")),
             head_contents: std::fs::read_to_string(&head_path).ok(),
         }
     }
@@ -194,6 +200,56 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .ok()
+}
+
+/// Cheap content signature over the loose `refs/heads` tree.
+///
+/// Walks the tree recursively (branch refs can be nested, e.g.
+/// `refs/heads/feature/x`), collecting `(relative name, mtime-nanos, size)` for
+/// every file into a sorted, hashed digest. This is O(number of loose refs),
+/// not O(repository size), and — unlike the parent directory's mtime — it moves
+/// when an existing ref file is rewritten in place. Returns `None` when the
+/// tree is absent (all refs packed, or not a repository).
+fn refs_heads_signature(dir: &Path) -> Option<String> {
+    if !dir.exists() {
+        return None;
+    }
+    let mut entries: Vec<(String, u128, u64)> = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let rel = path
+                .strip_prefix(dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            let mtime_nanos = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|delta| delta.as_nanos())
+                .unwrap_or(0);
+            entries.push((rel, mtime_nanos, meta.len()));
+        }
+    }
+    entries.sort();
+    let mut buffer = String::new();
+    for (name, mtime_nanos, size) in entries {
+        use std::fmt::Write as _;
+        let _ = write!(buffer, "{name}\0{mtime_nanos}\0{size}\n");
+    }
+    Some(super::sha256_hex(buffer.as_bytes()))
 }
 
 /// Resolve the git-dir (worktree-local) and common-dir (repository-shared)
