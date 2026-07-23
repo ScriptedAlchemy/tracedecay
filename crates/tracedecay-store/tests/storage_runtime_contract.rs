@@ -1,9 +1,8 @@
 use std::fmt::Debug;
 use std::future::Future;
 use std::pin::pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -155,15 +154,9 @@ fn submit_request(metadata: StoreOperationMetadataV1) -> RuntimeSubmitRequestV1 
     .unwrap()
 }
 
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
     let mut future = pin!(future);
     loop {
         if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
