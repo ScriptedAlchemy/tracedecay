@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Graph from 'graphology';
 import forceAtlas2 from 'graphology-layout-forceatlas2';
 import Sigma from 'sigma';
@@ -56,6 +56,7 @@ export function GraphCanvas({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sigmaRef = useRef<Sigma | null>(null);
+  const [, setRetryTick] = useState(0);
   const fieldRef = useRef<ActivationField | null>(null);
   if (activation) fieldRef.current = activation;
   else if (!fieldRef.current) fieldRef.current = new ActivationField();
@@ -63,6 +64,12 @@ export function GraphCanvas({
   useEffect(() => {
     const container = containerRef.current;
     if (!container || nodes.length === 0) return;
+    // Mount race: Sigma throws on zero-width containers (narrow layouts,
+    // pre-layout flex). Defer one frame until the container has size.
+    if (container.clientWidth === 0 || container.clientHeight === 0) {
+      const retry = requestAnimationFrame(() => setRetryTick((tick) => tick + 1));
+      return () => cancelAnimationFrame(retry);
+    }
 
     const graph = new Graph({ multi: true, type: 'directed' });
     const maxDegree = Math.max(...nodes.map((n) => n.degree), 1);
