@@ -883,7 +883,6 @@ impl CodeIndexWorktreeSchedulerV1 {
     fn worktree_stat_signature(&self) -> Result<String, CodeIndexSchedulerErrorV1> {
         let repository = gix::open(&self.project_root)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-        let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
         let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         let registry = StaticLanguageRegistry::new();
