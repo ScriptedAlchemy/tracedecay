@@ -18,16 +18,49 @@ impl ObservationExecutor {
         let observation = write.observation();
         let source_json = encode(observation.source())?;
         let scope_json = encode(observation.scope())?;
-        let actual_cursor = read_cursor(savepoint, &source_json, &scope_json)?;
-        if actual_cursor.as_ref() != write.expected_cursor() {
-            return Err(invalid("observation source cursor conflict"));
-        }
-
         let observation_json = encode(observation)?;
         let committed_cursor_json = encode(write.next_cursor())?;
         let receipt = observation.receipt();
         let receipt_json = encode(receipt)?;
         let receipt_id = receipt.receipt().receipt_id().as_str();
+        let payload_digest = observation.payload_reference().digest().as_str();
+        let existing = savepoint
+            .query_row(
+                "SELECT payload_digest, receipt_id, observation_json
+                 FROM observations WHERE observation_id = ?1",
+                [observation.observation_id().as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((stored_digest, stored_receipt_id, stored_observation)) = existing {
+            if stored_digest != payload_digest
+                || stored_receipt_id != receipt_id
+                || stored_observation != observation_json
+            {
+                return Err(invalid("observation identity collision"));
+            }
+            let stored_receipt: String = savepoint.query_row(
+                "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
+                [receipt_id],
+                |row| row.get(0),
+            )?;
+            if stored_receipt != receipt_json {
+                return Err(invalid("sanitization receipt identity collision"));
+            }
+            return Ok(());
+        }
+
+        let actual_cursor = read_cursor(savepoint, &source_json, &scope_json)?;
+        if actual_cursor.as_ref() != write.expected_cursor() {
+            return Err(invalid("observation source cursor conflict"));
+        }
+
         savepoint.execute(
             "INSERT INTO sanitization_receipts (
                 receipt_id, sanitizer_version, payload_digest, receipt_json
@@ -58,7 +91,7 @@ impl ObservationExecutor {
              ) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 observation.observation_id().as_str(),
-                observation.payload_reference().digest().as_str(),
+                payload_digest,
                 receipt_id,
                 observation_json,
                 committed_cursor_json,
@@ -142,4 +175,185 @@ fn read_cursor(
         .optional()?
         .map(decode)
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+    use serde_json::json;
+    use tracedecay_domain::{
+        ComponentVersion, ObservationId, ObservationIdentityMaterialV1,
+        ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+        ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+        PayloadReferenceV1, ProjectId, ProviderId, RetentionClass, SanitizationReceiptId,
+        SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+        SessionId,
+    };
+    use tracedecay_store::ObservationWrite;
+
+    use super::ObservationExecutor;
+
+    fn observation_write(body: &str, receipt_id: &str) -> ObservationWrite {
+        let source = ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("provider.fixture").unwrap(),
+            SessionId::new("session.fixture").unwrap(),
+        )
+        .unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: ProjectId::new("project.fixture").unwrap(),
+        };
+        let generation = ObservationSourceGenerationV1::new(1).unwrap();
+        let range = ObservationSourceRangeV1::new(0, 1).unwrap();
+        let payload = json!({"kind": "assistant_message", "body": body});
+        let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(receipt_id).unwrap(),
+                ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(payload_reference),
+        )
+        .unwrap();
+        let observation = tracedecay_domain::DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                source.clone(),
+                scope.clone(),
+                generation,
+                range,
+                ObservationOrderingDomainV1::SqliteRowId,
+                ObservationId::new("record.fixture").unwrap(),
+            )
+            .unwrap(),
+            receipt,
+            RetentionClass::new("retention.fixture").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            source,
+            scope,
+            generation,
+            ObservationOrderingDomainV1::SqliteRowId,
+            range.end(),
+        )
+        .unwrap();
+        ObservationWrite::new(observation, None, next_cursor).unwrap()
+    }
+
+    fn connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sanitization_receipts (
+                    receipt_id TEXT PRIMARY KEY,
+                    sanitizer_version TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL
+                 );
+                 CREATE TABLE observations (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    observation_id TEXT NOT NULL UNIQUE,
+                    payload_digest TEXT NOT NULL,
+                    receipt_id TEXT NOT NULL,
+                    observation_json TEXT NOT NULL,
+                    committed_cursor_json TEXT NOT NULL
+                 );
+                 CREATE TABLE source_cursors (
+                    source_json TEXT NOT NULL,
+                    scope_json TEXT NOT NULL,
+                    cursor_json TEXT NOT NULL,
+                    PRIMARY KEY (source_json, scope_json)
+                 );
+                 CREATE TABLE projection_queue (
+                    observation_id TEXT PRIMARY KEY,
+                    observation_sequence INTEGER NOT NULL UNIQUE
+                 );",
+            )
+            .unwrap();
+        connection
+    }
+
+    fn execute(connection: &mut Connection, write: &ObservationWrite) -> rusqlite::Result<()> {
+        let mut transaction = connection.transaction()?;
+        let savepoint = transaction.savepoint()?;
+        ObservationExecutor.execute_write(&savepoint, write)?;
+        savepoint.commit()?;
+        transaction.commit()
+    }
+
+    #[test]
+    fn exact_replay_is_a_no_op_after_the_source_cursor_advanced() {
+        let mut connection = connection();
+        let write = observation_write("fixture", "receipt.fixture");
+        let replay = ObservationWrite::new(
+            write.observation().clone(),
+            None,
+            write.next_cursor().clone().with_resume_checkpoint(7, 11),
+        )
+        .unwrap();
+
+        execute(&mut connection, &write).unwrap();
+        execute(&mut connection, &replay).unwrap();
+
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM observations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM projection_queue", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn identity_collision_fails_without_advancing_the_source_cursor() {
+        let mut connection = connection();
+        let write = observation_write("fixture", "receipt.fixture");
+        execute(&mut connection, &write).unwrap();
+        let cursor_before: String = connection
+            .query_row("SELECT cursor_json FROM source_cursors", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        let error = execute(
+            &mut connection,
+            &observation_write("conflicting", "receipt.conflicting"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("observation identity collision"));
+        assert_eq!(
+            connection
+                .query_row("SELECT cursor_json FROM source_cursors", [], |row| row
+                    .get::<_, String>(
+                    0
+                ))
+                .unwrap(),
+            cursor_before
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM observations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM projection_queue", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
 }
