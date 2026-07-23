@@ -21,9 +21,7 @@
     "fallback",
     "resource_strata",
     "resource_metrics",
-    "rollback",
-    "parent_gates",
-    "acceptance"
+    "rollback"
   ],
   "properties": {
     "schema_version": {
@@ -119,41 +117,6 @@
     },
     "rollback": {
       "type": "object"
-    },
-    "parent_gates": {
-      "type": "array",
-      "minItems": 14
-    },
-    "acceptance": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "state",
-        "required_outcome",
-        "promotion_allowed",
-        "semantic_activation_allowed",
-        "terminal_non_accepting_outcomes"
-      ],
-      "properties": {
-        "state": {
-          "const": "pending_parent_gates"
-        },
-        "required_outcome": {
-          "const": "accepted"
-        },
-        "promotion_allowed": {
-          "const": false
-        },
-        "semantic_activation_allowed": {
-          "const": false
-        },
-        "terminal_non_accepting_outcomes": {
-          "type": "array",
-          "contains": {
-            "const": "runtime_fallback_observed"
-          }
-        }
-      }
     }
   }
 }

@@ -1,27 +1,18 @@
 # PR9 search-quality direct verification
 
-The historically named `pr9-production-acceptance-v1.json` points at
-production APIs, direct Rust contracts, and the real sanitized search-quality
-corpus. It is a static compatibility fixture, not an acceptance snapshot,
-packet, gate manifest, owner receipt, or promotion authority. The direct tests
-cover deterministic extraction and generations,
+Direct Rust contracts cover deterministic extraction and generations,
 projection replay after restart, exact non-demotion, lexical ranking,
-graph/Git/diagnostic/test joins, coverage and abstention, and V1 import parity.
+graph/Git/diagnostic/test joins, coverage and abstention, and V1 import
+parity against the real sanitized search-quality corpus. There is no static
+acceptance snapshot, packet, gate manifest, owner receipt, or promotion
+authority in this directory; the legacy locked-acceptance scaffolding was
+removed when the delivery model shifted to direct contract execution.
 
 Developer quality evaluation is Linux-only. Normal Linux/macOS/Windows CI owns
-default-feature product support. Any legacy `pending_parent_gates` value is
-interpreted only as `pending`; the validator never grants activation authority,
-runs Cargo, or changes Git state.
+default-feature product support.
 
-Run the static validator:
+Run the direct contracts through Cargo, for example:
 
 ```sh
-python3 benchmarks/search-quality/validate_pr9_production_acceptance.py
-```
-
-List the direct commands represented by the static fixture:
-
-```sh
-python3 benchmarks/search-quality/validate_pr9_production_acceptance.py \
-  --list-parent-gates
+cargo nextest run --all-features --no-fail-fast -E 'binary(search_quality_suite)'
 ```
