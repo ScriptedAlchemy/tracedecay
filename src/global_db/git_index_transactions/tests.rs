@@ -10,11 +10,46 @@ use tracedecay_domain::{
     UtcMicros, WorktreeId,
 };
 use tracedecay_store::{
-    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,
-    GitIndexTransactionStoreError, GitIndexTransactionTerminalWriteV1,
+    CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesQueryV1,
+    CodeRecoveryRepositoriesQueryV1, GitIndexTransactionBeginRequestV1,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionStoreError,
+    GitIndexTransactionTerminalWriteV1,
 };
 
+use super::read::GitIndexReadExecutor;
 use crate::global_db::GlobalDb;
+
+fn key(value: &str) -> GitIndexIdempotencyKey {
+    GitIndexIdempotencyKey::new(value.to_owned()).expect("idempotency key")
+}
+
+async fn candidates_page(
+    executor: &GitIndexReadExecutor<'_, '_>,
+    query: CodeRecoveryCandidatesQueryV1,
+) -> tracedecay_store::CodeRecoveryCandidatesPageV1 {
+    match executor
+        .execute_read(&CodeReadOperationV1::RecoveryCandidates(query))
+        .await
+        .expect("candidate page")
+    {
+        CodeReadResultV1::RecoveryCandidates(page) => page,
+        other => panic!("unexpected candidate result: {other:?}"),
+    }
+}
+
+async fn repositories_page(
+    executor: &GitIndexReadExecutor<'_, '_>,
+    query: CodeRecoveryRepositoriesQueryV1,
+) -> tracedecay_store::CodeRecoveryRepositoriesPageV1 {
+    match executor
+        .execute_read(&CodeReadOperationV1::RecoveryRepositories(query))
+        .await
+        .expect("repository page")
+    {
+        CodeReadResultV1::RecoveryRepositories(page) => page,
+        other => panic!("unexpected repository result: {other:?}"),
+    }
+}
 
 fn id<T>(value: &str) -> T
 where
@@ -713,4 +748,169 @@ async fn failed_inspection_terminal_insert_rolls_back_journal_and_quarantine() {
         store.begin_or_replay(new_request).await,
         Ok(GitIndexTransactionBeginResultV1::Started(_))
     ));
+}
+
+#[tokio::test]
+async fn read_executor_round_trips_preview_and_transaction_record() {
+    let (_directory, _path, database) = open_database().await;
+    let preview = preview();
+    let request = begin_request(&preview, "idempotency.read-executor.round-trip");
+    let store = database.git_index_transaction_store();
+    store
+        .save_preview(preview.clone())
+        .await
+        .expect("save preview");
+    let record = match store
+        .begin_or_replay(request.clone())
+        .await
+        .expect("start transaction")
+    {
+        GitIndexTransactionBeginResultV1::Started(record) => *record,
+        other => panic!("unexpected begin outcome: {other:?}"),
+    };
+
+    let executor = GitIndexReadExecutor::new(&store);
+
+    assert_eq!(
+        executor
+            .execute_read(&CodeReadOperationV1::Preview(preview.preview_id.clone()))
+            .await
+            .expect("preview read"),
+        CodeReadResultV1::Preview(Box::new(Some(preview.clone())))
+    );
+    assert_eq!(
+        executor
+            .execute_read(&CodeReadOperationV1::TransactionRecord(
+                request.idempotency_key.clone(),
+            ))
+            .await
+            .expect("record read"),
+        CodeReadResultV1::TransactionRecord(Box::new(Some(record)))
+    );
+
+    // Absent keys project to `None` rather than an error.
+    assert_eq!(
+        executor
+            .execute_read(&CodeReadOperationV1::Preview(
+                GitIndexPreviewId::new("preview.read-executor.absent").expect("absent preview id"),
+            ))
+            .await
+            .expect("absent preview read"),
+        CodeReadResultV1::Preview(Box::new(None))
+    );
+    assert_eq!(
+        executor
+            .execute_read(&CodeReadOperationV1::TransactionRecord(key(
+                "idempotency.read-executor.absent"
+            )))
+            .await
+            .expect("absent record read"),
+        CodeReadResultV1::TransactionRecord(Box::new(None))
+    );
+}
+
+#[tokio::test]
+async fn read_executor_keyset_walks_recovery_candidates() {
+    let (_directory, _path, database) = open_database().await;
+    let preview = preview();
+    let repository_id = preview.repository_snapshot.repository_id.clone();
+    let store = database.git_index_transaction_store();
+    // Three non-terminal (Prepared) transactions on one repository are all
+    // recovery candidates; keys are ordered so the keyset walk is deterministic.
+    let keys = [
+        key("idempotency.candidate.a"),
+        key("idempotency.candidate.b"),
+        key("idempotency.candidate.c"),
+    ];
+    for candidate in &keys {
+        store
+            .begin_or_replay(begin_request(&preview, candidate.as_str()))
+            .await
+            .expect("start recovery candidate");
+    }
+
+    let executor = GitIndexReadExecutor::new(&store);
+    let candidates_query = |after: Option<GitIndexIdempotencyKey>, limit: u32| {
+        CodeRecoveryCandidatesQueryV1 {
+            repository_id: repository_id.clone(),
+            after,
+            limit,
+        }
+    };
+
+    let first = candidates_page(&executor, candidates_query(None, 2)).await;
+    assert_eq!(
+        first
+            .records
+            .iter()
+            .map(|record| record.idempotency_key.clone())
+            .collect::<Vec<_>>(),
+        vec![keys[0].clone(), keys[1].clone()]
+    );
+    assert_eq!(first.next, Some(keys[1].clone()));
+
+    let second = candidates_page(&executor, candidates_query(first.next.clone(), 2)).await;
+    assert_eq!(
+        second
+            .records
+            .iter()
+            .map(|record| record.idempotency_key.clone())
+            .collect::<Vec<_>>(),
+        vec![keys[2].clone()]
+    );
+    assert_eq!(second.next, None);
+
+    // A zero limit yields an empty page regardless of remaining candidates.
+    let empty = candidates_page(&executor, candidates_query(None, 0)).await;
+    assert!(empty.records.is_empty());
+    assert_eq!(empty.next, None);
+}
+
+#[tokio::test]
+async fn read_executor_keyset_walks_recovery_repositories() {
+    let (_directory, _path, database) = open_database().await;
+    let first_preview = preview();
+    let second_preview = preview_for(
+        "repository.git-transaction.second",
+        "preview.git-transaction.second",
+        UtcMicros(100),
+    );
+    let first_repository = first_preview.repository_snapshot.repository_id.clone();
+    let second_repository = second_preview.repository_snapshot.repository_id.clone();
+    let store = database.git_index_transaction_store();
+    store
+        .begin_or_replay(begin_request(&first_preview, "idempotency.repo-walk.first"))
+        .await
+        .expect("start first repository candidate");
+    store
+        .begin_or_replay(begin_request(
+            &second_preview,
+            "idempotency.repo-walk.second",
+        ))
+        .await
+        .expect("start second repository candidate");
+
+    let executor = GitIndexReadExecutor::new(&store);
+
+    let first = repositories_page(
+        &executor,
+        CodeRecoveryRepositoriesQueryV1 {
+            after: None,
+            limit: 1,
+        },
+    )
+    .await;
+    assert_eq!(first.repositories, vec![first_repository.clone()]);
+    assert_eq!(first.next, Some(first_repository.clone()));
+
+    let second = repositories_page(
+        &executor,
+        CodeRecoveryRepositoriesQueryV1 {
+            after: first.next.clone(),
+            limit: 1,
+        },
+    )
+    .await;
+    assert_eq!(second.repositories, vec![second_repository]);
+    assert_eq!(second.next, None);
 }

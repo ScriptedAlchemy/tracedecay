@@ -47,6 +47,22 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         read_preview_from_transaction(&snapshot, preview_id).await
     }
 
+    /// Reads the durable transaction record bound to an application idempotency
+    /// key without opening a writer. This is the read-only projection of the
+    /// same record `begin_or_replay` reconstructs before it decides to start,
+    /// replay, or require recovery.
+    // Staged: consumed by the code read-port executor (`super::read`), which is
+    // itself awaiting the daemon read-port dispatcher.
+    #[allow(dead_code)]
+    pub(crate) async fn read_record(
+        &self,
+        idempotency_key: &GitIndexIdempotencyKey,
+    ) -> GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>> {
+        idempotency_key.validate().map_err(invalid_domain)?;
+        let snapshot = self.read_snapshot().await?;
+        read_record_from_transaction(&snapshot, idempotency_key).await
+    }
+
     /// Atomically binds a client input and its prepared journal to an immutable
     /// preview before native Git is permitted to run.
     pub(crate) async fn begin_or_replay(
