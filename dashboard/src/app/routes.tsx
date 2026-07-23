@@ -1,6 +1,7 @@
 import { createBrowserRouter } from 'react-router';
 import { Shell } from './shell/Shell';
 import { WorkspacePlaceholder } from './shell/WorkspacePlaceholder';
+import { ObservatoryPage } from '../workspaces/observatory/ObservatoryPage.tsx';
 
 // The twelve PR14 workspaces (plan 11). Each becomes a lazy route module as
 // its slice ships; until then the designed placeholder renders its truthful
@@ -31,7 +32,12 @@ export const router = createBrowserRouter([
       { index: true, element: <WorkspacePlaceholder workspace="brain" /> },
       ...WORKSPACES.map((w) => ({
         path: w.path,
-        element: <WorkspacePlaceholder workspace={w.path} />,
+        element:
+          w.path === 'observatory' ? (
+            <ObservatoryPage />
+          ) : (
+            <WorkspacePlaceholder workspace={w.path} />
+          ),
       })),
     ],
   },

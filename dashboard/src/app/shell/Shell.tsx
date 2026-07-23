@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { Outlet } from 'react-router';
+import { CommandPalette, usePaletteHotkey } from './CommandPalette';
 import { NavRail } from './NavRail';
 import { ScopeBar } from './ScopeBar';
 import { StatusStrip } from './StatusStrip';
@@ -7,6 +9,8 @@ import { StatusStrip } from './StatusStrip';
  * The inspector panel mounts inside workspace content (archetype-owned) so
  * its width interacts with the content grid, not the shell. */
 export function Shell() {
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  usePaletteHotkey(setPaletteOpen);
   return (
     <div className="flex h-dvh w-full overflow-hidden bg-surface-0 text-text-primary">
       <a
@@ -16,8 +20,9 @@ export function Shell() {
         Skip to content
       </a>
       <NavRail />
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <ScopeBar />
+        <ScopeBar onOpenPalette={() => setPaletteOpen(true)} />
         <main id="td-main" className="min-h-0 flex-1 overflow-auto">
           <Outlet />
         </main>

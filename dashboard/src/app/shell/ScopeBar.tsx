@@ -11,7 +11,7 @@ function toggleTheme() {
 /** Always-visible active scope (plan 11: every view preserves and displays
  * scope; transitions are explicit). Chips become interactive once the scope
  * store lands; the bar ships first so no surface ever renders scopeless. */
-export function ScopeBar() {
+export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b border-edge-subtle bg-surface-1 px-3">
       <div className="flex min-w-0 flex-1 items-center gap-1.5" aria-label="Active scope">
@@ -20,6 +20,7 @@ export function ScopeBar() {
       </div>
       <button
         type="button"
+        onClick={onOpenPalette}
         className={cn(
           'flex h-7 items-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle',
           'bg-surface-2 px-2 text-2xs text-text-muted hover:text-text-secondary',
