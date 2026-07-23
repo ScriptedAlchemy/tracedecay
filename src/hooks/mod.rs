@@ -117,13 +117,6 @@ pub async fn hook_opencode_v2_tool_after(event_json: &str, project_root: &Path) 
     }
 }
 
-pub async fn lookup_hook_v2_ready_guidance(
-    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-    project_root: &Path,
-) -> Option<tracedecay_hooks::HookReadyGuidanceV1> {
-    v2::lookup_ready_guidance(envelope, project_root).await
-}
-
 macro_rules! read_hook_event {
     () => {{
         match $crate::hooks::read_stdin_bounded() {

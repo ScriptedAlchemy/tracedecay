@@ -199,26 +199,6 @@ pub(crate) async fn dispatch_opencode_tool_after(
     dispatch_decoded(HookHostV1::OpenCode, event_json, project_root, decoded).await
 }
 
-pub(crate) async fn lookup_ready_guidance(
-    envelope: &HookEventEnvelopeV2,
-    project_root: &Path,
-) -> Option<HookReadyGuidanceV1> {
-    let response = super::daemon_hook_action(
-        Some(project_root),
-        serde_json::json!({
-            "action": "hook_v2_guidance_lookup",
-            "envelope": envelope,
-        }),
-        None,
-    )
-    .await
-    .ok()?;
-    response
-        .get("ready_guidance")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-}
-
 async fn dispatch_decoded(
     host: HookHostV1,
     event_json: &str,
