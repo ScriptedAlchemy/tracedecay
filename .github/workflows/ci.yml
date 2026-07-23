@@ -235,14 +235,6 @@ jobs:
           lld-link.exe --version
           "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # Node is only needed so build.rs can produce the embedded dashboard
-      # dist assets (npm ci + npm run build) once, instead of once per shard.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
@@ -679,18 +671,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Build packaged dashboard assets
-        working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
-
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: ./.github/actions/setup-linux-mold
@@ -761,53 +741,11 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      DASHBOARD_DIST_FILES: >-
-        shell/dist/shell.js
-        shell/dist/shell.css
-        holographic/dist/index.js
-        holographic/dist/style.css
-        lcm/dist/index.js
-        lcm/dist/style.css
-        graph/dist/index.js
-        graph/dist/style.css
-        savings/dist/index.js
-        savings/dist/style.css
+    # The legacy npm dashboard pipeline was removed; committed placeholder
+    # dist assets are embedded directly, so this job only exercises the
+    # Rust-side dashboard API surface.
     steps:
       - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Install dashboard dependencies
-        working-directory: dashboard
-        run: npm ci
-
-      - name: Build dashboard assets
-        working-directory: dashboard
-        run: npm run build
-
-      - name: Run dashboard unit tests
-        working-directory: dashboard
-        run: npm test
-
-      - name: Verify embedded dist artifacts
-        working-directory: dashboard
-        run: |
-          set -euo pipefail
-          for f in $DASHBOARD_DIST_FILES; do
-            if [ ! -s "$f" ]; then
-              echo "missing or empty dist artifact: $f" >&2
-              exit 1
-            fi
-          done
-          # shellcheck disable=SC2086
-          sha256sum $DASHBOARD_DIST_FILES > /tmp/dashboard-dist.sha
-          npm run build
-          sha256sum -c /tmp/dashboard-dist.sha
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -829,52 +767,6 @@ jobs:
 
       - name: Run dashboard integration tests
         run: cargo nextest run --all-features --test dashboard_api_test --no-fail-fast --locked
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('dashboard/package-lock.json') }}
-          restore-keys: |
-            playwright-${{ runner.os }}-
-
-      - name: Install Playwright Chromium
-        working-directory: dashboard
-        run: npx playwright install --with-deps chromium
-
-      - name: Prebuild dashboard binary for smoke
-        run: cargo build --all-features --bin tracedecay --locked
-
-      - name: Run dashboard smoke (empty LCM)
-        working-directory: dashboard
-        env:
-          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-empty.db
-        run: |
-          set -euo pipefail
-          rm -f "$TRACEDECAY_GLOBAL_DB"
-          attempts=0
-          max_attempts=3
-          until [ "$attempts" -ge "$max_attempts" ]; do
-            attempts=$((attempts + 1))
-            echo "Smoke attempt ${attempts}/${max_attempts}..."
-            if npm run smoke -- --expect-lcm=empty; then
-              exit 0
-            fi
-            if [ "$attempts" -lt "$max_attempts" ]; then
-              sleep 10
-            fi
-          done
-          echo "Dashboard smoke failed after ${max_attempts} attempts" >&2
-          exit 1
-
-      - name: Run dashboard mobile smoke
-        working-directory: dashboard
-        env:
-          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-mobile.db
-        run: |
-          set -euo pipefail
-          rm -f "$TRACEDECAY_GLOBAL_DB"
-          npm run smoke:mobile -- --expect-lcm=empty
 
   hermes-integration:
     name: Hermes integration (stock)
