@@ -16,11 +16,29 @@ all other retention is judged by the direct anchor identity, resolution,
 authorization, lineage, deletion, Git, platform, and regression behavior
 below.
 
+**Status (2026-07-23):** Landed on this branch. PR7/Plan 13's core — `RetrievalAnchorId`
+identity and resolution, V2/V3 anchor targets, native Git/worktree/integration-receipt
+topology anchors, the immutable evidence-span/occurrence/retriever-contribution
+contract, dispositions and safe tombstones, and the atomic evidence-assembly store — is
+implemented across `crates/tracedecay-domain/src/research/`,
+`crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`,
+`crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`,
+`src/application/evidence_assembly.rs`, and `src/db/retrieval_anchor_authority.rs`.
+Per-section verdicts follow. Known pending: dedicated GitHub-stack anchor targets
+(Required behavior 19).
+
 ## Outcome
 
 Any authorized result can lead back to the exact retained observation or entity that
 supports it. The reference survives ranking changes, project moves, worktree removal,
 and index rebuilds, while deletion and retention remain explicit.
+
+**Status (2026-07-23):** Implemented. Anchor IDs are derived from owner+target identity
+(never rank, path, or payload bytes), so they survive ranking, project moves, worktree
+removal, and index rebuilds; resolution reports
+`current`/`drifted`/`redacted`/`expired`/`deleted`/`unavailable`/`ambiguous` with
+coverage (`crates/tracedecay-domain/src/research/{anchor,resolution}.rs`,
+`src/db/retrieval_anchor_authority.rs`).
 
 ## Owns
 
@@ -52,6 +70,18 @@ and index rebuilds, while deletion and retention remain explicit.
 - Payload-free retriever-contribution anchors that explain which exact retained
   sources contributed to an assembled result without making rank, score, query text,
   summaries, or embeddings source authority.
+
+**Status (2026-07-23):** Implemented, one item pending. `RetrievalAnchorId`
+identity/resolution, provenance relations, evidence-time/generation/watermark/
+coverage/drift state, immutable Git-object and repository/worktree/ref/PR/check/
+conflict/preflight/integration-receipt bindings, safe tombstones, derived
+evidence-span identity, and payload-free retriever-contribution anchors all exist
+(`crates/tracedecay-domain/src/research/{anchor,git_topology,resolution,coverage}.rs`,
+`crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`). Pending:
+dedicated GitHub-stack capability/snapshot anchor targets — the shipped
+`GitTopologyAnchorTargetV1` covers `RepositoryCapture`/`WorktreeCapture`/`RefSnapshot`/
+`NativeObject`/`PullRequestSnapshot`/`ReviewSnapshot`/`CheckSnapshot`/`ConflictEvidence`/
+`PreflightPreview`/`ApplyReceipt`/`IntegrationReceipt` but no `GitHubStack*` variant.
 
 ## Does not own
 
@@ -163,6 +193,25 @@ and index rebuilds, while deletion and retention remain explicit.
     task projection may abbreviate presentation, but its prose, score, status, branch
     label, or aggregate cannot become replacement evidence.
 
+**Status (2026-07-23):** Items 1–18 and 20–22 implemented; item 19 (GitHub-stack
+targets) pending. Shipped reality:
+
+- Item 1: the opaque `RetrievalAnchorId` is realized as a derived, digest-tagged
+  string — `retrieval.v2.sha256:<hex>` for observation/repository/entity targets and
+  `retrieval.v3.sha256:<hex>` for Git-topology and the V3 occurrence/span/contribution
+  targets (`derive_anchor_id`/`derive_v3_anchor_id`,
+  `crates/tracedecay-domain/src/research/anchor.rs`). The digest is over owner+target
+  identity, never payload bytes, so "not a content hash" still holds. A legacy bare
+  `sha256:<hex>` form persists in older stored rows and payload-integrity checks
+  (`src/global_db/session_temporal/hydration.rs`).
+- Item 5: the seven states are `AnchorResolutionStateV2`
+  (`crates/tracedecay-domain/src/research/resolution.rs`).
+- Coverage: derived-group (Span/Burst) candidate anchors are excluded from the coverage
+  denominator so grouped members are not double-counted as hidden omissions
+  (`src/query/temporal/mod.rs`; landed as commit `67a7f253`).
+- Items 11–18, 20–21: native repository/worktree/ref/object/PR/check/conflict/preflight/
+  integration anchors ship in `crates/tracedecay-domain/src/research/git_topology.rs`.
+
 ## Native Git, worktree, and integration-receipt anchors
 
 PR7 extends `RetrievalAnchorTargetV3`; it does not create a parallel public
@@ -220,6 +269,14 @@ escape, ambiguous native admin identity, or missing proof returns
 `ambiguous`/`unavailable`; it never rekeys the old anchor or reveals the prior
 raw path.
 
+**Status (2026-07-23):** Implemented. `GitTopologyAnchorTargetV1` exposes
+`RepositoryCapture`, `WorktreeCapture`, `RefSnapshot`, `NativeObject`,
+`PullRequestSnapshot`, `ReviewSnapshot`, `CheckSnapshot`, `ConflictEvidence`,
+`PreflightPreview`, `ApplyReceipt`, and `IntegrationReceipt` variants with
+capture/object-format/receipt bindings; SHA-1/SHA-256 IDs carry object-format and
+repository-capture bindings (`crates/tracedecay-domain/src/research/git_topology.rs`).
+GitHub-stack capability/snapshot targets remain pending.
+
 ### Lossless `TaskId` and integration drilldown
 
 Plan 24's existing `TaskEvidenceLinkRevision` is the only task-to-anchor edge.
@@ -242,6 +299,12 @@ Every page, expansion, and hydration reauthorizes each hop. A missing,
 redacted, deleted, expired, drifted, ambiguous, or unavailable source remains a
 typed omission; a summary cannot collapse it into success. Receipt possession
 grants no policy, runtime, Git, provider, or host authority.
+
+**Status (2026-07-23):** Implemented. `AnchorLineageRefV3` carries child/source anchor
+IDs, a strictly ordered `source_ordinal`, and explicit owner/privacy binding, and its
+validation (`validate_anchor_lineage_v3`) rejects prose/score/label sources
+(`crates/tracedecay-domain/src/research/anchor.rs`). Task-to-anchor edges stay Plan 24's
+`TaskEvidenceLinkRevision`; Plan 13 stores no `TaskId`.
 
 ### Persistence, migration, and direct acceptance
 
@@ -267,6 +330,14 @@ exact PR/check/preflight/integration evidence, TaskId-rooted drilldown with
 typed omissions, idempotent exact-only migration, and absence of copied or
 payload-bearing owner data. Historical schema, index, trigger, migration, and
 test-file names are not mandatory recreation targets.
+
+**Status (2026-07-23):** Implemented. Domain records own identity/validation, the store
+owns publish-or-replay and payload-free resolution, and the rusqlite runtime repository
+persists append-only immutable rows with replay-conflict detection
+(`crates/tracedecay-store/src/evidence_assembly.rs`,
+`crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs::insert_immutable`).
+Direct coverage: `tests/session_suite/{anchor_resolution,anchor_tombstone_expiry}.rs` and
+`crates/tracedecay-store/tests/session_contract/`.
 
 ## Immutable evidence-span contract
 
@@ -413,6 +484,20 @@ semantics. `derive_exact_source_occurrence_anchor_id`,
 machinery. Public lookup still uses only `RetrievalAnchorId`; the new IDs identify
 immutable targets and do not create a parallel public reference family.
 
+**Status (2026-07-23):** Implemented, with the type-name drift this plan already
+disclaims. The store defines `EvidenceSourceOccurrenceRecordV1` (plan
+`SourceOccurrenceRecordV1`), `CanonicalSourceOccurrenceSetRecordV1` (plan
+`CanonicalSourceOccurrenceSetV1`), `EvidenceSpanRunV1`, `EvidenceSpanRecordV1`,
+`EvidenceSpanHorizonV1`, `SourceCapabilityCatalogBindingV1`, and
+`VerifiedSourceOrderingProofV1`; `SourceOccurrenceSanitizationV1::new(capture,
+projection)` keeps the two receipt roles distinct; `RetrievalAnchorTargetV3` adds the
+three exact targets and the `derive_exact_*` functions mint `retrieval.v3.sha256:` IDs
+(`crates/tracedecay-store/src/evidence_assembly.rs`,
+`crates/tracedecay-domain/src/research/anchor.rs`). An application-layer mirror
+(`SourceOccurrenceRecord`/`CanonicalSourceOccurrenceSet`/`EvidenceSpanRecord`) lives in
+`src/application/evidence_assembly.rs`. The plan's `PublishEvidenceAssembly::execute` is
+realized as the store trait method `EvidenceAssemblyStore::publish_or_replay`.
+
 ## Retriever-contribution evidence
 
 Plan 23 emits a `RetrieverContributionRecordV1` after it freezes scope, temporal
@@ -477,6 +562,14 @@ Every hop rechecks current authorization, privacy, retention, disposition, catal
 binding, and drift. The records and tables contain no hydrated text or provider
 payload.
 
+**Status (2026-07-23):** Implemented. `RetrieverContributionRecordV1`,
+`RetrieverIdentityV1`, `RetrieverWatermarkBindingV1`, `PrivacyBoundRequestDigestV1`,
+`EvidenceAssemblyWriteV1`, and `EvidenceAssemblyIdempotencyKeyV1` ship in
+`crates/tracedecay-store/src/evidence_assembly.rs`; `publish_or_replay` returns the
+existing receipt on identical scoped material and `ReplayConflict` on changed material.
+A contribution stays explanation-only evidence — rank/score/query/embedding cannot
+retarget it.
+
 ## Authorization, lineage, and deletion
 
 Every create, resolve, hydrate, expand, replay, and cursor-continuation operation
@@ -522,6 +615,15 @@ tombstone or existence distinction. Restore, consolidation, replay, and migratio
 apply current dispositions before importing or rebuilding derivatives, so stale
 copies cannot resurrect payload access.
 
+**Status (2026-07-23):** Implemented. Owner-bound create/resolve, append-only
+`RetrievalAnchorDispositionRecordV1`, and the strict-whitelist
+`RetrievalAnchorTombstoneV1` ship in `crates/tracedecay-store/src/retrieval_anchor.rs`
+and are enforced by `src/db/retrieval_anchor_authority.rs` (disposition-transition
+rules, derivative suppression, newest-disposition-first resolution). `AnchorLineageRefV3`,
+`LogicalCopyRecordV1`/`CopiedFrom`, and `SessionSummaryRecordV1` provide copy/summary
+lineage (`crates/tracedecay-domain/src/{research/anchor,session}.rs`). Tombstone-expiry
+and revocation are exercised by `tests/session_suite/anchor_tombstone_expiry.rs`.
+
 ## Persistence and migration behavior
 
 Domain records own immutable identity and structural validation; the store
@@ -550,6 +652,12 @@ reads/writes only after atomicity, authorization, replay-conflict,
 tombstone-whitelist, and payload-free persistence checks pass. Any failure
 leaves the prior read path authoritative and rolls back new records without
 re-enabling deleted or redacted payloads.
+
+**Status (2026-07-23):** Implemented. The four-layer split — domain validation, store
+publish-or-replay, application authorization/orchestration
+(`src/application/evidence_assembly.rs`), and infra persistence
+(`crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`) — is in place
+with immutable inserts and atomic rollback on replay conflict.
 
 ## Cross-plan ownership
 
@@ -592,6 +700,10 @@ re-enabling deleted or redacted payloads.
   anchor IDs but cannot mint authorization, resolve stores locally, persist anchor
   copies, sanitize independently, or infer owner identity from ambient host state.
 
+**Status (2026-07-23):** Consistent with shipped layering. Plan 13 code references Plan
+24 (`TaskEvidenceLinkRevision`), Plan 08/27 (`SourceCapabilityCatalogBindingV1`), and
+Plan 36 native identities without redefining them.
+
 ## Lossless evidence boundary
 
 Durable products resolve through `RetrievalAnchorId` plus owning-store retention
@@ -606,6 +718,14 @@ Read-only GitHub thread/comment/reply and CI-failure ingress may create and
 resolve these anchors without [Plan 32](32-dynamic-workflow-runtime-and-sdk.md)
 as a prerequisite. Plan 32 is required only for admitted write-side effects and
 workflow automation outside this contract.
+
+**Status (2026-07-23):** Implemented. CI-failure and feedback ingress already
+create/resolve anchors without Plan 32 (`src/application/advisory/ci_runtime/`,
+`src/application/feedback/owner.rs`); `rh_` response handles remain Plan 21 transport
+artifacts, not durable evidence identity. Anchor resolution is surfaced downstream by the
+shipped dashboard provenance UI (`dashboard/src/ui/EvidenceTruthStrip.tsx`, Observatory
+Doctor findings in `dashboard/src/workspaces/observatory/`), which passes anchor IDs
+through without defining another reference type (Required behavior 10).
 
 ## Acceptance
 
@@ -672,3 +792,10 @@ workflow automation outside this contract.
   tombstone from an unknown anchor.
 - Repository search finds no research-ledger, plan-parser, compatibility-inventory, or
   plan-execution requirement in this contract.
+
+**Status (2026-07-23):** Largely implemented. Acceptance coverage lives in
+`tests/session_suite/{anchor_resolution,anchor_tombstone_expiry,fact_anchor_authority,temporal_derived_evidence,temporal_privacy}.rs`,
+`tests/session_suite/temporal_projection/lineage.rs`,
+`crates/tracedecay-store/tests/session_contract/`, and
+`crates/tracedecay-domain/src/research/{anchor_test,resolution}.rs`. The one criterion
+still pending is GitHub-stack target evidence (Required behavior 19).
