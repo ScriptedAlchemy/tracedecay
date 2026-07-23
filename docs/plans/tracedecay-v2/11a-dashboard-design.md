@@ -77,27 +77,40 @@ Every workspace composes from four archetypes; no bespoke layouts:
    forms, effective-vs-desired layered values side by side, typed patch
    preview → validate → CAS confirm as distinct steps.
 
-## Brain scope model
+## Scope model: all-projects first (every workspace)
 
-Brain is the whole-brain view first. Its default scope is ALL projects — one
-aggregate map/overview across every registered project — with the project
-dimension rendered as first-class visual structure (projects as named
-clusters/regions in the brain map, per-project rows in overview cards,
-cross-project edges visible and styled distinctly). Narrowing to one project
-happens through the ordinary scope-bar chip (or clicking a project cluster,
-which is an explicit scope transition per plan 11) and every Brain surface
-re-renders under the narrowed scope without changing shape. Rules:
+The entire dashboard defaults to ALL-projects scope — one connected brain.
+Every workspace renders the cross-project aggregate as its primary view and
+narrows to a specific project (or repository/worktree/branch/session) only
+through the ordinary scope-bar chips or an explicit in-view scope transition
+(e.g. clicking a project cluster/row), which updates the URL scope. No
+workspace is a project picker; narrowing never changes a workspace's shape,
+only its population. Concretely:
 
-- The all-projects aggregate is not a lobby or project picker; it is the
-  richest view (cross-project relationships, shared knowledge, global
-  health/freshness) and must stay within the graph tier budgets via
-  daemon-side clustering (project-level aggregation is the natural first
-  clustering level).
-- Coverage statements in aggregate views enumerate projects consulted vs
-  unavailable — a project whose store is unreachable renders as a truthful
-  partial/unavailable region, never silently omitted.
-- Deep links capture whether scope was all-projects or a specific project;
-  cluster-click narrowing updates the URL scope explicitly.
+- Brain: one aggregate map across every registered project — projects as
+  named clusters/regions, cross-project edges styled distinctly; clicking a
+  cluster is an explicit narrow.
+- Explorer/Sessions/Knowledge: search and lists span all projects by
+  default, with a project column/facet; Knowledge shows cross-project fact
+  relationships as first-class rows and edges.
+- Loom/Agents: traces and agent trees across projects, project as a lane
+  grouping dimension when scope is wide.
+- Code/Delivery: aggregate views list per-project/per-repo summaries and
+  drill into one repo's graph/rails via explicit narrowing (a code graph is
+  inherently per-repository; the aggregate level shows repo cards + health).
+- Observatory/Costs/Automations/Settings: fleet-wide by default (all
+  daemons/stores/providers), project as a grouping/facet; Settings shows
+  layered config with per-project overlays side by side.
+
+Rules that hold everywhere:
+
+- Aggregates stay within tier budgets via daemon-side aggregation; project-
+  level grouping is the natural first clustering level.
+- Aggregate coverage statements enumerate projects consulted vs unavailable;
+  an unreachable project's store renders as a truthful partial/unavailable
+  region or row — never silently omitted.
+- Deep links always capture whether scope was all-projects or narrowed, and
+  to what.
 
 ## Visual system
 
