@@ -37,6 +37,7 @@ mod automation_skills_api;
 mod code_diagnostics_api;
 mod code_index_freshness_api;
 mod doctor_findings_api;
+mod doctor_remediation_api;
 mod events_api;
 mod graph_api;
 mod graph_queries;
@@ -138,6 +139,30 @@ pub(crate) type AutomationSchedulerReconcileFuture =
     Pin<Box<dyn Future<Output = AutomationSchedulerReconcileOutcome> + Send + 'static>>;
 pub(crate) type AutomationSchedulerReconciler =
     Arc<dyn Fn() -> AutomationSchedulerReconcileFuture + Send + Sync + 'static>;
+pub(crate) type DoctorReportReadFuture = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    AdmittedDoctorReportV1,
+                    tracedecay_application::ApplicationContractError,
+                >,
+            > + Send
+            + 'static,
+    >,
+>;
+pub(crate) type DoctorReportReader =
+    Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sync + 'static>;
+
+#[derive(Clone)]
+pub(crate) struct AdmittedDoctorReportV1 {
+    pub(crate) report: tracedecay_application::doctor::DoctorReportV1,
+}
+
+impl AdmittedDoctorReportV1 {
+    pub(crate) fn new(report: tracedecay_application::doctor::DoctorReportV1) -> Self {
+        Self { report }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct DashboardState {
@@ -198,6 +223,13 @@ pub(crate) struct DashboardState {
     pub(crate) automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     /// Lifetime-owning capability for complete dashboard automation writes.
     pub(crate) automation_writer: DashboardAutomationWriter,
+    /// Admitted canonical Doctor report source. Absent when the dashboard was
+    /// not opened by an owner holding an exact application request context.
+    pub(crate) doctor_report_reader: Option<DoctorReportReader>,
+    /// Optional admitted owner-operation router. Its absence keeps remediation
+    /// references descriptive and non-actionable.
+    pub(crate) doctor_remediation_dispatcher:
+        Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
 }
 
 impl DashboardState {
@@ -394,6 +426,8 @@ async fn build_state_inner(
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler,
         automation_writer,
+        doctor_report_reader: None,
+        doctor_remediation_dispatcher: None,
     };
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
@@ -1031,6 +1065,18 @@ fn project_api_router() -> Router<DashboardState> {
         // family, plan-38 storage telemetry/findings, code-index freshness, and
         // the typed SSE stream. See `read_model` for the normative envelope.
         .route("/api/doctor/findings", get(doctor_findings_api::findings))
+        .route(
+            "/api/doctor/remediations/preview",
+            post(doctor_remediation_api::preview),
+        )
+        .route(
+            "/api/doctor/remediations/apply",
+            post(doctor_remediation_api::apply),
+        )
+        .route(
+            "/api/doctor/remediations/{operation_id}",
+            get(doctor_remediation_api::status),
+        )
         .route(
             "/api/storage/telemetry",
             get(storage_telemetry_api::telemetry),

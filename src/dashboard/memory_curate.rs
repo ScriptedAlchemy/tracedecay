@@ -155,6 +155,8 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler: None,
         automation_writer: super::direct_dashboard_automation_writer(),
+        doctor_report_reader: None,
+        doctor_remediation_dispatcher: None,
     })
 }
 
@@ -195,6 +197,8 @@ fn user_state(
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler: None,
         automation_writer: super::direct_dashboard_automation_writer(),
+        doctor_report_reader: None,
+        doctor_remediation_dispatcher: None,
     }
 }
 
