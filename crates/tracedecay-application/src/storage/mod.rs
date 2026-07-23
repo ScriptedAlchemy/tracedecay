@@ -28,9 +28,7 @@ pub mod identity;
 pub mod inventory;
 pub mod telemetry;
 
-pub use compaction::{
-    CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1,
-};
+pub use compaction::{CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1};
 pub use debris::{
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, QuarantineContractV1,
     QuarantinedArtifactV1,

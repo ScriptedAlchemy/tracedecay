@@ -508,7 +508,11 @@ async fn worktree_queries_do_not_serialize_on_slow_reconcile() {
     for fixture in [&slow, &fast] {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if registry.latest_generation_id(fixture.path()).await.is_some() {
+                if registry
+                    .latest_generation_id(fixture.path())
+                    .await
+                    .is_some()
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -961,7 +965,9 @@ fn deleting_a_file_tombstones_its_prior_chunks() {
         "the deleted file's occurrence must be absent from the new generation"
     );
 
-    let latest = scheduler.latest_complete().expect("post-deletion generation");
+    let latest = scheduler
+        .latest_complete()
+        .expect("post-deletion generation");
     assert!(
         latest
             .lexical()
@@ -1187,7 +1193,11 @@ fn reparse_matches_full_parse_chunks() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
 
     // Sequential-edit scheduler: baseline then two edits, each reconciled.
-    let mut sequential = scheduler(&fixture, store.path().join("sequential"), Arc::clone(&bytes));
+    let mut sequential = scheduler(
+        &fixture,
+        store.path().join("sequential"),
+        Arc::clone(&bytes),
+    );
     published(sequential.reconcile_now().expect("sequential baseline"));
 
     fixture.edit(

@@ -1044,7 +1044,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             changed_paths,
         })
     }
-
 }
 
 impl Drop for CodeIndexWorktreeSchedulerV1 {

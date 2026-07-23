@@ -93,7 +93,9 @@ fn truncate_ascii(value: &str, max: usize) -> String {
     value[..end].to_string()
 }
 
-fn remediation(kind: DoctorStorageFindingKindV1) -> Result<DoctorRemediationRefV1, ApplicationContractError> {
+fn remediation(
+    kind: DoctorStorageFindingKindV1,
+) -> Result<DoctorRemediationRefV1, ApplicationContractError> {
     Ok(DoctorRemediationRefV1::new(
         DoctorOwningOperationRefV1::new(owning_operation(kind))?,
         DoctorRemediationKindV1::Action,
@@ -182,27 +184,25 @@ pub fn over_budget_finding(
 ) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
     let kind = DoctorStorageFindingKindV1::OverBudgetStore;
     let finding = match read {
-        StorageTelemetryReadV1::Observed { sample } => {
-            match budget.evaluate(sample)? {
-                StoreBudgetEvaluationV1::OverBudget {
-                    observed, overage, ..
-                } => problem_finding(
-                    kind,
-                    &sample.store,
-                    DoctorEvidenceStateV1::Degraded,
-                    completeness,
-                    &format!("observed-{}b.overage-{}b", observed.get(), overage.get()),
-                    "store size observed against soft budget",
-                )?,
-                StoreBudgetEvaluationV1::WithinBudget { observed, .. } => clean_finding(
-                    kind,
-                    &sample.store,
-                    completeness,
-                    &format!("observed-{}b.within-budget", observed.get()),
-                    "store size observed within soft budget",
-                )?,
-            }
-        }
+        StorageTelemetryReadV1::Observed { sample } => match budget.evaluate(sample)? {
+            StoreBudgetEvaluationV1::OverBudget {
+                observed, overage, ..
+            } => problem_finding(
+                kind,
+                &sample.store,
+                DoctorEvidenceStateV1::Degraded,
+                completeness,
+                &format!("observed-{}b.overage-{}b", observed.get(), overage.get()),
+                "store size observed against soft budget",
+            )?,
+            StoreBudgetEvaluationV1::WithinBudget { observed, .. } => clean_finding(
+                kind,
+                &sample.store,
+                completeness,
+                &format!("observed-{}b.within-budget", observed.get()),
+                "store size observed within soft budget",
+            )?,
+        },
         StorageTelemetryReadV1::Unsupported { store } => unobservable_finding(
             kind,
             store,
@@ -472,7 +472,10 @@ mod tests {
             DoctorCoverageCompletenessV1::Complete,
         )
         .expect("finding");
-        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Unsupported);
+        assert_eq!(
+            finding.finding().state(),
+            DoctorEvidenceStateV1::Unsupported
+        );
         assert!(finding.finding().remediation().is_none());
     }
 
@@ -565,9 +568,14 @@ mod tests {
 
     fn debris_artifact(bytes: u64) -> IncidentDebrisArtifactV1 {
         let path = RelativeArtifactPathV1::new("sessions.db.corrupt-1721692800").expect("valid");
-        IncidentDebrisArtifactV1::classify_path(store(), path, StorageByteSizeV1(bytes), UtcMicros(1))
-            .expect("ok")
-            .expect("debris")
+        IncidentDebrisArtifactV1::classify_path(
+            store(),
+            path,
+            StorageByteSizeV1(bytes),
+            UtcMicros(1),
+        )
+        .expect("ok")
+        .expect("debris")
     }
 
     #[test]

@@ -987,7 +987,10 @@ fn effects_read_inbox_round_trips_after_apply() {
             match point {
                 EffectsReadResultV1::InboxReceipt(Some(receipt)) => {
                     assert_eq!(receipt.identity.effect_id, effect_id);
-                    assert_eq!(receipt.target_commit_watermark.shard_id, target_binding.shard_id);
+                    assert_eq!(
+                        receipt.target_commit_watermark.shard_id,
+                        target_binding.shard_id
+                    );
                 }
                 other => panic!("expected inbox receipt, got {other:?}"),
             }

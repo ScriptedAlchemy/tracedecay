@@ -411,7 +411,11 @@ mod tests {
         .expect("utf8 sha")
         .trim()
         .to_owned();
-        std::fs::write(repo.path().join("src/lib.rs"), "pub fn a() { let _ = 1; }\n").unwrap();
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn a() { let _ = 1; }\n",
+        )
+        .unwrap();
         git(repo.path(), &["commit", "-qam", "second"]);
         let branch = String::from_utf8(
             std::process::Command::new("git")

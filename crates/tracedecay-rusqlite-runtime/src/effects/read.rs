@@ -12,7 +12,8 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use tracedecay_store::{
     EffectsInboxCursorV1, EffectsInboxPageQueryV1, EffectsInboxPageV1, EffectsOutboxCursorV1,
     EffectsOutboxPageQueryV1, EffectsOutboxPageV1, EffectsReadOperationV1, EffectsReadResultV1,
-    StoreEffectIdV1, StoreRuntimeBindingV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    StoreEffectIdV1, StoreRuntimeBindingV1, TransactionalInboxReceiptV1,
+    TransactionalOutboxEntryV1,
 };
 
 const OUTBOX_TABLE: &str = "td_runtime_writer_outbox_v1";
@@ -82,7 +83,11 @@ fn read_outbox_page(
     let incarnation = incarnation_sql(&query.binding)?;
     let authority_epoch = authority_epoch_sql(&query.binding)?;
     let (has_after, after_sequence, after_effect_id) = match &query.after {
-        Some(cursor) => (1_i64, u64_to_i64(cursor.source_sequence)?, cursor.effect_id.as_str().to_owned()),
+        Some(cursor) => (
+            1_i64,
+            u64_to_i64(cursor.source_sequence)?,
+            cursor.effect_id.as_str().to_owned(),
+        ),
         None => (0_i64, 0_i64, String::new()),
     };
     let fetch = fetch_limit(query.limit);
@@ -153,7 +158,11 @@ fn read_inbox_page(
     let incarnation = incarnation_sql(&query.binding)?;
     let authority_epoch = authority_epoch_sql(&query.binding)?;
     let (has_after, after_sequence, after_effect_id) = match &query.after {
-        Some(cursor) => (1_i64, u64_to_i64(cursor.target_sequence)?, cursor.effect_id.as_str().to_owned()),
+        Some(cursor) => (
+            1_i64,
+            u64_to_i64(cursor.target_sequence)?,
+            cursor.effect_id.as_str().to_owned(),
+        ),
         None => (0_i64, 0_i64, String::new()),
     };
     let fetch = fetch_limit(query.limit);

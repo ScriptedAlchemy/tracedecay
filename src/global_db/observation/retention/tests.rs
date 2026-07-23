@@ -183,15 +183,10 @@ async fn superseded_and_deleted_dispositions_release_storage() -> Result<(), Str
         seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
         set_disposition(&conn, "anchor-1", state, NOW - 90 * DAY, successor).await?;
 
-        let report = run_observation_retention(
-            &conn,
-            None,
-            &released_config(),
-            RetentionMode::Apply,
-            NOW,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        let report =
+            run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
+                .await
+                .map_err(|e| e.to_string())?;
 
         assert_eq!(report.anchors_released.acted, 1, "{state}: anchor released");
         assert_eq!(
@@ -202,13 +197,24 @@ async fn superseded_and_deleted_dispositions_release_storage() -> Result<(), Str
             report.provenance_released.acted, 1,
             "{state}: provenance released"
         );
-        assert!(report.bytes_reclaimed() > 4096, "{state}: reclaim measurable");
+        assert!(
+            report.bytes_reclaimed() > 4096,
+            "{state}: reclaim measurable"
+        );
 
         assert!(is_released(
-            &fetch_str(&conn, "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-1'").await?
+            &fetch_str(
+                &conn,
+                "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-1'"
+            )
+            .await?
         ));
         assert!(is_released(
-            &fetch_str(&conn, "SELECT observation_json FROM observations WHERE observation_id = 'obs-anchor-1'").await?
+            &fetch_str(
+                &conn,
+                "SELECT observation_json FROM observations WHERE observation_id = 'obs-anchor-1'"
+            )
+            .await?
         ));
         assert!(is_released(
             &fetch_str(&conn, "SELECT availability_json FROM observation_repository_provenance WHERE observation_id = 'obs-anchor-1'").await?
@@ -226,21 +232,20 @@ async fn active_and_unavailable_dispositions_retain_storage() -> Result<(), Stri
         seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
         set_disposition(&conn, "anchor-1", state, NOW - 90 * DAY, None).await?;
 
-        let report = run_observation_retention(
-            &conn,
-            None,
-            &released_config(),
-            RetentionMode::Apply,
-            NOW,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        let report =
+            run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
+                .await
+                .map_err(|e| e.to_string())?;
 
         assert_eq!(report.anchors_released.acted, 0, "{state}: anchor retained");
         assert_eq!(report.observations_released.acted, 0);
         assert_eq!(report.provenance_released.acted, 0);
         assert!(!is_released(
-            &fetch_str(&conn, "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-1'").await?
+            &fetch_str(
+                &conn,
+                "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-1'"
+            )
+            .await?
         ));
     }
     Ok(())
@@ -253,7 +258,14 @@ async fn latest_disposition_wins() -> Result<(), String> {
     let (_temp, conn) = test_store().await?;
     insert_anchor(&conn, "successor", GEN, 8).await?;
     seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
-    set_disposition(&conn, "anchor-1", "superseded", NOW - 90 * DAY, Some("successor")).await?;
+    set_disposition(
+        &conn,
+        "anchor-1",
+        "superseded",
+        NOW - 90 * DAY,
+        Some("successor"),
+    )
+    .await?;
     // A later, higher-sequence entry restores the anchor to active.
     set_disposition(&conn, "anchor-1", "active", NOW - 80 * DAY, None).await?;
 
@@ -262,7 +274,10 @@ async fn latest_disposition_wins() -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
 
-    assert_eq!(report.anchors_released.acted, 0, "current active state retained");
+    assert_eq!(
+        report.anchors_released.acted, 0,
+        "current active state retained"
+    );
     Ok(())
 }
 
@@ -281,12 +296,23 @@ async fn window_is_honored() -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
 
-    assert_eq!(report.anchors_released.acted, 1, "only the >30d anchor released");
+    assert_eq!(
+        report.anchors_released.acted, 1,
+        "only the >30d anchor released"
+    );
     assert!(!is_released(
-        &fetch_str(&conn, "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'recent'").await?
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'recent'"
+        )
+        .await?
     ));
     assert!(is_released(
-        &fetch_str(&conn, "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'old'").await?
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'old'"
+        )
+        .await?
     ));
     Ok(())
 }
@@ -307,10 +333,18 @@ async fn dry_run_mutates_nothing() -> Result<(), String> {
     assert_eq!(report.anchors_released.acted, 0, "dry run acts on nothing");
     assert!(report.bytes_reclaimed() > 4096, "dry run still measures");
     assert!(!is_released(
-        &fetch_str(&conn, "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-1'").await?
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-1'"
+        )
+        .await?
     ));
     assert!(!is_released(
-        &fetch_str(&conn, "SELECT observation_json FROM observations WHERE observation_id = 'obs-anchor-1'").await?
+        &fetch_str(
+            &conn,
+            "SELECT observation_json FROM observations WHERE observation_id = 'obs-anchor-1'"
+        )
+        .await?
     ));
     Ok(())
 }
@@ -331,7 +365,10 @@ async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
 
     assert_eq!(report.anchor_payloads_before, 8);
-    assert_eq!(report.anchor_payloads_after, 0, "payload-count delta measurable");
+    assert_eq!(
+        report.anchor_payloads_after, 0,
+        "payload-count delta measurable"
+    );
     assert_eq!(report.observation_payloads_before, 8);
     assert_eq!(report.observation_payloads_after, 0);
     assert!(report.page_count_before > 0, "page_count observed");
@@ -352,17 +389,30 @@ async fn retention_is_generation_scoped() -> Result<(), String> {
     set_disposition(&conn, "gen-a", "deleted", NOW - 90 * DAY, None).await?;
     set_disposition(&conn, "gen-b", "deleted", NOW - 90 * DAY, None).await?;
 
-    let report =
-        run_observation_retention(&conn, Some(GEN), &released_config(), RetentionMode::Apply, NOW)
-            .await
-            .map_err(|e| e.to_string())?;
+    let report = run_observation_retention(
+        &conn,
+        Some(GEN),
+        &released_config(),
+        RetentionMode::Apply,
+        NOW,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     assert_eq!(report.anchors_released.acted, 1, "only GEN released");
     assert!(is_released(
-        &fetch_str(&conn, "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'gen-a'").await?
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'gen-a'"
+        )
+        .await?
     ));
     assert!(!is_released(
-        &fetch_str(&conn, "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'gen-b'").await?
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'gen-b'"
+        )
+        .await?
     ));
     Ok(())
 }
@@ -385,7 +435,11 @@ async fn disabled_config_is_a_no_op() -> Result<(), String> {
 
     assert_eq!(report.anchors_released.acted, 0);
     assert!(!is_released(
-        &fetch_str(&conn, "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-1'").await?
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-1'"
+        )
+        .await?
     ));
     Ok(())
 }
@@ -422,7 +476,8 @@ async fn immutability_and_ledger_are_preserved() -> Result<(), String> {
     let (_temp, conn) = test_store().await?;
     seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
     set_disposition(&conn, "anchor-1", "deleted", NOW - 90 * DAY, None).await?;
-    let ledger_before = fetch_i64(&conn, "SELECT COUNT(*) FROM retrieval_anchor_dispositions").await?;
+    let ledger_before =
+        fetch_i64(&conn, "SELECT COUNT(*) FROM retrieval_anchor_dispositions").await?;
 
     run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
         .await
@@ -439,9 +494,12 @@ async fn immutability_and_ledger_are_preserved() -> Result<(), String> {
         "anchor update trigger restored"
     );
     assert!(
-        conn.execute("DELETE FROM retrieval_anchors WHERE anchor_id = 'anchor-1'", ())
-            .await
-            .is_err(),
+        conn.execute(
+            "DELETE FROM retrieval_anchors WHERE anchor_id = 'anchor-1'",
+            ()
+        )
+        .await
+        .is_err(),
         "anchor delete trigger intact"
     );
     assert!(
@@ -455,7 +513,8 @@ async fn immutability_and_ledger_are_preserved() -> Result<(), String> {
         "provenance update trigger restored"
     );
     // The ledger is untouched and still immutable.
-    let ledger_after = fetch_i64(&conn, "SELECT COUNT(*) FROM retrieval_anchor_dispositions").await?;
+    let ledger_after =
+        fetch_i64(&conn, "SELECT COUNT(*) FROM retrieval_anchor_dispositions").await?;
     assert_eq!(ledger_before, ledger_after, "ledger row count unchanged");
     assert!(
         conn.execute(

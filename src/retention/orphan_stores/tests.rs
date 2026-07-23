@@ -2,9 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::global_db::{GlobalDb, StoreInstanceUpsert};
-use crate::storage::{
-    STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
-};
+use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
 
 const DAY: i64 = 24 * 60 * 60;
 
@@ -45,7 +43,10 @@ fn live_root_is_never_collected() {
     assert_eq!(findings[0].disposition, StoreDisposition::Live);
 
     let plan = plan_collection(findings, 0);
-    assert!(plan.collect.is_empty(), "a live store must never be collected");
+    assert!(
+        plan.collect.is_empty(),
+        "a live store must never be collected"
+    );
     assert!(plan.relink.is_empty());
     assert!(plan.retained_immature.is_empty());
 }
@@ -184,7 +185,15 @@ async fn sweep_collects_orphan_store_and_retires_row() {
     // Anchor timestamps at a real epoch base so the recorded last-write drives
     // the age (not the freshly-written file mtime, which would be "now").
     let base = 1_700_000_000i64;
-    seed_store(&db, &profile_root, "proj_live", "store_live", &live_root, base).await;
+    seed_store(
+        &db,
+        &profile_root,
+        "proj_live",
+        "store_live",
+        &live_root,
+        base,
+    )
+    .await;
     let orphan_data_root = seed_store(
         &db,
         &profile_root,

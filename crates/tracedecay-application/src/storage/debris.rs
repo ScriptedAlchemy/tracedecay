@@ -187,10 +187,9 @@ impl IncidentDebrisScanV1 {
     /// Total bytes of all detected debris artifacts (saturating).
     #[must_use]
     pub fn total_bytes(&self) -> StorageByteSizeV1 {
-        let total = self
-            .artifacts
-            .iter()
-            .fold(0u64, |acc, artifact| acc.saturating_add(artifact.size_bytes.get()));
+        let total = self.artifacts.iter().fold(0u64, |acc, artifact| {
+            acc.saturating_add(artifact.size_bytes.get())
+        });
         StorageByteSizeV1(total)
     }
 }
@@ -225,7 +224,12 @@ mod tests {
 
     #[test]
     fn classifier_never_flags_live_store_files() {
-        for name in ["sessions.db", "sessions.db-wal", "sessions.db-shm", "recovery-"] {
+        for name in [
+            "sessions.db",
+            "sessions.db-wal",
+            "sessions.db-shm",
+            "recovery-",
+        ] {
             assert_eq!(IncidentDebrisKindV1::classify(name), None, "{name}");
         }
     }
@@ -233,10 +237,14 @@ mod tests {
     #[test]
     fn classify_path_uses_basename() {
         let path = RelativeArtifactPathV1::new("nested/sessions.db.corrupt-9").expect("valid");
-        let artifact =
-            IncidentDebrisArtifactV1::classify_path(store(), path, StorageByteSizeV1(10), UtcMicros(1))
-                .expect("ok")
-                .expect("debris");
+        let artifact = IncidentDebrisArtifactV1::classify_path(
+            store(),
+            path,
+            StorageByteSizeV1(10),
+            UtcMicros(1),
+        )
+        .expect("ok")
+        .expect("debris");
         assert_eq!(artifact.kind, IncidentDebrisKindV1::Corrupt);
     }
 
@@ -244,9 +252,14 @@ mod tests {
     fn classify_path_returns_none_for_live_file() {
         let path = RelativeArtifactPathV1::new("sessions.db").expect("valid");
         assert!(
-            IncidentDebrisArtifactV1::classify_path(store(), path, StorageByteSizeV1(10), UtcMicros(1))
-                .expect("ok")
-                .is_none()
+            IncidentDebrisArtifactV1::classify_path(
+                store(),
+                path,
+                StorageByteSizeV1(10),
+                UtcMicros(1)
+            )
+            .expect("ok")
+            .is_none()
         );
     }
 
@@ -258,11 +271,17 @@ mod tests {
             retention_window_micros: 1_000,
         };
         let path = RelativeArtifactPathV1::new("sessions.db.corrupt-9").expect("valid");
-        let artifact =
-            IncidentDebrisArtifactV1::classify_path(store(), path, StorageByteSizeV1(10), UtcMicros(1))
-                .expect("ok")
-                .expect("debris");
-        let quarantined = contract.quarantine(artifact, UtcMicros(500)).expect("quarantined");
+        let artifact = IncidentDebrisArtifactV1::classify_path(
+            store(),
+            path,
+            StorageByteSizeV1(10),
+            UtcMicros(1),
+        )
+        .expect("ok")
+        .expect("debris");
+        let quarantined = contract
+            .quarantine(artifact, UtcMicros(500))
+            .expect("quarantined");
         assert_eq!(quarantined.collection_eligible_at, UtcMicros(1_500));
         assert!(!quarantined.is_collection_eligible(UtcMicros(1_499)));
         assert!(quarantined.is_collection_eligible(UtcMicros(1_500)));
@@ -277,10 +296,14 @@ mod tests {
     #[test]
     fn scan_totals_bytes_and_reports_emptiness() {
         let path = RelativeArtifactPathV1::new("sessions.db.corrupt-9").expect("valid");
-        let artifact =
-            IncidentDebrisArtifactV1::classify_path(store(), path, StorageByteSizeV1(700), UtcMicros(1))
-                .expect("ok")
-                .expect("debris");
+        let artifact = IncidentDebrisArtifactV1::classify_path(
+            store(),
+            path,
+            StorageByteSizeV1(700),
+            UtcMicros(1),
+        )
+        .expect("ok")
+        .expect("debris");
         let scan = IncidentDebrisScanV1 {
             store: store(),
             artifacts: vec![artifact],

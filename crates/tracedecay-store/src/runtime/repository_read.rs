@@ -20,9 +20,9 @@ use tracedecay_domain::{
 };
 
 use crate::{
-    ConfigurationRevisionRecordV1, FactCurrentQuery, FactLineageQuery,
-    GitIndexTransactionRecordV1, SessionTemporalProjectionBatchV1, StoreEffectIdV1,
-    StoreRuntimeBindingV1, StoredFactV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    ConfigurationRevisionRecordV1, FactCurrentQuery, FactLineageQuery, GitIndexTransactionRecordV1,
+    SessionTemporalProjectionBatchV1, StoreEffectIdV1, StoreRuntimeBindingV1, StoredFactV1,
+    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 /// One repository read operation, dispatched across the profile, project,

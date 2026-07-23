@@ -95,16 +95,6 @@ pub use result::{
     StreamTermination, StreamValidationError, TemporalState, validate_stream,
 };
 pub use retrieval::catalog::{APPLICATION_DEFAULT_PROFILE_ID, application_catalog_contributions};
-pub use storage::{
-    BranchRefV1, CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1,
-    FreePageRatioV1, IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1,
-    OrphanStoreRecordV1, QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1,
-    RelativeArtifactPathV1, RetentionBacklogRecordV1, StaleBranchDbRecordV1, StorageByteSizeV1,
-    StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
-    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1,
-    TableNameV1, incident_debris_finding, orphan_store_finding, over_budget_finding,
-    retention_backlog_finding, stale_branch_dbs_finding,
-};
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AffectedTestsService, AnchorExpandRequest,
     AnchorExpandResult, AnchorHydrationPort, CALLABLE_CODE_OPERATION_COUNT,
@@ -122,4 +112,14 @@ pub use retrieval::{
     SymbolSearchResult, SymbolSearchService, TemporalRetrievalPort, TestRetrievalPort,
     callable_code_catalog_contribution, callable_code_handler_descriptors, callable_code_operation,
     callable_code_operations, callable_code_request_schema, callable_code_result_schema,
+};
+pub use storage::{
+    BranchRefV1, CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1,
+    FreePageRatioV1, IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1,
+    OrphanStoreRecordV1, QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1,
+    RelativeArtifactPathV1, RetentionBacklogRecordV1, StaleBranchDbRecordV1, StorageByteSizeV1,
+    StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
+    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
+    incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
+    stale_branch_dbs_finding,
 };

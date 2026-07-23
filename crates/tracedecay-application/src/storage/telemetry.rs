@@ -54,7 +54,10 @@ impl StoreSizeSampleV1 {
 
     #[must_use]
     pub fn total_bytes(&self) -> StorageByteSizeV1 {
-        StorageByteSizeV1(self.page_count.saturating_mul(u64::from(self.page_size_bytes)))
+        StorageByteSizeV1(
+            self.page_count
+                .saturating_mul(u64::from(self.page_size_bytes)),
+        )
     }
 
     #[must_use]

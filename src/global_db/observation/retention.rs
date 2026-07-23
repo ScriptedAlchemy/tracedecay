@@ -527,10 +527,7 @@ async fn run_observation_pass(
         match txn
             .execute(
                 "UPDATE observations SET observation_json = ?2 WHERE observation_id = ?1",
-                params![
-                    target.observation_id.as_str(),
-                    OBSERVATION_RELEASED_MARKER
-                ],
+                params![target.observation_id.as_str(), OBSERVATION_RELEASED_MARKER],
             )
             .await
         {
@@ -625,10 +622,7 @@ async fn run_provenance_pass(
                 "UPDATE observation_repository_provenance
                  SET availability_json = ?2, capture_json = ?2
                  WHERE observation_id = ?1",
-                params![
-                    target.observation_id.as_str(),
-                    PROVENANCE_RELEASED_MARKER
-                ],
+                params![target.observation_id.as_str(), PROVENANCE_RELEASED_MARKER],
             )
             .await
         {

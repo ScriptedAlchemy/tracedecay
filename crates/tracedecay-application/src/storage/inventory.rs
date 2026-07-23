@@ -49,7 +49,9 @@ impl OrphanStoreRecordV1 {
     /// Age in micros since the store was first seen unresolved (saturating).
     #[must_use]
     pub fn age_micros(&self) -> i64 {
-        self.observed_at.0.saturating_sub(self.first_unresolved_at.0)
+        self.observed_at
+            .0
+            .saturating_sub(self.first_unresolved_at.0)
     }
 }
 
