@@ -725,10 +725,15 @@ impl StoreAdministration {
                 })?;
         let layout =
             crate::storage::resolve_layout(project_root, &handshake.client_identity.profile_root)?;
-        // Branch administration receives only a daemon-published pinned
-        // snapshot. A missing configuration authority fails before any
-        // destructive store action; it must not consult legacy config input.
-        let config = crate::config::runtime_configuration_for_layout(project_root, &layout)?
+        // Branch administration runs inside the daemon, which owns the durable
+        // configuration store. Resolve the pinned snapshot on demand when this
+        // process has not yet opened the project (first operation, or the first
+        // after a daemon restart) instead of failing closed. The resolver reads
+        // only durable authority; it never consults legacy config input and a
+        // genuinely unresolvable store still fails before any destructive store
+        // action.
+        let config = crate::config::resolve_runtime_configuration_for_layout(project_root, &layout)
+            .await?
             .config
             .sync;
         self.execute_branch_admin_in_layout(

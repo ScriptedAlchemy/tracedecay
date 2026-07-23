@@ -1399,7 +1399,8 @@ mod runtime_configuration_cutover {
         cached_runtime_configuration, cached_sync_config, cached_telemetry_config,
         commit_runtime_configuration_mutation, direct_mutation_for_runtime_config_diff,
         ensure_runtime_configuration_for_layout, install_pinned_runtime_configuration,
-        mutate_pinned_runtime_configuration, runtime_configuration_for_layout,
+        load_runtime_configuration_for_layout_read_only, mutate_pinned_runtime_configuration,
+        resolve_runtime_configuration_for_layout, runtime_configuration_for_layout,
     };
 
     fn project_id(value: &str) -> ProjectId {
@@ -1843,6 +1844,132 @@ mod runtime_configuration_cutover {
         assert!(
             runtime_configuration_for_layout(root.path(), &layout).is_ok(),
             "after ensure, fail-closed lookup must see the published pin"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_runtime_configuration_pins_registered_project_when_cache_is_cold() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary project root");
+        crate::storage::write_enrollment_marker(
+            root.path(),
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_resolve_cold_cache".to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("write enrollment marker");
+        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+
+        // A freshly registered project has no pinned snapshot in this process's
+        // cache — exactly the state a daemon is in for a project it has not yet
+        // opened, or for any project after a restart. The fail-closed hook-path
+        // lookup rejects it.
+        assert!(
+            runtime_configuration_for_layout(root.path(), &layout).is_err(),
+            "cold cache must fail the fail-closed lookup before an on-demand resolve"
+        );
+
+        // The daemon authority path resolves and pins on demand instead of
+        // erroring, so branch administration and other daemon operations run.
+        let pinned = resolve_runtime_configuration_for_layout(root.path(), &layout)
+            .await
+            .expect("daemon resolve pins a registered project on demand");
+        assert_eq!(pinned.target.project_id.as_str(), "proj_resolve_cold_cache");
+
+        // After the resolve, even the fail-closed lookup sees the published pin,
+        // so a subsequent daemon operation no longer hits the cold-cache error.
+        assert!(
+            runtime_configuration_for_layout(root.path(), &layout).is_ok(),
+            "on-demand resolve must publish a pin the fail-closed lookup can read"
+        );
+
+        // A second resolve is idempotent and returns the same authority.
+        let reresolved = resolve_runtime_configuration_for_layout(root.path(), &layout)
+            .await
+            .expect("second daemon resolve reuses the published pin");
+        assert_eq!(reresolved.revision_id, pinned.revision_id);
+        assert_eq!(reresolved.snapshot, pinned.snapshot);
+    }
+
+    #[tokio::test]
+    async fn resolve_runtime_configuration_errors_typed_when_authority_is_unresolvable() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary project root");
+        crate::storage::write_enrollment_marker(
+            root.path(),
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_resolve_unresolvable".to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("write enrollment marker");
+        let mut layout = crate::storage::resolve_layout_for_current_profile(root.path())
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+
+        // Strip the authoritative project identity: a layout with no project id
+        // has no configuration authority to resolve, and on-demand resolution
+        // must surface a typed error rather than fabricate one.
+        layout.identity.project_id = None;
+
+        let error = resolve_runtime_configuration_for_layout(root.path(), &layout)
+            .await
+            .expect_err("a layout without project identity has no resolvable authority");
+        assert!(
+            matches!(error, crate::errors::TraceDecayError::Config { .. }),
+            "genuine unavailability must stay a typed configuration error, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_open_serves_registry_defaults_for_uninitialized_store() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary project root");
+        crate::storage::write_enrollment_marker(
+            root.path(),
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_read_only_uninitialized".to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("write enrollment marker");
+        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        if let Some(parent) = layout.sessions_db_path.parent() {
+            std::fs::create_dir_all(parent).expect("create sessions db parent");
+        }
+
+        // Materialize the durable store schema without ever seeding a
+        // configuration revision — the state a consolidated destination store is
+        // left in after a repository move, when its configuration authority was
+        // never migrated in. Opening then dropping the writable handle creates
+        // the configuration tables but leaves them empty.
+        {
+            let database = crate::global_db::GlobalDb::try_open_at(&layout.sessions_db_path)
+                .await
+                .expect("open durable store")
+                .expect("durable store is created");
+            drop(database);
+        }
+
+        // A read-only reopen must degrade to the registry-default snapshot rather
+        // than hard-erroring on the absent current revision. This is what lets a
+        // moved, consolidated project be inspected read-only.
+        let configuration = load_runtime_configuration_for_layout_read_only(root.path(), &layout)
+            .await
+            .expect("read-only open serves registry defaults for an uninitialized store");
+        assert_eq!(
+            configuration.target.project_id.as_str(),
+            "proj_read_only_uninitialized"
+        );
+        assert_eq!(
+            configuration.revision_id.as_str(),
+            "configuration.read_only.default.v1",
+            "an uninitialized store must resolve the read-only registry default revision"
         );
     }
 }

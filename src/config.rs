@@ -935,6 +935,38 @@ pub fn runtime_configuration_for_layout(
     Ok(configuration)
 }
 
+/// Resolves the pinned runtime configuration for a daemon-side operation on a
+/// live project, pinning it on demand from the durable configuration store when
+/// the process-local snapshot cache is cold.
+///
+/// Unlike [`runtime_configuration_for_layout`], which is fail-closed for hook
+/// paths that must never invent authority, this is the daemon authority path:
+/// the daemon owns the durable configuration store, so a registered project that
+/// simply has not been opened in this process (a first operation, or the first
+/// after a daemon restart) is resolved and pinned rather than rejected. It never
+/// consults legacy `config.json` input and never migrates or writes the store; a
+/// genuinely uninitialized or unopenable configuration store still yields a
+/// typed error rather than a fabricated default authority.
+pub async fn resolve_runtime_configuration_for_layout(
+    project_root: &Path,
+    layout: &crate::storage::StoreLayout,
+) -> Result<PinnedRuntimeConfiguration> {
+    let target = runtime_configuration_target_for_layout(project_root, layout)?;
+    if let Ok(configuration) = runtime_configuration_cache().for_project(&target.project_id) {
+        // The cache already holds a daemon-published pin (possibly a migrated
+        // durable revision). Retarget it to this operation's non-authoritative
+        // route and keep the fast path; do not reopen the store.
+        let configuration = configuration.retarget(target)?;
+        runtime_configuration_cache().insert(configuration.clone())?;
+        return Ok(configuration);
+    }
+    // Cold cache: resolve the durable current revision (read-only, no legacy
+    // input, no store mutation) and publish it. A store that was never made
+    // writable resolves to registry defaults in memory; an initialized-but-
+    // unreadable store surfaces a typed authority error.
+    load_runtime_configuration_for_layout_read_only(project_root, layout).await
+}
+
 /// Retained store handle paired with the exact revision resolved at project
 /// open. Daemon composition consumes this bundle instead of opening a second
 /// configuration database or resolving a second snapshot.
@@ -1049,6 +1081,27 @@ pub(crate) async fn open_runtime_configuration_for_layout_read_only(
     };
     let database = Arc::new(database);
     let store = GlobalDbConfigurationControlStore::new(database.as_ref());
+    if store
+        .is_uninitialized()
+        .await
+        .map_err(map_configuration_error)?
+    {
+        // The durable store exists but holds no configuration revision or
+        // migration receipt yet — for example a consolidated destination whose
+        // configuration authority was never migrated in, reopened read-only
+        // after a repository move. Read-only inspection degrades to the
+        // registry-default snapshot exactly as it does for a never-writable
+        // store, rather than hard-erroring on the absent current revision. A
+        // non-empty store with an unreadable current revision is not
+        // uninitialized, so it still surfaces a typed authority error below and
+        // durable authority is never silently replaced.
+        let configuration = read_only_default_runtime_configuration(target)?;
+        install_pinned_runtime_configuration(configuration.clone())?;
+        return Ok(OpenedRuntimeConfiguration {
+            configuration,
+            database: None,
+        });
+    }
     let current = store.current().await.map_err(map_configuration_error)?;
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
