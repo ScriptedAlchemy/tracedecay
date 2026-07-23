@@ -127,6 +127,24 @@ pub(crate) fn session_table_spec(table: SessionStoreTable) -> TableSpec {
             "PRAGMA table_info(session_temporal_observation_effects)",
             "PRAGMA foreign_key_list(session_temporal_observation_effects)",
         ),
+        SessionStoreTable::SessionTemporalProjectionReceipts => session_table(
+            "session_temporal_projection_receipts",
+            "SELECT COUNT(*) FROM session_temporal_projection_receipts",
+            "PRAGMA table_info(session_temporal_projection_receipts)",
+            "PRAGMA foreign_key_list(session_temporal_projection_receipts)",
+        ),
+        SessionStoreTable::SessionOccurrences => session_table(
+            "session_occurrences",
+            "SELECT COUNT(*) FROM session_occurrences",
+            "PRAGMA table_info(session_occurrences)",
+            "PRAGMA foreign_key_list(session_occurrences)",
+        ),
+        SessionStoreTable::SessionSummaryNodes => session_table(
+            "session_summary_nodes",
+            "SELECT COUNT(*) FROM session_summary_nodes",
+            "PRAGMA table_info(session_summary_nodes)",
+            "PRAGMA foreign_key_list(session_summary_nodes)",
+        ),
     }
 }
 
@@ -289,6 +307,82 @@ pub(crate) fn session_page_query(
                     }) => *observation_sequence,
                     _ => 0,
                 }),
+                Value::Integer(limit),
+            ],
+        ),
+        (SessionStoreTable::SessionTemporalProjectionReceipts, cursor) => {
+            let (session_id, generation, batch_ordinal) = match cursor {
+                Some(SessionStoreCursor::SessionTemporalProjectionReceipts {
+                    session_id,
+                    generation,
+                    batch_ordinal,
+                }) => (
+                    Value::Text(session_id.clone()),
+                    Value::Integer(*generation),
+                    Value::Integer(*batch_ordinal),
+                ),
+                _ => (Value::Null, Value::Null, Value::Null),
+            };
+            (
+                "SELECT session_id, generation, batch_ordinal, batch_digest,
+                        frozen_watermarks_json, source_through, projection_through,
+                        occurrence_count, occurrence_digest, dimension_count, dimension_digest,
+                        copy_count, copy_digest, assertion_count, assertion_digest,
+                        supersession_count, supersession_digest, current_count, current_digest,
+                        fts_count, fts_digest, committed_at
+                 FROM session_temporal_projection_receipts
+                 WHERE ?1 IS NULL
+                    OR session_id > ?1
+                    OR (session_id = ?1 AND generation > ?2)
+                    OR (session_id = ?1 AND generation = ?2 AND batch_ordinal > ?3)
+                 ORDER BY session_id, generation, batch_ordinal
+                 LIMIT ?4",
+                vec![session_id, generation, batch_ordinal, Value::Integer(limit)],
+            )
+        }
+        (SessionStoreTable::SessionOccurrences, cursor) => {
+            let (session_id, generation, occurrence_id) = match cursor {
+                Some(SessionStoreCursor::SessionOccurrences {
+                    session_id,
+                    generation,
+                    occurrence_id,
+                }) => (
+                    Value::Text(session_id.clone()),
+                    Value::Integer(*generation),
+                    Value::Text(occurrence_id.clone()),
+                ),
+                _ => (Value::Null, Value::Null, Value::Null),
+            };
+            (
+                "SELECT session_id, generation, occurrence_id, source_observation_id,
+                        projection_output_ordinal, retrieval_anchor_id, thread_id,
+                        thread_grouping_json, turn_id, turn_grouping_json, message_id,
+                        agent_id, role, knowledge_at, valid_time_json, evidence_json,
+                        snippet_text, index_text
+                 FROM session_occurrences
+                 WHERE ?1 IS NULL
+                    OR session_id > ?1
+                    OR (session_id = ?1 AND generation > ?2)
+                    OR (session_id = ?1 AND generation = ?2 AND occurrence_id > ?3)
+                 ORDER BY session_id, generation, occurrence_id
+                 LIMIT ?4",
+                vec![session_id, generation, occurrence_id, Value::Integer(limit)],
+            )
+        }
+        (SessionStoreTable::SessionSummaryNodes, cursor) => (
+            "SELECT summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                    source_horizon_json, publication_json, created_at
+             FROM session_summary_nodes
+             WHERE ?1 IS NULL OR summary_id > ?1
+             ORDER BY summary_id
+             LIMIT ?2",
+            vec![
+                match cursor {
+                    Some(SessionStoreCursor::SessionSummaryNodes { summary_id }) => {
+                        Value::Text(summary_id.clone())
+                    }
+                    _ => Value::Null,
+                },
                 Value::Integer(limit),
             ],
         ),

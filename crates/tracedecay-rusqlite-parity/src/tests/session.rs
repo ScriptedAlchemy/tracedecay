@@ -118,6 +118,15 @@ fn session_counts_schema_and_keyset_pages_cover_every_closed_table() {
             SessionStoreTable::SessionTemporalObservationEffects,
             "session_temporal_observation_effects",
         ),
+        (
+            SessionStoreTable::SessionTemporalProjectionReceipts,
+            "session_temporal_projection_receipts",
+        ),
+        (SessionStoreTable::SessionOccurrences, "session_occurrences"),
+        (
+            SessionStoreTable::SessionSummaryNodes,
+            "session_summary_nodes",
+        ),
     ] {
         let Output::SessionStorePage(page) = execute(
             &fixture.path,
@@ -136,4 +145,69 @@ fn session_counts_schema_and_keyset_pages_cover_every_closed_table() {
             expected
         );
     }
+}
+
+#[test]
+fn projection_receipt_pages_walk_the_composite_generation_keyset() {
+    let fixture = fixture();
+    let Output::SessionStorePage(first_page) = execute(
+        &fixture.path,
+        Command::SessionStorePage {
+            family: SessionStoreFamily::Temporal,
+            table: SessionStoreTable::SessionTemporalProjectionReceipts,
+            cursor: None,
+            limit: 1,
+        },
+    ) else {
+        panic!("projection-receipt page output expected");
+    };
+    assert_eq!(
+        first_page.order_columns,
+        ["session_id", "generation", "batch_ordinal"]
+    );
+    assert!(matches!(
+        &first_page.rows[0],
+        SessionStoreRow::SessionTemporalProjectionReceipts {
+            session_id,
+            generation: 1,
+            batch_ordinal: 0,
+            batch_digest,
+            row_digest,
+        } if session_id == "session-1"
+            && batch_digest == "batch-0"
+            && row_digest.starts_with("sha256:")
+    ));
+    assert!(first_page.next_cursor.is_some());
+
+    let Output::SessionStorePage(second_page) = execute(
+        &fixture.path,
+        Command::SessionStorePage {
+            family: SessionStoreFamily::Temporal,
+            table: SessionStoreTable::SessionTemporalProjectionReceipts,
+            cursor: first_page.next_cursor,
+            limit: 1,
+        },
+    ) else {
+        panic!("second projection-receipt page output expected");
+    };
+    assert!(matches!(
+        &second_page.rows[0],
+        SessionStoreRow::SessionTemporalProjectionReceipts {
+            batch_ordinal: 1,
+            batch_digest,
+            ..
+        } if batch_digest == "batch-1"
+    ));
+    assert!(second_page.next_cursor.is_none());
+
+    let Output::SessionStoreCount(count) = execute(
+        &fixture.path,
+        Command::SessionStoreCount {
+            family: SessionStoreFamily::Summary,
+            table: SessionStoreTable::SessionSummaryNodes,
+        },
+    ) else {
+        panic!("summary-node count output expected");
+    };
+    assert_eq!(count.row_count, Some(1));
 }

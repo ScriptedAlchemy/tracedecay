@@ -112,6 +112,7 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreFamily::Transcript,
         SessionStoreFamily::Lcm,
         SessionStoreFamily::Temporal,
+        SessionStoreFamily::Summary,
     ] {
         round_trip(family);
     }
@@ -124,6 +125,9 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreTable::SessionTemporalSchemaMigrations,
         SessionStoreTable::SessionTemporalGenerations,
         SessionStoreTable::SessionTemporalObservationEffects,
+        SessionStoreTable::SessionTemporalProjectionReceipts,
+        SessionStoreTable::SessionOccurrences,
+        SessionStoreTable::SessionSummaryNodes,
     ] {
         round_trip(table);
     }
@@ -152,6 +156,19 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         },
         SessionStoreCursor::SessionTemporalObservationEffects {
             observation_sequence: 1,
+        },
+        SessionStoreCursor::SessionTemporalProjectionReceipts {
+            session_id: "session".to_owned(),
+            generation: 1,
+            batch_ordinal: 0,
+        },
+        SessionStoreCursor::SessionOccurrences {
+            session_id: "session".to_owned(),
+            generation: 1,
+            occurrence_id: "occurrence".to_owned(),
+        },
+        SessionStoreCursor::SessionSummaryNodes {
+            summary_id: "summary".to_owned(),
         },
     ] {
         round_trip(cursor);
@@ -319,7 +336,7 @@ fn every_graph_session_journal_and_response_result_variant_round_trips() {
     });
 }
 
-fn session_rows() -> [SessionStoreRow; 8] {
+fn session_rows() -> [SessionStoreRow; 11] {
     [
         SessionStoreRow::Observations {
             sequence: 1,
@@ -369,6 +386,26 @@ fn session_rows() -> [SessionStoreRow; 8] {
             observation_sequence: 1,
             session_id: "session".to_owned(),
             effect_digest: "effect".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::SessionTemporalProjectionReceipts {
+            session_id: "session".to_owned(),
+            generation: 1,
+            batch_ordinal: 0,
+            batch_digest: "batch".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::SessionOccurrences {
+            session_id: "session".to_owned(),
+            generation: 1,
+            occurrence_id: "occurrence".to_owned(),
+            role: "user".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::SessionSummaryNodes {
+            summary_id: "summary".to_owned(),
+            session_id: "session".to_owned(),
+            summary_anchor_id: "anchor".to_owned(),
             row_digest: "row".to_owned(),
         },
     ]

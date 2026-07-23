@@ -78,10 +78,14 @@ fn subprocess_reports_closed_session_store_counts_schema_and_keyset_pages() {
         "session_temporal_schema_migrations",
         "session_temporal_generations",
         "session_temporal_observation_effects",
+        "session_temporal_projection_receipts",
+        "session_occurrences",
+        "session_summary_nodes",
     ] {
         let family = match table {
             "sessions" | "session_messages" => "transcript",
             "session_schema_migrations" | "lcm_raw_messages" => "lcm",
+            "session_summary_nodes" => "summary",
             _ => "temporal",
         };
         let response = invoke(&request(

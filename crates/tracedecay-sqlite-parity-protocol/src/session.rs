@@ -9,6 +9,7 @@ pub enum SessionStoreFamily {
     Transcript,
     Lcm,
     Temporal,
+    Summary,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -22,6 +23,9 @@ pub enum SessionStoreTable {
     SessionTemporalSchemaMigrations,
     SessionTemporalGenerations,
     SessionTemporalObservationEffects,
+    SessionTemporalProjectionReceipts,
+    SessionOccurrences,
+    SessionSummaryNodes,
 }
 
 impl SessionStoreTable {
@@ -33,7 +37,10 @@ impl SessionStoreTable {
             Self::SessionSchemaMigrations | Self::LcmRawMessages => SessionStoreFamily::Lcm,
             Self::SessionTemporalSchemaMigrations
             | Self::SessionTemporalGenerations
-            | Self::SessionTemporalObservationEffects => SessionStoreFamily::Temporal,
+            | Self::SessionTemporalObservationEffects
+            | Self::SessionTemporalProjectionReceipts
+            | Self::SessionOccurrences => SessionStoreFamily::Temporal,
+            Self::SessionSummaryNodes => SessionStoreFamily::Summary,
         }
     }
 
@@ -47,6 +54,11 @@ impl SessionStoreTable {
             Self::LcmRawMessages => &["store_id"],
             Self::SessionTemporalGenerations => &["session_id", "generation"],
             Self::SessionTemporalObservationEffects => &["observation_sequence"],
+            Self::SessionTemporalProjectionReceipts => {
+                &["session_id", "generation", "batch_ordinal"]
+            }
+            Self::SessionOccurrences => &["session_id", "generation", "occurrence_id"],
+            Self::SessionSummaryNodes => &["summary_id"],
         }
     }
 }
@@ -82,6 +94,19 @@ pub enum SessionStoreCursor {
     },
     SessionTemporalObservationEffects {
         observation_sequence: i64,
+    },
+    SessionTemporalProjectionReceipts {
+        session_id: String,
+        generation: i64,
+        batch_ordinal: i64,
+    },
+    SessionOccurrences {
+        session_id: String,
+        generation: i64,
+        occurrence_id: String,
+    },
+    SessionSummaryNodes {
+        summary_id: String,
     },
 }
 
@@ -189,6 +214,26 @@ pub enum SessionStoreRow {
         observation_sequence: i64,
         session_id: String,
         effect_digest: String,
+        row_digest: String,
+    },
+    SessionTemporalProjectionReceipts {
+        session_id: String,
+        generation: i64,
+        batch_ordinal: i64,
+        batch_digest: String,
+        row_digest: String,
+    },
+    SessionOccurrences {
+        session_id: String,
+        generation: i64,
+        occurrence_id: String,
+        role: String,
+        row_digest: String,
+    },
+    SessionSummaryNodes {
+        summary_id: String,
+        session_id: String,
+        summary_anchor_id: String,
         row_digest: String,
     },
 }
@@ -312,6 +357,36 @@ fn validate_page_cursor(
                 observation_sequence,
             },
         ) => *observation_sequence > 0,
+        (
+            SessionStoreTable::SessionTemporalProjectionReceipts,
+            SessionStoreCursor::SessionTemporalProjectionReceipts {
+                session_id,
+                generation,
+                batch_ordinal,
+            },
+        ) => {
+            validate_cursor_text("session_id", session_id)?;
+            *generation > 0 && *batch_ordinal >= 0
+        }
+        (
+            SessionStoreTable::SessionOccurrences,
+            SessionStoreCursor::SessionOccurrences {
+                session_id,
+                generation,
+                occurrence_id,
+            },
+        ) => {
+            validate_cursor_text("session_id", session_id)?;
+            validate_cursor_text("occurrence_id", occurrence_id)?;
+            *generation > 0
+        }
+        (
+            SessionStoreTable::SessionSummaryNodes,
+            SessionStoreCursor::SessionSummaryNodes { summary_id },
+        ) => {
+            validate_cursor_text("summary_id", summary_id)?;
+            true
+        }
         _ => false,
     };
     if !valid {

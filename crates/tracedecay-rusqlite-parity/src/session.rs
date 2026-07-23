@@ -231,6 +231,28 @@ fn decode_row(table: SessionStoreTable, row: &Row<'_>) -> rusqlite::Result<Sessi
                 row_digest,
             })
         }
+        SessionStoreTable::SessionTemporalProjectionReceipts => {
+            Ok(SessionStoreRow::SessionTemporalProjectionReceipts {
+                session_id: row.get(0)?,
+                generation: row.get(1)?,
+                batch_ordinal: row.get(2)?,
+                batch_digest: row.get(3)?,
+                row_digest,
+            })
+        }
+        SessionStoreTable::SessionOccurrences => Ok(SessionStoreRow::SessionOccurrences {
+            session_id: row.get(0)?,
+            generation: row.get(1)?,
+            occurrence_id: row.get(2)?,
+            role: row.get(12)?,
+            row_digest,
+        }),
+        SessionStoreTable::SessionSummaryNodes => Ok(SessionStoreRow::SessionSummaryNodes {
+            summary_id: row.get(0)?,
+            session_id: row.get(1)?,
+            summary_anchor_id: row.get(2)?,
+            row_digest,
+        }),
     }
 }
 
@@ -282,6 +304,31 @@ fn cursor_for_row(row: &SessionStoreRow) -> SessionStoreCursor {
         } => SessionStoreCursor::SessionTemporalObservationEffects {
             observation_sequence: *observation_sequence,
         },
+        SessionStoreRow::SessionTemporalProjectionReceipts {
+            session_id,
+            generation,
+            batch_ordinal,
+            ..
+        } => SessionStoreCursor::SessionTemporalProjectionReceipts {
+            session_id: session_id.clone(),
+            generation: *generation,
+            batch_ordinal: *batch_ordinal,
+        },
+        SessionStoreRow::SessionOccurrences {
+            session_id,
+            generation,
+            occurrence_id,
+            ..
+        } => SessionStoreCursor::SessionOccurrences {
+            session_id: session_id.clone(),
+            generation: *generation,
+            occurrence_id: occurrence_id.clone(),
+        },
+        SessionStoreRow::SessionSummaryNodes { summary_id, .. } => {
+            SessionStoreCursor::SessionSummaryNodes {
+                summary_id: summary_id.clone(),
+            }
+        }
     }
 }
 

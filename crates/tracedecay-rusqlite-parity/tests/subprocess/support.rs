@@ -128,6 +128,63 @@ pub(crate) fn fixture() -> Fixture {
                 output_count INTEGER NOT NULL,
                 recorded_at INTEGER NOT NULL
             );
+            CREATE TABLE session_temporal_projection_receipts (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                batch_ordinal INTEGER NOT NULL,
+                batch_digest TEXT NOT NULL,
+                frozen_watermarks_json TEXT NOT NULL,
+                source_through INTEGER NOT NULL,
+                projection_through INTEGER NOT NULL,
+                occurrence_count INTEGER NOT NULL,
+                occurrence_digest TEXT NOT NULL,
+                dimension_count INTEGER NOT NULL,
+                dimension_digest TEXT NOT NULL,
+                copy_count INTEGER NOT NULL,
+                copy_digest TEXT NOT NULL,
+                assertion_count INTEGER NOT NULL,
+                assertion_digest TEXT NOT NULL,
+                supersession_count INTEGER NOT NULL,
+                supersession_digest TEXT NOT NULL,
+                current_count INTEGER NOT NULL,
+                current_digest TEXT NOT NULL,
+                fts_count INTEGER NOT NULL,
+                fts_digest TEXT NOT NULL,
+                committed_at INTEGER NOT NULL,
+                PRIMARY KEY(session_id, generation, batch_ordinal),
+                UNIQUE(session_id, generation, batch_digest)
+            );
+            CREATE TABLE session_occurrences (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                occurrence_id TEXT NOT NULL,
+                source_observation_id TEXT NOT NULL,
+                projection_output_ordinal INTEGER NOT NULL,
+                retrieval_anchor_id TEXT NOT NULL,
+                thread_id TEXT,
+                thread_grouping_json TEXT,
+                turn_id TEXT,
+                turn_grouping_json TEXT,
+                message_id TEXT,
+                agent_id TEXT,
+                role TEXT NOT NULL,
+                knowledge_at INTEGER NOT NULL,
+                valid_time_json TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                snippet_text TEXT NOT NULL,
+                index_text TEXT NOT NULL,
+                PRIMARY KEY(session_id, generation, occurrence_id)
+            );
+            CREATE TABLE session_summary_nodes (
+                summary_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                summary_anchor_id TEXT NOT NULL,
+                summary_text TEXT NOT NULL,
+                index_text TEXT NOT NULL,
+                source_horizon_json TEXT NOT NULL,
+                publication_json TEXT,
+                created_at INTEGER NOT NULL
+            );
             CREATE VIRTUAL TABLE nodes_fts USING fts5(
                 name, qualified_name, docstring, signature,
                 content='nodes', content_rowid='rowid'
@@ -163,6 +220,29 @@ pub(crate) fn fixture() -> Fixture {
                 observation_id, observation_sequence, session_id, receipt_id,
                 effect_digest, output_count, recorded_at
             ) VALUES ('observation-1', 1, 'session-1', 'receipt', 'effect-1', 1, 1);
+            INSERT INTO session_temporal_projection_receipts(
+                session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json,
+                source_through, projection_through, occurrence_count, occurrence_digest,
+                dimension_count, dimension_digest, copy_count, copy_digest, assertion_count,
+                assertion_digest, supersession_count, supersession_digest, current_count,
+                current_digest, fts_count, fts_digest, committed_at
+            ) VALUES
+                ('session-1', 1, 0, 'batch-0', '{}', 0, 0, 1, 'occ', 0, 'dim', 0, 'copy',
+                 0, 'assert', 0, 'super', 0, 'curr', 0, 'fts', 1),
+                ('session-1', 1, 1, 'batch-1', '{}', 1, 1, 0, 'occ', 0, 'dim', 0, 'copy',
+                 0, 'assert', 0, 'super', 0, 'curr', 0, 'fts', 2);
+            INSERT INTO session_occurrences(
+                session_id, generation, occurrence_id, source_observation_id,
+                projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
+                valid_time_json, evidence_json, snippet_text, index_text
+            ) VALUES (
+                'session-1', 1, 'occurrence-1', 'observation-1', 0, 'anchor-1', 'user', 1,
+                '{\"kind\":\"unknown\"}', '{}', 'snippet', 'index'
+            );
+            INSERT INTO session_summary_nodes(
+                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                source_horizon_json, created_at
+            ) VALUES ('summary-1', 'session-1', 'anchor-1', '', '', '{}', 1);
             INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild');",
         )
         .expect("create fixture schema");
