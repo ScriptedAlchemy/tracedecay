@@ -2,7 +2,7 @@
 //!
 //! The helper is deliberately not linked into the daemon. This module accepts
 //! only an explicit executable and an explicit authority-store path, freezes a
-//! coherent single-file copy with the existing libsql snapshot machinery, and
+//! coherent single-file copy with the canonical SQLite snapshot machinery, and
 //! exchanges one closed, versioned request from the shared parity protocol.
 
 #![cfg(test)]
@@ -469,7 +469,7 @@ async fn materialize_single_file(
         .map_err(|error| RusqliteParityInfrastructureErrorV1::Snapshot {
             message: error.to_string(),
         })?;
-    let copy = connection.execute(SNAPSHOT_SQL, libsql::params![destination]);
+    let copy = connection.execute(SNAPSHOT_SQL, crate::db::engine::params![destination]);
     tokio::pin!(copy);
     let interrupted = cancellation.cancelled();
     tokio::pin!(interrupted);
@@ -1345,7 +1345,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use libsql::Builder;
     use tempfile::TempDir;
     use tracedecay_sqlite_parity_protocol::{
         EffectiveJournalModeV1, FtsMatchV1, FtsParityV1, GraphFtsTableV1, GraphTableV1,
@@ -1382,19 +1381,16 @@ mod tests {
 
     struct FixtureStore {
         path: PathBuf,
-        _database: libsql::Database,
-        _connection: libsql::Connection,
+        _connection: crate::db::engine::TestConnection,
     }
 
     async fn fixture_store(root: &Path) -> FixtureStore {
         std::fs::create_dir_all(root).unwrap();
         let path = root.join("authority.db");
-        let database = Builder::new_local(&path).build().await.unwrap();
-        let connection = database.connect().unwrap();
+        let connection = crate::db::engine::TestConnection::open(&path);
         connection
             .execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 CREATE TABLE parity_fixture(value TEXT NOT NULL);
+                "CREATE TABLE parity_fixture(value TEXT NOT NULL);
                  INSERT INTO parity_fixture VALUES ('wal-resident');",
             )
             .await
@@ -1407,7 +1403,6 @@ mod tests {
         );
         FixtureStore {
             path,
-            _database: database,
             _connection: connection,
         }
     }
