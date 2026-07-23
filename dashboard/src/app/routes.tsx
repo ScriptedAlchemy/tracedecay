@@ -11,11 +11,13 @@ import { AutomationsPage } from '../workspaces/automations/AutomationsPage.tsx';
 import { SettingsPage } from '../workspaces/settings/SettingsPage.tsx';
 import { ExplorerPage } from '../workspaces/explorer/ExplorerPage.tsx';
 import { LoomPage } from '../workspaces/loom/LoomPage.tsx';
+import { AgentsPage } from '../workspaces/agents/AgentsPage.tsx';
 
 const WIRED: Record<string, () => React.JSX.Element> = {
   brain: BrainPage,
   explorer: ExplorerPage,
   loom: LoomPage,
+  agents: AgentsPage,
   sessions: SessionsPage,
   knowledge: KnowledgePage,
   code: CodePage,
