@@ -19,9 +19,7 @@ use tracedecay_store::{
     TransactionalOutboxEntryV1,
 };
 
-#[path = "../inbox/mod.rs"]
 mod inbox;
-#[path = "../outbox/mod.rs"]
 mod outbox;
 
 use super::ports::{
