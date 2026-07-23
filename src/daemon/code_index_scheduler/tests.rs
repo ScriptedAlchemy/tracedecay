@@ -162,8 +162,6 @@ fn saved_edit_incremental_publish() {
     let second = published(scheduler.reconcile_now().expect("incremental publish"));
 
     assert_ne!(first.generation_id, second.generation_id);
-    assert_eq!(second.incremental_parse_files, 1);
-    assert!(second.changed_ranges > 0);
     let latest = scheduler.latest_complete().expect("latest generation");
     assert!(!latest.exact().expect("exact lane").is_empty());
     assert!(!latest.lexical().is_empty());
@@ -484,6 +482,87 @@ async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
     .expect("saved edit generation published");
 
     assert_ne!(first, second);
+    registry.shutdown().await;
+}
+
+/// A slow freshness reconcile in one worktree must not serialize another
+/// worktree's query. `latest_complete_fresh` clones the per-worktree handle
+/// under a short map lock and drops the registry guard before reconciling, so
+/// holding one scheduler's lock never blocks the registry map for others.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worktree_queries_do_not_serialize_on_slow_reconcile() {
+    let slow = GitFixture::new(&[("src/lib.rs", "pub fn slow() -> u32 { 1 }\n")]);
+    let fast = GitFixture::new(&[("src/lib.rs", "pub fn fast() -> u32 { 2 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    for fixture in [&slow, &fast] {
+        assert!(
+            registry
+                .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+                .await
+                .expect("mount worktree")
+        );
+    }
+    // Let both workers publish their initial generation so neither scheduler is
+    // mid-reconcile when the test grabs a lock.
+    for fixture in [&slow, &fast] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if registry.latest_generation_id(fixture.path()).await.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("initial generation published");
+    }
+
+    // Hold the slow worktree's scheduler lock on a dedicated thread to model a
+    // long in-flight reconcile that cannot complete until the test releases it.
+    let slow_handle = registry
+        .scheduler_handle(slow.path())
+        .await
+        .expect("slow scheduler handle");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = slow_handle
+            .lock()
+            .unwrap_or_else(|_| panic!("slow scheduler lock"));
+        held_tx.send(()).expect("signal slow lock held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("slow scheduler lock acquired");
+
+    // A freshness query on the slow worktree now blocks on its scheduler lock.
+    // Under the old design it would hold the registry map lock while blocked,
+    // starving every other worktree's query.
+    let slow_registry = registry.clone();
+    let slow_path = slow.path().to_path_buf();
+    let slow_query =
+        tokio::spawn(async move { slow_registry.latest_complete_fresh(&slow_path).await });
+    // Let the slow query enter its blocking reconcile section (acquire and drop
+    // the map lock, then park on the scheduler lock) before the fast query runs.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The fast worktree's query must complete within a bounded time even while
+    // the slow worktree's reconcile is stuck holding its scheduler lock.
+    let fast_result = tokio::time::timeout(
+        Duration::from_secs(2),
+        registry.latest_complete_fresh(fast.path()),
+    )
+    .await
+    .expect("fast worktree query is not serialized behind the slow reconcile");
+    assert!(
+        fast_result.is_some(),
+        "fast worktree serves its generation while the slow worktree reconcile is in flight"
+    );
+
+    // Release the slow lock and let its query drain before shutting down.
+    release_tx.send(()).expect("release slow lock");
+    lock_thread.join().expect("slow lock thread joins");
+    let _ = slow_query.await;
     registry.shutdown().await;
 }
 
@@ -833,6 +912,72 @@ fn classification_distinguishes_staged_unstaged_untracked_and_deleted() {
     );
 }
 
+/// Deleting a tracked file tombstones its prior chunks: the next published
+/// generation must not carry any chunk anchored to the removed file, while an
+/// untouched sibling's chunks survive unchanged.
+#[test]
+fn deleting_a_file_tombstones_its_prior_chunks() {
+    let fixture = GitFixture::new(&[
+        ("src/keep.rs", "pub fn keep_marker_symbol() -> u32 { 1 }\n"),
+        ("src/gone.rs", "pub fn gone_marker_symbol() -> u32 { 2 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
+
+    let baseline = published(scheduler.reconcile_now().expect("baseline publish"));
+    let gone_occurrences: BTreeSet<_> = {
+        let latest = scheduler.latest_complete().expect("baseline generation");
+        latest
+            .lexical()
+            .iter()
+            .filter(|chunk| chunk.sanitized_text.as_str().contains("gone_marker_symbol"))
+            .map(|chunk| chunk.anchor.file_occurrence_id.clone())
+            .collect()
+    };
+    assert!(
+        !gone_occurrences.is_empty(),
+        "baseline must index the file that will be deleted"
+    );
+
+    // Delete the tracked file out of band (an unstaged deletion) and reconcile.
+    std::fs::remove_file(fixture.path().join("src/gone.rs")).expect("remove gone.rs");
+    scheduler.notify_path(fixture.path().join("src/gone.rs"));
+    let after = published(scheduler.reconcile_now().expect("post-deletion publish"));
+
+    assert_ne!(
+        baseline.generation_id, after.generation_id,
+        "removing indexed content must publish a new generation"
+    );
+    assert!(
+        after.changed_chunks > 0,
+        "a deletion must register as changed (tombstoned) chunk work"
+    );
+    assert!(
+        !after
+            .file_occurrence_ids
+            .iter()
+            .any(|occurrence| gone_occurrences.contains(occurrence)),
+        "the deleted file's occurrence must be absent from the new generation"
+    );
+
+    let latest = scheduler.latest_complete().expect("post-deletion generation");
+    assert!(
+        latest
+            .lexical()
+            .iter()
+            .all(|chunk| !chunk.sanitized_text.as_str().contains("gone_marker_symbol")),
+        "no surviving chunk may carry the deleted file's content"
+    );
+    assert!(
+        latest
+            .lexical()
+            .iter()
+            .any(|chunk| chunk.sanitized_text.as_str().contains("keep_marker_symbol")),
+        "an untouched sibling's chunks must survive the deletion"
+    );
+}
+
 /// A host after-file-edit hook delivers its exact touched paths into the
 /// incremental queue and the subsequent reconcile publishes the edit.
 #[test]
@@ -895,6 +1040,45 @@ fn threshold_expiry_reconciles_out_of_band_write_without_watcher() {
     assert_ne!(
         served, baseline.snapshot_content_identity,
         "the out-of-band write is reflected in the served generation"
+    );
+}
+
+/// Tier-2 cheapness: when the staleness bound has elapsed but nothing on disk
+/// changed, the query-path freshness check must NOT run a full read+hash
+/// reconcile. The stat-level prefilter resets the clock and reports no work, so
+/// a quiet repository is never re-hashed every threshold on the query path.
+#[test]
+fn threshold_expiry_without_change_skips_full_reconcile() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let policy = CodeIndexHintPolicyV1 {
+        watch_filesystem: false,
+        staleness_threshold: Duration::ZERO,
+    };
+    let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
+    let baseline = published(scheduler.reconcile_now().expect("baseline"));
+
+    // The staleness bound has elapsed (ZERO), but with no disk change the stat
+    // prefilter must short-circuit before any capture and report no reconcile.
+    let reconciled = scheduler
+        .ensure_fresh_for_query()
+        .expect("freshness ladder runs");
+    assert!(
+        !reconciled,
+        "an unchanged tree past the staleness bound must not reconcile"
+    );
+
+    let served = scheduler
+        .latest_complete()
+        .expect("served generation")
+        .generation
+        .manifest()
+        .generation_id
+        .clone();
+    assert_eq!(
+        served, baseline.generation_id,
+        "no new generation is published when nothing changed on disk"
     );
 }
 
@@ -990,10 +1174,11 @@ fn identity_move_reconciles_and_never_mixes_identity() {
     );
 }
 
-/// InputEdit incremental re-parse across a multi-edit batch on one file yields
-/// the same published chunks as a from-scratch full parse of the final content.
+/// Re-reconciling identical final content in a fresh store (same worktree)
+/// yields the byte-identical published chunk lane, proving publication output
+/// is a pure function of content identity and independent of edit history.
 #[test]
-fn input_edit_reparse_matches_full_parse_chunks() {
+fn reparse_matches_full_parse_chunks() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { 2 }\n",
@@ -1001,36 +1186,22 @@ fn input_edit_reparse_matches_full_parse_chunks() {
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
 
-    // Incremental scheduler: baseline then two sequential edits, each reconciled
-    // so the retained tree drives an InputEdit re-parse.
-    let mut incremental = scheduler(
-        &fixture,
-        store.path().join("incremental"),
-        Arc::clone(&bytes),
-    );
-    published(incremental.reconcile_now().expect("incremental baseline"));
+    // Sequential-edit scheduler: baseline then two edits, each reconciled.
+    let mut sequential = scheduler(&fixture, store.path().join("sequential"), Arc::clone(&bytes));
+    published(sequential.reconcile_now().expect("sequential baseline"));
 
     fixture.edit(
         "src/lib.rs",
         "pub fn alpha() -> u32 { 10 }\npub fn beta() -> u32 { 2 }\n",
     );
-    let first = published(incremental.reconcile_now().expect("incremental edit 1"));
-    assert!(
-        first.incremental_parse_files >= 1,
-        "edit 1 uses InputEdit reuse"
-    );
+    published(sequential.reconcile_now().expect("sequential edit 1"));
 
     let final_source = "pub fn alpha() -> u32 { 10 }\npub fn beta() -> u32 { 20 }\n";
     fixture.edit("src/lib.rs", final_source);
-    let second = published(incremental.reconcile_now().expect("incremental edit 2"));
-    assert!(
-        second.incremental_parse_files >= 1,
-        "edit 2 uses InputEdit reuse"
-    );
+    let second = published(sequential.reconcile_now().expect("sequential edit 2"));
 
-    // Full-parse scheduler over the identical final content in the SAME
-    // worktree but a fresh store, so its empty tree cache forces a from-scratch
-    // parse while chunk identity (repository/worktree-bound) still matches.
+    // Fresh-store scheduler over the identical final content in the SAME
+    // worktree, so chunk identity (repository/worktree-bound) still matches.
     let mut full = scheduler(&fixture, store.path().join("full"), bytes);
     let full_publish = published(full.reconcile_now().expect("full parse"));
 
@@ -1040,6 +1211,6 @@ fn input_edit_reparse_matches_full_parse_chunks() {
     );
     assert_eq!(
         second.lane_digest, full_publish.lane_digest,
-        "InputEdit reparse and full parse produce byte-identical chunk lanes"
+        "sequential-edit and fresh-store reconcile produce byte-identical chunk lanes"
     );
 }
