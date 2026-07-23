@@ -14,12 +14,19 @@ use tracedecay_store::{
 
 use super::{
     EffectCoordinator, EffectCoordinatorError, EffectDispatchOutcome, EffectUnknownCause,
-    OriginDispatchPreparation, OriginEffectReplayTransactions, OriginEffectTransactions,
-    SqliteOriginEffectTransactions, SqliteTargetEffectTransactions, TargetEffectTransactions,
+    EffectsLedgerReadExecutor, OriginDispatchPreparation, OriginEffectReplayTransactions,
+    OriginEffectTransactions, SqliteOriginEffectTransactions, SqliteTargetEffectTransactions,
+    TargetEffectTransactions,
 };
 use crate::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
+    repository::ConcreteRepositoryReadExecutor,
     test_support::{metadata, request},
+};
+use tracedecay_store::{
+    CodeReadOperationV1, CodeRecoveryRepositoriesQueryV1, EffectsInboxPageQueryV1,
+    EffectsOutboxCursorV1, EffectsOutboxPageQueryV1, EffectsReadOperationV1, EffectsReadResultV1,
+    RepositoryReadOperationV1,
 };
 
 fn id<T>(value: &str) -> T
@@ -825,4 +832,213 @@ fn sqlite_origin_rejects_stale_epoch_without_transitioning_outbox() {
             let persisted: TransactionalOutboxEntryV1 = serde_json::from_str(&entry_json).unwrap();
             assert_eq!(persisted.state, OutboxEffectStateV1::Pending);
         });
+}
+
+#[test]
+fn effects_read_outbox_entry_round_trips_after_write() {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("source.sqlite");
+            let source_metadata = metadata("operation.read", "key.read", 'a');
+            let binding = crate::test_support::binding(&source_metadata);
+            let (_locator, writer) = writer(&path, &binding);
+            let seeded = seed_outbox(&writer, "operation.read", "key.read", 'a', 0).await;
+            writer.shutdown_and_join().unwrap();
+
+            let mut connection = Connection::open(&path).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let mut reader = EffectsLedgerReadExecutor;
+
+            let hit = reader
+                .execute_read(
+                    &transaction,
+                    &EffectsReadOperationV1::OutboxEntry {
+                        binding: binding.clone(),
+                        effect_id: seeded.identity.effect_id.clone(),
+                    },
+                )
+                .unwrap();
+            match hit {
+                EffectsReadResultV1::OutboxEntry(Some(entry)) => assert_eq!(*entry, seeded),
+                other => panic!("expected outbox entry, got {other:?}"),
+            }
+
+            let miss = reader
+                .execute_read(
+                    &transaction,
+                    &EffectsReadOperationV1::OutboxEntry {
+                        binding: binding.clone(),
+                        effect_id: StoreEffectIdV1::new("effect.absent").unwrap(),
+                    },
+                )
+                .unwrap();
+            assert!(matches!(miss, EffectsReadResultV1::OutboxEntry(None)));
+        });
+}
+
+#[test]
+fn effects_read_outbox_page_walks_keyset_in_order() {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("source.sqlite");
+            let source_metadata = metadata("operation.p0", "key.p0", 'a');
+            let binding = crate::test_support::binding(&source_metadata);
+            let (_locator, writer) = writer(&path, &binding);
+            let first = seed_outbox(&writer, "operation.p0", "key.p0", 'a', 0).await;
+            let second = seed_outbox(&writer, "operation.p1", "key.p1", 'b', 1).await;
+            let third = seed_outbox(&writer, "operation.p2", "key.p2", 'c', 2).await;
+            writer.shutdown_and_join().unwrap();
+
+            let mut connection = Connection::open(&path).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let mut reader = EffectsLedgerReadExecutor;
+
+            let mut cursor: Option<EffectsOutboxCursorV1> = None;
+            let mut walked = Vec::new();
+            loop {
+                let page = match reader
+                    .execute_read(
+                        &transaction,
+                        &EffectsReadOperationV1::OutboxPage(EffectsOutboxPageQueryV1 {
+                            binding: binding.clone(),
+                            after: cursor.clone(),
+                            limit: 1,
+                        }),
+                    )
+                    .unwrap()
+                {
+                    EffectsReadResultV1::OutboxPage(page) => page,
+                    other => panic!("expected outbox page, got {other:?}"),
+                };
+                assert!(page.entries.len() <= 1);
+                walked.extend(page.entries);
+                match page.next {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+
+            let ordered: Vec<u64> = walked
+                .iter()
+                .map(|entry| entry.identity.source_watermark.commit_sequence.0)
+                .collect();
+            assert_eq!(ordered, vec![0, 1, 2]);
+            assert_eq!(walked, vec![first, second, third]);
+        });
+}
+
+#[test]
+fn effects_read_inbox_round_trips_after_apply() {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let source_path = directory.path().join("source.sqlite");
+            let target_path = directory.path().join("target.sqlite");
+            let source_metadata = metadata("operation.inbox", "key.inbox", 'a');
+            let source_binding = crate::test_support::binding(&source_metadata);
+            let (_source_locator, source_writer) = writer(&source_path, &source_binding);
+            let entry = seed_outbox(&source_writer, "operation.inbox", "key.inbox", 'a', 0).await;
+            let target_binding = StoreRuntimeBindingV1::new(
+                entry.identity.target_watermark.shard_id.clone(),
+                entry.identity.target_watermark.incarnation,
+                entry.identity.target_watermark.authority_epoch,
+            );
+            let (_target_locator, target_writer) = writer(&target_path, &target_binding);
+            let effect_id = entry.identity.effect_id.clone();
+            let mut origin = SqliteOriginEffectTransactions::open(&source_writer).unwrap();
+            let prepared = origin
+                .prepare_dispatch(&source_binding, &effect_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let dispatched = match prepared {
+                OriginDispatchPreparation::Prepared(entry) => entry,
+                preparation => panic!("expected prepared dispatch, got {preparation:?}"),
+            };
+            let applied = SqliteTargetEffectTransactions::new(&target_writer)
+                .apply_once(&target_binding, &dispatched)
+                .await
+                .unwrap();
+            assert_eq!(applied.disposition, InboxEffectDispositionV1::Applied);
+            source_writer.shutdown_and_join().unwrap();
+            target_writer.shutdown_and_join().unwrap();
+
+            let mut connection = Connection::open(&target_path).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let mut reader = EffectsLedgerReadExecutor;
+
+            let point = reader
+                .execute_read(
+                    &transaction,
+                    &EffectsReadOperationV1::InboxReceipt {
+                        binding: target_binding.clone(),
+                        effect_id: effect_id.clone(),
+                    },
+                )
+                .unwrap();
+            match point {
+                EffectsReadResultV1::InboxReceipt(Some(receipt)) => {
+                    assert_eq!(receipt.identity.effect_id, effect_id);
+                    assert_eq!(receipt.target_commit_watermark.shard_id, target_binding.shard_id);
+                }
+                other => panic!("expected inbox receipt, got {other:?}"),
+            }
+
+            let page = reader
+                .execute_read(
+                    &transaction,
+                    &EffectsReadOperationV1::InboxPage(EffectsInboxPageQueryV1 {
+                        binding: target_binding.clone(),
+                        after: None,
+                        limit: 8,
+                    }),
+                )
+                .unwrap();
+            match page {
+                EffectsReadResultV1::InboxPage(page) => {
+                    assert_eq!(page.receipts.len(), 1);
+                    assert_eq!(page.receipts[0].identity.effect_id, effect_id);
+                    assert!(page.next.is_none());
+                }
+                other => panic!("expected inbox page, got {other:?}"),
+            }
+        });
+}
+
+#[test]
+fn repository_read_attachment_rejects_code_and_effects_families() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.transaction().unwrap();
+    let mut executor = ConcreteRepositoryReadExecutor::default();
+
+    let effects = executor.execute(
+        &transaction,
+        &RepositoryReadOperationV1::Effects(EffectsReadOperationV1::OutboxPage(
+            EffectsOutboxPageQueryV1 {
+                binding: crate::test_support::binding(&metadata("operation.x", "key.x", 'a')),
+                after: None,
+                limit: 4,
+            },
+        )),
+    );
+    assert!(effects.is_err());
+
+    let code = executor.execute(
+        &transaction,
+        &RepositoryReadOperationV1::Code(CodeReadOperationV1::RecoveryRepositories(
+            CodeRecoveryRepositoriesQueryV1 {
+                after: None,
+                limit: 4,
+            },
+        )),
+    );
+    assert!(code.is_err());
 }
