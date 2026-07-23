@@ -23,6 +23,28 @@ function rowsOf(data: z.infer<typeof ListPayload>): Record<string, unknown>[] {
   return data.results ?? data.items ?? data.nodes ?? data.facts ?? [];
 }
 
+const MemoryListPayload = z
+  .object({
+    holographic: z
+      .object({ facts: z.array(AnyObject).optional() })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+function memoryRows(data: Record<string, unknown>): Record<string, unknown>[] {
+  const holographic = data['holographic'];
+  if (holographic && typeof holographic === 'object') {
+    const facts = (holographic as { facts?: unknown }).facts;
+    if (Array.isArray(facts)) return facts as Record<string, unknown>[];
+  }
+  return [];
+}
+
+type SourceResult =
+  | { outcome: 'ok'; data: Record<string, unknown> }
+  | { outcome: string; data?: unknown };
+
 /** Explorer: one query fanned across independent sources with per-source
  * progress rows (the planner-composer pattern, minimally realized over the
  * legacy search surfaces — the typed PlannerQueryRun replaces this fan-out
@@ -43,10 +65,20 @@ export function ExplorerPage() {
     `/api/plugins/hermes-lcm/search?q=${encodeURIComponent(submitted)}`,
     ListPayload,
   );
+  const memory = useLegacy(
+    ['explorer', 'memory', submitted],
+    `/api/plugins/holographic/?q=${encodeURIComponent(submitted)}&limit=25`,
+    MemoryListPayload,
+  );
 
-  const sources = [
-    { name: 'code graph', query: graph },
-    { name: 'sessions', query: lcm },
+  const sources: Array<{
+    name: string;
+    query: { isPending: boolean; data?: SourceResult };
+    extract: (data: Record<string, unknown>) => Record<string, unknown>[];
+  }> = [
+    { name: 'code graph', query: graph, extract: rowsOf },
+    { name: 'sessions', query: lcm, extract: rowsOf },
+    { name: 'knowledge', query: memory, extract: memoryRows },
   ];
 
   return (
@@ -76,7 +108,7 @@ export function ExplorerPage() {
                     <StateChip kind="loading" />
                   ) : s.query.data?.outcome === 'ok' ? (
                     <span className="tabular text-text-secondary">
-                      {rowsOf(s.query.data.data).length}
+                      {s.extract(s.query.data.data as Record<string, unknown>).length}
                     </span>
                   ) : (
                     <StateChip
@@ -98,11 +130,12 @@ export function ExplorerPage() {
           <div>
             {sources.map((s) =>
               s.query.data?.outcome === 'ok'
-                ? rowsOf(s.query.data.data).map((row, i) => {
+                ? s.extract(s.query.data.data as Record<string, unknown>).map((row, i) => {
                     const label = String(
                       row['qualified_name'] ??
                         row['name'] ??
                         row['summary'] ??
+                        row['content'] ??
                         row['text'] ??
                         row['session_id'] ??
                         i,
