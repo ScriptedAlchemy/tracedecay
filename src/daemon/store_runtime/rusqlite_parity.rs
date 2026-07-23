@@ -1205,6 +1205,15 @@ fn session_store_row_matches(table: SessionStoreTableV1, row: &SessionStoreRowV1
         SessionStoreRowV1::SessionSummarySuccessors { .. } => {
             SessionStoreTableV1::SessionSummarySuccessors
         }
+        SessionStoreRowV1::MemoryV2Facts { .. } => SessionStoreTableV1::MemoryV2Facts,
+        SessionStoreRowV1::MemoryV2CurrentFacts { .. } => {
+            SessionStoreTableV1::MemoryV2CurrentFacts
+        }
+        SessionStoreRowV1::MemoryV2Assertions { .. } => SessionStoreTableV1::MemoryV2Assertions,
+        SessionStoreRowV1::MemoryV2LineageEvents { .. } => {
+            SessionStoreTableV1::MemoryV2LineageEvents
+        }
+        SessionStoreRowV1::RetrievalAnchors { .. } => SessionStoreTableV1::RetrievalAnchors,
     };
     table == expected && is_canonical_sha256_digest(session_store_row_digest(row))
 }
@@ -1226,7 +1235,12 @@ fn session_store_row_digest(row: &SessionStoreRowV1) -> &str {
         | SessionStoreRowV1::SessionAssertions { row_digest, .. }
         | SessionStoreRowV1::SessionSummaryNodes { row_digest, .. }
         | SessionStoreRowV1::SessionSummarySources { row_digest, .. }
-        | SessionStoreRowV1::SessionSummarySuccessors { row_digest, .. } => row_digest,
+        | SessionStoreRowV1::SessionSummarySuccessors { row_digest, .. }
+        | SessionStoreRowV1::MemoryV2Facts { row_digest, .. }
+        | SessionStoreRowV1::MemoryV2CurrentFacts { row_digest, .. }
+        | SessionStoreRowV1::MemoryV2Assertions { row_digest, .. }
+        | SessionStoreRowV1::MemoryV2LineageEvents { row_digest, .. }
+        | SessionStoreRowV1::RetrievalAnchors { row_digest, .. } => row_digest,
     }
 }
 
@@ -1268,6 +1282,17 @@ fn session_store_cursor_matches(table: SessionStoreTableV1, cursor: &SessionStor
         SessionStoreCursorV1::SessionSummarySuccessors { .. } => {
             SessionStoreTableV1::SessionSummarySuccessors
         }
+        SessionStoreCursorV1::MemoryV2Facts { .. } => SessionStoreTableV1::MemoryV2Facts,
+        SessionStoreCursorV1::MemoryV2CurrentFacts { .. } => {
+            SessionStoreTableV1::MemoryV2CurrentFacts
+        }
+        SessionStoreCursorV1::MemoryV2Assertions { .. } => {
+            SessionStoreTableV1::MemoryV2Assertions
+        }
+        SessionStoreCursorV1::MemoryV2LineageEvents { .. } => {
+            SessionStoreTableV1::MemoryV2LineageEvents
+        }
+        SessionStoreCursorV1::RetrievalAnchors { .. } => SessionStoreTableV1::RetrievalAnchors,
     };
     table == expected
 }
@@ -1479,7 +1504,7 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
     #[test]
     fn session_store_shape_helpers_accept_new_temporal_and_summary_families() {
         let digest = format!("sha256:{}", "1".repeat(64));
-        let cases: [(SessionStoreTableV1, SessionStoreRowV1, SessionStoreCursorV1); 6] = [
+        let cases: [(SessionStoreTableV1, SessionStoreRowV1, SessionStoreCursorV1); 11] = [
             (
                 SessionStoreTableV1::SessionTemporalProjectionReceipts,
                 SessionStoreRowV1::SessionTemporalProjectionReceipts {
@@ -1563,6 +1588,74 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
                 SessionStoreCursorV1::SourceCursors {
                     source_json: "{\"source\":\"s\"}".to_owned(),
                     scope_json: "{\"scope\":\"p\"}".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::MemoryV2Facts,
+                SessionStoreRowV1::MemoryV2Facts {
+                    fact_id: "fact-1".to_owned(),
+                    owner_kind: "user".to_owned(),
+                    project_id: "project-1".to_owned(),
+                    identity_json: "{\"k\":\"v\"}".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::MemoryV2Facts {
+                    fact_id: "fact-1".to_owned(),
+                    owner_kind: "user".to_owned(),
+                    project_id: "project-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::MemoryV2CurrentFacts,
+                SessionStoreRowV1::MemoryV2CurrentFacts {
+                    fact_id: "fact-1".to_owned(),
+                    owner_kind: "user".to_owned(),
+                    project_id: "project-1".to_owned(),
+                    payload_access: "public".to_owned(),
+                    projection_state: "active".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::MemoryV2CurrentFacts {
+                    fact_id: "fact-1".to_owned(),
+                    owner_kind: "user".to_owned(),
+                    project_id: "project-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::MemoryV2Assertions,
+                SessionStoreRowV1::MemoryV2Assertions {
+                    assertion_id: "assertion-1".to_owned(),
+                    fact_id: "fact-1".to_owned(),
+                    owner_kind: "user".to_owned(),
+                    project_id: "project-1".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::MemoryV2Assertions {
+                    assertion_id: "assertion-1".to_owned(),
+                    fact_id: "fact-1".to_owned(),
+                    owner_kind: "user".to_owned(),
+                    project_id: "project-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::MemoryV2LineageEvents,
+                SessionStoreRowV1::MemoryV2LineageEvents {
+                    event_sequence: 1,
+                    event_id: "event-1".to_owned(),
+                    fact_id: "fact-1".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::MemoryV2LineageEvents { event_sequence: 1 },
+            ),
+            (
+                SessionStoreTableV1::RetrievalAnchors,
+                SessionStoreRowV1::RetrievalAnchors {
+                    anchor_id: "anchor-1".to_owned(),
+                    projection_generation: "1".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::RetrievalAnchors {
+                    anchor_id: "anchor-1".to_owned(),
                 },
             ),
         ];
