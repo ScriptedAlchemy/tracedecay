@@ -53,3 +53,24 @@ export const GraphSearchPayloadSchema = z
   })
   .passthrough();
 export type GraphSearchPayload = z.infer<typeof GraphSearchPayloadSchema>;
+
+export const SubgraphEdgeSchema = z
+  .object({
+    source: z.string(),
+    target: z.string(),
+    kind: z.string().optional(),
+  })
+  .passthrough();
+
+export const SubgraphPayloadSchema = z
+  .object({
+    seed_id: z.string().nullable(),
+    mode: z.string(),
+    nodes: z.array(GraphNodeSchema),
+    edges: z.array(SubgraphEdgeSchema),
+    capped: z
+      .object({ nodes: z.boolean(), edges: z.boolean() })
+      .passthrough(),
+  })
+  .passthrough();
+export type SubgraphPayload = z.infer<typeof SubgraphPayloadSchema>;

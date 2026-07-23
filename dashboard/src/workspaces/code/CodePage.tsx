@@ -10,17 +10,21 @@ import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import { useCallback, useMemo } from 'react';
+import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import {
   GraphOverviewPayloadSchema,
   GraphSearchPayloadSchema,
+  SubgraphPayloadSchema,
   type GraphNode,
 } from './contracts.ts';
 
 const BASE = '/api/plugins/graph';
 
-/** Code: graph overview (kind composition), symbol search, node inspector.
- * The Sigma canvas over the subgraph endpoint is the phase-2 renderer per the
- * visualization catalog. */
+/** Code: the connected graph itself (Sigma over the subgraph endpoint —
+ * unseeded hub overview, reseeded on the selected symbol), kind composition,
+ * symbol search, node inspector. The virtualized list beside the canvas is
+ * its accessible equivalent. */
 export function CodePage() {
   const overview = useLegacy(
     ['graph', 'overview'],
@@ -35,6 +39,39 @@ export function CodePage() {
     GraphSearchPayloadSchema,
   );
   const [selected, setSelected] = useState<GraphNode | null>(null);
+  const subgraph = useLegacy(
+    ['graph', 'subgraph', selected?.id ?? ''],
+    `${BASE}/subgraph${selected ? `?node_id=${encodeURIComponent(selected.id)}` : ''}`,
+    SubgraphPayloadSchema,
+  );
+  const canvasNodes = useMemo(() => {
+    if (subgraph.data?.outcome !== 'ok') return [];
+    return subgraph.data.data.nodes.map((node) => ({
+      id: node.id,
+      label: node.name ?? node.qualified_name ?? node.id,
+      kind: node.kind,
+      degree: node.degree ?? 1,
+    }));
+  }, [subgraph.data]);
+  const canvasEdges = useMemo(() => {
+    if (subgraph.data?.outcome !== 'ok') return [];
+    return subgraph.data.data.edges.map((edge) => ({
+      source: edge.source,
+      target: edge.target,
+      kind: edge.kind,
+    }));
+  }, [subgraph.data]);
+  const selectFromCanvas = useCallback(
+    (id: string | null) => {
+      if (id == null) return setSelected(null);
+      const node =
+        subgraph.data?.outcome === 'ok'
+          ? subgraph.data.data.nodes.find((candidate) => candidate.id === id)
+          : undefined;
+      if (node) setSelected(node);
+    },
+    [subgraph.data],
+  );
 
   return (
     <ExplorerSplit
@@ -87,7 +124,24 @@ export function CodePage() {
         </div>
       }
       list={
-        submitted === '' ? (
+        <div className="flex h-full flex-col">
+          <div className="border-b border-edge-subtle p-3">
+            {subgraph.isPending ? (
+              <p className="p-6 text-center text-sm text-text-muted">
+                composing graph neighborhood…
+              </p>
+            ) : (
+              <GraphCanvas
+                nodes={canvasNodes}
+                edges={canvasEdges}
+                selectedId={selected?.id ?? null}
+                onSelect={selectFromCanvas}
+                height={300}
+              />
+            )}
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto">
+        {submitted === '' ? (
           <TopConnectedList
             overviewPending={overview.isPending}
             overviewResult={overview.data}
@@ -127,7 +181,9 @@ export function CodePage() {
               );
             }}
           </LegacyBoundary>
-        )
+        )}
+          </div>
+        </div>
       }
       inspector={
         selected ? (

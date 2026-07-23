@@ -20,10 +20,13 @@
     "@tanstack/react-virtual": "^3.11.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "graphology": "^0.26.0",
+    "graphology-layout-forceatlas2": "^0.10.1",
     "lucide-react": "^0.469.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router": "^7.1.0",
+    "sigma": "^3.0.3",
     "zod": "^3.23.8",
     "zustand": "^5.0.2"
   },
