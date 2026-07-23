@@ -278,19 +278,14 @@ authorized configuration or remediation commands back through the daemon.
 - Delete dashboard-local health, configuration, and action logic replaced by
   canonical application operations.
 
-**Library-first implementation defaults.** Use React Router for route/deep-link
-mechanics, TanStack Query for canonical HTTP/SSE-backed server state, Zustand
-only for bounded presentation/selection state, Zod at generated wire
-boundaries, selected Radix primitives for accessible interaction, TanStack
-Virtual for large lists, and the existing `d3-force` renderer. These replace
-custom routing, request/cache lifecycles, ad hoc global stores, handwritten
-runtime decoding, home-grown accessibility primitives, and manual
-virtualization while retaining exhaustive domain states, stable IDs,
-renderer-neutral projections, accessible table/text equivalents, and
-server-owned health/action semantics. Keep a small native implementation when
-a library would own product semantics or miss an accessibility/offline/bundle
-gate. Observable Plot is admitted only for a concrete chart journey that the
-existing renderer does not serve and only when its lazy-loaded budget passes.
+**Implementation architecture.** Finalized 2026-07-23 in
+[Plan 11](11-dashboard-frontend.md) §"Finalized implementation architecture"
+(fresh single-app rebuild on Rsbuild — decided, no ADR; React Router, TanStack
+Query, bounded Zustand, Zod over one generated contracts module, Radix +
+Tailwind v4 semantic tokens, TanStack Virtual, `d3-force` default graph
+adapter, ECharts as the single charting library, SSE monotone reducer). The
+legacy multi-bundle dashboard was removed the same day; Plan 11 is the single
+authority for frontend structure, styling, and dependency decisions.
 
 **Direct acceptance.** Starting from a real PR13 finding, navigate to retained
 evidence, diagnose an injected operational fault, apply an authorized
