@@ -16,6 +16,13 @@ and persisted deep links retain compatibility and migration obligations; all
 other retention is judged by the user journeys, behavior, accessibility,
 performance, platform, and regression requirements below.
 
+Fresh start (2026-07-23): the legacy multi-app dashboard (shell, holographic,
+lcm, graph, code-diagnostics, savings, settings as separate bundles) was
+removed from the tree; placeholder dist bundles keep the Rust build, packaging,
+and daemon serving green until the PR14 implementation replaces them. Nothing
+from the deleted apps is a dependency; the API handlers they consumed remain
+the compatibility surface the new implementation binds to.
+
 ## Outcome
 
 The dashboard is TraceDecay's world-class flagship product surface: a polished,
@@ -102,24 +109,87 @@ deferred by this framing.
   after license, bundle, capability, offline, accessibility, fallback, and
   performance review.
 
-## PR14 implementation defaults
+## Finalized implementation architecture (decided 2026-07-23; owner: design)
 
-- Use React Router for route and deep-link mechanics, TanStack Query for
-  canonical HTTP/SSE-backed server state, Zustand only for bounded
-  presentation and linked-selection state, and Zod at generated wire
-  boundaries. These replace custom routing, request/cache lifecycles, ad hoc
-  global stores, and handwritten runtime decoders while retaining exhaustive
-  domain states, revision-monotone updates, exact scope, stable IDs, and
-  server-owned product semantics.
-- Use selected Radix primitives for accessible interaction and TanStack
-  Virtual for large lists. Retain native elements or focused local code when a
-  primitive would weaken keyboard, screen-reader, offline, or bundle behavior;
-  the accessible table/text projection remains required.
-- Keep existing `d3-force` as the default connected-graph renderer.
-  Observable Plot is admitted only for a concrete chart journey that the
-  existing renderer does not serve and only when lazy loading passes the
-  route's bundle and interaction budget. No renderer becomes graph, query,
+Build and packaging:
+
+- Rsbuild is the bundler. Decided; no ADR, no comparison, do not revisit.
+- One npm package at `dashboard/` producing ONE application: a single shell
+  with one lazy, code-split route chunk per workspace. The legacy
+  seven-bundle plugin-eval/SDK-injection composition is retired; workspaces
+  are ordinary routed modules inside one React tree.
+- The Rust integration contract is retained exactly: dist artifacts are
+  embedded into the binary at compile time (zero filesystem dependency at
+  runtime, offline-complete), `build.rs` keeps the content-stamp
+  stale-check + auto `npm ci && npm run build` + fail-fast behavior, and the
+  Cargo.toml include whitelist keeps `cargo package` shipping the UI. The
+  embedded-asset list moves from per-plugin files to the single app's
+  hashed-chunk manifest.
+- The Hermes deployment remains a thin wrapper around the same bundles and
+  the same Rust server (proxy shim only); it adapts to the single-app
+  composition without forking the frontend.
+
+Language, data, and state:
+
+- React 19 + TypeScript in strict mode. npm (lockfile-pinned toolchain,
+  including the pinned Playwright).
+- React Router owns routes and deep-link mechanics. TanStack Query owns all
+  canonical HTTP/SSE-backed server state. Zustand is limited to the bounded
+  presentation/optimism allowlist below. Zod validates at the generated wire
+  boundary. These replace the legacy hand-rolled `fetchJSON`/hook state
+  entirely while retaining exhaustive domain states, revision-monotone
+  updates, exact scope, stable IDs, and server-owned product semantics.
+- One generated contracts module (`dashboard/src/contracts/`) is the only
+  wire boundary: TypeScript types + Zod decoders generated from the Rust
+  API-crate schemas. Hand-written request/response shapes are forbidden;
+  union switches are exhaustive with `never` checks; unknown variants render
+  `unsupported_schema`.
+- One SSE module implements the monotone event reducer (dedupe by
+  stream/event/revision, stale-generation rejection, refetch-on-gap) and
+  feeds TanStack Query patches/invalidations. Workspaces never open ad hoc
+  EventSources.
+
+Styling system (design-owned; foundation lanes do not restyle or restructure):
+
+- Tailwind CSS v4, zero-runtime, over a semantic design-token layer expressed
+  as CSS custom properties: color/space/type/radius/elevation scales plus
+  named tokens for every `DashboardDomainState`, for severity, and for
+  evidence-quality — severity and evidence quality are separate token axes,
+  never one red/amber/green scale. Dark is the default theme; light,
+  `prefers-contrast: more`, and forced-colors are first-class token themes.
+- Radix primitives for accessible interaction patterns, composed through a
+  small variant layer (class-variance-authority); native elements are
+  preferred where a primitive would weaken keyboard, screen-reader, offline,
+  or bundle behavior. No runtime CSS-in-JS anywhere (bundle and long-task
+  budgets forbid it).
+- TanStack Virtual for large lists under the virtualization rules below.
+
+Visualization:
+
+- The renderer-neutral `ProjectionView` model is the only semantic source for
+  graph/timeline views. `d3-force` ships as the default connected-graph
+  renderer adapter (permissive license, offline). ECharts is the single
+  quantitative charting library, imported modularly and lazy-loaded per
+  route within each route's bundle budget; the earlier Observable Plot
+  admission is withdrawn — one charting library, one graph adapter, plus the
+  gated optional GPU adapter path below. No renderer becomes graph, query,
   health, readiness, ranking, or action authority.
+
+Legacy-surface dispositions (from the 2026-07-23 inventory):
+
+- Reachable legacy API families (graph, code-diagnostics, settings,
+  holographic/memory, automation, lcm, savings, analytics diagnostics)
+  remain the compatibility surface the new workspaces bind to.
+- Orphan handlers are deleted with their PR14 replacement, not carried:
+  the duplicate holographic fact-proposal family, `fact_trust_history`,
+  the unreferenced `automation_jobs_api` family, and the three uncalled
+  analytics endpoints. Each deletion lands only when its workspace slice
+  ships or the surface is confirmed dead.
+- Known backend gaps feeding PR14 are separate completion work, not
+  frontend scope: the Doctor finding family has no HTTP surface binding yet,
+  and the plan-38 storage telemetry/findings and code-index
+  freshness/coverage read models have no exposure; the PR14 journeys
+  require those bindings to exist server-side.
 
 ## Frontend ownership and compatibility
 
