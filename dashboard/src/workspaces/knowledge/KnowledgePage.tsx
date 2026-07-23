@@ -8,6 +8,7 @@ import {
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
+import { VirtualList } from '../../ui/VirtualList.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { MemoryOverviewPayloadSchema, type FactRow } from './contracts.ts';
@@ -104,16 +105,17 @@ export function KnowledgePage() {
               );
             }
             return (
-              <div>
-                {facts.map((fact) => (
+              <VirtualList
+                items={facts}
+                getKey={(fact) => String(fact.fact_id)}
+                renderItem={(fact) => (
                   <FactListRow
-                    key={String(fact.fact_id)}
                     fact={fact}
                     selected={selected?.fact_id === fact.fact_id}
                     onSelect={() => setSelected(fact)}
                   />
-                ))}
-              </div>
+                )}
+              />
             );
           }}
         </LegacyBoundary>

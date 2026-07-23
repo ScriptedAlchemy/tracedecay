@@ -7,6 +7,7 @@ import {
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { StateChip } from '../../ui/StateChip';
+import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 
@@ -127,35 +128,39 @@ export function ExplorerPage() {
             search across sessions, code, and knowledge
           </p>
         ) : (
-          <div>
-            {sources.map((s) =>
+          <VirtualList
+            items={sources.flatMap((s) =>
               s.query.data?.outcome === 'ok'
-                ? s.extract(s.query.data.data as Record<string, unknown>).map((row, i) => {
-                    const label = String(
-                      row['qualified_name'] ??
-                        row['name'] ??
-                        row['summary'] ??
-                        row['content'] ??
-                        row['text'] ??
-                        row['session_id'] ??
-                        i,
-                    );
-                    return (
-                      <DataRow
-                        key={`${s.name}-${i}`}
-                        selected={selected === row}
-                        onSelect={() => setSelected(row)}
-                      >
-                        <span className="w-24 shrink-0 truncate text-2xs text-text-muted">
-                          {s.name}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate">{label}</span>
-                      </DataRow>
-                    );
-                  })
-                : null,
+                ? s
+                    .extract(s.query.data.data as Record<string, unknown>)
+                    .map((row, i) => ({ source: s.name, row, index: i }))
+                : [],
             )}
-          </div>
+            getKey={(entry) => `${entry.source}-${entry.index}`}
+            renderItem={(entry) => {
+              const { source, row } = entry;
+              const label = String(
+                row['qualified_name'] ??
+                  row['name'] ??
+                  row['summary'] ??
+                  row['content'] ??
+                  row['text'] ??
+                  row['session_id'] ??
+                  entry.index,
+              );
+              return (
+                <DataRow
+                  selected={selected === row}
+                  onSelect={() => setSelected(row)}
+                >
+                  <span className="w-24 shrink-0 truncate text-2xs text-text-muted">
+                    {source}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{label}</span>
+                </DataRow>
+              );
+            }}
+          />
         )
       }
       inspector={

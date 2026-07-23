@@ -8,6 +8,7 @@ import {
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
+import { VirtualList } from '../../ui/VirtualList.tsx';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   GraphOverviewPayloadSchema,
@@ -103,20 +104,26 @@ export function CodePage() {
                     no symbols matched “{submitted}”
                   </p>
                 );
+              const capped = data.total != null && data.total > rows.length;
               return (
-                <div>
-                  <p className="border-b border-edge-subtle px-3 py-1.5 text-2xs text-text-muted">
-                    {data.total ?? rows.length} matches
-                  </p>
-                  {rows.map((node) => (
+                <VirtualList
+                  items={rows}
+                  getKey={(node) => node.id}
+                  header={
+                    <p className="border-b border-edge-subtle px-3 py-1.5 text-2xs text-text-muted">
+                      {capped
+                        ? `${rows.length} of ${data.total} matches`
+                        : `${data.total ?? rows.length} matches`}
+                    </p>
+                  }
+                  renderItem={(node) => (
                     <SymbolRow
-                      key={node.id}
                       node={node}
                       selected={selected?.id === node.id}
                       onSelect={() => setSelected(node)}
                     />
-                  ))}
-                </div>
+                  )}
+                />
               );
             }}
           </LegacyBoundary>
@@ -171,22 +178,25 @@ function TopConnectedList({
             </p>
           );
         return (
-          <div>
-            <p className="border-b border-edge-subtle px-3 py-1.5 text-2xs text-text-muted">
-              most connected symbols
-            </p>
-            {hubs.map((row, i) => {
+          <VirtualList
+            items={hubs}
+            getKey={(row, i) => String((row as GraphNode).id ?? i)}
+            header={
+              <p className="border-b border-edge-subtle px-3 py-1.5 text-2xs text-text-muted">
+                most connected symbols
+              </p>
+            }
+            renderItem={(row) => {
               const node = row as GraphNode;
               return (
                 <SymbolRow
-                  key={String(node.id ?? i)}
                   node={node}
                   selected={selected?.id === node.id}
                   onSelect={() => onSelect(node)}
                 />
               );
-            })}
-          </div>
+            }}
+          />
         );
       }}
     </LegacyBoundary>

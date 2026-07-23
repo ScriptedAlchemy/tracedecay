@@ -8,6 +8,7 @@ import {
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
+import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 
@@ -57,8 +58,10 @@ export function SessionsPage() {
                 </p>
               );
             return (
-              <div>
-                {rows.map((row, i) => {
+              <VirtualList
+                items={rows}
+                getKey={(row, i) => String(row['session_id'] ?? row['id'] ?? i)}
+                renderItem={(row, i) => {
                   const id = String(row['session_id'] ?? row['id'] ?? i);
                   const provider = String(row['provider'] ?? row['source'] ?? '');
                   const count = row['message_count'];
@@ -67,7 +70,6 @@ export function SessionsPage() {
                     : '';
                   return (
                     <DataRow
-                      key={id}
                       selected={selected === row}
                       onSelect={() => setSelected(row)}
                     >
@@ -83,8 +85,8 @@ export function SessionsPage() {
                       <span className="tabular shrink-0 text-2xs text-text-muted">{when}</span>
                     </DataRow>
                   );
-                })}
-              </div>
+                }}
+              />
             );
           }}
         </LegacyBoundary>
