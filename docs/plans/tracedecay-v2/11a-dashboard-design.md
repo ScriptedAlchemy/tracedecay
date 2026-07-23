@@ -124,6 +124,43 @@ Motion:
   replaces all of it with instant changes and starts playback paused per the
   plan.
 
+## Aesthetic quality bar
+
+Beautiful and functional are one requirement, not a tradeoff. The reference
+class is the best-crafted developer tools of this era (Linear's calm,
+Vercel's restraint, Perfetto's density done legibly) — TraceDecay should sit
+comfortably beside them and feel unmistakably its own.
+
+- **Depth without noise.** Layered dark surfaces (`surface-0..3`) create
+  space; hairline 1px edges, no decorative shadows, one accent hue used
+  sparingly so state/severity color always reads as signal. Light theme gets
+  the same care, not an inversion pass.
+- **Typography is the interface.** Inter with proper optical sizing,
+  tabular numerals everywhere data lives, tight-but-breathing line heights,
+  true monospace identifiers. If a screen looks wrong, fix rhythm and weight
+  before adding lines or color.
+- **Micro-interaction polish.** Hover/focus/active states designed for every
+  interactive element (token-driven, 120ms); focus rings are crisp
+  two-tone, never browser-default; in-place value pulses instead of layout
+  shifts; skeletons match final geometry exactly (zero CLS by design).
+- **Iconography**: Lucide (ISC license), 16px grid, 1.5px stroke,
+  consistent metaphors registered per domain entity (finding, generation,
+  worktree, anchor…) in one icon map — no ad-hoc icon picks in workspaces.
+- **Data-ink discipline in charts**: no gridline lattices, direct labels
+  over legends where feasible, axis text at `text-muted`, series colors from
+  the categorical ramp with perceptually even lightness in both themes;
+  uncertainty always drawn (bands/intervals), never implied.
+- **Crafted truthful states.** Empty/partial/stale/denied states are
+  designed compositions (icon + one sentence + next action), unique per
+  workspace where the meaning differs — never a generic illustration, never
+  a bare spinner. `complete_zero_findings` celebrates quietly with its
+  coverage receipt.
+- **Design review gate.** Every workspace slice ships with a screenshot set
+  (both themes, three breakpoints, key states) reviewed by the design owner
+  before merge; drift from tokens/archetypes is a review blocker, and a
+  visual-regression suite (Playwright screenshots on the pinned runner)
+  guards the approved compositions afterward.
+
 ## Component conventions
 
 - **EvidenceTruthStrip**: one-line strip on every compact result — authority
