@@ -466,7 +466,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a ExactOccurrenceRequest,
     ) -> CallableCodeQueryFuture<'a, ExactOccurrenceRecord> {
         Box::pin(async move {
-            let Some(latest) = self.resolve_serving_generation(&request.scope.generation).await
+            let Some(latest) = self
+                .resolve_serving_generation(&request.scope.generation)
+                .await
             else {
                 return unavailable(tracedecay_domain::UtcMicros(0));
             };
@@ -518,7 +520,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a PhraseSearchRequest,
     ) -> CallableCodeQueryFuture<'a, LexicalOccurrenceRecord> {
         Box::pin(async move {
-            let Some(latest) = self.resolve_serving_generation(&request.scope.generation).await
+            let Some(latest) = self
+                .resolve_serving_generation(&request.scope.generation)
+                .await
             else {
                 return unavailable(tracedecay_domain::UtcMicros(0));
             };
@@ -574,7 +578,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeRelationRequest,
     ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
-            let Some(latest) = self.resolve_serving_generation(&request.scope.generation).await
+            let Some(latest) = self
+                .resolve_serving_generation(&request.scope.generation)
+                .await
             else {
                 return unavailable(tracedecay_domain::UtcMicros(0));
             };
