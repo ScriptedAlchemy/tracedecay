@@ -708,6 +708,10 @@ impl SemanticModelLifecycleOwnerV1 {
             .status()
             .selected_model
             .ok_or(ModelLifecycleErrorV1::Rejected)?;
+        // Mirror `spawn_acquire`: clear any stale cancel flag (e.g. left set by a
+        // prior `remove_install`) so a fresh blocking acquisition is not aborted
+        // by the in-loop cancellation check.
+        self.cancel.store(false, Ordering::SeqCst);
         run_acquisition(
             &self.root,
             &self.catalog,
