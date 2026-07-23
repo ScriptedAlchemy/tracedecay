@@ -22,8 +22,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // Dev mode proxies API calls to a locally running daemon dashboard
-      // server (`tracedecay dashboard --port 8321`).
-      '/api': 'http://127.0.0.1:8321',
+      // server (`tracedecay dashboard --port 8321`). Override the target with
+      // TRACEDECAY_DASHBOARD_API when verifying against another instance.
+      '/api': process.env['TRACEDECAY_DASHBOARD_API'] ?? 'http://127.0.0.1:8321',
     },
   },
   performance: {
