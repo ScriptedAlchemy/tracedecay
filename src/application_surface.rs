@@ -46,8 +46,9 @@ use tracedecay_tool_catalog::{
 };
 
 use crate::application::feedback::observations::{
-    Plan26DeliveryRouteV1, Plan26FeedbackOperationV1, Plan26FeedbackOutcomeV1,
-    Plan26FeedbackSourceEventV1, Plan26SseLifecycleV1,
+    Plan26ArgumentRejectionClassV1, Plan26DeliveryRouteV1, Plan26FeedbackOperationV1,
+    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1, Plan26RejectedArgumentV1,
+    Plan26SseLifecycleV1,
 };
 use crate::application::operation_stream::{
     OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
@@ -556,8 +557,12 @@ async fn http_operation_events(
             &state,
             observation_subject.as_ref(),
             current_micros().unwrap_or(UtcMicros(1)),
-            Plan26FeedbackSourceEventV1::ArgumentRejected {
+            Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
                 operation: Plan26FeedbackOperationV1::SseStream,
+                route: Some(Plan26DeliveryRouteV1::Http),
+                argument: Plan26RejectedArgumentV1::RequestHandle,
+                rejection: Plan26ArgumentRejectionClassV1::InvalidShape,
+                schema_revision: 1,
                 outcome: Plan26FeedbackOutcomeV1::Rejected,
             },
         )
@@ -589,8 +594,12 @@ async fn http_operation_events(
                 &state,
                 observation_subject.as_ref(),
                 observed_at,
-                Plan26FeedbackSourceEventV1::ArgumentRejected {
+                Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
                     operation: Plan26FeedbackOperationV1::SseStream,
+                    route: Some(Plan26DeliveryRouteV1::Http),
+                    argument: Plan26RejectedArgumentV1::RequestHandle,
+                    rejection: Plan26ArgumentRejectionClassV1::Unauthorized,
+                    schema_revision: 1,
                     outcome: Plan26FeedbackOutcomeV1::Denied,
                 },
             )
@@ -725,8 +734,12 @@ async fn http_operation_cancel(
             &state,
             observation_subject.as_ref(),
             current_micros().unwrap_or(UtcMicros(1)),
-            Plan26FeedbackSourceEventV1::ArgumentRejected {
+            Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
                 operation: Plan26FeedbackOperationV1::SseStream,
+                route: Some(Plan26DeliveryRouteV1::Http),
+                argument: Plan26RejectedArgumentV1::RequestHandle,
+                rejection: Plan26ArgumentRejectionClassV1::InvalidShape,
+                schema_revision: 1,
                 outcome: Plan26FeedbackOutcomeV1::Rejected,
             },
         )
@@ -1465,7 +1478,14 @@ pub async fn observe_surface_argument_rejection(
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
     request_id: &RequestId,
+    error: &ApplicationSurfaceAdapterError,
 ) {
+    if !plan26_surface_is_observable(operation) {
+        return;
+    }
+    let Some((argument, rejection, outcome)) = surface_rejection_metadata(error) else {
+        return;
+    };
     let (Some(client), Ok(subject_digest), Ok(observed_at)) = (
         client,
         canonical_sha256(&(
@@ -1482,12 +1502,47 @@ pub async fn observe_surface_argument_rejection(
         .observe_plan26_feedback(
             subject_digest,
             observed_at,
-            Plan26FeedbackSourceEventV1::ArgumentRejected {
+            Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
                 operation: plan26_surface_operation(operation),
-                outcome: Plan26FeedbackOutcomeV1::Rejected,
+                route: Some(plan26_delivery_route(surface)),
+                argument,
+                rejection,
+                schema_revision: 1,
+                outcome,
             },
         )
         .await;
+}
+
+fn surface_rejection_metadata(
+    error: &ApplicationSurfaceAdapterError,
+) -> Option<(
+    Plan26RejectedArgumentV1,
+    Plan26ArgumentRejectionClassV1,
+    Plan26FeedbackOutcomeV1,
+)> {
+    match error {
+        ApplicationSurfaceAdapterError::InvalidRequestHandle => Some((
+            Plan26RejectedArgumentV1::RequestHandle,
+            Plan26ArgumentRejectionClassV1::InvalidShape,
+            Plan26FeedbackOutcomeV1::Rejected,
+        )),
+        ApplicationSurfaceAdapterError::InvalidSurfaceRequest => Some((
+            Plan26RejectedArgumentV1::RequestBody,
+            Plan26ArgumentRejectionClassV1::InvalidShape,
+            Plan26FeedbackOutcomeV1::Rejected,
+        )),
+        ApplicationSurfaceAdapterError::UnknownOrNotAuthorized => Some((
+            Plan26RejectedArgumentV1::Operation,
+            Plan26ArgumentRejectionClassV1::Unauthorized,
+            Plan26FeedbackOutcomeV1::Denied,
+        )),
+        ApplicationSurfaceAdapterError::Catalog(_)
+        | ApplicationSurfaceAdapterError::Contract(_)
+        | ApplicationSurfaceAdapterError::Identifier(_)
+        | ApplicationSurfaceAdapterError::CatalogValidation(_)
+        | ApplicationSurfaceAdapterError::DaemonUnavailable => None,
+    }
 }
 
 pub async fn resolve_http_application_surface(
@@ -1510,6 +1565,7 @@ pub async fn resolve_http_application_surface(
                 BindingSurface::Http,
                 operation,
                 &request_id,
+                &error,
             )
             .await;
             return Err(error);
@@ -1601,6 +1657,7 @@ async fn invoke_http_application_request(
                 BindingSurface::Http,
                 operation,
                 &request_id,
+                &error,
             )
             .await;
             return CanonicalInvocationResult::new(
@@ -1625,6 +1682,7 @@ async fn invoke_http_application_request(
                 BindingSurface::Http,
                 operation,
                 &request_id,
+                &error,
             )
             .await;
             return CanonicalInvocationResult::new(
@@ -1636,20 +1694,18 @@ async fn invoke_http_application_request(
     let dispatched = match resolve_dispatch(&resolver, BindingSurface::Http, input) {
         Ok(dispatched) => dispatched,
         Err(error) => {
+            let error = map_dispatch_error(error);
             observe_surface_argument_rejection(
                 Some(client),
                 BindingSurface::Http,
                 operation,
                 &request_id,
+                &error,
             )
             .await;
             return CanonicalInvocationResult::new(
                 binding_id,
-                Err(http_adapter_problem(
-                    result_contract,
-                    request_id,
-                    map_dispatch_error(error),
-                )),
+                Err(http_adapter_problem(result_contract, request_id, error)),
             );
         }
     };

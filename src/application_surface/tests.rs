@@ -16,11 +16,15 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, DEFAULT_DEADLINE_MICROS,
-    FeedbackSurfaceRequest, HttpCancellationRegistry, HttpDisconnectCancellation,
-    HttpOperationEventState, application_surface_dispatch_input_with_controls, current_micros,
-    http_operation_event_router, parse_application_surface_request, plan26_sse_stream_event,
-    resolve_authenticated_http_request_context,
+    ApplicationSurfaceAdapterError, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
+    DEFAULT_DEADLINE_MICROS, FeedbackSurfaceRequest, HttpCancellationRegistry,
+    HttpDisconnectCancellation, HttpOperationEventState,
+    application_surface_dispatch_input_with_controls, current_micros, http_operation_event_router,
+    parse_application_surface_request, plan26_sse_stream_event,
+    resolve_authenticated_http_request_context, surface_rejection_metadata,
+};
+use crate::application::feedback::observations::{
+    Plan26ArgumentRejectionClassV1, Plan26FeedbackOutcomeV1, Plan26RejectedArgumentV1,
 };
 use crate::application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
@@ -503,5 +507,29 @@ async fn sse_resume_after_memory_restart_returns_canonical_expired_problem() {
     assert_eq!(
         problem["value"]["problem"]["code"],
         "operation_event.resume_expired"
+    );
+}
+
+#[test]
+fn surface_rejection_metadata_distinguishes_invalid_input_from_authorization() {
+    assert_eq!(
+        surface_rejection_metadata(&ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        Some((
+            Plan26RejectedArgumentV1::RequestBody,
+            Plan26ArgumentRejectionClassV1::InvalidShape,
+            Plan26FeedbackOutcomeV1::Rejected,
+        ))
+    );
+    assert_eq!(
+        surface_rejection_metadata(&ApplicationSurfaceAdapterError::UnknownOrNotAuthorized),
+        Some((
+            Plan26RejectedArgumentV1::Operation,
+            Plan26ArgumentRejectionClassV1::Unauthorized,
+            Plan26FeedbackOutcomeV1::Denied,
+        ))
+    );
+    assert_eq!(
+        surface_rejection_metadata(&ApplicationSurfaceAdapterError::DaemonUnavailable),
+        None
     );
 }

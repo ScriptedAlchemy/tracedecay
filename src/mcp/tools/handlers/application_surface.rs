@@ -45,12 +45,23 @@ pub(super) async fn handle_application_surface(
         object.remove("__mcp_request_id");
     }
     let render_args = request_args.clone();
-    let request = parse_application_surface_request(operation, request_args).map_err(|error| {
-        TraceDecayError::Config {
-            message: error.to_string(),
-        }
-    })?;
     let request_id = protocol_request_id.unwrap_or(request_id()?);
+    let request = match parse_application_surface_request(operation, request_args) {
+        Ok(request) => request,
+        Err(error) => {
+            crate::application_surface::observe_surface_argument_rejection(
+                client,
+                tracedecay_tool_catalog::BindingSurface::Mcp,
+                operation,
+                &request_id,
+                &error,
+            )
+            .await;
+            return Err(TraceDecayError::Config {
+                message: error.to_string(),
+            });
+        }
+    };
     let result = match (protocol_deadline, protocol_cancellation) {
         (Some(deadline), Some(cancellation)) => {
             resolve_mcp_application_surface_with_controls(

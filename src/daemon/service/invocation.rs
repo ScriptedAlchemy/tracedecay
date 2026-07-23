@@ -59,8 +59,9 @@ use crate::application::feedback::concrete::{
     Pr12FeedbackRuntime, Pr12FeedbackRuntimeError, ProjectFeedbackStore, open_pr12_feedback_runtime,
 };
 use crate::application::feedback::observations::{
-    Plan26AnchorOperationV1, Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1,
-    Plan26FeedbackOperationV1, Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
+    Plan26AnchorOperationV1, Plan26ArgumentRejectionClassV1, Plan26DeliveryRouteV1,
+    Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1, Plan26FeedbackOutcomeV1,
+    Plan26FeedbackSourceEventV1, Plan26RejectedArgumentV1,
 };
 use crate::application::feedback::owner::{
     DaemonFeedbackReadOwnerV1, FeedbackReadInvocationResultV1, FeedbackReadOperationV1,
@@ -2516,13 +2517,20 @@ impl DaemonInvocationService {
             .map(|runtime| runtime.source_observation_port());
         let observation_subject = plan26_invocation_subject(&request_id, operation, delivery_route);
         if let Err(problem) = request.validate() {
-            if plan26_observable_operation(operation) {
+            if plan26_observable_operation(operation)
+                && let Some((argument, rejection)) =
+                    plan26_invocation_problem_rejected_argument(problem)
+            {
                 emit_plan26_invocation_event(
                     observations.as_ref(),
                     observation_subject.as_ref(),
                     current_micros(),
-                    Plan26FeedbackSourceEventV1::ArgumentRejected {
+                    Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
                         operation: plan26_feedback_operation(operation),
+                        route: delivery_route,
+                        argument,
+                        rejection,
+                        schema_revision: 1,
                         outcome: Plan26FeedbackOutcomeV1::Rejected,
                     },
                 );
@@ -3143,6 +3151,43 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
     }
 }
 
+fn plan26_rejected_argument(
+    response: &DaemonInvocationResponse,
+) -> Option<(Plan26RejectedArgumentV1, Plan26ArgumentRejectionClassV1)> {
+    match &response.outcome {
+        DaemonInvocationOutcome::Problem { problem } => {
+            plan26_invocation_problem_rejected_argument(*problem)
+        }
+        DaemonInvocationOutcome::ApplicationProblem { problem }
+            if problem.kind() == ApplicationProblemKind::InvalidRequest =>
+        {
+            Some((
+                Plan26RejectedArgumentV1::RequestBody,
+                Plan26ArgumentRejectionClassV1::InvalidShape,
+            ))
+        }
+        _ => None,
+    }
+}
+
+const fn plan26_invocation_problem_rejected_argument(
+    problem: DaemonInvocationProblem,
+) -> Option<(Plan26RejectedArgumentV1, Plan26ArgumentRejectionClassV1)> {
+    match problem {
+        DaemonInvocationProblem::InvalidRequest => Some((
+            Plan26RejectedArgumentV1::RequestBody,
+            Plan26ArgumentRejectionClassV1::InvalidShape,
+        )),
+        DaemonInvocationProblem::UnsupportedRevision => Some((
+            Plan26RejectedArgumentV1::Lifecycle,
+            Plan26ArgumentRejectionClassV1::Unsupported,
+        )),
+        DaemonInvocationProblem::NotFoundOrNotAuthorized | DaemonInvocationProblem::Unavailable => {
+            None
+        }
+    }
+}
+
 fn observe_plan26_invocation_response(
     observations: Option<&Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>>,
     subject: Option<&ManifestDigest>,
@@ -3188,13 +3233,17 @@ fn observe_plan26_invocation_response(
             },
         );
     }
-    if matches!(outcome, Plan26FeedbackOutcomeV1::Rejected) {
+    if let Some((argument, rejection)) = plan26_rejected_argument(response) {
         emit_plan26_invocation_event(
             observations,
             subject,
             observed_at,
-            Plan26FeedbackSourceEventV1::ArgumentRejected {
+            Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
                 operation: plan26_feedback_operation(operation),
+                route,
+                argument,
+                rejection,
+                schema_revision: 1,
                 outcome,
             },
         );
@@ -3511,6 +3560,33 @@ mod tests {
         let encoded = serde_json::to_value(&request).expect("serialize request");
         assert_eq!(encoded["delivery_route"], "mcp");
         assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn feedback_rejection_observation_classifies_request_and_revision_failures() {
+        let invalid = DaemonInvocationResponse::problem(
+            "request.invalid",
+            DaemonInvocationProblem::InvalidRequest,
+        );
+        assert_eq!(
+            plan26_rejected_argument(&invalid),
+            Some((
+                Plan26RejectedArgumentV1::RequestBody,
+                Plan26ArgumentRejectionClassV1::InvalidShape,
+            ))
+        );
+
+        let unsupported = DaemonInvocationResponse::problem(
+            "request.unsupported",
+            DaemonInvocationProblem::UnsupportedRevision,
+        );
+        assert_eq!(
+            plan26_rejected_argument(&unsupported),
+            Some((
+                Plan26RejectedArgumentV1::Lifecycle,
+                Plan26ArgumentRejectionClassV1::Unsupported,
+            ))
+        );
     }
 
     #[test]

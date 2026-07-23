@@ -46,8 +46,14 @@ pub async fn resolve_mcp_application_surface(
     ) {
         Ok(dispatched) => dispatched,
         Err(error) => {
-            observe_surface_argument_rejection(client, BindingSurface::Mcp, operation, &request_id)
-                .await;
+            observe_surface_argument_rejection(
+                client,
+                BindingSurface::Mcp,
+                operation,
+                &request_id,
+                &error,
+            )
+            .await;
             return Err(error);
         }
     };
@@ -67,9 +73,16 @@ pub async fn resolve_mcp_application_surface_with_controls(
     let page = match PageRequest::first(10) {
         Ok(page) => page,
         Err(error) => {
-            observe_surface_argument_rejection(client, BindingSurface::Mcp, operation, &request_id)
-                .await;
-            return Err(error.into());
+            let error = ApplicationSurfaceAdapterError::from(error);
+            observe_surface_argument_rejection(
+                client,
+                BindingSurface::Mcp,
+                operation,
+                &request_id,
+                &error,
+            )
+            .await;
+            return Err(error);
         }
     };
     let dispatched = match resolve_application_surface_dispatch_with_controls(
@@ -84,8 +97,14 @@ pub async fn resolve_mcp_application_surface_with_controls(
     ) {
         Ok(dispatched) => dispatched,
         Err(error) => {
-            observe_surface_argument_rejection(client, BindingSurface::Mcp, operation, &request_id)
-                .await;
+            observe_surface_argument_rejection(
+                client,
+                BindingSurface::Mcp,
+                operation,
+                &request_id,
+                &error,
+            )
+            .await;
             return Err(error);
         }
     };

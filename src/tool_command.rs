@@ -41,7 +41,7 @@ use tokio::time::{Instant, timeout_at};
 
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation,
-    parse_application_surface_request,
+    observe_surface_argument_rejection, parse_application_surface_request,
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_within};
 use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
@@ -231,11 +231,6 @@ async fn dispatch_cli_application_surface(
     raw_json: bool,
     deadline: Instant,
 ) -> Result<()> {
-    let request = parse_application_surface_request(operation, tool_args).map_err(|error| {
-        TraceDecayError::Config {
-            message: error.to_string(),
-        }
-    })?;
     let sequence = NEXT_APPLICATION_SURFACE_REQUEST.fetch_add(1, Ordering::Relaxed);
     let request_id = RequestId::new(format!(
         "request.cli.{}.{}",
@@ -245,6 +240,27 @@ async fn dispatch_cli_application_surface(
     .map_err(|_| TraceDecayError::Config {
         message: "could not allocate an application surface request id".to_owned(),
     })?;
+    let request = match parse_application_surface_request(operation, tool_args) {
+        Ok(request) => request,
+        Err(error) => {
+            if let Ok(handshake) =
+                DaemonHandshake::for_current_client(project.clone(), None, false, false)
+                && let Ok(client) = DaemonInvocationClient::for_current(handshake)
+            {
+                observe_surface_argument_rejection(
+                    Some(&client),
+                    tracedecay_tool_catalog::BindingSurface::Cli,
+                    operation,
+                    &request_id,
+                    &error,
+                )
+                .await;
+            }
+            return Err(TraceDecayError::Config {
+                message: error.to_string(),
+            });
+        }
+    };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))

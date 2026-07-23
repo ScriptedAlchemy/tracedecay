@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use tracedecay_application::feedback::FeedbackObservationPort;
 use tracedecay_domain::feedback::{
     FeedbackCycleObservationV1, FeedbackEvaluationInputV1, FeedbackObservationKindV1,
-    FeedbackSavedEvaluationV1,
+    FeedbackSavedEvaluationV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
@@ -77,12 +77,90 @@ pub enum Plan26DeliveryRouteV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+pub enum Plan26RejectedArgumentV1 {
+    RequestBody,
+    Pagination,
+    RequestHandle,
+    Operation,
+    Lifecycle,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26ArgumentRejectionClassV1 {
+    Missing,
+    InvalidShape,
+    OutOfBounds,
+    Unsupported,
+    Unauthorized,
+    Stale,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26LspMethodClassV1 {
+    Lifecycle,
+    DocumentSync,
+    Diagnostics,
+    Navigation,
+    ContextProjection,
+    ContextExpansion,
+    Cancellation,
+    Progress,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26LspStateV1 {
+    SessionOpened,
+    Initialized,
+    Detached,
+    Reconnected,
+    Shutdown,
+    Exited,
+    Expired,
+    MethodAdmitted,
+    MethodCompleted,
+    MethodRejected,
+    QueueBackpressured,
+    CancellationRequested,
+    CancellationAccepted,
+    CancellationTooLate,
+    AnalyzerStarting,
+    AnalyzerRestarting,
+    AnalyzerIndexing,
+    AnalyzerDegraded,
+    CacheReused,
+    OverlayFresh,
+    OverlayStale,
+    DiagnosticPublished,
+    DiagnosticCleared,
+    ProviderConflict,
+    HostDelivered,
+    Partial,
+    Dropped,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum Plan26GitHubLifecycleV1 {
     Current,
     Outdated,
     Resolved,
     Edited,
     Deleted,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26AdvisoryProviderV1 {
+    #[serde(rename = "github_review")]
+    GitHubReview,
+    CiLocalization,
+    Proximity,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -160,6 +238,21 @@ pub enum Plan26FeedbackSourceEventV1 {
         operation: Plan26FeedbackOperationV1,
         outcome: Plan26FeedbackOutcomeV1,
     },
+    SurfaceArgumentRejected {
+        operation: Plan26FeedbackOperationV1,
+        route: Option<Plan26DeliveryRouteV1>,
+        argument: Plan26RejectedArgumentV1,
+        rejection: Plan26ArgumentRejectionClassV1,
+        schema_revision: u16,
+        outcome: Plan26FeedbackOutcomeV1,
+    },
+    LspState {
+        state: Plan26LspStateV1,
+        method: Option<Plan26LspMethodClassV1>,
+        outcome: Plan26FeedbackOutcomeV1,
+        item_count: u32,
+        duration_micros: Option<u64>,
+    },
     Dispatch {
         operation: Plan26FeedbackOperationV1,
         outcome: Plan26FeedbackOutcomeV1,
@@ -198,6 +291,10 @@ pub enum Plan26FeedbackSourceEventV1 {
     },
     GitHubStale {
         item_count: u32,
+    },
+    ProviderState {
+        provider: Plan26AdvisoryProviderV1,
+        state: ProviderEvaluationStateV1,
     },
     CiLocalization {
         outcome: Plan26FeedbackOutcomeV1,
@@ -244,7 +341,10 @@ pub enum Plan26FeedbackSourceEventV1 {
 impl Plan26FeedbackSourceEventV1 {
     pub const fn event_kind(&self) -> &'static str {
         match self {
-            Self::ArgumentRejected { .. } => "feedback.argument.rejected.v1",
+            Self::ArgumentRejected { .. } | Self::SurfaceArgumentRejected { .. } => {
+                "feedback.argument.rejected.v1"
+            }
+            Self::LspState { .. } => "feedback.lsp.state.observed.v1",
             Self::Dispatch { .. } => "feedback.dispatch.observed.v1",
             Self::Delivery { .. } => "feedback.delivery.observed.v1",
             Self::Truncation { .. } => "feedback.truncation.observed.v1",
@@ -253,6 +353,7 @@ impl Plan26FeedbackSourceEventV1 {
             Self::GitHubIngress { .. } => "feedback.github.ingress.observed.v1",
             Self::GitHubRateLimit { .. } => "feedback.github.rate_limit.observed.v1",
             Self::GitHubStale { .. } => "feedback.github.stale.observed.v1",
+            Self::ProviderState { .. } => "feedback.provider.state.observed.v1",
             Self::CiLocalization { .. } => "feedback.ci.localization.observed.v1",
             Self::Proximity { .. } => "feedback.proximity.observed.v1",
             Self::HostDelivery { .. } => "feedback.host_delivery.observed.v1",
@@ -264,6 +365,9 @@ impl Plan26FeedbackSourceEventV1 {
 
     pub fn validate(&self) -> Option<()> {
         match self {
+            Self::SurfaceArgumentRejected {
+                schema_revision, ..
+            } => (*schema_revision > 0).then_some(()),
             Self::Proximity {
                 configuration_revision,
                 affected_count,
@@ -697,6 +801,7 @@ impl BoundedPlan26FeedbackObservationQueue {
             }
             Err(TrySendError::Closed(_)) => {
                 replay_window.replay_identities.remove(&identity);
+                self.record_drop();
                 FeedbackObservationSinkOutcome::Dropped
             }
         }
@@ -1063,6 +1168,94 @@ mod tests {
     }
 
     #[test]
+    fn advisory_provider_state_is_orthogonal_and_content_free() {
+        let input = saved_input();
+        let events = [
+            Plan26FeedbackSourceEventV1::GitHubLifecycle {
+                lifecycle: Plan26GitHubLifecycleV1::Current,
+                item_count: 1,
+            },
+            Plan26FeedbackSourceEventV1::GitHubIngress {
+                outcome: Plan26FeedbackOutcomeV1::Completed,
+                item_count: 1,
+                duration_micros: None,
+            },
+            Plan26FeedbackSourceEventV1::ProviderState {
+                provider: Plan26AdvisoryProviderV1::GitHubReview,
+                state: tracedecay_domain::feedback::ProviderEvaluationStateV1::Partial,
+            },
+        ];
+        let envelopes = events
+            .into_iter()
+            .map(|event| plan26_feedback_source_event_envelope(&input, event).unwrap())
+            .collect::<Vec<_>>();
+        let kinds = envelopes
+            .iter()
+            .map(|envelope| envelope.event_kind().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(kinds.len(), 3);
+
+        let provider = serde_json::to_string(&envelopes[2]).unwrap();
+        assert!(provider.contains("\"provider\":\"github_review\""));
+        assert!(provider.contains("\"state\":\"partial\""));
+        assert!(!provider.contains("\"path\""));
+        assert!(!provider.contains("\"source\""));
+        assert!(!provider.contains("\"message\""));
+        assert!(!provider.contains("\"payload\""));
+    }
+
+    #[test]
+    fn lsp_state_observation_is_bounded_and_content_free() {
+        let input = saved_input();
+        let envelope = plan26_feedback_source_event_envelope(
+            &input,
+            Plan26FeedbackSourceEventV1::LspState {
+                state: Plan26LspStateV1::DiagnosticPublished,
+                method: Some(Plan26LspMethodClassV1::Diagnostics),
+                outcome: Plan26FeedbackOutcomeV1::Partial,
+                item_count: 3,
+                duration_micros: Some(17),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            envelope.event_kind(),
+            Some("feedback.lsp.state.observed.v1")
+        );
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        assert!(!encoded.contains("file:///"));
+        assert!(!encoded.contains("\"path\""));
+        assert!(!encoded.contains("\"source\""));
+        assert!(!encoded.contains("\"message\""));
+        assert!(!encoded.contains("\"payload\""));
+    }
+
+    #[test]
+    fn rejected_argument_observation_keeps_only_normalized_metadata() {
+        let input = saved_input();
+        let envelope = plan26_feedback_source_event_envelope(
+            &input,
+            Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
+                operation: Plan26FeedbackOperationV1::FeedbackDiagnostics,
+                route: Some(Plan26DeliveryRouteV1::Http),
+                argument: Plan26RejectedArgumentV1::RequestBody,
+                rejection: Plan26ArgumentRejectionClassV1::InvalidShape,
+                schema_revision: 1,
+                outcome: Plan26FeedbackOutcomeV1::Rejected,
+            },
+        )
+        .unwrap();
+
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        assert!(encoded.contains("\"argument\":\"request_body\""));
+        assert!(encoded.contains("\"rejection\":\"invalid_shape\""));
+        assert!(encoded.contains("\"schema_revision\":1"));
+        assert!(!encoded.contains("\"value\""));
+        assert!(!encoded.contains("\"raw\""));
+    }
+
+    #[test]
     fn read_model_preserves_denominators_and_event_families() {
         let input = saved_input();
         let observations = vec![
@@ -1200,6 +1393,33 @@ mod tests {
             FeedbackObservationSinkOutcome::Enqueued
         );
         assert_eq!(contended.dropped_count(), 0);
+    }
+
+    #[test]
+    fn closed_bounded_queue_counts_each_truthful_drop() {
+        let input = saved_input();
+        let envelope = feedback_observation_envelope(
+            &input,
+            FeedbackCycleObservationV1::trigger(&input).unwrap(),
+        )
+        .unwrap();
+        let queue = BoundedPlan26FeedbackObservationQueue::new(1);
+        queue
+            .receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+
+        assert_eq!(
+            queue.enqueue_feedback_observation(envelope.clone()),
+            FeedbackObservationSinkOutcome::Dropped
+        );
+        assert_eq!(queue.dropped_count(), 1);
+        assert_eq!(
+            queue.replay_feedback_observation(envelope),
+            FeedbackObservationSinkOutcome::Dropped
+        );
+        assert_eq!(queue.dropped_count(), 2);
     }
 
     #[derive(Clone, Copy, Debug)]
