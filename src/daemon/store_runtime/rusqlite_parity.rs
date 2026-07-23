@@ -1168,50 +1168,44 @@ fn session_store_page_matches(
 }
 
 fn session_store_row_matches(table: SessionStoreTableV1, row: &SessionStoreRowV1) -> bool {
-    let shape_matches = matches!(
-        (table, row),
-        (
-            SessionStoreTableV1::Observations,
-            SessionStoreRowV1::Observations { .. }
-        ) | (
-            SessionStoreTableV1::Sessions,
-            SessionStoreRowV1::Sessions { .. }
-        ) | (
-            SessionStoreTableV1::SessionMessages,
-            SessionStoreRowV1::SessionMessages { .. }
-        ) | (
-            SessionStoreTableV1::SessionSchemaMigrations,
-            SessionStoreRowV1::SessionSchemaMigrations { .. }
-        ) | (
-            SessionStoreTableV1::LcmRawMessages,
-            SessionStoreRowV1::LcmRawMessages { .. }
-        ) | (
-            SessionStoreTableV1::SessionTemporalSchemaMigrations,
-            SessionStoreRowV1::SessionTemporalSchemaMigrations { .. }
-        ) | (
-            SessionStoreTableV1::SessionTemporalGenerations,
-            SessionStoreRowV1::SessionTemporalGenerations { .. }
-        ) | (
-            SessionStoreTableV1::SessionTemporalObservationEffects,
-            SessionStoreRowV1::SessionTemporalObservationEffects { .. }
-        ) | (
-            SessionStoreTableV1::SessionTemporalProjectionReceipts,
-            SessionStoreRowV1::SessionTemporalProjectionReceipts { .. }
-        ) | (
-            SessionStoreTableV1::SessionOccurrences,
-            SessionStoreRowV1::SessionOccurrences { .. }
-        ) | (
-            SessionStoreTableV1::SessionLogicalCopyEdges,
-            SessionStoreRowV1::SessionLogicalCopyEdges { .. }
-        ) | (
-            SessionStoreTableV1::SessionAssertions,
-            SessionStoreRowV1::SessionAssertions { .. }
-        ) | (
-            SessionStoreTableV1::SessionSummaryNodes,
-            SessionStoreRowV1::SessionSummaryNodes { .. }
-        )
-    );
-    shape_matches && is_canonical_sha256_digest(session_store_row_digest(row))
+    // Exhaustive by construction: deriving the expected table from the row
+    // variant (no wildcard arm) forces every new protocol row to be listed
+    // here or the crate fails to compile, closing the silent-drift gap that
+    // a `matches!` shape list leaves open.
+    let expected = match row {
+        SessionStoreRowV1::Observations { .. } => SessionStoreTableV1::Observations,
+        SessionStoreRowV1::Sessions { .. } => SessionStoreTableV1::Sessions,
+        SessionStoreRowV1::SessionMessages { .. } => SessionStoreTableV1::SessionMessages,
+        SessionStoreRowV1::SessionSchemaMigrations { .. } => {
+            SessionStoreTableV1::SessionSchemaMigrations
+        }
+        SessionStoreRowV1::LcmRawMessages { .. } => SessionStoreTableV1::LcmRawMessages,
+        SessionStoreRowV1::SessionTemporalSchemaMigrations { .. } => {
+            SessionStoreTableV1::SessionTemporalSchemaMigrations
+        }
+        SessionStoreRowV1::SessionTemporalGenerations { .. } => {
+            SessionStoreTableV1::SessionTemporalGenerations
+        }
+        SessionStoreRowV1::SessionTemporalObservationEffects { .. } => {
+            SessionStoreTableV1::SessionTemporalObservationEffects
+        }
+        SessionStoreRowV1::SessionTemporalProjectionReceipts { .. } => {
+            SessionStoreTableV1::SessionTemporalProjectionReceipts
+        }
+        SessionStoreRowV1::SessionOccurrences { .. } => SessionStoreTableV1::SessionOccurrences,
+        SessionStoreRowV1::SessionLogicalCopyEdges { .. } => {
+            SessionStoreTableV1::SessionLogicalCopyEdges
+        }
+        SessionStoreRowV1::SessionAssertions { .. } => SessionStoreTableV1::SessionAssertions,
+        SessionStoreRowV1::SessionSummaryNodes { .. } => SessionStoreTableV1::SessionSummaryNodes,
+        SessionStoreRowV1::SessionSummarySources { .. } => {
+            SessionStoreTableV1::SessionSummarySources
+        }
+        SessionStoreRowV1::SessionSummarySuccessors { .. } => {
+            SessionStoreTableV1::SessionSummarySuccessors
+        }
+    };
+    table == expected && is_canonical_sha256_digest(session_store_row_digest(row))
 }
 
 fn session_store_row_digest(row: &SessionStoreRowV1) -> &str {
@@ -1228,54 +1222,51 @@ fn session_store_row_digest(row: &SessionStoreRowV1) -> &str {
         | SessionStoreRowV1::SessionOccurrences { row_digest, .. }
         | SessionStoreRowV1::SessionLogicalCopyEdges { row_digest, .. }
         | SessionStoreRowV1::SessionAssertions { row_digest, .. }
-        | SessionStoreRowV1::SessionSummaryNodes { row_digest, .. } => row_digest,
+        | SessionStoreRowV1::SessionSummaryNodes { row_digest, .. }
+        | SessionStoreRowV1::SessionSummarySources { row_digest, .. }
+        | SessionStoreRowV1::SessionSummarySuccessors { row_digest, .. } => row_digest,
     }
 }
 
 fn session_store_cursor_matches(table: SessionStoreTableV1, cursor: &SessionStoreCursorV1) -> bool {
-    matches!(
-        (table, cursor),
-        (
-            SessionStoreTableV1::Observations,
-            SessionStoreCursorV1::Observations { .. }
-        ) | (
-            SessionStoreTableV1::Sessions,
-            SessionStoreCursorV1::Sessions { .. }
-        ) | (
-            SessionStoreTableV1::SessionMessages,
-            SessionStoreCursorV1::SessionMessages { .. }
-        ) | (
-            SessionStoreTableV1::SessionSchemaMigrations,
-            SessionStoreCursorV1::SessionSchemaMigrations { .. }
-        ) | (
-            SessionStoreTableV1::LcmRawMessages,
-            SessionStoreCursorV1::LcmRawMessages { .. }
-        ) | (
-            SessionStoreTableV1::SessionTemporalSchemaMigrations,
-            SessionStoreCursorV1::SessionTemporalSchemaMigrations { .. }
-        ) | (
-            SessionStoreTableV1::SessionTemporalGenerations,
-            SessionStoreCursorV1::SessionTemporalGenerations { .. }
-        ) | (
-            SessionStoreTableV1::SessionTemporalObservationEffects,
-            SessionStoreCursorV1::SessionTemporalObservationEffects { .. }
-        ) | (
-            SessionStoreTableV1::SessionTemporalProjectionReceipts,
-            SessionStoreCursorV1::SessionTemporalProjectionReceipts { .. }
-        ) | (
-            SessionStoreTableV1::SessionOccurrences,
-            SessionStoreCursorV1::SessionOccurrences { .. }
-        ) | (
-            SessionStoreTableV1::SessionLogicalCopyEdges,
-            SessionStoreCursorV1::SessionLogicalCopyEdges { .. }
-        ) | (
-            SessionStoreTableV1::SessionAssertions,
-            SessionStoreCursorV1::SessionAssertions { .. }
-        ) | (
-            SessionStoreTableV1::SessionSummaryNodes,
-            SessionStoreCursorV1::SessionSummaryNodes { .. }
-        )
-    )
+    // Exhaustive by construction (see `session_store_row_matches`): a new
+    // cursor variant must be listed here or the crate fails to compile.
+    let expected = match cursor {
+        SessionStoreCursorV1::Observations { .. } => SessionStoreTableV1::Observations,
+        SessionStoreCursorV1::Sessions { .. } => SessionStoreTableV1::Sessions,
+        SessionStoreCursorV1::SessionMessages { .. } => SessionStoreTableV1::SessionMessages,
+        SessionStoreCursorV1::SessionSchemaMigrations { .. } => {
+            SessionStoreTableV1::SessionSchemaMigrations
+        }
+        SessionStoreCursorV1::LcmRawMessages { .. } => SessionStoreTableV1::LcmRawMessages,
+        SessionStoreCursorV1::SessionTemporalSchemaMigrations { .. } => {
+            SessionStoreTableV1::SessionTemporalSchemaMigrations
+        }
+        SessionStoreCursorV1::SessionTemporalGenerations { .. } => {
+            SessionStoreTableV1::SessionTemporalGenerations
+        }
+        SessionStoreCursorV1::SessionTemporalObservationEffects { .. } => {
+            SessionStoreTableV1::SessionTemporalObservationEffects
+        }
+        SessionStoreCursorV1::SessionTemporalProjectionReceipts { .. } => {
+            SessionStoreTableV1::SessionTemporalProjectionReceipts
+        }
+        SessionStoreCursorV1::SessionOccurrences { .. } => SessionStoreTableV1::SessionOccurrences,
+        SessionStoreCursorV1::SessionLogicalCopyEdges { .. } => {
+            SessionStoreTableV1::SessionLogicalCopyEdges
+        }
+        SessionStoreCursorV1::SessionAssertions { .. } => SessionStoreTableV1::SessionAssertions,
+        SessionStoreCursorV1::SessionSummaryNodes { .. } => {
+            SessionStoreTableV1::SessionSummaryNodes
+        }
+        SessionStoreCursorV1::SessionSummarySources { .. } => {
+            SessionStoreTableV1::SessionSummarySources
+        }
+        SessionStoreCursorV1::SessionSummarySuccessors { .. } => {
+            SessionStoreTableV1::SessionSummarySuccessors
+        }
+    };
+    table == expected
 }
 
 #[cfg(all(test, unix))]
@@ -1570,6 +1561,24 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
                 "cursor shape must match for {table:?}"
             );
         }
+
+        // A row/cursor whose variant disagrees with the declared table must be
+        // rejected: the summary row is not a projection-receipts table row.
+        let (_, summary_row, summary_cursor) = &cases[4];
+        assert!(
+            !session_store_row_matches(
+                SessionStoreTableV1::SessionTemporalProjectionReceipts,
+                summary_row
+            ),
+            "mismatched table+row must not match"
+        );
+        assert!(
+            !session_store_cursor_matches(
+                SessionStoreTableV1::SessionTemporalProjectionReceipts,
+                summary_cursor
+            ),
+            "mismatched table+cursor must not match"
+        );
     }
 
     #[tokio::test]
