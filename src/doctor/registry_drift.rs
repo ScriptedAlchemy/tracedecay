@@ -1,5 +1,95 @@
 use std::path::{Path, PathBuf};
 
+use tracedecay_application::doctor::{
+    DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
+    DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
+    DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
+    DoctorStorageFindingKindV1, DoctorStorageFindingV1,
+};
+
+use crate::retention::orphan_stores::{OrphanStoreFinding, StoreDisposition};
+
+/// Owning operation Doctor names for collecting a dead-identity orphan store.
+const ORPHAN_COLLECT_OP: &str = "retention.orphan_store_sweep";
+/// Owning operation Doctor names for re-linking a moved-repository store —
+/// this reconciliation path (`doctor::registry_drift`), per Plan 38 §2.
+const ORPHAN_RELINK_OP: &str = "doctor.registry_drift.relink";
+/// Coverage/evidence identifier byte ceiling shared by the kernel constructors.
+const DOCTOR_TEXT_LIMIT: usize = 512;
+
+/// Clamps a human coverage statement to the kernel's bounds: trimmed, free of
+/// control characters, and within the identifier byte ceiling, so construction
+/// never fails on an over-long store path.
+fn bounded_statement(statement: &str) -> String {
+    let cleaned: String = statement
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.len() <= DOCTOR_TEXT_LIMIT {
+        return cleaned.to_string();
+    }
+    // Truncate on a char boundary at or below the ceiling.
+    let mut end = DOCTOR_TEXT_LIMIT;
+    while end > 0 && !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    cleaned[..end].trim().to_string()
+}
+
+/// Maps one classified orphan-store finding (Plan 38 §2) onto the typed Doctor
+/// [`DoctorStorageFindingV1`] the application kernel defines. `Live` stores are
+/// never a retention concern and yield `None`; orphaned and re-linkable stores
+/// both surface as [`DoctorStorageFindingKindV1::OrphanStore`], each carrying
+/// the remediation that fits its disposition (collect vs re-link). Returns
+/// `None` when the store identity cannot form a valid evidence reference.
+pub(crate) fn orphan_store_doctor_finding(
+    finding: &OrphanStoreFinding,
+) -> Option<DoctorStorageFindingV1> {
+    let (state, remediation_op, statement) = match &finding.disposition {
+        StoreDisposition::Live => return None,
+        StoreDisposition::Orphaned => (
+            DoctorEvidenceStateV1::Degraded,
+            ORPHAN_COLLECT_OP,
+            format!(
+                "orphan store '{}' (project '{}') has no live root: {} bytes, idle {}s",
+                finding.store_id, finding.project_id, finding.size_bytes, finding.age_secs
+            ),
+        ),
+        StoreDisposition::Relinkable { live_root } => (
+            DoctorEvidenceStateV1::Stale,
+            ORPHAN_RELINK_OP,
+            format!(
+                "store '{}' (project '{}') is re-linkable to live root '{}': {} bytes",
+                finding.store_id,
+                finding.project_id,
+                live_root.display(),
+                finding.size_bytes
+            ),
+        ),
+    };
+    let reference = DoctorEvidenceReferenceV1::new(finding.store_id.clone()).ok()?;
+    let evidence = DoctorEvidenceRefV1::new(DoctorFindingFamilyV1::Storage, reference);
+    let coverage = DoctorCoverageStatementV1::new(
+        DoctorCoverageCompletenessV1::Complete,
+        bounded_statement(&statement),
+    )
+    .ok()?;
+    let remediation = DoctorRemediationRefV1::new(
+        DoctorOwningOperationRefV1::new(remediation_op).ok()?,
+        DoctorRemediationKindV1::Action,
+    );
+    let core = DoctorFindingV1::new(
+        DoctorFindingFamilyV1::Storage,
+        state,
+        vec![evidence],
+        coverage,
+        Some(remediation),
+    )
+    .ok()?;
+    DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OrphanStore, core).ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RegistryDriftFinding {
     pub(super) project_id: String,
@@ -202,6 +292,47 @@ mod tests {
 
     const STORE_ID: &str = "store_reconcile_test";
     const PROJECT_ID: &str = "proj_reconcile_test";
+
+    fn orphan_finding(disposition: StoreDisposition) -> OrphanStoreFinding {
+        OrphanStoreFinding {
+            project_id: "proj_orphan".to_string(),
+            store_id: "store_orphan".to_string(),
+            data_root: PathBuf::from("/tmp/does-not-exist/store_orphan"),
+            disposition,
+            age_secs: 1_000_000,
+            size_bytes: 42_000,
+        }
+    }
+
+    #[test]
+    fn live_store_yields_no_doctor_finding() {
+        assert!(orphan_store_doctor_finding(&orphan_finding(StoreDisposition::Live)).is_none());
+    }
+
+    #[test]
+    fn orphaned_store_maps_to_degraded_orphan_store_finding() {
+        let typed = orphan_store_doctor_finding(&orphan_finding(StoreDisposition::Orphaned))
+            .expect("orphaned store produces a typed finding");
+        assert_eq!(typed.kind(), DoctorStorageFindingKindV1::OrphanStore);
+    }
+
+    #[test]
+    fn relinkable_store_maps_to_orphan_store_finding() {
+        let typed = orphan_store_doctor_finding(&orphan_finding(StoreDisposition::Relinkable {
+            live_root: PathBuf::from("/live/moved/root"),
+        }))
+        .expect("relinkable store produces a typed finding");
+        assert_eq!(typed.kind(), DoctorStorageFindingKindV1::OrphanStore);
+    }
+
+    #[test]
+    fn bounded_statement_clamps_over_long_paths() {
+        let long = "x".repeat(DOCTOR_TEXT_LIMIT * 2);
+        let clamped = bounded_statement(&long);
+        assert!(clamped.len() <= DOCTOR_TEXT_LIMIT);
+        // A control character is scrubbed so kernel construction never rejects it.
+        assert!(!bounded_statement("a\nb").contains('\n'));
+    }
 
     struct Fixture {
         _tmp: tempfile::TempDir,

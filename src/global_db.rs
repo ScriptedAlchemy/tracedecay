@@ -32,7 +32,7 @@ use crate::sessions::{
 
 pub mod configuration;
 mod git_index_transactions;
-mod observation;
+pub(crate) mod observation;
 mod observation_projection;
 mod observation_store;
 mod project_registry;
@@ -1362,6 +1362,34 @@ impl GlobalDb {
         &self.db_path
     }
 
+    /// Typed entry point for session-store (LCM) retention (Plan 38 §3/§4).
+    ///
+    /// Daemon-wiring seam mirroring [`Self::run_observation_retention`]: a
+    /// retention scheduler calls this on the owner session store off the hot
+    /// path. It is inert by default (`LcmRetentionConfig::default()` has every
+    /// window `None`). External-payload offloads are written under this store's
+    /// own `storage_root`, so the caller never needs to resolve it.
+    pub(crate) async fn run_session_lcm_retention(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+        config: &crate::sessions::lcm::LcmRetentionConfig,
+        mode: crate::sessions::lcm::RetentionMode,
+        now: i64,
+    ) -> std::result::Result<crate::sessions::lcm::LcmRetentionReport, crate::sessions::lcm::LcmError>
+    {
+        crate::sessions::lcm::run_session_retention(
+            &self.conn,
+            &self.storage_root,
+            provider,
+            session_id,
+            config,
+            mode,
+            now,
+        )
+        .await
+    }
+
     /// Single physical-open seam for owned global/profile/session stores.
     ///
     /// Every `GlobalDb` constructor funnels its authorized `libsql` open through
@@ -1655,6 +1683,10 @@ impl GlobalDb {
     }
 
     async fn connect_writer(&self) -> Result<Connection, libsql::Error> {
+        self.inner
+            ._authority
+            .require_active_write_scope("connect global database writer")
+            .map_err(|error| libsql::Error::Misuse(error.to_string()))?;
         let conn = self.db.connect()?;
         conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")
             .await?;

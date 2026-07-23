@@ -855,18 +855,42 @@ mod backstop {
 
         let mut last_gc: Option<Instant> = None;
         let gc_period = Duration::from_hours(24);
+        // Retention/compaction and orphan-store sweeps share the daily-ish
+        // cadence family but carry an owner-configurable interval. Both are
+        // inert unless a window is opened in config, so a default daemon never
+        // opens the session store or registry here.
+        let mut last_retention: Option<Instant> = None;
+        let retention_period = Duration::from_secs(
+            watcher
+                .inner
+                .config
+                .retention
+                .interval_hours
+                .max(1)
+                .saturating_mul(3_600),
+        );
 
         loop {
             ticker.tick().await;
-            tick(&watcher, global_db_path.as_deref(), &mut last_gc, gc_period).await;
+            tick(
+                &watcher,
+                global_db_path.as_deref(),
+                &mut last_gc,
+                gc_period,
+                &mut last_retention,
+                retention_period,
+            )
+            .await;
         }
     }
 
     async fn tick(
         watcher: &GitWatcher,
-        _global_db_path: Option<&Path>,
+        global_db_path: Option<&Path>,
         last_gc: &mut Option<Instant>,
         gc_period: Duration,
+        last_retention: &mut Option<Instant>,
+        retention_period: Duration,
     ) {
         let interval_secs = watcher
             .inner
@@ -919,6 +943,26 @@ mod backstop {
 
         if run_gc_now && !gc_retry_needed {
             *last_gc = Some(Instant::now());
+        }
+
+        // Profile-scoped retention/compaction and orphan-store collection run on
+        // their own owner-configurable cadence, independent of per-project GC.
+        // Every engine is config-gated and inert by default, so this is a cheap
+        // no-op unless the owner opened a window.
+        let run_retention_now = last_retention.is_none_or(|t| t.elapsed() >= retention_period);
+        if run_retention_now {
+            let retention = &watcher.inner.config.retention;
+            let profile_root = watcher.inner.profile_root.clone();
+            super::store_maintenance::run_session_retention(&profile_root, retention).await;
+            if let Some(days) = retention.orphan_store_gc_days {
+                super::store_maintenance::run_orphan_store_sweep(
+                    global_db_path,
+                    &profile_root,
+                    days,
+                )
+                .await;
+            }
+            *last_retention = Some(Instant::now());
         }
     }
 

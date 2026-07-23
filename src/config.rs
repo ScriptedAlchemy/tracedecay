@@ -60,6 +60,15 @@ pub const DB_FILENAME: &str = "tracedecay.db";
 /// semantic selection.
 pub const SEMANTIC_RUNTIME_SETTING_KEY: &str = "semantic.runtime.v1";
 
+/// Atomic daemon retention/compaction policy tree (Plan 38).
+///
+/// The value is canonical JSON for [`RetentionConfig`]. Keeping the session
+/// (LCM), observation-evidence, orphan-store, and compaction windows under one
+/// setting keeps the inert-by-default retention engines threaded as a single
+/// versioned unit the daemon backstop reads, mirroring the semantic key. Absent
+/// or unset resolves to [`RetentionConfig::default`] — every engine disabled.
+pub const SYNC_RETENTION_SETTING_KEY: &str = "sync.retention.v1";
+
 /// Default `FastEmbed` catalog model selected on install (offline-safe).
 pub const DEFAULT_FASTEMBED_MODEL_ID: &str = "JinaEmbeddingsV2BaseCode";
 
@@ -446,6 +455,96 @@ fn default_sync_auto_track_pr_branches() -> bool {
 fn default_sync_auto_track_pr_poll_secs() -> u64 {
     300
 }
+fn default_retention_interval_hours() -> u64 {
+    24
+}
+
+/// Incremental-vacuum compaction trigger for the daemon background lane
+/// (Plan 38 §6). Threads [`crate::storage::compaction::CompactionTriggerPolicyV1`]
+/// through owner config: the daemon samples a store's free-page ratio and, when
+/// this threshold is met, schedules a bounded incremental vacuum off the hot
+/// path. Present-but-disabled unless the owner opts in with a positive ratio.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CompactionThresholdConfig {
+    /// Free-page ratio at or above which an incremental vacuum is scheduled.
+    pub free_page_ratio_threshold: f64,
+    /// Minimum reclaimable free bytes below which compaction is not worth it.
+    #[serde(default)]
+    pub minimum_reclaimable_bytes: u64,
+    /// Upper bound on freelist pages reclaimed per tick, keeping each vacuum
+    /// bounded and off the hot path.
+    #[serde(default = "default_compaction_max_pages_per_tick")]
+    pub max_pages_per_tick: u32,
+}
+
+fn default_compaction_max_pages_per_tick() -> u32 {
+    1024
+}
+
+impl Default for CompactionThresholdConfig {
+    fn default() -> Self {
+        Self {
+            free_page_ratio_threshold: 0.0,
+            minimum_reclaimable_bytes: 0,
+            max_pages_per_tick: default_compaction_max_pages_per_tick(),
+        }
+    }
+}
+
+/// The daemon retention/compaction policy tree (Plan 38). Every engine is
+/// inert by default: the session (LCM) and observation-evidence sub-configs
+/// default to their own disabled state, and the orphan-store and compaction
+/// windows default to `None`. Only an owner who sets a window opts a store in.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RetentionConfig {
+    /// Session-store (LCM raw/projected) retention windows.
+    #[serde(default)]
+    pub session_lcm: crate::sessions::lcm::LcmRetentionConfig,
+    /// Observation-evidence generation-scoped retention windows.
+    #[serde(default)]
+    pub observation: crate::global_db::observation::retention::ObservationRetentionConfig,
+    /// Orphan profile-sharded store collection window (days). `None` disables
+    /// the sweep; the Doctor surface still reports findings read-only.
+    #[serde(default)]
+    pub orphan_store_gc_days: Option<u64>,
+    /// Incremental-vacuum compaction trigger. `None` disables compaction.
+    #[serde(default)]
+    pub compaction: Option<CompactionThresholdConfig>,
+    /// Cadence between daemon retention passes (hours).
+    #[serde(default = "default_retention_interval_hours")]
+    pub interval_hours: u64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            session_lcm: crate::sessions::lcm::LcmRetentionConfig::default(),
+            observation:
+                crate::global_db::observation::retention::ObservationRetentionConfig::default(),
+            orphan_store_gc_days: None,
+            compaction: None,
+            interval_hours: default_retention_interval_hours(),
+        }
+    }
+}
+
+impl RetentionConfig {
+    /// Validate the compaction trigger, when configured. A non-positive or
+    /// non-finite ratio would schedule compaction unconditionally, so it is
+    /// rejected in favor of leaving compaction disabled (`None`).
+    fn validate(&self) -> Result<()> {
+        if let Some(compaction) = &self.compaction
+            && (!compaction.free_page_ratio_threshold.is_finite()
+                || compaction.free_page_ratio_threshold <= 0.0)
+        {
+            return Err(config_error(
+                "retention compaction free_page_ratio_threshold must be a positive, finite ratio",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Floor for the PR-autotrack poll interval; polls faster than this hammer the
 /// GitHub API / `git ls-remote` needlessly, so any smaller configured value is
 /// clamped up to this.
@@ -533,6 +632,9 @@ pub struct SyncConfig {
     /// to [`MIN_AUTO_TRACK_PR_POLL_SECS`] at read time.
     #[serde(default = "default_sync_auto_track_pr_poll_secs")]
     pub auto_track_pr_poll_secs: u64,
+    /// Daemon retention/compaction policy tree (Plan 38). Inert by default.
+    #[serde(default)]
+    pub retention: RetentionConfig,
 }
 
 impl SyncConfig {
@@ -563,6 +665,7 @@ impl Default for SyncConfig {
             auto_init: default_sync_auto_init(),
             auto_track_pr_branches: default_sync_auto_track_pr_branches(),
             auto_track_pr_poll_secs: default_sync_auto_track_pr_poll_secs(),
+            retention: RetentionConfig::default(),
         }
     }
 }
@@ -1367,6 +1470,7 @@ pub fn runtime_config_from_snapshot(
                 snapshot,
                 SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
             )?,
+            retention: retention_config_from_snapshot(snapshot)?,
         },
         telemetry: TelemetryConfig {
             timings: required_bool(snapshot, TELEMETRY_TIMINGS_SETTING_KEY)?,
@@ -1398,6 +1502,30 @@ fn semantic_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<S
     };
     semantic.validate()?;
     Ok(semantic)
+}
+
+fn retention_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<RetentionConfig> {
+    let key = SettingKey::new(SYNC_RETENTION_SETTING_KEY).map_err(|error| {
+        config_error(format!(
+            "invalid runtime setting key '{SYNC_RETENTION_SETTING_KEY}': {error}"
+        ))
+    })?;
+    let retention = match snapshot.effective_values.get(&key) {
+        None => RetentionConfig::default(),
+        Some(ConfigurationValueV1::Text(value)) => {
+            serde_json::from_str(value).map_err(|error| {
+                config_error(format!("resolved retention setting is invalid: {error}"))
+            })?
+        }
+        Some(value) => {
+            return Err(config_error(format!(
+                "resolved configuration setting '{SYNC_RETENTION_SETTING_KEY}' has wrong type: expected text, got {:?}",
+                value.kind()
+            )));
+        }
+    };
+    retention.validate()?;
+    Ok(retention)
 }
 
 fn required_setting<'a>(
@@ -1636,6 +1764,13 @@ fn direct_mutation_for_runtime_config_diff(
     push_runtime_change(
         &mut mutations,
         project_id,
+        SYNC_RETENTION_SETTING_KEY,
+        ConfigurationValueV1::Text(retention_config_json(&before.sync.retention)?),
+        ConfigurationValueV1::Text(retention_config_json(&after.sync.retention)?),
+    )?;
+    push_runtime_change(
+        &mut mutations,
+        project_id,
         TELEMETRY_TIMINGS_SETTING_KEY,
         ConfigurationValueV1::Boolean(before.telemetry.timings),
         ConfigurationValueV1::Boolean(after.telemetry.timings),
@@ -1650,6 +1785,12 @@ fn semantic_config_json(config: &SemanticConfig) -> Result<String> {
     config.validate()?;
     serde_json::to_string(config)
         .map_err(|error| config_error(format!("semantic runtime setting is invalid: {error}")))
+}
+
+fn retention_config_json(config: &RetentionConfig) -> Result<String> {
+    config.validate()?;
+    serde_json::to_string(config)
+        .map_err(|error| config_error(format!("retention setting is invalid: {error}")))
 }
 
 fn push_runtime_change(

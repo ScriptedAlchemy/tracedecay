@@ -1973,3 +1973,63 @@ mod runtime_configuration_cutover {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod retention_config_tests {
+    use crate::config::{RetentionConfig, SyncConfig};
+
+    #[test]
+    fn default_retention_is_fully_inert() {
+        let retention = RetentionConfig::default();
+        assert!(!retention.session_lcm.enabled, "LCM disabled by default");
+        assert!(
+            !retention.observation.enabled,
+            "observation disabled by default"
+        );
+        assert!(
+            retention.orphan_store_gc_days.is_none(),
+            "orphan sweep disabled by default"
+        );
+        assert!(
+            retention.compaction.is_none(),
+            "compaction disabled by default"
+        );
+        // A default SyncConfig carries the inert retention tree.
+        assert_eq!(SyncConfig::default().retention, retention);
+    }
+
+    #[test]
+    fn empty_json_object_deserializes_to_inert_defaults() {
+        // A serde-compat empty object (older config with no retention block)
+        // must resolve every engine to disabled.
+        let retention: RetentionConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(retention, RetentionConfig::default());
+    }
+
+    #[test]
+    fn retention_config_json_round_trips_with_windows_set() {
+        let json = r#"{
+            "session_lcm": { "enabled": true, "drop_after_days": 30 },
+            "observation": { "enabled": true, "anchor_release_after_days": 45 },
+            "orphan_store_gc_days": 14,
+            "compaction": { "free_page_ratio_threshold": 0.25, "minimum_reclaimable_bytes": 1000000 },
+            "interval_hours": 12
+        }"#;
+        let retention: RetentionConfig = serde_json::from_str(json).unwrap();
+        assert!(retention.session_lcm.enabled);
+        assert_eq!(retention.session_lcm.drop_after_days, Some(30));
+        assert!(retention.observation.enabled);
+        assert_eq!(retention.observation.anchor_release_after_days, Some(45));
+        assert_eq!(retention.orphan_store_gc_days, Some(14));
+        assert_eq!(retention.interval_hours, 12);
+        let compaction = retention.compaction.expect("compaction configured");
+        assert!((compaction.free_page_ratio_threshold - 0.25).abs() < f64::EPSILON);
+        assert_eq!(compaction.minimum_reclaimable_bytes, 1_000_000);
+
+        // Re-serialize and re-parse: the tree is stable across a round trip.
+        let reserialized = serde_json::to_string(&retention).unwrap();
+        let reparsed: RetentionConfig = serde_json::from_str(&reserialized).unwrap();
+        assert_eq!(retention, reparsed);
+    }
+}
