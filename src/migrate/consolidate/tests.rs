@@ -678,26 +678,91 @@ async fn insert_projection_alias(db: &GlobalDb, observation_id: &str, output_mes
     assert!(rebuilt.is_complete());
 }
 
+const FIXTURE_SOURCE_ID: &str = "proj_legacy";
+const FIXTURE_TARGET_ID: &str = "proj_current";
+
+/// Cross-process on-disk fixture template. nextest runs every test in its own
+/// process, so per-process caches cannot amortize the fixed cost of building
+/// the consolidation fixture (a git repo, two graph shards, two session DBs,
+/// and a global DB) that ~40 tests each pay. This builds the full tree once
+/// behind an exclusive file lock, and every test copies the template into its
+/// own isolated `TempDir` and re-runs only the cheap path-dependent fixups
+/// (global-DB project rows/aliases, the two store manifests, and the
+/// repository-identity marker). Bump the version suffix when the fixture
+/// layout changes so stale templates are ignored. Every entry point falls back
+/// to the real builder when the template cannot be built, copied, or fixed up,
+/// so tests never depend on the template for correctness.
+const FIXTURE_TEMPLATE_BASE: &str = "tracedecay-consolidate-fixture-template-v1";
+
+static FIXTURE_TEMPLATE: tokio::sync::OnceCell<Option<PathBuf>> =
+    tokio::sync::OnceCell::const_new();
+
+/// Names the template directory, keyed by a fingerprint of the schema source
+/// files whose shape the seeded stores embed. A schema change flips the key, so
+/// a stale template built by an earlier revision (the dir persists under the
+/// system temp dir across runs) is abandoned rather than served with the wrong
+/// shape.
+fn fixture_template_dir_name() -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for source in [
+        include_str!("../../global_db/schema_stages.rs"),
+        include_str!("../../global_db/schema_contract/definitions.rs"),
+        include_str!("../../global_db/schema_contract/invariants/triggers.rs"),
+    ] {
+        hasher.update(source.as_bytes());
+    }
+    let fingerprint = hex::encode(&hasher.finalize()[..8]);
+    format!("{FIXTURE_TEMPLATE_BASE}-{fingerprint}")
+}
+
 async fn fixture() -> Fixture {
+    match fixture_from_template().await {
+        Some(fixture) => fixture,
+        None => build_fixture_real().await,
+    }
+}
+
+/// Builds the fixture tree directly under a fresh `TempDir` via the real
+/// builder — the correctness baseline and the fallback when templating fails.
+async fn build_fixture_real() -> Fixture {
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("repo");
     let profile = temp.path().join("profile");
-    let source_id = "proj_legacy".to_string();
-    let target_id = "proj_current".to_string();
-    init_repo(&project);
+    build_fixture_tree(&project, &profile).await;
+    make_fixture(temp)
+}
+
+fn make_fixture(temp: TempDir) -> Fixture {
+    let project = temp.path().join("repo");
+    let profile = temp.path().join("profile");
+    Fixture {
+        _temp: temp,
+        project,
+        profile,
+        source_id: FIXTURE_SOURCE_ID.to_string(),
+        target_id: FIXTURE_TARGET_ID.to_string(),
+    }
+}
+
+/// Builds the complete fixture tree (git repo, two shards, global DB, and the
+/// repository-identity marker) at the given `project`/`profile` roots. Shared
+/// by the real builder and the template builder.
+async fn build_fixture_tree(project: &Path, profile: &Path) {
+    init_repo(project);
     create_shard(
-        &profile,
-        &project,
-        &source_id,
+        profile,
+        project,
+        FIXTURE_SOURCE_ID,
         "legacy durable fact",
         "legacy-session",
         true,
     )
     .await;
     create_shard(
-        &profile,
-        &project,
-        &target_id,
+        profile,
+        project,
+        FIXTURE_TARGET_ID,
         "current durable fact",
         "current-session",
         false,
@@ -706,12 +771,12 @@ async fn fixture() -> Fixture {
     let global = GlobalDb::open_at_without_structured_backfill(&profile.join("global.db"))
         .await
         .unwrap();
-    let git_common_dir = crate::worktree::git_common_dir(&project).unwrap();
-    for project_id in [&source_id, &target_id] {
+    let git_common_dir = crate::worktree::git_common_dir(project).unwrap();
+    for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
         global
             .upsert_code_project(
                 project_id,
-                &project,
+                project,
                 Some(&git_common_dir),
                 None,
                 Some("main"),
@@ -721,7 +786,7 @@ async fn fixture() -> Fixture {
         global
             .upsert_store_instance(StoreInstanceUpsert {
                 store_id: format!("store:{project_id}:profile_sharded"),
-                project_id: project_id.clone(),
+                project_id: project_id.to_string(),
                 store_kind: "code_project".to_string(),
                 storage_mode: "profile_sharded".to_string(),
                 store_relpath: format!("projects/{project_id}"),
@@ -736,19 +801,165 @@ async fn fixture() -> Fixture {
             .unwrap();
     }
     global
-        .upsert_project_alias(&project, &target_id)
+        .upsert_project_alias(project, FIXTURE_TARGET_ID)
         .await
         .unwrap();
     global.checkpoint().await;
     global.close();
-    storage::write_repository_identity_marker(&project, &target_id).unwrap();
-    Fixture {
-        _temp: temp,
-        project,
-        profile,
-        source_id,
-        target_id,
+    storage::write_repository_identity_marker(project, FIXTURE_TARGET_ID).unwrap();
+}
+
+/// Seeds a fixture by copying the shared template and re-running the cheap
+/// path-dependent fixups. Returns `None` on any failure so the caller falls
+/// back to [`build_fixture_real`].
+async fn fixture_from_template() -> Option<Fixture> {
+    let template = fixture_template_root().await?;
+    let temp = TempDir::new().ok()?;
+    let project = temp.path().join("repo");
+    let profile = temp.path().join("profile");
+    copy_fixture_tree(&template.join("repo"), &project).ok()?;
+    copy_fixture_tree(&template.join("profile"), &profile).ok()?;
+    apply_fixture_fixups(&project, &profile).await?;
+    Some(make_fixture(temp))
+}
+
+/// Re-points the copied store at its new location: global-DB project rows and
+/// aliases (recomputed git common dir + fresh path aliases), the two store
+/// manifests (project_root/data_root), and the repository-identity marker.
+async fn apply_fixture_fixups(project: &Path, profile: &Path) -> Option<()> {
+    let git_common_dir = crate::worktree::git_common_dir(project)?;
+    let global = GlobalDb::open_at_without_structured_backfill(&profile.join("global.db")).await?;
+    // Drop the template build's path aliases so only fresh new-path aliases
+    // remain after the re-upserts below.
+    {
+        let conn = global.writer_connection().await.ok()?;
+        conn.execute("DELETE FROM project_aliases", ()).await.ok()?;
     }
+    for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
+        global
+            .upsert_code_project(
+                project_id,
+                project,
+                Some(&git_common_dir),
+                None,
+                Some("main"),
+            )
+            .await?;
+    }
+    global
+        .upsert_project_alias(project, FIXTURE_TARGET_ID)
+        .await?;
+    global.checkpoint().await;
+    global.close();
+    for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
+        let layout = layout_for_id(project, profile, project_id).ok()?;
+        storage::write_store_manifest(&layout).ok()?;
+    }
+    storage::write_repository_identity_marker(project, FIXTURE_TARGET_ID).ok()?;
+    Some(())
+}
+
+async fn fixture_template_root() -> Option<&'static Path> {
+    FIXTURE_TEMPLATE
+        .get_or_init(ensure_fixture_template)
+        .await
+        .as_deref()
+}
+
+/// Returns the shared template dir, building it under an exclusive file lock if
+/// this is the first process to need it. Exactly one process builds; concurrent
+/// processes block on the lock, then find the `READY` marker.
+async fn ensure_fixture_template() -> Option<PathBuf> {
+    let base = std::env::temp_dir();
+    let dir_name = fixture_template_dir_name();
+    let shared = base.join(&dir_name);
+    if shared.join("READY").is_file() {
+        return Some(shared);
+    }
+    fs::create_dir_all(&base).ok()?;
+    let lock_path = base.join(format!("{dir_name}.lock"));
+    let lock_file = tokio::task::spawn_blocking(move || -> std::io::Result<fs::File> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)?;
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok(file)
+    })
+    .await
+    .ok()?
+    .ok()?;
+    // Another process may have finished the build while we waited on the lock.
+    if shared.join("READY").is_file() {
+        let _ = fs2::FileExt::unlock(&lock_file);
+        return Some(shared);
+    }
+    let build = shared.with_file_name(format!("{dir_name}-build-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&build);
+    let built = build_fixture_template(&build).await;
+    let result = match built {
+        Ok(()) => match fs::rename(&build, &shared) {
+            Ok(()) => Some(shared),
+            Err(_) if shared.join("READY").is_file() => {
+                let _ = fs::remove_dir_all(&build);
+                Some(shared)
+            }
+            // Rename failed but the private build tree is a valid template.
+            Err(_) => Some(build),
+        },
+        Err(_) => {
+            let _ = fs::remove_dir_all(&build);
+            None
+        }
+    };
+    let _ = fs2::FileExt::unlock(&lock_file);
+    result
+}
+
+/// Builds the template into `dest`. The tree is built in a system `TempDir`
+/// (never under the repository target/) so branch detection walking up from the
+/// fixture repo cannot bootstrap from this repository's own `.git`.
+async fn build_fixture_template(dest: &Path) -> std::io::Result<()> {
+    let scratch = TempDir::new()?;
+    let project = scratch.path().join("repo");
+    let profile = scratch.path().join("profile");
+    build_fixture_tree(&project, &profile).await;
+    copy_fixture_tree(&project, &dest.join("repo"))?;
+    copy_fixture_tree(&profile, &dest.join("profile"))?;
+    fs::write(dest.join("READY"), b"ok")?;
+    Ok(())
+}
+
+/// Recursively copies `src` into `dest`, skipping database-authority lock
+/// artifacts (mirroring `full_tree_snapshot`'s ignore set) so the copied store
+/// carries no stale locks and each test acquires a fresh authority.
+fn copy_fixture_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if is_database_lock_artifact(&name.to_string_lossy()) {
+            continue;
+        }
+        let from = entry.path();
+        let to = dest.join(&name);
+        if entry.file_type()?.is_dir() {
+            copy_fixture_tree(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_database_lock_artifact(name: &str) -> bool {
+    name == ".tracedecay-database-locks"
+        || name == "lifecycle.lock"
+        || name == "lifecycle.lock.owner"
+        || name.ends_with(".access.lock")
+        || name.ends_with(".writer.lock")
+        || name.ends_with(".writer.owner")
 }
 
 async fn create_shard(
