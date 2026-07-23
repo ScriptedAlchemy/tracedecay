@@ -457,6 +457,13 @@ mod tests {
         .unwrap()
     }
 
+    fn runtime_recovery_operation() -> DoctorOwningOperationRefV1 {
+        DoctorOwningOperationRefV1::new(
+            tracedecay_application::doctor::operations::RUNTIME_RECOVER_DAEMON,
+        )
+        .unwrap()
+    }
+
     fn failed_operation() -> DoctorRemediationOperationV1 {
         DoctorRemediationOperationV1 {
             operation_id: OperationId::from_request(
@@ -572,6 +579,41 @@ mod tests {
         );
 
         assert!(dispatcher.legal_actions(&reference).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_delegates_an_operation_that_has_no_preview() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, mut state) = state_for_test().await;
+        let mut failed = failed_operation();
+        failed.owning_operation = runtime_recovery_operation();
+        failed.preview_id = None;
+        state.doctor_remediation_dispatcher = Some(DoctorRemediationDispatcherV1::new(
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] })),
+            Arc::new({
+                let failed = failed.clone();
+                move |_| {
+                    let failed = failed.clone();
+                    Box::pin(async move { Ok(failed) })
+                }
+            }),
+        ));
+
+        let Json(envelope) = apply(
+            State(state),
+            Json(DoctorRemediationApplyRequestV1 {
+                operation: runtime_recovery_operation(),
+                preview_id: None,
+                idempotency_key: IdempotencyKey::new("idempotency.runtime-recovery").unwrap(),
+                confirmed: true,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            envelope.payload,
+            DoctorRemediationPayloadV1::Operation { operation: failed }
+        );
     }
 
     #[tokio::test]
