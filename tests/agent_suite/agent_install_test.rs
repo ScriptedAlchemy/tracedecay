@@ -1028,6 +1028,36 @@ fn test_opencode_install_preserves_existing_config() {
 }
 
 #[test]
+fn test_opencode_install_converts_enabled_lsp_to_custom_server_map() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let config_path = home.join(".config/opencode/opencode.json");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": true
+}
+"#,
+    )
+    .unwrap();
+
+    OpenCodeIntegration
+        .install(&make_install_ctx(home))
+        .unwrap();
+
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config_path).unwrap()).unwrap();
+    assert!(config["mcp"]["tracedecay"].is_object());
+    assert!(
+        config["lsp"]["tracedecay"].is_object(),
+        "OpenCode documents object-form lsp as retaining built-ins while adding custom servers"
+    );
+}
+
+#[test]
 fn test_zed_install_preserves_existing_config() {
     let dir = TempDir::new().unwrap();
     let original = r#"{

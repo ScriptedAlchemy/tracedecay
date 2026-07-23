@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
@@ -341,27 +341,62 @@ fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
         }
     };
 
-    config["mcp"]["tracedecay"] = json!({
-        "type": "local",
-        "command": [tracedecay_bin, "serve"]
-    });
-    config["lsp"]["tracedecay"] = json!({
-        "command": [tracedecay_bin, "lsp", "bridge", "--stdio", "--project", "."],
-        "extensions": [
-            ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".c", ".h",
-            ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".m", ".mm", ".zig",
-            ".lua", ".php"
-        ],
-        "env": {
-            "TRACEDECAY_LSP_BROKER_UPSTREAM": "0"
-        },
-        "initialization": {
-            "tracedecay": {
-                "brokerUpstream": false,
-                "duplicateAnalyzerAvoidance": true
-            }
-        }
-    });
+    let config_object = config
+        .as_object_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("{} must contain a JSON object", config_path.display()),
+        })?;
+    let mcp = config_object
+        .entry("mcp")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("{}.mcp must be a JSON object", config_path.display()),
+        })?;
+    mcp.insert(
+        "tracedecay".to_string(),
+        json!({
+            "type": "local",
+            "command": [tracedecay_bin, "serve"]
+        }),
+    );
+
+    let lsp_value = config_object.entry("lsp").or_insert_with(|| json!({}));
+    if lsp_value == &json!(true) {
+        // OpenCode documents object-form `lsp` as retaining built-in servers
+        // while allowing custom entries, so this preserves `lsp: true`.
+        *lsp_value = json!({});
+    }
+    if lsp_value != &json!(false) {
+        let lsp = lsp_value
+            .as_object_mut()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "{}.lsp must be a boolean or JSON object",
+                    config_path.display()
+                ),
+            })?;
+        lsp.insert(
+            "tracedecay".to_string(),
+            json!({
+                "command": [tracedecay_bin, "lsp", "bridge", "--stdio", "--project", "."],
+                "extensions": [
+                    ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".c", ".h",
+                    ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".m", ".mm", ".zig",
+                    ".lua", ".php"
+                ],
+                "env": {
+                    "TRACEDECAY_LSP_BROKER_UPSTREAM": "0"
+                },
+                "initialization": {
+                    "tracedecay": {
+                        "brokerUpstream": false,
+                        "duplicateAnalyzerAvoidance": true
+                    }
+                }
+            }),
+        );
+    }
 
     safe_write_json_file(config_path, &config, backup.as_deref())?;
     eprintln!(
