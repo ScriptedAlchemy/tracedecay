@@ -232,10 +232,15 @@ async fn scoped_row_count(
          WHERE (?1 = 'all' OR provider = ?1)
            AND (?2 IS NULL OR session_id = ?2)"
     );
-    util::fetch_i64(conn, &sql, params![provider, util::opt_text(session_id)], "count")
-        .await
-        .unwrap_or(0)
-        .max(0) as u64
+    util::fetch_i64(
+        conn,
+        &sql,
+        params![provider, util::opt_text(session_id)],
+        "count",
+    )
+    .await
+    .unwrap_or(0)
+    .max(0) as u64
 }
 
 /// Runs the configured session-retention passes for `provider`/`session_id`.
@@ -287,8 +292,16 @@ pub async fn run_session_retention(
 
     // Drop first (terminal, longest window) so offload never externalizes a row
     // that is about to be deleted.
-    report.dropped =
-        run_drop_pass(conn, provider, session_id, config, mode, now, &mut report.errors).await?;
+    report.dropped = run_drop_pass(
+        conn,
+        provider,
+        session_id,
+        config,
+        mode,
+        now,
+        &mut report.errors,
+    )
+    .await?;
     report.offloaded = run_offload_pass(
         conn,
         storage_root,
@@ -300,8 +313,16 @@ pub async fn run_session_retention(
         &mut report.errors,
     )
     .await?;
-    report.projected_deduped =
-        run_dedupe_pass(conn, provider, session_id, config, mode, now, &mut report.errors).await?;
+    report.projected_deduped = run_dedupe_pass(
+        conn,
+        provider,
+        session_id,
+        config,
+        mode,
+        now,
+        &mut report.errors,
+    )
+    .await?;
 
     if mode.is_apply() {
         // Consume the staged GC/reporting meta cards: record the last run so a

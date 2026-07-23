@@ -88,10 +88,7 @@ fn root_is_live(root: &Path) -> bool {
 
 fn classify_one(entry: &StoreCensusEntry) -> StoreDisposition {
     if root_is_live(&entry.canonical_root)
-        || entry
-            .display_root
-            .as_deref()
-            .is_some_and(root_is_live)
+        || entry.display_root.as_deref().is_some_and(root_is_live)
     {
         return StoreDisposition::Live;
     }
@@ -364,10 +361,7 @@ pub async fn sweep_orphan_stores(
                 .map(|entry| entry.canonical_root.clone())
         })
         .collect::<Vec<_>>();
-    let collected_roots = collected_roots
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let collected_roots = collected_roots.into_iter().flatten().collect::<Vec<_>>();
     let retired_registry_rows = if collected_roots.is_empty() {
         0
     } else {

@@ -212,16 +212,18 @@ async fn drop_reaps_only_projection_durable_rows() -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    assert_eq!(report.dropped.eligible, 1, "only the durable row is eligible");
+    assert_eq!(
+        report.dropped.eligible, 1,
+        "only the durable row is eligible"
+    );
     assert_eq!(report.dropped.acted, 1);
-    assert_eq!(count(conn, "lcm_raw_messages").await?, 1, "live row retained");
+    assert_eq!(
+        count(conn, "lcm_raw_messages").await?,
+        1,
+        "live row retained"
+    );
     // The surviving raw row is the un-projected live one.
-    let survivor: i64 = fetch_i64(
-        conn,
-        "SELECT store_id FROM lcm_raw_messages",
-        (),
-    )
-    .await?;
+    let survivor: i64 = fetch_i64(conn, "SELECT store_id FROM lcm_raw_messages", ()).await?;
     assert_ne!(survivor, durable, "durable row dropped, live row kept");
     // Projected twin of the dropped row is gone; the live twin remains.
     assert_eq!(count(conn, "session_messages").await?, 1);
@@ -313,8 +315,16 @@ async fn dedupe_drops_projected_duplicate_and_keeps_raw() -> Result<(), String> 
     .map_err(|e| e.to_string())?;
 
     assert_eq!(report.projected_deduped.acted, 1);
-    assert_eq!(count(conn, "session_messages").await?, 0, "projected twin dropped");
-    assert_eq!(count(conn, "lcm_raw_messages").await?, 1, "raw copy retained");
+    assert_eq!(
+        count(conn, "session_messages").await?,
+        0,
+        "projected twin dropped"
+    );
+    assert_eq!(
+        count(conn, "lcm_raw_messages").await?,
+        1,
+        "raw copy retained"
+    );
     // The projected FTS shadow obeys the same window (trigger cleaned it).
     let fts_after = count(conn, "session_messages_fts").await?;
     assert!(fts_after < fts_before, "projected FTS shadow shrank");
@@ -353,7 +363,11 @@ async fn dedupe_never_touches_sole_projected_copy() -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     assert_eq!(report.projected_deduped.acted, 0);
-    assert_eq!(count(conn, "session_messages").await?, 1, "sole copy retained");
+    assert_eq!(
+        count(conn, "session_messages").await?,
+        1,
+        "sole copy retained"
+    );
     Ok(())
 }
 
@@ -386,7 +400,10 @@ async fn offload_externalizes_durable_content_after_durability() -> Result<(), S
     .await
     .map_err(|e| e.to_string())?;
 
-    assert_eq!(report.offloaded.acted, 1, "only the durable row is offloaded");
+    assert_eq!(
+        report.offloaded.acted, 1,
+        "only the durable row is offloaded"
+    );
     assert!(report.offloaded.bytes_reclaimed >= 4096);
 
     // Durable row: inline content cleared, now external with a payload_ref.
@@ -397,12 +414,7 @@ async fn offload_externalizes_durable_content_after_durability() -> Result<(), S
     )
     .await?;
     assert_eq!(kind, "external");
-    let payload_present = fetch_i64(
-        conn,
-        "SELECT COUNT(*) FROM lcm_external_payloads",
-        (),
-    )
-    .await?;
+    let payload_present = fetch_i64(conn, "SELECT COUNT(*) FROM lcm_external_payloads", ()).await?;
     assert_eq!(payload_present, 1, "content stored once, addressed by hash");
     // The un-projected live row is untouched (still inline).
     let live_kind: i64 = fetch_i64(
