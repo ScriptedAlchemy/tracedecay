@@ -153,6 +153,23 @@ export function GraphCanvas({
       },
     });
     sigmaRef.current = renderer;
+    {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      graph.forEachNode((_, attrs) => {
+        const x = attrs['x'] as number;
+        const y = attrs['y'] as number;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      });
+      const padX = (maxX - minX || 1) * 0.08;
+      const padY = (maxY - minY || 1) * 0.08;
+      renderer.setCustomBBox({
+        x: [minX - padX, maxX + padX],
+        y: [minY - padY, maxY + padY],
+      });
+    }
 
     renderer.on('enterNode', ({ node }) => {
       if (node.startsWith(HALO)) return;
@@ -197,8 +214,26 @@ export function GraphCanvas({
           };
           if (graph.hasNode(haloId)) graph.mergeNodeAttributes(haloId, halo);
           else graph.addNode(haloId, halo);
+          // Impact flare (Gource grammar): a wide, faint ring pops on strike
+          // and expands as the bloom settles.
+          const ringId = haloId + 'r';
+          if (heat > 0.55) {
+            const ring = {
+              x: attrs['x'],
+              y: attrs['y'],
+              size: (attrs['size'] as number) * (2.4 + 2.8 * (1 - heat)),
+              color: `rgba(${hr}, ${hg}, ${hb}, ${(0.09 * heat).toFixed(3)})`,
+              label: '',
+              zIndex: 0,
+            };
+            if (graph.hasNode(ringId)) graph.mergeNodeAttributes(ringId, ring);
+            else graph.addNode(ringId, ring);
+          } else if (graph.hasNode(ringId)) {
+            graph.dropNode(ringId);
+          }
         } else if (graph.hasNode(haloId)) {
           graph.dropNode(haloId);
+          if (graph.hasNode(haloId + 'r')) graph.dropNode(haloId + 'r');
         }
       }
     };
