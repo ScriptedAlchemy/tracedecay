@@ -709,6 +709,11 @@ jobs:
         with:
           package: tracedecay
           rust-toolchain: manual
+          # The V2 storage cutover intentionally breaks the pre-V2 public API.
+          # Release-plz owns the version bump at release time (the drift guard
+          # forbids pre-bumping in the PR), so tell semver-checks the next
+          # release is breaking instead of inferring from the unchanged version.
+          release-type: major
 
   clippy:
     name: Clippy
