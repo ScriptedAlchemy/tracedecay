@@ -47,8 +47,11 @@ export function BrainPage() {
               <StatTile label="graph scopes" value={totals.scopes} />
             </div>
             <div className="flex flex-col gap-3 px-4 pb-4">
-              {groups.map((group) => (
-                <RepoGroupCard key={group.git_common_dir ?? group.label} group={group} />
+              {groups.map((group, index) => (
+                <RepoGroupCard
+                  key={`${group.git_common_dir ?? group.label}#${index}`}
+                  group={group}
+                />
               ))}
             </div>
           </div>
@@ -72,7 +75,10 @@ function RepoGroupCard({ group }: { group: ProjectRepoGroup }) {
       </header>
       <div>
         {group.projects.map((project) => (
-          <ProjectRow key={project.project_id} project={project} />
+          <ProjectRow
+            key={`${project.project_id}:${project.canonical_root}`}
+            project={project}
+          />
         ))}
       </div>
     </section>
