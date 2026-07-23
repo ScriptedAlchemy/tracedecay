@@ -9,6 +9,7 @@ import {
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
+import { CapacityBar } from '../../ui/ActivityColumns.tsx';
 
 /** Observatory landing (archetype 1): storage health from the real
  * /api/storage/telemetry envelope. Every state renders truthfully. */
@@ -63,6 +64,8 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
           <span className="text-2xs text-text-muted">{entry.role}</span>
         </div>
         {observed ? (
+          <>
+          <CapacityBar usedBytes={entry.total_bytes} freeBytes={entry.free_bytes} />
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs tabular">
             <dt className="text-text-muted">size</dt>
             <dd data-cell="numeric">{formatBytes(entry.total_bytes)}</dd>
@@ -73,6 +76,7 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
               {entry.free_page_ratio != null ? `${(entry.free_page_ratio * 100).toFixed(1)}%` : '—'}
             </dd>
           </dl>
+          </>
         ) : (
           <p className="text-xs text-text-muted">telemetry not observed for this store</p>
         )}

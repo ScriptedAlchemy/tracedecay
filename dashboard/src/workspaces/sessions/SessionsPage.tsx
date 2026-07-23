@@ -7,6 +7,7 @@ import {
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
+import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 
@@ -30,19 +31,16 @@ export function SessionsPage() {
       filters={
         <LegacyBoundary title="LCM" pending={timeline.isPending} result={timeline.data}>
           {(data) => {
-            const buckets = data.buckets ?? [];
-            const recent = buckets.slice(-7);
+            const buckets = (data.buckets ?? []).map((b) => ({
+              label: String(b['bucket'] ?? ''),
+              value: Number(b['count'] ?? 0),
+              hint: `~${Number(b['token_estimate'] ?? 0).toLocaleString()} tokens`,
+            }));
+            const total = buckets.reduce((sum, b) => sum + b.value, 0);
             return (
-              <div className="flex flex-col gap-2">
-                <StatTile label="days tracked" value={buckets.length} />
-                {recent.map((b, i) => (
-                  <StatTile
-                    key={i}
-                    label={String(b['bucket'] ?? i)}
-                    value={String(b['count'] ?? '—')}
-                    hint={`~${String(b['token_estimate'] ?? 0)} tokens`}
-                  />
-                ))}
+              <div className="flex flex-col gap-3">
+                <ActivityColumns buckets={buckets.slice(-46)} />
+                <StatTile label="messages tracked" value={total.toLocaleString()} />
               </div>
             );
           }}
