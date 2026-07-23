@@ -294,12 +294,11 @@ fn write_sqlite_placeholder(path: &Path) {
     }
     let path = path.to_path_buf();
     std::thread::spawn(move || {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let db = libsql::Builder::new_local(path).build().await.unwrap();
-            let conn = db.connect().unwrap();
-            conn.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)", ())
+        create_runtime().block_on(async {
+            let (db, _) = crate::common::initialize_test_database(&path)
                 .await
                 .unwrap();
+            db.close();
         });
     })
     .join()

@@ -716,11 +716,9 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
 
     // Ensure schema exists, then deliberately break the raw-message table.
     drop(open_project_session_db(&project).await.unwrap());
-    let broken = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let broken_conn = broken.connect().unwrap();
+    let broken_conn = rusqlite::Connection::open(&db_path).unwrap();
     broken_conn
-        .execute("DROP TABLE session_messages", ())
-        .await
+        .execute("DROP TABLE session_messages", [])
         .unwrap();
 
     // Skip schema ensure so ingest runs against the broken table.
