@@ -13,10 +13,9 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use gix::bstr::ByteSlice;
 use notify_debouncer_full::{
     DebounceEventResult, Debouncer, RecommendedCache, new_debouncer,
     notify::{RecommendedWatcher, RecursiveMode},
@@ -31,7 +30,7 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
     ScoreDomainId, SnapshotFileDispositionV1, UtcMicros, WorktreeId, canonical_sha256,
 };
-use tree_sitter::{InputEdit, Parser, Point, Range, Tree};
+use tree_sitter::{InputEdit, Parser, Point, Range};
 
 use crate::{
     application::code_index::{
@@ -64,6 +63,37 @@ use crate::{
 const MAX_PENDING_HINTS: usize = 1_024;
 const MAX_SUPERSEDED_RECONCILE_RETRIES: usize = 4;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(75);
+/// Freshness contract for non-git-mediated mutations (raw file writes, rsync,
+/// out-of-agent saves): a query admitted after this bound since the last
+/// reconciliation re-checks gix truth before serving. Git-mediated changes are
+/// caught immediately by the tier-1 metadata check regardless of this bound.
+const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// How the scheduler is hinted about changes.
+///
+/// TraceDecay's edits are agent-driven, so the daemon already learns about
+/// touched paths through host after-file-edit hooks; those are the primary
+/// hint source and require no standing filesystem watches. gix status remains
+/// the sole truth, reconciled lazily (on open, on hook receipt, and on the
+/// query-admission freshness ladder). A recursive `notify` watcher is a
+/// non-agent-driven fallback only: it can exhaust inotify descriptors on large
+/// trees, so it is off by default and nothing depends on it being enabled.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CodeIndexHintPolicyV1 {
+    /// Opt-in recursive filesystem watcher for non-agent-driven setups.
+    pub watch_filesystem: bool,
+    /// Tier-2 bounded-staleness reconcile threshold for non-git mutations.
+    pub staleness_threshold: Duration,
+}
+
+impl Default for CodeIndexHintPolicyV1 {
+    fn default() -> Self {
+        Self {
+            watch_filesystem: false,
+            staleness_threshold: DEFAULT_STALENESS_THRESHOLD,
+        }
+    }
+}
 
 type ProductionOwner =
     ProductionCodeIndexOwnerV1<DaemonCodeIndexPublicationStoreV1, DaemonProjectionSinkV1>;
@@ -386,11 +416,6 @@ impl PendingHintsV1 {
     }
 }
 
-struct SavedTreeV1 {
-    bytes: Arc<[u8]>,
-    tree: Tree,
-}
-
 struct CapturedSnapshotV1 {
     snapshot: SanitizedCodeSnapshotV1,
     captured_files: Vec<CodeIndexCapturedFileV1>,
@@ -534,15 +559,24 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
 
 pub(super) struct CodeIndexWorktreeSchedulerV1 {
     project_root: PathBuf,
+    /// The exact indexing identity this worktree is bound to. Re-resolved
+    /// before each reconciliation so a HEAD move never mis-attributes a served
+    /// generation to a newer revision.
+    identity: identity::IndexingIdentityV1,
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
+    policy: CodeIndexHintPolicyV1,
+    /// Tier-1 cheap staleness signal: `.git` metadata mtimes at last reconcile.
+    git_metadata: identity::GitMetadataFingerprintV1,
+    /// Tier-2 bounded-staleness clock: when truth was last reconciled.
+    last_reconciled_at: Instant,
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     owner: ProductionOwner,
     hints: Arc<Mutex<PendingHintsV1>>,
     wake: Arc<tokio::sync::Notify>,
     epoch: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
-    saved_trees: BTreeMap<String, SavedTreeV1>,
+    saved_trees: tree_cache::SavedTreeCacheV1,
     latest_content_identity: Option<ContentDigest>,
     watcher: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
     /// Optional PR10 hook: schedule `FastEmbed` projection without joining it.
@@ -556,9 +590,28 @@ impl CodeIndexWorktreeSchedulerV1 {
         store_root: PathBuf,
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
+        Self::open_with_policy(
+            project_root,
+            store_root,
+            byte_pool,
+            CodeIndexHintPolicyV1::default(),
+        )
+    }
+
+    pub fn open_with_policy(
+        project_root: &Path,
+        store_root: PathBuf,
+        byte_pool: Arc<SharedCodeIndexBytePoolV1>,
+        policy: CodeIndexHintPolicyV1,
+    ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
-        let repository_id = repository_id(&project_root)?;
-        let worktree_id = worktree_id(&project_root)?;
+        // Resolve exact identity BEFORE any indexing work. Paths located this
+        // checkout; identity authorizes what may be reused.
+        let identity = identity::IndexingIdentityV1::resolve(&project_root)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let repository_id = identity.repository_id().clone();
+        let worktree_id = identity.worktree_id().clone();
+        let git_metadata = identity::GitMetadataFingerprintV1::capture(&project_root);
         let publication = DaemonCodeIndexPublicationStoreV1::new(&store_root)?;
         let owner = open_production_code_index_owner_v1(
             CodeIndexProductionConfigV1 {
@@ -575,12 +628,18 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?;
         let restored = owner.active_generation()?;
-        if let Some(generation) = &restored
-            && generation.snapshot().worktree.as_ref() != Some(&worktree_id)
-        {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "active code generation belongs to a different worktree".to_owned(),
-            ));
+        // Identity backstop: a restored generation may only be adopted when it
+        // was produced under this exact repository AND worktree. A matching path
+        // or branch label is never sufficient; cross-worktree reuse is refused.
+        if let Some(generation) = &restored {
+            let snapshot = generation.snapshot();
+            let same_worktree = snapshot.worktree.as_ref() == Some(&worktree_id);
+            let same_repository = snapshot.repository == repository_id;
+            if !same_worktree || !same_repository {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "active code generation belongs to a different worktree identity".to_owned(),
+                ));
+            }
         }
         let latest_content_identity = restored
             .as_ref()
@@ -588,22 +647,32 @@ impl CodeIndexWorktreeSchedulerV1 {
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
+        let saved_trees = tree_cache::SavedTreeCacheV1::new(identity.identity_key());
         let mut scheduler = Self {
             project_root,
+            identity,
             repository_id,
             worktree_id,
+            policy,
+            git_metadata,
+            last_reconciled_at: Instant::now(),
             byte_pool,
             owner,
             hints,
             wake,
             epoch,
             shutting_down: Arc::new(AtomicBool::new(false)),
-            saved_trees: BTreeMap::new(),
+            saved_trees,
             latest_content_identity,
             watcher: None,
             semantic_schedule: None,
         };
-        scheduler.mount_watcher()?;
+        // The recursive filesystem watcher is an opt-in fallback only. By
+        // default the scheduler is driven by host hooks and lazy reconciliation,
+        // which need no standing inotify descriptors.
+        if scheduler.policy.watch_filesystem {
+            scheduler.mount_watcher()?;
+        }
         Ok(scheduler)
     }
 
@@ -672,6 +741,22 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn reconcile_now(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
+        // Re-resolve exact identity before indexing (tier-3 backstop). The
+        // worktree must still be the same structural identity this scheduler is
+        // bound to; a HEAD move under the same worktree is allowed and simply
+        // records a new source revision, so the served generation is never
+        // mis-attributed across identities.
+        let resolved = identity::IndexingIdentityV1::resolve(&self.project_root)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        if !resolved.authorizes_reuse_of(&self.identity) {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "worktree identity changed under the scheduler".to_owned(),
+            ));
+        }
+        self.identity = resolved;
+        // Sample tier-1 git metadata for the state we are reconciling to; stored
+        // on return so the next query-admission check compares against it.
+        let sampled_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
             let hints = self
@@ -682,13 +767,14 @@ impl CodeIndexWorktreeSchedulerV1 {
             overflow_reconciled |= hints.overflow;
             let captured = self.capture_authoritative_snapshot()?;
             if self.latest_content_identity.as_ref() == Some(&captured.snapshot.content_identity) {
+                self.mark_reconciled(sampled_metadata);
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity: captured.snapshot.content_identity,
                     overflow_reconciled,
                 }));
             }
 
-            let (next_trees, incremental_parse_files, changed_ranges) =
+            let (saved_tree_inputs, incremental_parse_files, changed_ranges) =
                 self.incremental_parse_evidence(&captured)?;
             let control = DaemonCodeIndexControlV1::new(
                 Arc::clone(&self.epoch),
@@ -718,8 +804,11 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 Err(error) => return Err(error.into()),
             };
-            self.saved_trees = next_trees;
+            let identity_key = self.identity.identity_key();
+            self.saved_trees
+                .commit_batch(&identity_key, saved_tree_inputs);
             self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
+            self.mark_reconciled(sampled_metadata.clone());
 
             // PR10: enqueue FastEmbed projection without waiting on download/index.
             if let Some(schedule) = &self.semantic_schedule {
@@ -762,6 +851,65 @@ impl CodeIndexWorktreeSchedulerV1 {
         unreachable!("the bounded reconciliation loop returns on its final attempt")
     }
 
+    fn mark_reconciled(&mut self, metadata: identity::GitMetadataFingerprintV1) {
+        self.git_metadata = metadata;
+        self.last_reconciled_at = Instant::now();
+    }
+
+    /// Deliver debounced hook hints (exact touched paths) into the incremental
+    /// queue. Hints only narrow work; gix status remains the truth on reconcile.
+    pub fn notify_hook_paths<I>(&self, paths: I)
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        {
+            let mut hints = self
+                .hints
+                .lock()
+                .unwrap_or_else(|_| panic!("code-index hint lock"));
+            for path in paths {
+                hints.path(path);
+            }
+        }
+        DaemonCodeIndexControlV1::advance(&self.epoch);
+        self.wake.notify_one();
+    }
+
+    /// Freshness ladder run at query admission so external changes are caught
+    /// without a filesystem watcher. Returns `true` when a reconciliation ran.
+    ///
+    /// - Tier 1 (git-mediated): `.git` metadata mtimes changed since the last
+    ///   reconcile (commit/checkout/rebase/pull from any process) → reconcile.
+    /// - Tier 2 (non-git mutations): the bounded-staleness threshold elapsed
+    ///   (raw file writes, rsync, out-of-agent saves) → reconcile.
+    /// - Tier 3 (identity backstop): reconciliation re-resolves identity, so a
+    ///   served result is always attributed to its exact resolved identity.
+    pub fn ensure_fresh_for_query(&mut self) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        let git_changed = identity::GitMetadataFingerprintV1::capture(&self.project_root)
+            .differs_from(&self.git_metadata);
+        let past_staleness_bound =
+            self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold;
+        if git_changed || past_staleness_bound {
+            self.reconcile_now()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// The exact identity this scheduler is currently bound to.
+    pub fn identity(&self) -> &identity::IndexingIdentityV1 {
+        &self.identity
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_hint_paths(&self) -> BTreeSet<PathBuf> {
+        self.hints
+            .lock()
+            .unwrap_or_else(|_| panic!("code-index hint lock"))
+            .paths
+            .clone()
+    }
+
     pub fn latest_complete(&self) -> Option<LatestCompleteCodeIndexV1> {
         self.owner
             .active_generation()
@@ -775,31 +923,13 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1> {
         let repository = gix::open(&self.project_root)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-        let index = repository
-            .index_or_empty()
+        // Classify committed/staged/unstaged/untracked/deleted/renamed paths
+        // truthfully from gix. Deletions drop out of the present candidate set;
+        // their tombstones flow through `changed_paths`.
+        let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-        let mut candidate_paths = index
-            .entries()
-            .iter()
-            .filter_map(|entry| {
-                std::str::from_utf8(entry.path(&index).as_ref())
-                    .ok()
-                    .map(str::to_owned)
-            })
-            .collect::<BTreeSet<_>>();
-        let mut changed_paths = BTreeSet::new();
-        let status = repository
-            .status(gix::progress::Discard)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
-            .untracked_files(gix::status::UntrackedFiles::Files)
-            .into_iter(Vec::<gix::bstr::BString>::new())
-            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-        for item in status {
-            let item = item.map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-            let path = item.location().to_str_lossy().into_owned();
-            changed_paths.insert(path.clone());
-            candidate_paths.insert(path);
-        }
+        let candidate_paths = classification.candidate_paths();
+        let changed_paths = classification.changed_paths();
 
         let registry = StaticLanguageRegistry::new();
         let mut files = Vec::new();
@@ -864,10 +994,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     fn incremental_parse_evidence(
-        &self,
+        &mut self,
         captured: &CapturedSnapshotV1,
-    ) -> Result<(BTreeMap<String, SavedTreeV1>, usize, usize), CodeIndexSchedulerErrorV1> {
-        let mut next = BTreeMap::new();
+    ) -> Result<(Vec<tree_cache::SavedTreeInputV1>, usize, usize), CodeIndexSchedulerErrorV1> {
+        let mut inputs = Vec::new();
         let mut incremental_files = 0;
         let mut changed_range_count = 0;
         for file in &captured.snapshot.files {
@@ -886,6 +1016,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                         .map_err(CodeIndexSchedulerErrorV1::Identity)?,
                 )
                 .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+            // The retained tree (if any) is structurally isolated to this
+            // worktree's identity by the cache key; a miss just full-parses.
             let (tree, changed_ranges) = match self.saved_trees.get(&file.logical_path) {
                 Some(saved) if saved.bytes.as_ref() != bytes.as_ref() => {
                     let mut edited = saved.tree.clone();
@@ -900,7 +1032,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     changed_range_count += ranges.len().max(1);
                     (tree, ranges)
                 }
-                Some(saved) => (saved.tree.clone(), Vec::<Range>::new()),
+                Some(saved) => (saved.tree, Vec::<Range>::new()),
                 None => (
                     parser.parse(bytes.as_ref(), None).ok_or_else(|| {
                         CodeIndexSchedulerErrorV1::Identity(
@@ -911,15 +1043,14 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ),
             };
             let _ = changed_ranges;
-            next.insert(
-                file.logical_path.clone(),
-                SavedTreeV1 {
-                    bytes: Arc::clone(bytes),
-                    tree,
-                },
-            );
+            inputs.push(tree_cache::SavedTreeInputV1 {
+                path: file.logical_path.clone(),
+                bytes: Arc::clone(bytes),
+                digest: file.content_digest.clone(),
+                tree,
+            });
         }
-        Ok((next, incremental_files, changed_range_count))
+        Ok((inputs, incremental_files, changed_range_count))
     }
 }
 
@@ -1048,6 +1179,30 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
+    /// Primary hint path: deliver the exact touched paths carried by a host
+    /// after-file-edit hook into the mounted worktree's incremental queue.
+    /// `rel_paths` are repository-relative; they are resolved against the
+    /// project root. Returns `true` when a worktree was mounted to receive them.
+    pub async fn notify_hook_paths(&self, project_root: &Path, rel_paths: &[String]) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(&project_root) else {
+            return false;
+        };
+        let absolute = rel_paths
+            .iter()
+            .map(|rel| project_root.join(rel))
+            .collect::<Vec<_>>();
+        worktree
+            .scheduler
+            .lock()
+            .unwrap_or_else(|_| panic!("code-index scheduler lock"))
+            .notify_hook_paths(absolute);
+        true
+    }
+
     pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {
         let project_root = project_root.canonicalize().ok()?;
         let mounted = self.mounted.lock().await;
@@ -1058,6 +1213,27 @@ impl CodeIndexSchedulerRegistryV1 {
             .ok()?
             .latest_complete()
             .map(|latest| latest.generation.manifest().generation_id.clone())
+    }
+
+    /// Query-admission entry point: run the freshness ladder (tier-1 git
+    /// metadata, tier-2 bounded staleness, tier-3 identity re-resolution) before
+    /// returning the latest complete generation, so external out-of-band changes
+    /// are reconciled without any standing filesystem watcher.
+    pub async fn latest_complete_fresh(
+        &self,
+        project_root: &Path,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root)?;
+        let mut scheduler = worktree
+            .scheduler
+            .lock()
+            .unwrap_or_else(|_| panic!("code-index scheduler lock"));
+        // A freshness reconcile failure is non-fatal for serving: fall back to
+        // the last complete generation rather than denying the query.
+        let _ = scheduler.ensure_fresh_for_query();
+        scheduler.latest_complete()
     }
 
     pub async fn shutdown(&self) {
@@ -1083,20 +1259,6 @@ where
 {
     T::try_from(value.to_owned())
         .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))
-}
-
-fn repository_id(project_root: &Path) -> Result<RepositoryId, CodeIndexSchedulerErrorV1> {
-    let common =
-        crate::worktree::git_common_dir(project_root).unwrap_or_else(|| project_root.to_path_buf());
-    let digest = sha256_hex(common.to_string_lossy().as_bytes());
-    id(&format!("repository.daemon.{digest}"))
-}
-
-fn worktree_id(project_root: &Path) -> Result<WorktreeId, CodeIndexSchedulerErrorV1> {
-    id(&format!(
-        "worktree.daemon.{}",
-        sha256_hex(project_root.to_string_lossy().as_bytes())
-    ))
 }
 
 fn file_occurrence_id(
@@ -1205,4 +1367,7 @@ fn point_for_offset(bytes: &[u8], offset: usize) -> Point {
 #[cfg(test)]
 mod tests;
 
+mod classification;
+mod identity;
 mod queries;
+mod tree_cache;

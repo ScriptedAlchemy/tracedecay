@@ -759,3 +759,287 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
 
     registry.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Worktree-aware incremental indexing: identity, gix classification, the
+// hook-driven + lazy-reconcile freshness ladder, and InputEdit equivalence.
+// ---------------------------------------------------------------------------
+
+use super::CodeIndexHintPolicyV1;
+use super::classification::{WorktreeChangeClassV1, WorktreeChangeClassificationV1};
+
+fn scheduler_with_policy(
+    fixture: &GitFixture,
+    store_root: PathBuf,
+    bytes: Arc<SharedCodeIndexBytePoolV1>,
+    policy: CodeIndexHintPolicyV1,
+) -> CodeIndexWorktreeSchedulerV1 {
+    CodeIndexWorktreeSchedulerV1::open_with_policy(fixture.path(), store_root, bytes, policy)
+        .expect("open worktree scheduler with policy")
+}
+
+/// gix status classification keeps committed/staged/unstaged/untracked/deleted
+/// dispositions distinct and truthful.
+#[test]
+fn classification_distinguishes_staged_unstaged_untracked_and_deleted() {
+    let fixture = GitFixture::new(&[
+        ("src/a.rs", "pub fn a() -> u32 { 1 }\n"),
+        ("src/b.rs", "pub fn b() -> u32 { 2 }\n"),
+        ("src/d.rs", "pub fn d() -> u32 { 4 }\n"),
+    ]);
+    // Staged modification.
+    fixture.edit("src/a.rs", "pub fn a() -> u32 { 10 }\n");
+    git(fixture.path(), &["add", "src/a.rs"]);
+    // Unstaged modification.
+    fixture.edit("src/b.rs", "pub fn b() -> u32 { 20 }\n");
+    // Untracked new file.
+    write(fixture.path(), "src/c.rs", "pub fn c() -> u32 { 3 }\n");
+    // Unstaged deletion.
+    std::fs::remove_file(fixture.path().join("src/d.rs")).expect("remove d");
+
+    let repository = gix::open(fixture.path()).expect("open gix");
+    let classification = WorktreeChangeClassificationV1::classify(&repository).expect("classify");
+
+    assert_eq!(
+        classification.class_of("src/a.rs"),
+        Some(WorktreeChangeClassV1::StagedModified)
+    );
+    assert_eq!(
+        classification.class_of("src/b.rs"),
+        Some(WorktreeChangeClassV1::UnstagedModified)
+    );
+    assert_eq!(
+        classification.class_of("src/c.rs"),
+        Some(WorktreeChangeClassV1::Untracked)
+    );
+    assert_eq!(
+        classification.class_of("src/d.rs"),
+        Some(WorktreeChangeClassV1::UnstagedDeleted)
+    );
+
+    let deleted = classification.deleted_paths();
+    assert!(
+        deleted.contains("src/d.rs"),
+        "deletion is a tombstone candidate"
+    );
+
+    let candidates = classification.candidate_paths();
+    assert!(candidates.contains("src/a.rs"));
+    assert!(candidates.contains("src/b.rs"));
+    assert!(candidates.contains("src/c.rs"));
+    assert!(
+        !candidates.contains("src/d.rs"),
+        "a deleted path is never a present-content candidate"
+    );
+}
+
+/// A host after-file-edit hook delivers its exact touched paths into the
+/// incremental queue and the subsequent reconcile publishes the edit.
+#[test]
+fn hook_hint_delivers_exact_paths_and_schedules_batch() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    published(scheduler.reconcile_now().expect("baseline"));
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    let edited = fixture.path().join("src/lib.rs");
+    scheduler.notify_hook_paths([edited.clone()]);
+
+    assert!(
+        scheduler.pending_hint_paths().contains(&edited),
+        "the exact hook path is enqueued as a hint"
+    );
+
+    let publish = published(scheduler.reconcile_now().expect("hook-scheduled batch"));
+    assert!(publish.changed_chunks > 0, "the hinted edit is indexed");
+    assert!(
+        scheduler.pending_hint_paths().is_empty(),
+        "reconciliation drains the hint queue"
+    );
+}
+
+/// With no filesystem watcher, a raw out-of-band file write is still caught by
+/// the tier-2 bounded-staleness reconcile at query admission.
+#[test]
+fn threshold_expiry_reconciles_out_of_band_write_without_watcher() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let policy = CodeIndexHintPolicyV1 {
+        watch_filesystem: false,
+        staleness_threshold: Duration::ZERO,
+    };
+    let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
+    let baseline = published(scheduler.reconcile_now().expect("baseline"));
+
+    // No hook, no watcher: a raw editor/rsync write.
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+
+    let reconciled = scheduler
+        .ensure_fresh_for_query()
+        .expect("freshness ladder runs");
+    assert!(
+        reconciled,
+        "an elapsed staleness bound reconciles at admission"
+    );
+
+    let served = scheduler
+        .latest_complete()
+        .expect("served generation")
+        .generation
+        .snapshot()
+        .content_identity
+        .clone();
+    assert_ne!(
+        served, baseline.snapshot_content_identity,
+        "the out-of-band write is reflected in the served generation"
+    );
+}
+
+/// A git operation from another process (commit here stands in for pull/rebase)
+/// is detected instantly by the tier-1 .git-metadata check, without waiting for
+/// the staleness bound and without any watcher.
+#[test]
+fn git_op_in_another_process_detected_via_metadata() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    // Long staleness bound so only tier-1 (git metadata) can fire.
+    let policy = CodeIndexHintPolicyV1 {
+        watch_filesystem: false,
+        staleness_threshold: Duration::from_secs(3_600),
+    };
+    let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
+    let baseline = published(scheduler.reconcile_now().expect("baseline"));
+
+    // Another process commits a change.
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "external"]);
+
+    let reconciled = scheduler
+        .ensure_fresh_for_query()
+        .expect("freshness ladder runs");
+    assert!(
+        reconciled,
+        "a .git-metadata change reconciles before the bound"
+    );
+
+    let served = scheduler
+        .latest_complete()
+        .expect("served generation")
+        .generation
+        .snapshot()
+        .content_identity
+        .clone();
+    assert_ne!(
+        served, baseline.snapshot_content_identity,
+        "the external git change is reflected in the served generation"
+    );
+}
+
+/// When HEAD moves between indexing and query, the served generation is
+/// refreshed to the new revision while its repository/worktree identity is never
+/// mixed with another checkout's.
+#[test]
+fn identity_move_reconciles_and_never_mixes_identity() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let policy = CodeIndexHintPolicyV1 {
+        watch_filesystem: false,
+        staleness_threshold: Duration::from_secs(3_600),
+    };
+    let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
+    published(scheduler.reconcile_now().expect("baseline"));
+
+    let repo_before = scheduler.identity().repository_id().clone();
+    let worktree_before = scheduler.identity().worktree_id().clone();
+    let commit_before = scheduler.identity().head_commit().cloned();
+
+    // HEAD moves under the same worktree.
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "move-head"]);
+
+    let reconciled = scheduler
+        .ensure_fresh_for_query()
+        .expect("freshness ladder runs");
+    assert!(reconciled, "a HEAD move reconciles at admission");
+
+    // Tier-3 backstop: identity re-resolved to the new revision.
+    let commit_after = scheduler.identity().head_commit().cloned();
+    assert_ne!(
+        commit_before, commit_after,
+        "the resolved source revision advances with HEAD"
+    );
+    // Structural identity is never mixed across the move.
+    assert_eq!(scheduler.identity().repository_id(), &repo_before);
+    assert_eq!(scheduler.identity().worktree_id(), &worktree_before);
+
+    let served = scheduler.latest_complete().expect("served generation");
+    assert_eq!(
+        &served.generation.snapshot().repository,
+        &repo_before,
+        "the served generation is attributed to its exact repository identity"
+    );
+    assert_eq!(
+        served.generation.snapshot().worktree.as_ref(),
+        Some(&worktree_before),
+        "the served generation is attributed to its exact worktree identity"
+    );
+}
+
+/// InputEdit incremental re-parse across a multi-edit batch on one file yields
+/// the same published chunks as a from-scratch full parse of the final content.
+#[test]
+fn input_edit_reparse_matches_full_parse_chunks() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { 2 }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+
+    // Incremental scheduler: baseline then two sequential edits, each reconciled
+    // so the retained tree drives an InputEdit re-parse.
+    let mut incremental = scheduler(
+        &fixture,
+        store.path().join("incremental"),
+        Arc::clone(&bytes),
+    );
+    published(incremental.reconcile_now().expect("incremental baseline"));
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 10 }\npub fn beta() -> u32 { 2 }\n",
+    );
+    let first = published(incremental.reconcile_now().expect("incremental edit 1"));
+    assert!(
+        first.incremental_parse_files >= 1,
+        "edit 1 uses InputEdit reuse"
+    );
+
+    let final_source = "pub fn alpha() -> u32 { 10 }\npub fn beta() -> u32 { 20 }\n";
+    fixture.edit("src/lib.rs", final_source);
+    let second = published(incremental.reconcile_now().expect("incremental edit 2"));
+    assert!(
+        second.incremental_parse_files >= 1,
+        "edit 2 uses InputEdit reuse"
+    );
+
+    // Full-parse scheduler over the identical final content in the SAME
+    // worktree but a fresh store, so its empty tree cache forces a from-scratch
+    // parse while chunk identity (repository/worktree-bound) still matches.
+    let mut full = scheduler(&fixture, store.path().join("full"), bytes);
+    let full_publish = published(full.reconcile_now().expect("full parse"));
+
+    assert_eq!(
+        second.snapshot_content_identity, full_publish.snapshot_content_identity,
+        "identical final content yields identical snapshot identity"
+    );
+    assert_eq!(
+        second.lane_digest, full_publish.lane_digest,
+        "InputEdit reparse and full parse produce byte-identical chunk lanes"
+    );
+}
