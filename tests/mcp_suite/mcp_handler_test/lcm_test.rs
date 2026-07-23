@@ -3669,10 +3669,14 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
             .unwrap_or_else(|e| panic!("{tool} response is not valid JSON: {e}\n{text}"));
 
         let status = payload["status"].as_str().unwrap_or_default();
+        // The temporal retrieval runtime maps an empty/zero-row resolution for a
+        // never-ingested anchor to a typed, non-retryable `deleted` outcome
+        // (session_retrieval.rs CompleteZero -> Deleted). That stays a typed,
+        // non-error, non-mutating read, which is exactly this test's intent.
         assert!(
             matches!(
                 status,
-                "ok" | "not_ingested" | "unavailable" | "complete_zero"
+                "ok" | "not_ingested" | "unavailable" | "complete_zero" | "deleted"
             ),
             "{tool}: unexpected status={status}, got {payload}"
         );
