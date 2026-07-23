@@ -3,7 +3,7 @@ use std::path::Path;
 use rusqlite::{Connection, ErrorCode, limits::Limit};
 use tempfile::NamedTempFile;
 
-use super::{ConnectionMode, open, with_progress_cancellation};
+use super::{ConnectionMode, open, open_immutable_reader, with_progress_cancellation};
 
 fn database() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary database");
@@ -19,6 +19,12 @@ fn pragma_i64(connection: &Connection, name: &str) -> i64 {
     connection
         .pragma_query_value(None, name, |row| row.get(0))
         .expect("read pragma")
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    sidecar.into()
 }
 
 #[test]
@@ -71,6 +77,38 @@ fn reader_mode_is_private_query_only_and_denies_writes() {
             .execute("INSERT INTO items VALUES (2)", [])
             .is_err()
     );
+}
+
+#[test]
+fn immutable_reader_applies_full_reader_policy_without_sidecars() {
+    let file = database();
+    let wal = sidecar_path(file.path(), "-wal");
+    let shm = sidecar_path(file.path(), "-shm");
+    let journal = sidecar_path(file.path(), "-journal");
+    let before = std::fs::read(file.path()).unwrap();
+
+    let connection = open_immutable_reader(file.path()).expect("immutable reader policy");
+    assert_eq!(pragma_i64(&connection, "query_only"), 1);
+    assert_eq!(pragma_i64(&connection, "foreign_keys"), 1);
+    assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
+    assert_eq!(pragma_i64(&connection, "busy_timeout"), 0);
+    assert_eq!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 0);
+    assert!(
+        connection
+            .execute("INSERT INTO items VALUES (2)", [])
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute_batch("ATTACH DATABASE ':memory:' AS other")
+            .is_err()
+    );
+    drop(connection);
+
+    assert_eq!(std::fs::read(file.path()).unwrap(), before);
+    assert!(!wal.exists());
+    assert!(!shm.exists());
+    assert!(!journal.exists());
 }
 
 #[test]

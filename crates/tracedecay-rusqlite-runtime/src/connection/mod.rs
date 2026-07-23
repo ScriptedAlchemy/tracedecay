@@ -64,12 +64,14 @@ pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, Conn
     Ok(connection)
 }
 
-/// Opens a one-shot immutable, query-only health connection for Doctor.
+/// Opens an immutable, query-only connection for a foreign or health database.
 ///
 /// Uses `file:…?immutable=1&mode=ro` so diagnosis never creates WAL/SHM
-/// sidecars or acquires authority locks. Callers must refuse non-empty WAL
-/// families before invoking this opener.
-pub fn open_immutable_health_reader(path: &Path) -> Result<Connection, ConnectionPolicyError> {
+/// sidecars or acquires authority locks. The caller owns the source-specific
+/// policy for a non-empty WAL: reject it when a complete current snapshot is
+/// mandatory, or accept eventual main-file visibility for best-effort foreign
+/// ingestion.
+pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicyError> {
     let uri = immutable_health_uri(path)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_URI
@@ -77,14 +79,18 @@ pub fn open_immutable_health_reader(path: &Path) -> Result<Connection, Connectio
         | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
     let connection =
         Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
-    connection
-        .busy_timeout(Duration::ZERO)
-        .map_err(|source| policy("busy timeout", source))?;
-    connection
-        .pragma_update(None, "query_only", true)
-        .map_err(|source| policy("query-only reader", source))?;
-    verify_pragma_i64(&connection, "query_only", 1)?;
+    apply_pragmas(&connection, ConnectionMode::Reader)?;
+    assert_compile_options(&connection)?;
+    apply_limits(&connection, ConnectionMode::Reader)?;
+    install_authorizer(&connection, ConnectionMode::Reader)?;
     Ok(connection)
+}
+
+/// Doctor compatibility name for the canonical immutable reader policy.
+///
+/// Doctor rejects non-empty WAL families before calling this function.
+pub fn open_immutable_health_reader(path: &Path) -> Result<Connection, ConnectionPolicyError> {
+    open_immutable_reader(path)
 }
 
 fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
