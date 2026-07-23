@@ -325,6 +325,11 @@
       "disposition": "benchmark-only observation fixture"
     },
     {
+      "path": "src/sessions/hermes/state_db.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "permanent foreign Hermes state.db read-only reader; never TraceDecay authority"
+    },
+    {
       "path": "src/sessions/lcm/doctor.rs",
       "callee": "libsql::Builder::new_local",
       "disposition": "test-only LCM Doctor fixture"

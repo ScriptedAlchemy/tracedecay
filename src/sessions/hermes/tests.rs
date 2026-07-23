@@ -873,7 +873,10 @@ async fn page_byte_budget_stops_collection_before_unbounded_growth() {
         .await
         .unwrap();
     }
+    drop(conn);
+    drop(db);
 
+    let conn = open_read_only_strict(&path).await.unwrap();
     let message_cols = message_columns(&conn).await.unwrap();
     let session_cols = table_columns(&conn, "sessions").await.unwrap();
     let select_sql = select_new_messages_sql(&message_cols, &session_cols);
@@ -940,7 +943,10 @@ async fn utf8_byte_gate_rejects_multibyte_text_before_materialization() {
     )
     .await
     .unwrap();
+    drop(conn);
+    drop(db);
 
+    let conn = open_read_only_strict(&path).await.unwrap();
     let message_cols = message_columns(&conn).await.unwrap();
     let session_cols = table_columns(&conn, "sessions").await.unwrap();
     let select_sql = select_new_messages_sql(&message_cols, &session_cols);

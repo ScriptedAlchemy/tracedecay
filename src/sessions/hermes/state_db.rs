@@ -10,7 +10,9 @@ use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, Proje
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::global_db::GlobalDb;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
-use crate::sessions::shared::{ProjectRootMatcher, StoredCursor, TranscriptIngestStats};
+use crate::sessions::shared::{
+    ProjectRootMatcher, SqliteReadConn, StoredCursor, TranscriptIngestStats,
+};
 
 use super::coverage::{admit_rows, admit_rows_with_admission, sqlite_incarnation};
 use super::ingest::{HermesProfileSource, ProjectIngestDestination};
@@ -25,28 +27,39 @@ use super::{CHUNK_ROWS, MAX_HERMES_IDENTITY_BYTES, MAX_HERMES_PAGE_BYTES, MAX_HE
 /// and `reasoning` arrived in later Hermes schema revisions, so the sweep
 /// probes before selecting to stay readable on legacy stores.
 pub(crate) async fn message_columns(
-    conn: &libsql::Connection,
+    conn: &SqliteReadConn,
 ) -> Result<std::collections::BTreeSet<String>, String> {
     table_columns(conn, "messages").await
 }
 
 pub(crate) async fn table_columns(
-    conn: &libsql::Connection,
+    conn: &SqliteReadConn,
+    table: &str,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let table = table.to_string();
+    conn.with(move |conn| table_columns_sync(conn, &table))
+        .await
+        .unwrap_or_else(|| Err("could not inspect Hermes SQLite schema".to_string()))
+}
+
+fn table_columns_sync(
+    conn: &rusqlite::Connection,
     table: &str,
 ) -> Result<std::collections::BTreeSet<String>, String> {
     let mut out = std::collections::BTreeSet::new();
     let query = format!("SELECT name FROM pragma_table_info('{table}')");
-    let mut rows = conn
-        .query(&query, ())
-        .await
+    let mut statement = conn
+        .prepare(&query)
+        .map_err(|_| "could not inspect Hermes SQLite schema".to_string())?;
+    let mut rows = statement
+        .query(())
         .map_err(|_| "could not inspect Hermes SQLite schema".to_string())?;
     while let Some(row) = rows
         .next()
-        .await
         .map_err(|_| "could not read Hermes SQLite schema".to_string())?
     {
         let name = row
-            .get::<String>(0)
+            .get::<_, String>(0)
             .map_err(|_| "Hermes SQLite schema row is malformed".to_string())?;
         out.insert(name);
     }
@@ -248,7 +261,7 @@ async fn open_state_source(
     source: &HermesProfileSource,
 ) -> Result<
     (
-        libsql::Connection,
+        SqliteReadConn,
         ObservationSourceGenerationV1,
         u64,
         u64,
@@ -278,7 +291,7 @@ async fn open_state_source(
 #[allow(clippy::too_many_arguments)]
 async fn ingest_bounded_pages<F, R>(
     admission: &HostAdmissionFacade<'_>,
-    conn: &libsql::Connection,
+    conn: &SqliteReadConn,
     select_sql: &str,
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
@@ -505,16 +518,34 @@ pub(crate) async fn try_ingest_user_state_db_bounded(
 
 /// Opens a Hermes `state.db` strictly read-only so the sweep can never write
 /// to (or create) another agent's live store.
-pub(crate) async fn open_read_only_strict(path: &Path) -> Result<libsql::Connection, String> {
-    let db = crate::db::libsql_local::open_local_database(path, true)
-        .await
-        .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))?;
-    db.connect()
-        .map_err(|error| format!("could not connect to '{}': {error}", path.display()))
+pub(crate) async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String> {
+    let owned = path.to_path_buf();
+    let opened = tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open_with_flags(
+            &owned,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+    })
+    .await
+    .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))?;
+    opened
+        .map(SqliteReadConn::new)
+        .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))
 }
 
 pub(crate) async fn read_new_rows_strict(
-    conn: &libsql::Connection,
+    conn: &SqliteReadConn,
+    select_sql: &str,
+    prev: StoredCursor,
+) -> Result<HermesPageRead, String> {
+    let select_sql = select_sql.to_string();
+    conn.with(move |conn| read_new_rows_strict_sync(conn, &select_sql, prev))
+        .await
+        .unwrap_or_else(|| Err("could not query legacy Hermes state rows".to_string()))
+}
+
+fn read_new_rows_strict_sync(
+    conn: &rusqlite::Connection,
     select_sql: &str,
     prev: StoredCursor,
 ) -> Result<HermesPageRead, String> {
@@ -524,22 +555,20 @@ pub(crate) async fn read_new_rows_strict(
     let mut truncated_by_byte_budget = false;
     while items.len() < CHUNK_ROWS {
         let remaining = MAX_HERMES_PAGE_BYTES.saturating_sub(page_bytes);
-        let mut rows = conn
-            .query(
-                select_sql,
-                libsql::params![max_rowid as i64, remaining as i64],
-            )
-            .await
+        let mut statement = conn
+            .prepare(select_sql)
+            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+        let mut rows = statement
+            .query(rusqlite::params![max_rowid as i64, remaining as i64])
             .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
         let row = rows
             .next()
-            .await
             .map_err(|error| format!("could not read legacy Hermes state row: {error}"))?;
         let Some(row) = row else {
             break;
         };
         let rowid = row
-            .get::<i64>(0)
+            .get::<_, i64>(0)
             .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
         // Columns 21..23 are SQL byte/typeof/budget aggregates — integers only.
         let measured = row_i64_flag(&row, 21).max(0) as u64;
@@ -575,25 +604,28 @@ pub(crate) async fn read_new_rows_strict(
     })
 }
 
-fn row_i64_flag(row: &libsql::Row, idx: i32) -> i64 {
-    row.get::<i64>(idx)
-        .or_else(|_| row.get::<Option<i64>>(idx).map(|value| value.unwrap_or(0)))
-        .or_else(|_| row.get::<f64>(idx).map(|value| value as i64))
+fn row_i64_flag(row: &rusqlite::Row<'_>, idx: usize) -> i64 {
+    row.get::<_, i64>(idx)
+        .or_else(|_| {
+            row.get::<_, Option<i64>>(idx)
+                .map(|value| value.unwrap_or(0))
+        })
+        .or_else(|_| row.get::<_, f64>(idx).map(|value| value as i64))
         .unwrap_or(0)
 }
 
-fn row_optional_f64(row: &libsql::Row, idx: i32) -> Option<f64> {
-    row.get::<Option<f64>>(idx).ok().flatten().or_else(|| {
-        row.get::<Option<i64>>(idx)
+fn row_optional_f64(row: &rusqlite::Row<'_>, idx: usize) -> Option<f64> {
+    row.get::<_, Option<f64>>(idx).ok().flatten().or_else(|| {
+        row.get::<_, Option<i64>>(idx)
             .ok()
             .flatten()
             .map(|value| value as f64)
     })
 }
 
-fn map_row(rowid: i64, row: &libsql::Row, sql_measured_bytes: u64) -> Option<HermesRow> {
+fn map_row(rowid: i64, row: &rusqlite::Row<'_>, sql_measured_bytes: u64) -> Option<HermesRow> {
     let sql_value_oversized = row_i64_flag(row, 22) != 0;
-    let session_id = match row.get::<Option<String>>(1).ok().flatten() {
+    let session_id = match row.get::<_, Option<String>>(1).ok().flatten() {
         Some(id) if !id.is_empty() => id,
         // Rejected/oversized session_id never materializes the hostile value; use a
         // deterministic cover identity so the row can advance without payload leakage.
@@ -604,28 +636,28 @@ fn map_row(rowid: i64, row: &libsql::Row, sql_measured_bytes: u64) -> Option<Her
         id: rowid,
         session_id,
         role: row
-            .get::<Option<String>>(2)
+            .get::<_, Option<String>>(2)
             .ok()
             .flatten()
             .unwrap_or_default(),
-        content: row.get::<Option<String>>(3).ok().flatten(),
-        reasoning: row.get::<Option<String>>(4).ok().flatten(),
-        tool_name: row.get::<Option<String>>(5).ok().flatten(),
-        tool_calls: row.get::<Option<String>>(6).ok().flatten(),
+        content: row.get::<_, Option<String>>(3).ok().flatten(),
+        reasoning: row.get::<_, Option<String>>(4).ok().flatten(),
+        tool_name: row.get::<_, Option<String>>(5).ok().flatten(),
+        tool_calls: row.get::<_, Option<String>>(6).ok().flatten(),
         timestamp: row_optional_f64(row, 7),
-        session_model: row.get::<Option<String>>(8).ok().flatten(),
-        parent_session_id: row.get::<Option<String>>(9).ok().flatten(),
-        session_cwd: row.get::<Option<String>>(10).ok().flatten(),
-        session_source: row.get::<Option<String>>(11).ok().flatten(),
-        session_title: row.get::<Option<String>>(12).ok().flatten(),
+        session_model: row.get::<_, Option<String>>(8).ok().flatten(),
+        parent_session_id: row.get::<_, Option<String>>(9).ok().flatten(),
+        session_cwd: row.get::<_, Option<String>>(10).ok().flatten(),
+        session_source: row.get::<_, Option<String>>(11).ok().flatten(),
+        session_title: row.get::<_, Option<String>>(12).ok().flatten(),
         session_started_at: row_optional_f64(row, 13),
         session_ended_at: row_optional_f64(row, 14),
-        session_input_tokens: row.get::<Option<i64>>(15).ok().flatten(),
-        session_output_tokens: row.get::<Option<i64>>(16).ok().flatten(),
-        session_cache_read_tokens: row.get::<Option<i64>>(17).ok().flatten(),
-        session_cache_write_tokens: row.get::<Option<i64>>(18).ok().flatten(),
-        session_reasoning_tokens: row.get::<Option<i64>>(19).ok().flatten(),
-        active: row.get::<Option<i64>>(20).ok().flatten().unwrap_or(1),
+        session_input_tokens: row.get::<_, Option<i64>>(15).ok().flatten(),
+        session_output_tokens: row.get::<_, Option<i64>>(16).ok().flatten(),
+        session_cache_read_tokens: row.get::<_, Option<i64>>(17).ok().flatten(),
+        session_cache_write_tokens: row.get::<_, Option<i64>>(18).ok().flatten(),
+        session_reasoning_tokens: row.get::<_, Option<i64>>(19).ok().flatten(),
+        active: row.get::<_, Option<i64>>(20).ok().flatten().unwrap_or(1),
         sql_value_oversized,
         sql_measured_bytes,
     })
