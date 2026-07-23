@@ -45,11 +45,29 @@ export function CenteredState({
 }
 
 /** Compact stat tile for overview grids. */
-export function StatTile({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
+export function StatTile({
+  label,
+  value,
+  hint,
+  dense,
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: string;
+  /** Narrow-rail variant: smaller numerals that never clip. */
+  dense?: boolean;
+}) {
   return (
-    <div className="flex flex-col gap-0.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-3 py-2.5">
-      <span className="text-2xs uppercase tracking-wide text-text-muted">{label}</span>
-      <span className="tabular text-xl font-semibold leading-tight text-text-primary" data-cell="numeric">
+    <div className="flex min-w-0 flex-col gap-0.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-3 py-2.5">
+      <span className="truncate text-2xs uppercase tracking-wide text-text-muted">{label}</span>
+      <span
+        className={
+          dense
+            ? 'tabular truncate text-sm font-semibold leading-tight text-text-primary'
+            : 'tabular truncate text-xl font-semibold leading-tight text-text-primary'
+        }
+        data-cell="numeric"
+      >
         {value}
       </span>
       {hint ? <span className="text-2xs text-text-muted">{hint}</span> : null}

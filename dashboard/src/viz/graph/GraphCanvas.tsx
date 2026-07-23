@@ -100,6 +100,55 @@ export function GraphCanvas({
       // the tissue reads dense, not lost in the void.
       settings: { ...fa2, gravity: (fa2.gravity ?? 1) * (nodes.length < 60 ? 8 : 2), scalingRatio: 4 },
     });
+    // Constellation composure: FA2 lets disconnected components drift apart.
+    // For larger graphs, re-center each component onto a ring sized from the
+    // measured component extents (FA2's own coordinate scale) so separate
+    // clusters compose like one constellation. The frozen bbox below is
+    // computed after this pass, so the camera always frames the result.
+    if (graph.order >= 30) {
+      const componentOf = new Map<string, number>();
+      let componentCount = 0;
+      for (const start of graph.nodes()) {
+        if (componentOf.has(start)) continue;
+        const queue = [start];
+        componentOf.set(start, componentCount);
+        while (queue.length) {
+          const current = queue.pop()!;
+          for (const neighbor of graph.neighbors(current)) {
+            if (!componentOf.has(neighbor)) {
+              componentOf.set(neighbor, componentCount);
+              queue.push(neighbor);
+            }
+          }
+        }
+        componentCount += 1;
+      }
+      if (componentCount > 1) {
+        const centroids = Array.from({ length: componentCount }, () => ({ x: 0, y: 0, n: 0 }));
+        for (const [node, component] of componentOf) {
+          const c = centroids[component]!;
+          c.x += graph.getNodeAttribute(node, 'x') as number;
+          c.y += graph.getNodeAttribute(node, 'y') as number;
+          c.n += 1;
+        }
+        let maxExtent = 1;
+        for (const [node, component] of componentOf) {
+          const c = centroids[component]!;
+          const ex = Math.abs((graph.getNodeAttribute(node, 'x') as number) - c.x / c.n);
+          const ey = Math.abs((graph.getNodeAttribute(node, 'y') as number) - c.y / c.n);
+          maxExtent = Math.max(maxExtent, ex, ey);
+        }
+        const ring = maxExtent * 1.5;
+        for (const [node, component] of componentOf) {
+          const c = centroids[component]!;
+          const angle = (component / componentCount) * Math.PI * 2;
+          const dx = Math.cos(angle) * ring - c.x / c.n;
+          const dy = Math.sin(angle) * ring - c.y / c.n;
+          graph.updateNodeAttribute(node, 'x', (x) => (x as number) + dx);
+          graph.updateNodeAttribute(node, 'y', (y) => (y as number) + dy);
+        }
+      }
+    }
 
     let colors = palette(container);
     let hovered: string | null = null;

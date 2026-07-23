@@ -114,9 +114,9 @@ export function CodePage() {
               return (
                 <div className="flex flex-col gap-3">
                   <div className="grid grid-cols-3 gap-2">
-                    <StatTile label="nodes" value={formatCount(data.totals.nodes)} />
-                    <StatTile label="edges" value={formatCount(data.totals.edges)} />
-                    <StatTile label="files" value={formatCount(data.totals.files)} />
+                    <StatTile dense label="nodes" value={formatCount(data.totals.nodes)} />
+                    <StatTile dense label="edges" value={formatCount(data.totals.edges)} />
+                    <StatTile dense label="files" value={formatCount(data.totals.files)} />
                   </div>
                   {kinds.length > 0 ? (
                     <figure className="flex flex-col gap-1">
