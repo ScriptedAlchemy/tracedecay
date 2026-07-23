@@ -38,6 +38,17 @@ impl Drop for ApplicationCancellationRegistration<'_> {
     }
 }
 
+/// Application-surface plumbing prepared once per dispatch: the typed request
+/// id, deadline, cancellation signal, daemon invocation client, and the RAII
+/// cancellation registration that must outlive the dispatch await.
+struct ApplicationSurfaceDispatch<'a> {
+    request_id: Option<tracedecay_application::RequestId>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+    invocation_client: Option<&'a crate::daemon_client::DaemonInvocationClient>,
+    _registration: ApplicationCancellationRegistration<'a>,
+}
+
 fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
     tracedecay_domain::UtcMicros(
         std::time::SystemTime::now()
@@ -848,53 +859,15 @@ impl McpServer {
         };
         let handler_arguments =
             self.route_tool_arguments(id, tool_name, arguments, route_cache, memory_request_scope);
-        let application_surface =
-            crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
-        let application_request_id = application_surface
-            .and_then(|_| application_surface_request_id(id, memory_request_scope))
-            .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
-        let application_cancellation = application_request_id.as_ref().and_then(|request_id| {
-            tracedecay_application::CancellationSignal::active(format!(
-                "cancellation.{}",
-                request_id.as_str()
-            ))
-            .ok()
-        });
-        if let (Some(request_id), Some(cancellation)) =
-            (&application_request_id, &application_cancellation)
-            && let Ok(mut cancellations) = self.application_surface_cancellations.lock()
-        {
-            cancellations.insert(request_id.as_str().to_owned(), cancellation.clone());
-        }
-        let _cancellation_registration = ApplicationCancellationRegistration {
-            registry: &self.application_surface_cancellations,
-            request_id: application_request_id
-                .as_ref()
-                .map(|request_id| request_id.as_str().to_owned()),
-        };
-        let application_deadline = application_surface.and_then(|_| {
-            let now = mcp_now_micros().0;
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                now.saturating_add(10_000_000),
-            ))
-            .ok()
-        });
-        let application_invocation_client = if application_surface.is_some() {
-            self.application_surface_client
-                .get_or_try_init(|| async {
-                    let handshake = crate::daemon::DaemonHandshake::for_current_client(
-                        Some(cg.project_root().to_path_buf()),
-                        self.scope_prefix.clone(),
-                        false,
-                        false,
-                    )?;
-                    crate::daemon_client::DaemonInvocationClient::for_current(handshake)
-                })
-                .await
-                .ok()
-        } else {
-            None
-        };
+        let ApplicationSurfaceDispatch {
+            request_id: application_request_id,
+            deadline: application_deadline,
+            cancellation: application_cancellation,
+            invocation_client: application_invocation_client,
+            _registration,
+        } = self
+            .prepare_application_surface_dispatch(&cg, id, tool_name, memory_request_scope)
+            .await;
         let outcome = self
             .execute_tool_dispatch(
                 &cg,
@@ -912,6 +885,71 @@ impl McpServer {
             cg,
             outcome,
             elapsed_us: handler_start.map(|t| t.elapsed().as_micros() as u64),
+        }
+    }
+
+    /// Prepare the application-surface plumbing for a single dispatch. Returns
+    /// the typed request id, deadline, cancellation, and daemon invocation
+    /// client, plus the RAII registration guard that must outlive the dispatch.
+    async fn prepare_application_surface_dispatch<'a>(
+        &'a self,
+        cg: &TraceDecay,
+        id: &Value,
+        tool_name: &str,
+        memory_request_scope: &str,
+    ) -> ApplicationSurfaceDispatch<'a> {
+        let application_surface =
+            crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
+        let request_id = application_surface
+            .and_then(|_| application_surface_request_id(id, memory_request_scope))
+            .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
+        let cancellation = request_id.as_ref().and_then(|request_id| {
+            tracedecay_application::CancellationSignal::active(format!(
+                "cancellation.{}",
+                request_id.as_str()
+            ))
+            .ok()
+        });
+        if let (Some(request_id), Some(cancellation)) = (&request_id, &cancellation)
+            && let Ok(mut cancellations) = self.application_surface_cancellations.lock()
+        {
+            cancellations.insert(request_id.as_str().to_owned(), cancellation.clone());
+        }
+        let registration = ApplicationCancellationRegistration {
+            registry: &self.application_surface_cancellations,
+            request_id: request_id
+                .as_ref()
+                .map(|request_id| request_id.as_str().to_owned()),
+        };
+        let deadline = application_surface.and_then(|_| {
+            let now = mcp_now_micros().0;
+            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                now.saturating_add(10_000_000),
+            ))
+            .ok()
+        });
+        let invocation_client = if application_surface.is_some() {
+            self.application_surface_client
+                .get_or_try_init(|| async {
+                    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+                        Some(cg.project_root().to_path_buf()),
+                        self.scope_prefix.clone(),
+                        false,
+                        false,
+                    )?;
+                    crate::daemon_client::DaemonInvocationClient::for_current(handshake)
+                })
+                .await
+                .ok()
+        } else {
+            None
+        };
+        ApplicationSurfaceDispatch {
+            request_id,
+            deadline,
+            cancellation,
+            invocation_client,
+            _registration: registration,
         }
     }
 
