@@ -1,12 +1,15 @@
 /**
- * Contracts codegen CLI.
+ * Contracts codegen CLI (transitional preview harness).
  *
- *   tsx codegen/src/cli.ts generate   # write dashboard/src/contracts/*
- *   tsx codegen/src/cli.ts --check    # fail (exit 1) if on-disk output is stale
+ *   tsx codegen/src/cli.ts generate   # write the preview under codegen/.preview/
+ *   tsx codegen/src/cli.ts --check    # fail (exit 1) if the preview is stale
  *
- * `--check` is the reviewable-diff gate: it regenerates in memory and compares
- * byte-for-byte against the committed files, so a schema change that was not
- * regenerated cannot merge silently.
+ * The live wire boundary (`src/contracts/generated.ts`) is hand-maintained
+ * against `src/dashboard/read_model.rs` today; this CLI emits a preview so the
+ * generated shape can be diffed without overwriting the hand-maintained file.
+ * `--check` regenerates in memory and compares byte-for-byte against the
+ * preview, so a schema change that was not regenerated is caught. When the real
+ * schemars export lands, repoint `OUTPUT_FILES` back at `src/contracts/*`.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";

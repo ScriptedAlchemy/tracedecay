@@ -2,29 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://tracedecay.dev/schemas/dashboard-contracts.json",
   "title": "DashboardContracts",
-  "schemaRevision": "2026-07-23.1",
-  "description": "Representative fixture mirroring the Rust API-crate JSON Schema export for the dashboard wire boundary. Authored from docs/plans/tracedecay-v2/11-dashboard-frontend.md normative contracts. The real pipeline consumes schemars-exported schemas of the same shape.",
+  "schemaRevision": "read-model-v1",
+  "description": "Fixture mirroring the Rust serde model in src/dashboard/read_model.rs (DashboardEnvelopeV1<T> plus the closed snake_case enums). This is the generation source for the frontend wire boundary (src/contracts/generated.ts). Until the real schemars JSON Schema export is wired, this fixture is hand-kept in lockstep with read_model.rs; the generated module is hand-maintained from the same source of truth.",
   "$defs": {
-    "Scope": {
-      "type": "object",
-      "description": "Opaque exact scope identity. Never a title, path, or branch label.",
-      "properties": {
-        "key": { "type": "string" },
-        "revision": { "type": "string" }
-      },
-      "required": ["key", "revision"]
-    },
-    "Versions": {
-      "type": "object",
-      "description": "Entity and graph version identity carried by every envelope.",
-      "properties": {
-        "entity": { "type": "string" },
-        "graph": { "type": "string" }
-      },
-      "required": ["entity", "graph"]
-    },
     "Authorization": {
       "type": "object",
+      "description": "Authorization outcome (internally tagged on `outcome`). Only `authorized` is emitted by the local loopback dashboard today.",
       "properties": {
         "outcome": {
           "type": "string",
@@ -35,18 +18,24 @@
     },
     "Coverage": {
       "type": "object",
-      "description": "Coverage counts. Unknown denominators never render 0%/100%.",
+      "description": "Coverage statement. `completeness` is authoritative; an unknown denominator is null, never a fabricated 0/100%.",
       "properties": {
-        "eligible": { "type": "integer" },
-        "examined": { "type": "integer" },
-        "matched": { "type": "integer" },
-        "excluded": { "type": "integer" },
-        "omitted": { "type": "integer" },
-        "unknown": { "type": "integer" },
+        "completeness": {
+          "type": "string",
+          "enum": ["complete", "partial", "unknown", "unsupported"]
+        },
+        "eligible": { "type": ["integer", "null"] },
+        "examined": { "type": ["integer", "null"] },
+        "matched": { "type": ["integer", "null"] },
+        "excluded": { "type": ["integer", "null"] },
+        "omitted": { "type": ["integer", "null"] },
+        "unknown": { "type": ["integer", "null"] },
         "denominator": { "type": ["integer", "null"] },
-        "unit": { "type": "string" }
+        "unit": { "type": ["string", "null"] },
+        "omission_reasons": { "type": "array", "items": { "type": "string" } }
       },
       "required": [
+        "completeness",
         "eligible",
         "examined",
         "matched",
@@ -54,131 +43,106 @@
         "omitted",
         "unknown",
         "denominator",
-        "unit"
+        "unit",
+        "omission_reasons"
+      ]
+    },
+    "DashboardDomainState": {
+      "description": "The closed 17-value domain-state union (snake_case). `unsupported` (live producer not yet wired server-side) is canonically emitted by the server and is distinct from `unsupported_schema` (an undecodable schema/variant).",
+      "type": "string",
+      "enum": [
+        "loading",
+        "complete_zero_findings",
+        "ready",
+        "partial",
+        "stale",
+        "locked",
+        "denied",
+        "unauthorized",
+        "redacted",
+        "conflicting",
+        "offline",
+        "unknown",
+        "cancelled",
+        "timed_out",
+        "error",
+        "unsupported_schema",
+        "unsupported"
       ]
     },
     "Freshness": {
       "type": "object",
+      "description": "Freshness statement. `absent` (no source produced anything) and `unsupported` (no source wired) are distinct from `stale` and `unknown`.",
       "properties": {
-        "observed_at": { "type": "string" },
-        "watermark": { "type": "string" },
-        "stale": { "type": "boolean" }
+        "state": {
+          "type": "string",
+          "enum": ["fresh", "stale", "unknown", "absent", "unsupported"]
+        },
+        "observed_at_micros": { "type": ["integer", "null"] },
+        "watermark": { "type": ["string", "null"] }
       },
-      "required": ["observed_at", "watermark", "stale"]
+      "required": ["state", "observed_at_micros", "watermark"]
+    },
+    "LegalActionKind": {
+      "type": "string",
+      "enum": [
+        "inspect",
+        "expand_evidence",
+        "refresh",
+        "request_dry_run",
+        "request_apply",
+        "request_cancel"
+      ]
     },
     "LegalActionRef": {
       "type": "object",
-      "description": "Reference to a server-authored legal action. No command payload.",
+      "description": "Reference to one owner-supplied legal action. No command payload; `operation` names the owning application operation.",
       "properties": {
-        "action_id": { "type": "string" },
-        "kind": { "type": "string" }
+        "kind": { "$ref": "#/$defs/LegalActionKind" },
+        "operation": { "type": "string" }
       },
-      "required": ["action_id", "kind"]
+      "required": ["kind", "operation"]
     },
-    "DashboardDomainState": {
-      "description": "16-variant discriminated union. The `unsupported_schema` variant is synthesized by the decoder for unknown kinds and is never authored here (15 authored + 1 synthesized = 16).",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["loading"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["complete_zero_findings"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["ready"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["partial"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["stale"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["locked"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["denied"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["unauthorized"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "description": "Retains only server-supplied non-sensitive metadata.",
-          "properties": {
-            "kind": { "type": "string", "enum": ["redacted"] },
-            "source_kind": { "type": "string" },
-            "source_id": { "type": "string" },
-            "source_revision": { "type": "string" },
-            "locator_class": { "type": "string" },
-            "display_label": { "type": "string" },
-            "reason_code": { "type": "string" }
-          },
-          "required": [
-            "kind",
-            "source_kind",
-            "source_id",
-            "source_revision",
-            "locator_class",
-            "display_label",
-            "reason_code"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["conflicting"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["offline"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["unknown"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["cancelled"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": { "kind": { "type": "string", "enum": ["timed_out"] } },
-          "required": ["kind"]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": { "type": "string", "enum": ["error"] },
-            "code": { "type": "string" },
-            "message": { "type": "string" }
-          },
-          "required": ["kind", "code", "message"]
-        }
-      ]
+    "Scope": {
+      "type": "object",
+      "description": "Exact resolved scope. Never falls back to a title, path, or latest version.",
+      "properties": {
+        "project_id": { "type": ["string", "null"] },
+        "storage_mode": { "type": "string" },
+        "store_root": { "type": "string" }
+      },
+      "required": ["project_id", "storage_mode", "store_root"]
+    },
+    "Time": {
+      "type": "object",
+      "description": "Valid time and observation time, kept separate. Microseconds since the Unix epoch.",
+      "properties": {
+        "valid_time_micros": { "type": ["integer", "null"] },
+        "observation_time_micros": { "type": "integer" }
+      },
+      "required": ["valid_time_micros", "observation_time_micros"]
+    },
+    "Version": {
+      "type": "object",
+      "description": "Entity/graph version identity. Both optional; absent rather than invented 0/latest.",
+      "properties": {
+        "entity_version": { "type": ["string", "null"] },
+        "graph_version": { "type": ["string", "null"] }
+      },
+      "required": ["entity_version", "graph_version"]
+    },
+    "Watermark": {
+      "type": "object",
+      "description": "Opaque monotone source watermark. Compared for staleness, never parsed.",
+      "properties": {
+        "source": { "type": "string" },
+        "watermark": { "type": "string" }
+      },
+      "required": ["source", "watermark"]
     },
     "FindingPayload": {
       "type": "object",
-      "description": "Sample domain payload. Severity and evidence quality are separate token axes, never one scale.",
+      "description": "Representative domain payload (the `T` in DashboardEnvelope<T>). Severity and evidence quality are separate token axes, never one scale.",
       "properties": {
         "finding_id": { "type": "string" },
         "title": { "type": "string" },
@@ -197,14 +161,15 @@
     "DashboardEnvelope": {
       "type": "object",
       "x-generic": "TPayload",
-      "description": "DashboardEnvelope<TPayload>. Always carries schema_revision, exact scope, entity/graph version, valid and observation time, source watermark, authorization, coverage, freshness, domain state, legal action references, and payload.",
+      "description": "DashboardEnvelopeV1<TPayload>. Every V2 read-model route returns exactly this shape; only `payload` varies. Carries schema revision, exact scope, entity/graph version, valid+observation time, optional source watermark, authorization, coverage, freshness, domain state, legal action references, and payload.",
       "properties": {
-        "schema_revision": { "type": "string" },
+        "schema_revision": { "type": "integer" },
         "scope": { "$ref": "#/$defs/Scope" },
-        "versions": { "$ref": "#/$defs/Versions" },
-        "valid_time": { "type": "string" },
-        "observation_time": { "type": "string" },
-        "watermark": { "type": "string" },
+        "version": { "$ref": "#/$defs/Version" },
+        "time": { "$ref": "#/$defs/Time" },
+        "source_watermark": {
+          "anyOf": [{ "$ref": "#/$defs/Watermark" }, { "type": "null" }]
+        },
         "authorization": { "$ref": "#/$defs/Authorization" },
         "coverage": { "$ref": "#/$defs/Coverage" },
         "freshness": { "$ref": "#/$defs/Freshness" },
@@ -218,10 +183,9 @@
       "required": [
         "schema_revision",
         "scope",
-        "versions",
-        "valid_time",
-        "observation_time",
-        "watermark",
+        "version",
+        "time",
+        "source_watermark",
         "authorization",
         "coverage",
         "freshness",

@@ -1,91 +1,66 @@
+// Decoder tests for the canonical hand-maintained wire boundary
+// (src/contracts/generated.ts), verifying it decodes the read_model.rs
+// envelope shape and keeps the closed unions honest.
 import { describe, it, expect } from "vitest";
+import { z } from "zod";
 import {
-  DashboardDomainStateSchema,
-  DashboardEnvelopeSchema,
-  FindingPayloadSchema,
+  DomainStateSchema,
+  EnvelopeSchema,
+  StorageFindingsPayloadSchema,
+  StorageTelemetryPayloadSchema,
+  WIRE_SCHEMA_REVISION,
   assertNever,
-  SCHEMA_REVISION,
-  type DashboardDomainState,
-  type DashboardEnvelope,
-  type FindingPayload,
+  type WireDomainState,
 } from "../../src/contracts/generated.ts";
 
-function findingEnvelope(domain: unknown): unknown {
+const PayloadSchema = z.object({ ok: z.boolean() });
+
+function readyEnvelope(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    schema_revision: SCHEMA_REVISION,
-    scope: { key: "scope-1", revision: "r1" },
-    versions: { entity: "e1", graph: "g1" },
-    valid_time: "vt",
-    observation_time: "ot",
-    watermark: "wm",
+    schema_revision: WIRE_SCHEMA_REVISION,
+    scope: { project_id: "p", storage_mode: "profile_sharded", store_root: "/store" },
+    version: { entity_version: null, graph_version: null },
+    time: { valid_time_micros: null, observation_time_micros: 123 },
+    source_watermark: null,
     authorization: { outcome: "authorized" },
     coverage: {
-      eligible: 10,
-      examined: 10,
-      matched: 3,
-      excluded: 1,
+      completeness: "complete",
+      eligible: 1,
+      examined: 1,
+      matched: 1,
+      excluded: 0,
       omitted: 0,
       unknown: 0,
-      denominator: 10,
-      unit: "rows",
+      denominator: 1,
+      unit: "stores",
+      omission_reasons: [],
     },
-    freshness: { observed_at: "ot", watermark: "wm", stale: false },
-    domain_state: domain,
-    legal_actions: [{ action_id: "a1", kind: "acknowledge" }],
-    payload: {
-      finding_id: "f1",
-      title: "t",
-      summary: "s",
-      severity: "high",
-      evidence_quality: "corroborated",
-    },
+    freshness: { state: "fresh", observed_at_micros: 123, watermark: null },
+    domain_state: "ready",
+    legal_actions: [{ kind: "refresh", operation: "use-case.dashboard.refresh" }],
+    payload: { ok: true },
+    ...overrides,
   };
 }
 
-describe("generated domain-state decoder", () => {
-  it("decodes a valid known variant", () => {
-    const parsed = DashboardDomainStateSchema.parse({ kind: "ready" });
-    expect(parsed).toEqual({ kind: "ready" });
+describe("wire domain-state decoder", () => {
+  it("decodes a known variant", () => {
+    expect(DomainStateSchema.parse("ready")).toBe("ready");
   });
 
-  it("decodes a data-carrying known variant (redacted metadata allowlist)", () => {
-    const input: DashboardDomainState = {
-      kind: "redacted",
-      source_kind: "session",
-      source_id: "s1",
-      source_revision: "r1",
-      locator_class: "opaque",
-      display_label: "Redacted item",
-      reason_code: "policy",
-    };
-    expect(DashboardDomainStateSchema.parse(input)).toEqual(input);
+  it("keeps `unsupported` and `unsupported_schema` distinct (both server-canonical)", () => {
+    expect(DomainStateSchema.parse("unsupported")).toBe("unsupported");
+    expect(DomainStateSchema.parse("unsupported_schema")).toBe("unsupported_schema");
   });
 
-  it("maps an UNKNOWN variant to unsupported_schema instead of throwing", () => {
-    const parsed = DashboardDomainStateSchema.parse({ kind: "brand_new_state", extra: 1 });
-    expect(parsed).toEqual({
-      kind: "unsupported_schema",
-      raw: { kind: "brand_new_state", extra: 1 },
-    });
+  it("maps an UNKNOWN value to unsupported_schema instead of throwing", () => {
+    expect(DomainStateSchema.parse("brand_new_state")).toBe("unsupported_schema");
+    expect(DomainStateSchema.parse(42)).toBe("unsupported_schema");
   });
 
-  it("maps a non-object / missing discriminant to unsupported_schema", () => {
-    expect(DashboardDomainStateSchema.parse(42)).toEqual({ kind: "unsupported_schema", raw: 42 });
-    expect(DashboardDomainStateSchema.parse({})).toEqual({ kind: "unsupported_schema", raw: {} });
-  });
-
-  it("produces a typed decode error for a MALFORMED known variant (not a silent downgrade)", () => {
-    // error variant requires code + message; omit them.
-    const res = DashboardDomainStateSchema.safeParse({ kind: "error" });
-    expect(res.success).toBe(false);
-    if (!res.success) {
-      expect(res.error.issues.length).toBeGreaterThan(0);
-    }
-  });
-
-  it("is exhaustively switchable with assertNever", () => {
-    function describeState(state: DashboardDomainState): string {
-      switch (state.kind) {
+  it("is exhaustively switchable with assertNever (never-checked)", () => {
+    function label(state: WireDomainState): string {
+      switch (state) {
         case "loading":
         case "complete_zero_findings":
         case "ready":
@@ -94,83 +69,101 @@ describe("generated domain-state decoder", () => {
         case "locked":
         case "denied":
         case "unauthorized":
+        case "redacted":
         case "conflicting":
         case "offline":
         case "unknown":
         case "cancelled":
         case "timed_out":
-          return state.kind;
-        case "redacted":
-          return state.display_label;
         case "error":
-          return `${state.code}:${state.message}`;
         case "unsupported_schema":
-          return "unsupported";
+        case "unsupported":
+          return state;
         default:
           return assertNever(state);
       }
     }
-    expect(describeState({ kind: "ready" })).toBe("ready");
-    expect(describeState({ kind: "unsupported_schema", raw: null })).toBe("unsupported");
+    expect(label("ready")).toBe("ready");
+    expect(label("unsupported")).toBe("unsupported");
   });
 });
 
-describe("generated finding payload decoder", () => {
-  it("decodes a valid finding", () => {
-    const finding: FindingPayload = {
-      finding_id: "f1",
-      title: "t",
-      summary: "s",
-      severity: "critical",
-      evidence_quality: "verified",
-    };
-    expect(FindingPayloadSchema.parse(finding)).toEqual(finding);
-  });
-
-  it("rejects an out-of-range severity enum", () => {
-    const res = FindingPayloadSchema.safeParse({
-      finding_id: "f1",
-      title: "t",
-      summary: "s",
-      severity: "apocalyptic",
-      evidence_quality: "verified",
-    });
-    expect(res.success).toBe(false);
-  });
-});
-
-describe("generated generic envelope decoder", () => {
-  const EnvelopeSchema = DashboardEnvelopeSchema(FindingPayloadSchema);
+describe("wire envelope decoder", () => {
+  const Envelope = EnvelopeSchema(PayloadSchema);
 
   it("decodes a complete envelope carrying every normative field", () => {
-    const parsed = EnvelopeSchema.parse(findingEnvelope({ kind: "ready" }));
-    const envelope: DashboardEnvelope<FindingPayload> = parsed;
-    expect(envelope.schema_revision).toBe(SCHEMA_REVISION);
-    expect(envelope.domain_state).toEqual({ kind: "ready" });
-    expect(envelope.payload.finding_id).toBe("f1");
-    expect(envelope.legal_actions[0]!.action_id).toBe("a1");
-    expect(envelope.coverage.denominator).toBe(10);
+    const parsed = Envelope.parse(readyEnvelope());
+    expect(parsed.schema_revision).toBe(WIRE_SCHEMA_REVISION);
+    expect(parsed.scope.store_root).toBe("/store");
+    expect(parsed.authorization.outcome).toBe("authorized");
+    expect(parsed.domain_state).toBe("ready");
+    expect(parsed.coverage.denominator).toBe(1);
+    expect(parsed.legal_actions[0]!.operation).toBe("use-case.dashboard.refresh");
+    expect(parsed.payload.ok).toBe(true);
   });
 
-  it("decodes an unknown domain state inside the envelope to unsupported_schema", () => {
-    const parsed = EnvelopeSchema.parse(findingEnvelope({ kind: "future_state" }));
-    expect(parsed.domain_state).toEqual({
-      kind: "unsupported_schema",
-      raw: { kind: "future_state" },
-    });
+  it("downgrades an unknown domain state inside the envelope to unsupported_schema", () => {
+    const parsed = Envelope.parse(readyEnvelope({ domain_state: "future_state" }));
+    expect(parsed.domain_state).toBe("unsupported_schema");
   });
 
-  it("fails when a required envelope field is missing (typed decode error)", () => {
-    const bad = findingEnvelope({ kind: "ready" }) as Record<string, unknown>;
-    delete bad.watermark;
-    const res = EnvelopeSchema.safeParse(bad);
+  it("rejects a wrong schema_revision (hard-fail on drift)", () => {
+    const res = Envelope.safeParse(readyEnvelope({ schema_revision: 2 }));
     expect(res.success).toBe(false);
   });
 
   it("allows a null coverage denominator (unknown denominator)", () => {
-    const env = findingEnvelope({ kind: "partial" }) as Record<string, unknown>;
+    const env = readyEnvelope();
+    (env.coverage as Record<string, unknown>).completeness = "unknown";
     (env.coverage as Record<string, unknown>).denominator = null;
-    const res = EnvelopeSchema.safeParse(env);
-    expect(res.success).toBe(true);
+    expect(Envelope.safeParse(env).success).toBe(true);
+  });
+
+  it("fails when a required envelope field is missing (typed decode error)", () => {
+    const bad = readyEnvelope();
+    delete bad.authorization;
+    expect(Envelope.safeParse(bad).success).toBe(false);
+  });
+});
+
+describe("wire storage payload decoders", () => {
+  it("decodes a storage telemetry payload", () => {
+    const parsed = StorageTelemetryPayloadSchema.parse({
+      stores: [
+        {
+          store: "s",
+          role: "graph",
+          path: "/p",
+          read: {
+            kind: "observed",
+            sample: {
+              store: "s",
+              page_size_bytes: 4096,
+              page_count: 10,
+              freelist_pages: 0,
+              observed_at: 1,
+            },
+          },
+          total_bytes: 100,
+          free_bytes: 0,
+          free_page_ratio: 0,
+          budget: { state: "unsupported", reason: "not wired" },
+          growth: { state: "absent", reason: "no prior sample" },
+        },
+      ],
+      budget_note: "n",
+      growth_note: "m",
+    });
+    expect(parsed.stores[0]!.read.kind).toBe("observed");
+  });
+
+  it("decodes a storage findings payload", () => {
+    const parsed = StorageFindingsPayloadSchema.parse({
+      kinds: [
+        { kind: "orphan_store", state: "absent", required_source: "src", reason: "r" },
+      ],
+      note: "n",
+    });
+    expect(parsed.kinds[0]!.kind).toBe("orphan_store");
   });
 });

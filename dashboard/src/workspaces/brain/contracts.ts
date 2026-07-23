@@ -1,3 +1,9 @@
+// LEGACY BOUNDARY — pending envelope migration.
+// These schemas describe the pre-envelope plugin JSON endpoints
+// (`/api/plugins/*`, `/api/projects`), NOT the DashboardEnvelopeV1 wire surface
+// in `../../contracts/generated.ts`. They are hand-matched to their Rust
+// producers and remain until these routes move to typed envelopes; new
+// envelope-backed reads must use the single wire boundary in `contracts/`.
 import { z } from 'zod';
 
 /** Wire-true shapes for GET /api/projects (src/dashboard/projects.rs `list`). */
