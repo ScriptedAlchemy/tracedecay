@@ -34,7 +34,7 @@ const HintsPayload = z
  * sources. */
 export function AgentsPage() {
   const usage = useLegacy(['analytics', 'usage'], `${BASE}/usage`, UsagePayload);
-  const hints = useLegacy(['analytics', 'hints'], `${BASE}/hints`, HintsPayload);
+  const hints = useLegacy(['analytics', 'underused'], `${BASE}/underused`, HintsPayload);
 
   return (
     <LegacyBoundary title="Agents" pending={usage.isPending} result={usage.data}>

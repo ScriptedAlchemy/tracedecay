@@ -133,9 +133,10 @@ export function AutomationsPage() {
               return (
                 <div className="flex flex-col">
                   {rows.map((skill, i) => {
-                    const id = String(skill['id'] ?? skill['skill_id'] ?? i);
-                    const title = String(skill['title'] ?? skill['name'] ?? id);
-                    const state = String(skill['state'] ?? skill['status'] ?? '');
+                    const metadata = (skill['metadata'] ?? {}) as Record<string, unknown>;
+                    const id = String(metadata['id'] ?? skill['id'] ?? skill['skill_id'] ?? i);
+                    const title = String(metadata['title'] ?? skill['title'] ?? skill['name'] ?? id);
+                    const state = String(metadata['state'] ?? skill['state'] ?? skill['status'] ?? '');
                     return (
                       <div
                         key={id}
@@ -168,8 +169,14 @@ export function AutomationsPage() {
                 <div className="flex flex-col">
                   {rows.map((proposal, i) => {
                     const id = String(proposal['id'] ?? proposal['proposal_id'] ?? i);
+                    const request = (proposal['add_fact_request'] ?? {}) as Record<string, unknown>;
                     const content = String(
-                      proposal['content'] ?? proposal['fact'] ?? proposal['summary'] ?? id,
+                      request['content'] ??
+                        request['fact'] ??
+                        proposal['content'] ??
+                        proposal['fact'] ??
+                        proposal['summary'] ??
+                        id,
                     );
                     return (
                       <p
