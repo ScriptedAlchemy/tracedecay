@@ -1,39 +1,21 @@
 {
-  "name": "tracedecay-dashboard",
+  "name": "@tracedecay/dashboard",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.0.0",
   "type": "module",
-  "description": "TraceDecay dashboard UI: standalone shell + ported Hermes plugin dashboards (holographic memory, LCM).",
   "scripts": {
-    "build": "node build.mjs",
-    "dev": "node dev/run.mjs",
-    "test": "npm run test:node && npm run test:dom",
-    "test:node": "node run-unit-tests.mjs",
-    "test:dom": "vitest run",
-    "smoke": "node smoke.mjs",
-    "smoke:mobile": "node smoke.mjs --profiles=iphone12,pixel5"
+    "contracts:generate": "tsx codegen/src/cli.ts generate",
+    "contracts:check": "tsx codegen/src/cli.ts --check",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
-    "d3-force": "^3.0.0",
-    "lucide-react": "^0.577.0",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@rsbuild/core": "^2.0.15",
-    "@rsbuild/plugin-react": "^2.1.0",
-    "@rsbuild/plugin-type-check": "^1.4.0",
-    "@rspack/core": "^2.0.8",
-    "@tailwindcss/node": "^4.3.1",
-    "@tailwindcss/oxide": "^4.3.1",
-    "@testing-library/dom": "^10.0.0",
-    "@testing-library/react": "^16.3.2",
-    "chokidar": "^3.6.0",
-    "jsdom": "^29.1.1",
-    "playwright": "^1.60.0",
-    "postcss": "^8.5.15",
-    "tailwindcss": "^4.3.1",
-    "typescript": "^5.9.0",
-    "vitest": "^4.1.8"
+    "@types/node": "^22.20.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
   }
 }

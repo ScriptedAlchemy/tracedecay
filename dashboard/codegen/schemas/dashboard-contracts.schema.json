@@ -1,0 +1,234 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tracedecay.dev/schemas/dashboard-contracts.json",
+  "title": "DashboardContracts",
+  "schemaRevision": "2026-07-23.1",
+  "description": "Representative fixture mirroring the Rust API-crate JSON Schema export for the dashboard wire boundary. Authored from docs/plans/tracedecay-v2/11-dashboard-frontend.md normative contracts. The real pipeline consumes schemars-exported schemas of the same shape.",
+  "$defs": {
+    "Scope": {
+      "type": "object",
+      "description": "Opaque exact scope identity. Never a title, path, or branch label.",
+      "properties": {
+        "key": { "type": "string" },
+        "revision": { "type": "string" }
+      },
+      "required": ["key", "revision"]
+    },
+    "Versions": {
+      "type": "object",
+      "description": "Entity and graph version identity carried by every envelope.",
+      "properties": {
+        "entity": { "type": "string" },
+        "graph": { "type": "string" }
+      },
+      "required": ["entity", "graph"]
+    },
+    "Authorization": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": ["authorized", "unauthorized", "denied", "redacted"]
+        }
+      },
+      "required": ["outcome"]
+    },
+    "Coverage": {
+      "type": "object",
+      "description": "Coverage counts. Unknown denominators never render 0%/100%.",
+      "properties": {
+        "eligible": { "type": "integer" },
+        "examined": { "type": "integer" },
+        "matched": { "type": "integer" },
+        "excluded": { "type": "integer" },
+        "omitted": { "type": "integer" },
+        "unknown": { "type": "integer" },
+        "denominator": { "type": ["integer", "null"] },
+        "unit": { "type": "string" }
+      },
+      "required": [
+        "eligible",
+        "examined",
+        "matched",
+        "excluded",
+        "omitted",
+        "unknown",
+        "denominator",
+        "unit"
+      ]
+    },
+    "Freshness": {
+      "type": "object",
+      "properties": {
+        "observed_at": { "type": "string" },
+        "watermark": { "type": "string" },
+        "stale": { "type": "boolean" }
+      },
+      "required": ["observed_at", "watermark", "stale"]
+    },
+    "LegalActionRef": {
+      "type": "object",
+      "description": "Reference to a server-authored legal action. No command payload.",
+      "properties": {
+        "action_id": { "type": "string" },
+        "kind": { "type": "string" }
+      },
+      "required": ["action_id", "kind"]
+    },
+    "DashboardDomainState": {
+      "description": "16-variant discriminated union. The `unsupported_schema` variant is synthesized by the decoder for unknown kinds and is never authored here (15 authored + 1 synthesized = 16).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["loading"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["complete_zero_findings"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["ready"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["partial"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["stale"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["locked"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["denied"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["unauthorized"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "description": "Retains only server-supplied non-sensitive metadata.",
+          "properties": {
+            "kind": { "type": "string", "enum": ["redacted"] },
+            "source_kind": { "type": "string" },
+            "source_id": { "type": "string" },
+            "source_revision": { "type": "string" },
+            "locator_class": { "type": "string" },
+            "display_label": { "type": "string" },
+            "reason_code": { "type": "string" }
+          },
+          "required": [
+            "kind",
+            "source_kind",
+            "source_id",
+            "source_revision",
+            "locator_class",
+            "display_label",
+            "reason_code"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["conflicting"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["offline"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["unknown"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["cancelled"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "enum": ["timed_out"] } },
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["error"] },
+            "code": { "type": "string" },
+            "message": { "type": "string" }
+          },
+          "required": ["kind", "code", "message"]
+        }
+      ]
+    },
+    "FindingPayload": {
+      "type": "object",
+      "description": "Sample domain payload. Severity and evidence quality are separate token axes, never one scale.",
+      "properties": {
+        "finding_id": { "type": "string" },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "medium", "high", "critical"]
+        },
+        "evidence_quality": {
+          "type": "string",
+          "enum": ["unverified", "weak", "corroborated", "verified"]
+        }
+      },
+      "required": ["finding_id", "title", "summary", "severity", "evidence_quality"]
+    },
+    "DashboardEnvelope": {
+      "type": "object",
+      "x-generic": "TPayload",
+      "description": "DashboardEnvelope<TPayload>. Always carries schema_revision, exact scope, entity/graph version, valid and observation time, source watermark, authorization, coverage, freshness, domain state, legal action references, and payload.",
+      "properties": {
+        "schema_revision": { "type": "string" },
+        "scope": { "$ref": "#/$defs/Scope" },
+        "versions": { "$ref": "#/$defs/Versions" },
+        "valid_time": { "type": "string" },
+        "observation_time": { "type": "string" },
+        "watermark": { "type": "string" },
+        "authorization": { "$ref": "#/$defs/Authorization" },
+        "coverage": { "$ref": "#/$defs/Coverage" },
+        "freshness": { "$ref": "#/$defs/Freshness" },
+        "domain_state": { "$ref": "#/$defs/DashboardDomainState" },
+        "legal_actions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/LegalActionRef" }
+        },
+        "payload": { "x-generic-ref": "TPayload" }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "versions",
+        "valid_time",
+        "observation_time",
+        "watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ]
+    }
+  }
+}
