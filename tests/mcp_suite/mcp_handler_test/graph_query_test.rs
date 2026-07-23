@@ -1045,15 +1045,15 @@ async fn test_module_api() {
     .await
     .unwrap();
     let text = extract_text(&result.value);
+    // Plan 21: module_api is a daemon-retained primitive. Without a daemon
+    // transport this harness receives the truthful unavailable envelope;
+    // daemon-backed content coverage lives in the runtime acceptance suite.
     assert!(
-        text.contains("public_symbol_count"),
-        "should have public_symbol_count key"
+        text.contains("application.transport.unavailable"),
+        "expected the canonical unavailable envelope, got: {text}"
     );
-    // helper is pub so it should appear
-    assert!(
-        text.contains("helper"),
-        "pub fn helper should appear in module API"
-    );
+    // Content assertions (public symbols, path echo) belong to the
+    // daemon-backed acceptance coverage of this primitive.
 }
 
 // ---------------------------------------------------------------------------
