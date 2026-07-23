@@ -93,11 +93,18 @@ fn production_composition_registers_only_callable_catalog_handlers() {
             "{capability_id} has a registered callable handler"
         );
     }
+    // symbol-search is a callable production retrieval capability: its catalog
+    // contribution is `AvailabilityContract::Available` and it carries a
+    // registered typed handler descriptor (activated by "feat(search): complete
+    // production retrieval activation"). It is therefore projected into a
+    // callable policy route, exactly like the feedback capabilities above.
     assert!(
         composition
             .registered_capability("capability.retrieval.symbol-search")
-            .is_none()
+            .is_some()
     );
+    // stage-hunks stays inert (`AvailabilityContract::Unavailable`) and never
+    // becomes a callable route, so unavailable metadata is not registered.
     assert!(
         composition
             .registered_capability("capability.git.stage-hunks")
