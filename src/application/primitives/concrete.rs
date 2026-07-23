@@ -486,7 +486,7 @@ mod tests {
         let request = TemporalSnapshotRequest::new(
             SessionId::new("session.pr12.symbol-graph").expect("session"),
             scope.scope_digest.as_str(),
-            "request.pr12.symbol-graph",
+            format!("sha256:{}", "d".repeat(64)),
             context.grant().digest.as_str(),
             TemporalModeV1::Current,
             RetrievalGrainV1::Occurrence,
@@ -506,7 +506,7 @@ mod tests {
                 ranking: 1,
                 configuration_digest: BindingDigest::new(
                     "configuration_digest",
-                    "configuration.pr12",
+                    format!("sha256:{}", "c".repeat(64)),
                 )
                 .expect("configuration digest"),
             },

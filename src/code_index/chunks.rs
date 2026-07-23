@@ -273,7 +273,15 @@ impl CodeFileChunksV1 {
                     occurrences.insert(prior_occurrence, current.clone());
                     current
                 };
-                chunk.anchor.symbol_occurrence_id = Some(current_occurrence);
+                chunk.anchor.symbol_occurrence_id = Some(current_occurrence.clone());
+                for term in &mut chunk.exact_terms {
+                    if term.kind() == ExactTechnicalTermKindV1::WholeSymbol {
+                        term.rebind_symbol_occurrence(current_occurrence.clone())
+                            .map_err(|error| {
+                                ChunkingFailureV1::NonCanonicalIdentity(error.to_string())
+                            })?;
+                    }
+                }
             }
         }
 

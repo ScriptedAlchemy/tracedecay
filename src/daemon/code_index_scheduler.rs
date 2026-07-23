@@ -419,6 +419,11 @@ struct CapturedSnapshotV1 {
     snapshot: SanitizedCodeSnapshotV1,
     captured_files: Vec<CodeIndexCapturedFileV1>,
     changed_paths: BTreeSet<String>,
+    /// Strong references to this snapshot's interned bytes. The shared byte
+    /// pool holds only weak entries; the scheduler retains its current
+    /// snapshot's bytes so identical content in sibling worktrees can reuse
+    /// them (physical sharing without identity aliasing).
+    retained_bytes: Vec<Arc<[u8]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -465,6 +470,18 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
 }
 
 impl LatestCompleteCodeIndexV1 {
+    /// The sealed generation identity as a display string. Used by the dashboard
+    /// code-index freshness read port and Doctor code-index mapping.
+    pub(in crate::daemon) fn generation_id_string(&self) -> String {
+        self.generation.manifest().generation_id.as_str().to_owned()
+    }
+
+    /// The sealed-at watermark (microseconds since the Unix epoch) of this
+    /// generation. Serves as the last-reconcile watermark the dashboard reports.
+    pub(in crate::daemon) fn sealed_at_micros(&self) -> i64 {
+        self.generation.manifest().seal.sealed_at.0
+    }
+
     pub fn exact(
         &self,
     ) -> Result<
@@ -572,6 +589,8 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     /// O(repo) read+hash capture.
     last_stat_signature: Option<String>,
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
+    /// Keeps the current snapshot's interned bytes alive in the shared pool.
+    retained_snapshot_bytes: Vec<Arc<[u8]>>,
     owner: ProductionOwner,
     hints: Arc<Mutex<PendingHintsV1>>,
     wake: Arc<tokio::sync::Notify>,
@@ -657,6 +676,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             last_reconciled_at: Instant::now(),
             last_stat_signature: None,
             byte_pool,
+            retained_snapshot_bytes: Vec::new(),
             owner,
             hints,
             wake,
@@ -766,7 +786,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .unwrap_or_else(|_| panic!("code-index hint lock"))
                 .take();
             overflow_reconciled |= hints.overflow;
-            let captured = self.capture_authoritative_snapshot()?;
+            let mut captured = self.capture_authoritative_snapshot()?;
+            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
             if self.latest_content_identity.as_ref() == Some(&captured.snapshot.content_identity) {
                 self.mark_reconciled(sampled_metadata, sampled_signature);
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -862,6 +883,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     fn worktree_stat_signature(&self) -> Result<String, CodeIndexSchedulerErrorV1> {
         let repository = gix::open(&self.project_root)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+        let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
         let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         let registry = StaticLanguageRegistry::new();
@@ -981,6 +1003,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // Classify committed/staged/unstaged/untracked/deleted/renamed paths
         // truthfully from gix. Deletions drop out of the present candidate set;
         // their tombstones flow through `changed_paths`.
+        let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
         let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         let candidate_paths = classification.candidate_paths();
@@ -1003,6 +1026,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             };
             let bytes = std::fs::read(&absolute)?;
             let (digest, shared) = self.byte_pool.intern(bytes);
+            retained_bytes.push(Arc::clone(&shared));
             let occurrence = file_occurrence_id(
                 &self.repository_id,
                 &self.worktree_id,
@@ -1042,6 +1066,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             },
             captured_files,
             changed_paths,
+            retained_bytes,
         })
     }
 }

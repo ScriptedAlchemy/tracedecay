@@ -354,6 +354,23 @@ impl ExactTechnicalTermV1 {
         Ok(term)
     }
 
+    /// Rebind a WholeSymbol term's occurrence authority during chunk
+    /// rematerialization for a new generation. Only WholeSymbol terms carry
+    /// occurrence authority; rebinding any other kind is non-canonical.
+    pub fn rebind_symbol_occurrence(
+        &mut self,
+        symbol_occurrence_id: SymbolOccurrenceId,
+    ) -> Result<(), DomainError> {
+        if self.kind != ExactTechnicalTermKindV1::WholeSymbol {
+            return Err(DomainError::NonCanonical {
+                field: "exact term occurrence rebind kind",
+            });
+        }
+        symbol_occurrence_id.validate()?;
+        self.symbol_occurrence_id = Some(symbol_occurrence_id);
+        Ok(())
+    }
+
     pub fn kind(&self) -> ExactTechnicalTermKindV1 {
         self.kind
     }
