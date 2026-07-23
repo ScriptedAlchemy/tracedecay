@@ -3160,7 +3160,7 @@ mod tests {
             br#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///root/a.rs","version":2},"contentChanges":[{"text":"fn b() {}"}]}}"#,
             40,
         );
-        assert!(session.flush_due(89).queued_messages == 0);
+        assert_eq!(session.flush_due(89).queued_messages, 0);
         let output = session.flush_due(90);
         assert!(output.queued_messages >= 1);
         let messages = session.drain_outbound();
