@@ -35,6 +35,9 @@ pub(crate) use automation_run_service::{
 mod automation_scheduler_api;
 mod automation_skills_api;
 mod code_diagnostics_api;
+mod code_index_freshness_api;
+mod doctor_findings_api;
+mod events_api;
 mod graph_api;
 mod graph_queries;
 mod graph_service;
@@ -46,7 +49,10 @@ mod memory_api;
 pub mod memory_curate;
 mod memory_service;
 mod projects;
+mod read_model;
 mod savings_api;
+mod storage_findings_api;
+mod storage_telemetry_api;
 mod savings_pricing;
 mod settings_api;
 mod token_count;
@@ -254,9 +260,16 @@ pub(crate) async fn resolve_lcm_store(
             scope: "unavailable".to_string(),
         };
     }
-    let project_db_path = crate::sessions::cursor::resolved_project_session_db_path(project_root)
-        .await
-        .unwrap_or_else(|| cg.store_layout().sessions_db_path.clone());
+    let Some(project_db_path) =
+        crate::sessions::cursor::resolved_project_session_db_path(project_root).await
+    else {
+        return LcmStoreSelection {
+            conn: None,
+            lcm_db: None,
+            path: cg.store_layout().sessions_db_path.display().to_string(),
+            scope: "unavailable".to_string(),
+        };
+    };
     if let Some(db) = GlobalDb::open_at(&project_db_path).await {
         let conn = db.owned_read_connection().await;
         let db = Arc::new(db);
@@ -770,6 +783,12 @@ fn router_with_active_application(
         .route("/api/automation/{*tail}", any(active_api_gateway))
         .route("/api/settings", any(active_api_gateway))
         .route("/api/settings/{*tail}", any(active_api_gateway))
+        // PR14 V2 read-model surfaces bound through the active-project gateway,
+        // mirroring the project-scoped `/api/projects/{id}/…` gateway path.
+        .route("/api/doctor/{*tail}", any(active_api_gateway))
+        .route("/api/storage/{*tail}", any(active_api_gateway))
+        .route("/api/code-index/{*tail}", any(active_api_gateway))
+        .route("/api/events", any(active_api_gateway))
         .with_state(runtime);
     match application {
         Some(application) => router.nest("/api/application", application.0),
@@ -1008,6 +1027,26 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/settings/user",
             patch(settings_api::patch_user_settings),
         )
+        // PR14 V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
+        // family, plan-38 storage telemetry/findings, code-index freshness, and
+        // the typed SSE stream. See `read_model` for the normative envelope.
+        .route(
+            "/api/doctor/findings",
+            get(doctor_findings_api::findings),
+        )
+        .route(
+            "/api/storage/telemetry",
+            get(storage_telemetry_api::telemetry),
+        )
+        .route(
+            "/api/storage/findings",
+            get(storage_findings_api::findings),
+        )
+        .route(
+            "/api/code-index/freshness",
+            get(code_index_freshness_api::freshness),
+        )
+        .route("/api/events", get(events_api::events))
 }
 
 async fn active_api_gateway(
@@ -1362,5 +1401,73 @@ mod authority_tests {
             .await
             .expect("selected-project application response");
         assert_eq!(selected.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Deliverable 4: the V2 read-model routes must be reachable through both
+    /// router construction paths — the active-project gateway (`/api/…`) and the
+    /// project-scoped gateway (`/api/projects/{id}/…`) — mirroring how the
+    /// existing families are exposed.
+    #[tokio::test]
+    async fn v2_read_models_are_reachable_through_both_gateways() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
+        let state = build_state(&cg).await.expect("dashboard state");
+        let project_id = state.project_id.clone().expect("active project id");
+        let app = router_with_active_application(state, None);
+
+        // Every V2 read-model route resolves both through the active gateway and
+        // through the project-scoped gateway for the active project.
+        for tail in [
+            "doctor/findings",
+            "storage/telemetry",
+            "storage/findings",
+            "code-index/freshness",
+        ] {
+            let active = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/{tail}"))
+                        .body(Body::empty())
+                        .expect("active v2 request"),
+                )
+                .await
+                .expect("active v2 response");
+            assert_eq!(
+                active.status(),
+                StatusCode::OK,
+                "active gateway route /api/{tail} should resolve"
+            );
+            let body = axum::body::to_bytes(active.into_body(), 1 << 20)
+                .await
+                .expect("active body");
+            let value: Value = serde_json::from_slice(&body).expect("envelope json");
+            assert_eq!(value["schema_revision"], 1, "/api/{tail} envelope revision");
+            assert!(
+                value.get("domain_state").is_some(),
+                "/api/{tail} carries a domain_state"
+            );
+
+            let scoped = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/projects/{project_id}/{tail}"))
+                        .body(Body::empty())
+                        .expect("scoped v2 request"),
+                )
+                .await
+                .expect("scoped v2 response");
+            assert_eq!(
+                scoped.status(),
+                StatusCode::OK,
+                "project-scoped gateway route for /api/{tail} should resolve"
+            );
+        }
     }
 }
