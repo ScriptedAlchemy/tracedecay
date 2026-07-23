@@ -93,6 +93,10 @@ fn subprocess_reports_closed_session_store_counts_schema_and_keyset_pages() {
         "retrieval_anchors",
         "generation_diagnostics",
         "diagnostic_generation_publications",
+        "configuration_revisions",
+        "configuration_entries",
+        "configuration_mutation_receipts",
+        "configuration_audit_events",
     ] {
         let family = match table {
             "source_cursors" => "observation",
@@ -107,6 +111,10 @@ fn subprocess_reports_closed_session_store_counts_schema_and_keyset_pages() {
             | "memory_v2_lineage_events"
             | "retrieval_anchors" => "fact",
             "generation_diagnostics" | "diagnostic_generation_publications" => "diagnostics",
+            "configuration_revisions"
+            | "configuration_entries"
+            | "configuration_mutation_receipts"
+            | "configuration_audit_events" => "configuration",
             _ => "temporal",
         };
         let response = invoke(&request(

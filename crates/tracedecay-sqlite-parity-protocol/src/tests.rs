@@ -115,6 +115,7 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreFamily::Summary,
         SessionStoreFamily::Fact,
         SessionStoreFamily::Diagnostics,
+        SessionStoreFamily::Configuration,
     ] {
         round_trip(family);
     }
@@ -142,6 +143,10 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreTable::RetrievalAnchors,
         SessionStoreTable::GenerationDiagnostics,
         SessionStoreTable::DiagnosticGenerationPublications,
+        SessionStoreTable::ConfigurationRevisions,
+        SessionStoreTable::ConfigurationEntries,
+        SessionStoreTable::ConfigurationMutationReceipts,
+        SessionStoreTable::ConfigurationAuditEvents,
     ] {
         round_trip(table);
     }
@@ -232,6 +237,21 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         },
         SessionStoreCursor::DiagnosticGenerationPublications {
             generation_id: "generation".to_owned(),
+        },
+        SessionStoreCursor::ConfigurationRevisions {
+            revision_id: "revision".to_owned(),
+        },
+        SessionStoreCursor::ConfigurationEntries {
+            revision_id: "revision".to_owned(),
+            key: "key".to_owned(),
+            layer_kind: "layer".to_owned(),
+            layer_id: "layer-1".to_owned(),
+        },
+        SessionStoreCursor::ConfigurationMutationReceipts {
+            receipt_id: "receipt".to_owned(),
+        },
+        SessionStoreCursor::ConfigurationAuditEvents {
+            event_id: "event".to_owned(),
         },
     ] {
         round_trip(cursor);
@@ -399,7 +419,7 @@ fn every_graph_session_journal_and_response_result_variant_round_trips() {
     });
 }
 
-fn session_rows() -> [SessionStoreRow; 23] {
+fn session_rows() -> [SessionStoreRow; 27] {
     [
         SessionStoreRow::Observations {
             sequence: 1,
@@ -544,6 +564,31 @@ fn session_rows() -> [SessionStoreRow; 23] {
         SessionStoreRow::DiagnosticGenerationPublications {
             generation_id: "generation".to_owned(),
             record_state: "current".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::ConfigurationRevisions {
+            revision_id: "revision".to_owned(),
+            snapshot_id: "snapshot".to_owned(),
+            operation_kind: "bootstrap".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::ConfigurationEntries {
+            revision_id: "revision".to_owned(),
+            key: "key".to_owned(),
+            layer_kind: "layer".to_owned(),
+            layer_id: "layer-1".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::ConfigurationMutationReceipts {
+            receipt_id: "receipt".to_owned(),
+            result_revision_id: "revision".to_owned(),
+            activation_status: "activated".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::ConfigurationAuditEvents {
+            event_id: "event".to_owned(),
+            operation_kind: "mutate".to_owned(),
+            base_revision_id: "revision".to_owned(),
             row_digest: "row".to_owned(),
         },
     ]

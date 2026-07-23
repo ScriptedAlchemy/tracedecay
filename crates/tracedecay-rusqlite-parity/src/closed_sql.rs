@@ -217,6 +217,30 @@ pub(crate) fn session_table_spec(table: SessionStoreTable) -> TableSpec {
             "PRAGMA table_info(diagnostic_generation_publications)",
             "PRAGMA foreign_key_list(diagnostic_generation_publications)",
         ),
+        SessionStoreTable::ConfigurationRevisions => session_table(
+            "configuration_revisions",
+            "SELECT COUNT(*) FROM configuration_revisions",
+            "PRAGMA table_info(configuration_revisions)",
+            "PRAGMA foreign_key_list(configuration_revisions)",
+        ),
+        SessionStoreTable::ConfigurationEntries => session_table(
+            "configuration_entries",
+            "SELECT COUNT(*) FROM configuration_entries",
+            "PRAGMA table_info(configuration_entries)",
+            "PRAGMA foreign_key_list(configuration_entries)",
+        ),
+        SessionStoreTable::ConfigurationMutationReceipts => session_table(
+            "configuration_mutation_receipts",
+            "SELECT COUNT(*) FROM configuration_mutation_receipts",
+            "PRAGMA table_info(configuration_mutation_receipts)",
+            "PRAGMA foreign_key_list(configuration_mutation_receipts)",
+        ),
+        SessionStoreTable::ConfigurationAuditEvents => session_table(
+            "configuration_audit_events",
+            "SELECT COUNT(*) FROM configuration_audit_events",
+            "PRAGMA table_info(configuration_audit_events)",
+            "PRAGMA foreign_key_list(configuration_audit_events)",
+        ),
     }
 }
 
@@ -747,6 +771,94 @@ pub(crate) fn session_page_query(
                     Some(SessionStoreCursor::DiagnosticGenerationPublications {
                         generation_id,
                     }) => Value::Text(generation_id.clone()),
+                    _ => Value::Null,
+                },
+                Value::Integer(limit),
+            ],
+        ),
+        (SessionStoreTable::ConfigurationRevisions, cursor) => (
+            "SELECT revision_id, parent_revision_id, snapshot_id, effective_behavior_digest,
+                    resolution_provenance_digest, actor_id, operation_kind, created_at
+             FROM configuration_revisions
+             WHERE ?1 IS NULL OR revision_id > ?1
+             ORDER BY revision_id
+             LIMIT ?2",
+            vec![
+                match cursor {
+                    Some(SessionStoreCursor::ConfigurationRevisions { revision_id }) => {
+                        Value::Text(revision_id.clone())
+                    }
+                    _ => Value::Null,
+                },
+                Value::Integer(limit),
+            ],
+        ),
+        (SessionStoreTable::ConfigurationEntries, cursor) => {
+            let (revision_id, key, layer_kind, layer_id) = match cursor {
+                Some(SessionStoreCursor::ConfigurationEntries {
+                    revision_id,
+                    key,
+                    layer_kind,
+                    layer_id,
+                }) => (
+                    Value::Text(revision_id.clone()),
+                    Value::Text(key.clone()),
+                    Value::Text(layer_kind.clone()),
+                    Value::Text(layer_id.clone()),
+                ),
+                _ => (Value::Null, Value::Null, Value::Null, Value::Null),
+            };
+            (
+                "SELECT revision_id, key, layer_kind, layer_id, schema_revision, typed_value
+                 FROM configuration_entries
+                 WHERE ?1 IS NULL
+                    OR revision_id > ?1
+                    OR (revision_id = ?1 AND key > ?2)
+                    OR (revision_id = ?1 AND key = ?2 AND layer_kind > ?3)
+                    OR (revision_id = ?1 AND key = ?2 AND layer_kind = ?3 AND layer_id > ?4)
+                 ORDER BY revision_id, key, layer_kind, layer_id
+                 LIMIT ?5",
+                vec![
+                    revision_id,
+                    key,
+                    layer_kind,
+                    layer_id,
+                    Value::Integer(limit),
+                ],
+            )
+        }
+        (SessionStoreTable::ConfigurationMutationReceipts, cursor) => (
+            "SELECT receipt_id, plan_id, actor_id, idempotency_key, base_revision_id,
+                    result_revision_id, operation_digest, authorization_policy_digest,
+                    activation_status, receipt_digest, created_at
+             FROM configuration_mutation_receipts
+             WHERE ?1 IS NULL OR receipt_id > ?1
+             ORDER BY receipt_id
+             LIMIT ?2",
+            vec![
+                match cursor {
+                    Some(SessionStoreCursor::ConfigurationMutationReceipts { receipt_id }) => {
+                        Value::Text(receipt_id.clone())
+                    }
+                    _ => Value::Null,
+                },
+                Value::Integer(limit),
+            ],
+        ),
+        (SessionStoreTable::ConfigurationAuditEvents, cursor) => (
+            "SELECT event_id, actor_id, idempotency_key, operation_kind, base_revision_id,
+                    result_revision_id, sealed_target_reference,
+                    event_scoped_target_commitment, receipt_digest, correlation_id,
+                    safe_reason_code, occurred_at
+             FROM configuration_audit_events
+             WHERE ?1 IS NULL OR event_id > ?1
+             ORDER BY event_id
+             LIMIT ?2",
+            vec![
+                match cursor {
+                    Some(SessionStoreCursor::ConfigurationAuditEvents { event_id }) => {
+                        Value::Text(event_id.clone())
+                    }
                     _ => Value::Null,
                 },
                 Value::Integer(limit),

@@ -12,6 +12,7 @@ pub enum SessionStoreFamily {
     Summary,
     Fact,
     Diagnostics,
+    Configuration,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -40,6 +41,10 @@ pub enum SessionStoreTable {
     RetrievalAnchors,
     GenerationDiagnostics,
     DiagnosticGenerationPublications,
+    ConfigurationRevisions,
+    ConfigurationEntries,
+    ConfigurationMutationReceipts,
+    ConfigurationAuditEvents,
 }
 
 impl SessionStoreTable {
@@ -67,6 +72,10 @@ impl SessionStoreTable {
             Self::GenerationDiagnostics | Self::DiagnosticGenerationPublications => {
                 SessionStoreFamily::Diagnostics
             }
+            Self::ConfigurationRevisions
+            | Self::ConfigurationEntries
+            | Self::ConfigurationMutationReceipts
+            | Self::ConfigurationAuditEvents => SessionStoreFamily::Configuration,
         }
     }
 
@@ -103,6 +112,10 @@ impl SessionStoreTable {
             Self::RetrievalAnchors => &["anchor_id"],
             Self::GenerationDiagnostics => &["diagnostic_anchor"],
             Self::DiagnosticGenerationPublications => &["generation_id"],
+            Self::ConfigurationRevisions => &["revision_id"],
+            Self::ConfigurationEntries => &["revision_id", "key", "layer_kind", "layer_id"],
+            Self::ConfigurationMutationReceipts => &["receipt_id"],
+            Self::ConfigurationAuditEvents => &["event_id"],
         }
     }
 }
@@ -202,6 +215,21 @@ pub enum SessionStoreCursor {
     },
     DiagnosticGenerationPublications {
         generation_id: String,
+    },
+    ConfigurationRevisions {
+        revision_id: String,
+    },
+    ConfigurationEntries {
+        revision_id: String,
+        key: String,
+        layer_kind: String,
+        layer_id: String,
+    },
+    ConfigurationMutationReceipts {
+        receipt_id: String,
+    },
+    ConfigurationAuditEvents {
+        event_id: String,
     },
 }
 
@@ -404,6 +432,31 @@ pub enum SessionStoreRow {
     DiagnosticGenerationPublications {
         generation_id: String,
         record_state: String,
+        row_digest: String,
+    },
+    ConfigurationRevisions {
+        revision_id: String,
+        snapshot_id: String,
+        operation_kind: String,
+        row_digest: String,
+    },
+    ConfigurationEntries {
+        revision_id: String,
+        key: String,
+        layer_kind: String,
+        layer_id: String,
+        row_digest: String,
+    },
+    ConfigurationMutationReceipts {
+        receipt_id: String,
+        result_revision_id: String,
+        activation_status: String,
+        row_digest: String,
+    },
+    ConfigurationAuditEvents {
+        event_id: String,
+        operation_kind: String,
+        base_revision_id: String,
         row_digest: String,
     },
 }
@@ -674,6 +727,42 @@ fn validate_page_cursor(
             SessionStoreCursor::DiagnosticGenerationPublications { generation_id },
         ) => {
             validate_cursor_text("generation_id", generation_id)?;
+            true
+        }
+        (
+            SessionStoreTable::ConfigurationRevisions,
+            SessionStoreCursor::ConfigurationRevisions { revision_id },
+        ) => {
+            validate_cursor_text("revision_id", revision_id)?;
+            true
+        }
+        (
+            SessionStoreTable::ConfigurationEntries,
+            SessionStoreCursor::ConfigurationEntries {
+                revision_id,
+                key,
+                layer_kind,
+                layer_id,
+            },
+        ) => {
+            validate_cursor_text("revision_id", revision_id)?;
+            validate_cursor_text("key", key)?;
+            validate_cursor_text("layer_kind", layer_kind)?;
+            validate_cursor_text("layer_id", layer_id)?;
+            true
+        }
+        (
+            SessionStoreTable::ConfigurationMutationReceipts,
+            SessionStoreCursor::ConfigurationMutationReceipts { receipt_id },
+        ) => {
+            validate_cursor_text("receipt_id", receipt_id)?;
+            true
+        }
+        (
+            SessionStoreTable::ConfigurationAuditEvents,
+            SessionStoreCursor::ConfigurationAuditEvents { event_id },
+        ) => {
+            validate_cursor_text("event_id", event_id)?;
             true
         }
         _ => false,

@@ -163,6 +163,22 @@ fn session_counts_schema_and_keyset_pages_cover_every_closed_table() {
             SessionStoreTable::DiagnosticGenerationPublications,
             "diagnostic_generation_publications",
         ),
+        (
+            SessionStoreTable::ConfigurationRevisions,
+            "configuration_revisions",
+        ),
+        (
+            SessionStoreTable::ConfigurationEntries,
+            "configuration_entries",
+        ),
+        (
+            SessionStoreTable::ConfigurationMutationReceipts,
+            "configuration_mutation_receipts",
+        ),
+        (
+            SessionStoreTable::ConfigurationAuditEvents,
+            "configuration_audit_events",
+        ),
     ] {
         let Output::SessionStorePage(page) = execute(
             &fixture.path,
@@ -776,6 +792,174 @@ fn diagnostic_publication_pages_walk_the_generation_keyset_with_digest_oracle() 
     assert!(second.next_cursor.is_none());
 }
 
+#[test]
+fn configuration_revision_pages_walk_the_identifier_keyset_with_digest_oracle() {
+    let fixture = fixture();
+    let first = single_row_page(
+        &fixture.path,
+        SessionStoreTable::ConfigurationRevisions,
+        None,
+    );
+    assert_eq!(first.order_columns, ["revision_id"]);
+    let mut oracle = CanonicalRowHasher::new();
+    oracle.update_text(b"revision-1");
+    oracle.update_null();
+    oracle.update_text(b"snapshot-1");
+    oracle.update_text(b"behavior-1");
+    oracle.update_text(b"provenance-1");
+    oracle.update_text(b"actor");
+    oracle.update_text(b"bootstrap");
+    oracle.update_integer(1);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::ConfigurationRevisions {
+            revision_id,
+            snapshot_id,
+            operation_kind,
+            row_digest,
+        } if revision_id == "revision-1"
+            && snapshot_id == "snapshot-1"
+            && operation_kind == "bootstrap"
+            && row_digest == &oracle.finish()
+    ));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("configuration-revision cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::ConfigurationRevisions,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::ConfigurationRevisions {
+            revision_id,
+            operation_kind,
+            ..
+        } if revision_id == "revision-2" && operation_kind == "mutate"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn configuration_entry_pages_walk_the_composite_layer_keyset() {
+    let fixture = fixture();
+    let first = single_row_page(&fixture.path, SessionStoreTable::ConfigurationEntries, None);
+    assert_eq!(
+        first.order_columns,
+        ["revision_id", "key", "layer_kind", "layer_id"]
+    );
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::ConfigurationEntries {
+            revision_id,
+            key,
+            layer_kind,
+            layer_id,
+            row_digest,
+        } if revision_id == "revision-1"
+            && key == "key-1"
+            && layer_kind == "layer"
+            && layer_id == "layer-1"
+            && row_digest.starts_with("sha256:")
+    ));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("configuration-entry cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::ConfigurationEntries,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::ConfigurationEntries { layer_id, .. } if layer_id == "layer-2"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn configuration_receipt_pages_walk_the_identifier_keyset() {
+    let fixture = fixture();
+    let first = single_row_page(
+        &fixture.path,
+        SessionStoreTable::ConfigurationMutationReceipts,
+        None,
+    );
+    assert_eq!(first.order_columns, ["receipt_id"]);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::ConfigurationMutationReceipts {
+            receipt_id,
+            result_revision_id,
+            activation_status,
+            ..
+        } if receipt_id == "receipt-1"
+            && result_revision_id == "revision-2"
+            && activation_status == "activated"
+    ));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("configuration-receipt cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::ConfigurationMutationReceipts,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::ConfigurationMutationReceipts {
+            receipt_id,
+            activation_status,
+            ..
+        } if receipt_id == "receipt-2" && activation_status == "noop"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn configuration_audit_event_pages_walk_the_identifier_keyset() {
+    let fixture = fixture();
+    let first = single_row_page(
+        &fixture.path,
+        SessionStoreTable::ConfigurationAuditEvents,
+        None,
+    );
+    assert_eq!(first.order_columns, ["event_id"]);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::ConfigurationAuditEvents {
+            event_id,
+            operation_kind,
+            base_revision_id,
+            ..
+        } if event_id == "event-1"
+            && operation_kind == "mutate"
+            && base_revision_id == "revision-1"
+    ));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("configuration-audit cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::ConfigurationAuditEvents,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::ConfigurationAuditEvents {
+            event_id,
+            operation_kind,
+            ..
+        } if event_id == "event-2" && operation_kind == "denied"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
 /// Guards against a silent canonical-digest subset: a page query that drops or
 /// reorders a physical column still changes row digests but would otherwise pass
 /// every value assertion. Requiring the SELECT column count to equal
@@ -822,7 +1006,7 @@ fn single_row_page(
     page
 }
 
-const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 23] = [
+const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 27] = [
     SessionStoreTable::Observations,
     SessionStoreTable::SourceCursors,
     SessionStoreTable::Sessions,
@@ -846,4 +1030,8 @@ const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 23] = [
     SessionStoreTable::RetrievalAnchors,
     SessionStoreTable::GenerationDiagnostics,
     SessionStoreTable::DiagnosticGenerationPublications,
+    SessionStoreTable::ConfigurationRevisions,
+    SessionStoreTable::ConfigurationEntries,
+    SessionStoreTable::ConfigurationMutationReceipts,
+    SessionStoreTable::ConfigurationAuditEvents,
 ];

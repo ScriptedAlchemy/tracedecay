@@ -320,6 +320,52 @@ pub(crate) fn fixture() -> Fixture {
                 state_generation TEXT,
                 published_at INTEGER NOT NULL
             );
+            CREATE TABLE configuration_revisions (
+                revision_id TEXT PRIMARY KEY,
+                parent_revision_id TEXT,
+                snapshot_id TEXT NOT NULL,
+                effective_behavior_digest TEXT NOT NULL,
+                resolution_provenance_digest TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                operation_kind TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE configuration_entries (
+                revision_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                layer_kind TEXT NOT NULL,
+                layer_id TEXT,
+                schema_revision INTEGER NOT NULL,
+                typed_value TEXT NOT NULL,
+                PRIMARY KEY(revision_id, key, layer_kind, layer_id)
+            );
+            CREATE TABLE configuration_mutation_receipts (
+                receipt_id TEXT PRIMARY KEY,
+                plan_id TEXT,
+                actor_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                base_revision_id TEXT NOT NULL,
+                result_revision_id TEXT NOT NULL,
+                operation_digest TEXT NOT NULL,
+                authorization_policy_digest TEXT NOT NULL,
+                activation_status TEXT NOT NULL,
+                receipt_digest TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE configuration_audit_events (
+                event_id TEXT PRIMARY KEY,
+                actor_id TEXT NOT NULL,
+                idempotency_key TEXT,
+                operation_kind TEXT NOT NULL,
+                base_revision_id TEXT NOT NULL,
+                result_revision_id TEXT,
+                sealed_target_reference BLOB,
+                event_scoped_target_commitment TEXT NOT NULL,
+                receipt_digest TEXT,
+                correlation_id TEXT,
+                safe_reason_code TEXT,
+                occurred_at INTEGER NOT NULL
+            );
             CREATE VIRTUAL TABLE nodes_fts USING fts5(
                 name, qualified_name, docstring, signature,
                 content='nodes', content_rowid='rowid'
@@ -457,6 +503,38 @@ pub(crate) fn fixture() -> Fixture {
             ) VALUES
                 ('generation-1', 'superseded', 'generation-2', 1),
                 ('generation-2', 'current', NULL, 2);
+            INSERT INTO configuration_revisions(
+                revision_id, parent_revision_id, snapshot_id, effective_behavior_digest,
+                resolution_provenance_digest, actor_id, operation_kind, created_at
+            ) VALUES
+                ('revision-1', NULL, 'snapshot-1', 'behavior-1', 'provenance-1', 'actor',
+                 'bootstrap', 1),
+                ('revision-2', 'revision-1', 'snapshot-2', 'behavior-2', 'provenance-2',
+                 'actor', 'mutate', 2);
+            INSERT INTO configuration_entries(
+                revision_id, key, layer_kind, layer_id, schema_revision, typed_value
+            ) VALUES
+                ('revision-1', 'key-1', 'layer', 'layer-1', 1, 'value-1'),
+                ('revision-1', 'key-1', 'layer', 'layer-2', 1, 'value-2');
+            INSERT INTO configuration_mutation_receipts(
+                receipt_id, plan_id, actor_id, idempotency_key, base_revision_id,
+                result_revision_id, operation_digest, authorization_policy_digest,
+                activation_status, receipt_digest, created_at
+            ) VALUES
+                ('receipt-1', NULL, 'actor', 'idempotency-1', 'revision-1', 'revision-2',
+                 'operation-1', 'policy-1', 'activated', 'receipt-digest-1', 2),
+                ('receipt-2', NULL, 'actor', 'idempotency-2', 'revision-2', 'revision-2',
+                 'operation-2', 'policy-1', 'noop', 'receipt-digest-2', 3);
+            INSERT INTO configuration_audit_events(
+                event_id, actor_id, idempotency_key, operation_kind, base_revision_id,
+                result_revision_id, sealed_target_reference,
+                event_scoped_target_commitment, receipt_digest, correlation_id,
+                safe_reason_code, occurred_at
+            ) VALUES
+                ('event-1', 'actor', 'idempotency-1', 'mutate', 'revision-1', 'revision-2',
+                 NULL, 'commitment-1', 'receipt-digest-1', NULL, NULL, 2),
+                ('event-2', 'actor', NULL, 'denied', 'revision-2', NULL, NULL,
+                 'commitment-2', NULL, NULL, 'unauthorized', 3);
             INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild');",
         )
         .expect("create fixture schema");

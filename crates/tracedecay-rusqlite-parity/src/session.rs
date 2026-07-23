@@ -334,6 +334,35 @@ fn decode_row(table: SessionStoreTable, row: &Row<'_>) -> rusqlite::Result<Sessi
                 row_digest,
             })
         }
+        SessionStoreTable::ConfigurationRevisions => Ok(SessionStoreRow::ConfigurationRevisions {
+            revision_id: row.get(0)?,
+            snapshot_id: row.get(2)?,
+            operation_kind: row.get(6)?,
+            row_digest,
+        }),
+        SessionStoreTable::ConfigurationEntries => Ok(SessionStoreRow::ConfigurationEntries {
+            revision_id: row.get(0)?,
+            key: row.get(1)?,
+            layer_kind: row.get(2)?,
+            layer_id: row.get(3)?,
+            row_digest,
+        }),
+        SessionStoreTable::ConfigurationMutationReceipts => {
+            Ok(SessionStoreRow::ConfigurationMutationReceipts {
+                receipt_id: row.get(0)?,
+                result_revision_id: row.get(5)?,
+                activation_status: row.get(8)?,
+                row_digest,
+            })
+        }
+        SessionStoreTable::ConfigurationAuditEvents => {
+            Ok(SessionStoreRow::ConfigurationAuditEvents {
+                event_id: row.get(0)?,
+                operation_kind: row.get(3)?,
+                base_revision_id: row.get(4)?,
+                row_digest,
+            })
+        }
     }
 }
 
@@ -506,6 +535,33 @@ fn cursor_for_row(row: &SessionStoreRow) -> SessionStoreCursor {
         SessionStoreRow::DiagnosticGenerationPublications { generation_id, .. } => {
             SessionStoreCursor::DiagnosticGenerationPublications {
                 generation_id: generation_id.clone(),
+            }
+        }
+        SessionStoreRow::ConfigurationRevisions { revision_id, .. } => {
+            SessionStoreCursor::ConfigurationRevisions {
+                revision_id: revision_id.clone(),
+            }
+        }
+        SessionStoreRow::ConfigurationEntries {
+            revision_id,
+            key,
+            layer_kind,
+            layer_id,
+            ..
+        } => SessionStoreCursor::ConfigurationEntries {
+            revision_id: revision_id.clone(),
+            key: key.clone(),
+            layer_kind: layer_kind.clone(),
+            layer_id: layer_id.clone(),
+        },
+        SessionStoreRow::ConfigurationMutationReceipts { receipt_id, .. } => {
+            SessionStoreCursor::ConfigurationMutationReceipts {
+                receipt_id: receipt_id.clone(),
+            }
+        }
+        SessionStoreRow::ConfigurationAuditEvents { event_id, .. } => {
+            SessionStoreCursor::ConfigurationAuditEvents {
+                event_id: event_id.clone(),
             }
         }
     }
