@@ -19,6 +19,7 @@ pub mod handlers;
 pub mod policy;
 pub mod result;
 pub mod retrieval;
+pub mod storage;
 
 mod error;
 
@@ -49,7 +50,7 @@ pub use doctor::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
     DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
     DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
-    DoctorStorageFindingKindV1,
+    DoctorStorageFindingKindV1, DoctorStorageFindingV1,
 };
 pub use error::ApplicationContractError;
 pub use external_source::{
@@ -94,6 +95,16 @@ pub use result::{
     StreamTermination, StreamValidationError, TemporalState, validate_stream,
 };
 pub use retrieval::catalog::{APPLICATION_DEFAULT_PROFILE_ID, application_catalog_contributions};
+pub use storage::{
+    BranchRefV1, CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1,
+    FreePageRatioV1, IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1,
+    OrphanStoreRecordV1, QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1,
+    RelativeArtifactPathV1, RetentionBacklogRecordV1, StaleBranchDbRecordV1, StorageByteSizeV1,
+    StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
+    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1,
+    TableNameV1, incident_debris_finding, orphan_store_finding, over_budget_finding,
+    retention_backlog_finding, stale_branch_dbs_finding,
+};
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AffectedTestsService, AnchorExpandRequest,
     AnchorExpandResult, AnchorHydrationPort, CALLABLE_CODE_OPERATION_COUNT,

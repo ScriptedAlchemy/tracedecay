@@ -400,6 +400,58 @@ impl DoctorFindingV1 {
     }
 }
 
+/// A [`DoctorFindingFamilyV1::Storage`] finding paired with its typed subclass.
+///
+/// Plan 38 §7 review S1: the storage subclass ([`DoctorStorageFindingKindV1`])
+/// must be *attached* to the finding it classifies, not smuggled into an
+/// evidence-reference string that a consumer has to parse back out. This wrapper
+/// is the typed carrier. Its constructor enforces that the wrapped finding is the
+/// `Storage` family, so a non-Storage finding can never be mislabeled with a
+/// storage subclass, and the kind is recovered by value rather than by string
+/// prefix. The kernel owns the wrapper; storage producers emit it.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct DoctorStorageFindingV1 {
+    kind: DoctorStorageFindingKindV1,
+    finding: DoctorFindingV1,
+}
+
+impl DoctorStorageFindingV1 {
+    /// Validate and construct a typed storage finding.
+    ///
+    /// Invariant: the wrapped finding must be the [`DoctorFindingFamilyV1::Storage`]
+    /// family. Pairing a storage subclass with any other family is a contract
+    /// error, not a silently accepted mislabel.
+    pub fn new(
+        kind: DoctorStorageFindingKindV1,
+        finding: DoctorFindingV1,
+    ) -> Result<Self, ApplicationContractError> {
+        if finding.family() != DoctorFindingFamilyV1::Storage {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "doctor storage finding family",
+            });
+        }
+        Ok(Self { kind, finding })
+    }
+
+    /// The typed subclass this finding belongs to.
+    #[must_use]
+    pub fn kind(&self) -> DoctorStorageFindingKindV1 {
+        self.kind
+    }
+
+    /// The underlying canonical finding.
+    #[must_use]
+    pub fn finding(&self) -> &DoctorFindingV1 {
+        &self.finding
+    }
+
+    /// Consume the wrapper, yielding the canonical finding.
+    #[must_use]
+    pub fn into_finding(self) -> DoctorFindingV1 {
+        self.finding
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,6 +756,49 @@ mod tests {
             error,
             ApplicationContractError::Inconsistent {
                 field: "doctor healthy coverage"
+            }
+        );
+    }
+
+    #[test]
+    fn doctor_storage_finding_wrapper_attaches_kind_and_requires_storage_family() {
+        let finding = DoctorFindingV1::new(
+            DoctorFindingFamilyV1::Storage,
+            DoctorEvidenceStateV1::Degraded,
+            vec![evidence(
+                DoctorFindingFamilyV1::Storage,
+                "storage.orphan-store.age-42d",
+            )],
+            complete_coverage(),
+            Some(remediation()),
+        )
+        .expect("storage finding");
+        let typed =
+            DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OrphanStore, finding.clone())
+                .expect("typed storage finding");
+        assert_eq!(typed.kind(), DoctorStorageFindingKindV1::OrphanStore);
+        assert_eq!(typed.finding(), &finding);
+        assert_eq!(typed.into_finding(), finding);
+    }
+
+    #[test]
+    fn doctor_storage_finding_wrapper_rejects_non_storage_family() {
+        let finding = DoctorFindingV1::new(
+            DoctorFindingFamilyV1::StorageRuntime,
+            DoctorEvidenceStateV1::Degraded,
+            vec![evidence(
+                DoctorFindingFamilyV1::StorageRuntime,
+                "runtime.reader-lease",
+            )],
+            complete_coverage(),
+            Some(remediation()),
+        )
+        .expect("runtime finding");
+        assert_eq!(
+            DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OverBudgetStore, finding)
+                .expect_err("non-storage family rejected"),
+            ApplicationContractError::Inconsistent {
+                field: "doctor storage finding family"
             }
         );
     }
