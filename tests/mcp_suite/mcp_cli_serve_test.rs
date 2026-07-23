@@ -2,6 +2,7 @@ use crate::common;
 
 #[cfg(unix)]
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::fs;
 use std::io::Write;
 #[cfg(unix)]
