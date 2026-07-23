@@ -663,7 +663,19 @@ benchmarks do not ship.
   [19](19-system-defragmentation-convergence-and-extensibility.md),
   [34](34-workspace-refactoring-and-api-migration.md), and every component
   migration section whose released data or API crosses the cutover.
-- PR20: [Plan 33](33-end-to-end-performance-optimization.md).
+- PR20: [Plan 33](33-end-to-end-performance-optimization.md) and
+  [Plan 38](38-storage-retention-size-and-efficiency.md)'s compaction and
+  size-telemetry budgets.
+
+Storage retention, size, and efficiency
+([Plan 38](38-storage-retention-size-and-efficiency.md)) threads through the
+remaining slices rather than owning one PR: the Doctor storage finding
+family lands with PR14 (plan 09 over plan 26 read models); automatic
+branch-DB lifecycle and registry orphan detection/collection land with the
+storage-runtime S11 window; session retention with raw/projected dedup
+extends the staged LCM GC cards. Measured driver: one dogfood profile
+reached 256 GB and was reduced to ~75 GB purely by removing data the
+product should never have retained.
 
 PR #421 stays open through PR20. It merges only after PR20, direct product
 tests, and normal cross-platform CI are stable.

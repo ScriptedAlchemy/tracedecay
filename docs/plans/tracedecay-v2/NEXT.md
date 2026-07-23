@@ -86,7 +86,14 @@ normal CI are stable.
    scheduling while keeping project open and ordinary search non-blocking.
 5. Add worktree/edit/no-op/rename/delete/overflow/cancellation/restart
    regressions and current/10x performance evidence.
-6. Run focused crate tests, all-feature workspace checks, release builds,
+6. Deliver storage retention/size/efficiency per
+   [plan 38](38-storage-retention-size-and-efficiency.md): automatic
+   branch-DB lifecycle, registry orphan detection/collection, session
+   retention with raw/projected dedup, incident-debris ownership,
+   compaction policy, and Doctor storage findings (measured driver: one
+   dogfood profile reached 256 GB, reduced to ~75 GB by removing data the
+   product should never have retained).
+7. Run focused crate tests, all-feature workspace checks, release builds,
    package/install checks, and normal Linux/macOS/Windows CI.
 
 ## Direct verification

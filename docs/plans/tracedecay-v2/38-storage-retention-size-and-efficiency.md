@@ -1,0 +1,82 @@
+# Storage retention, size, and efficiency
+
+Owner-profile storage must stay proportional to live, retrievable value. This
+plan is the product contract for database size and efficiency across every
+TraceDecay store. It is grounded in measured dogfood evidence from
+2026-07-23, when one owner profile reached **256 GB** and was reduced to
+~75 GB purely by removing data the product should never have retained.
+
+## Measured failure classes (evidence, one dogfood profile)
+
+1. **Branch graph-DB copies, never collected — 40 GB in one project.**
+   `branches/` holds a full graph shard per branch ever worked on. Branch
+   deletion does not trigger DB cleanup, and no periodic sweep runs. Manual
+   GC of stale entries freed 24.8 GB across projects.
+2. **Identity-drift orphan stores — ~41 GB.** A project-root path migration
+   re-registered repositories under new project IDs; the old-identity stores
+   remained silently, invisible to any surface. Registry GC exists but was
+   not automatic and was blocked by a daemon configuration-authority bug.
+3. **Unbounded session retention with structural duplication — 15 GB in one
+   `sessions.db`.** `lcm_raw_messages` (3.8 GB) and `session_messages`
+   (2.4 GB) both retain the same conversations (raw ingest and projected
+   form), plus FTS shadow tables over each (~0.6 GB), plus append-only
+   `observations` (1.8 GB), `retrieval_anchors` (1.6 GB), and
+   `observation_repository_provenance` (1.4 GB), forever.
+4. **Incident debris inside stores.** `*.corrupt-*`, `*.recovered*`, and
+   `recovery-*` siblings of live DBs accumulate without any owner surface
+   (~0.8 GB in one project).
+5. **Free-page bloat.** Large DBs carry unreclaimed free pages; no
+   compaction policy exists.
+
+## Product contract
+
+1. **Branch store lifecycle.** Deleting a branch (or a worktree whose branch
+   is gone) schedules its branch-DB removal through the daemon. A periodic
+   daemon sweep reconciles `branches/` against live git refs. `branch gc`
+   remains the manual verb; the automatic path is the default.
+2. **Registry orphan detection and collection.** The registry sweep detects
+   stores whose project identity no longer resolves to a live repository
+   root, reports them as a typed Doctor finding (with age and size), and
+   collects them under an owner-visible retention window. Identity
+   migrations must re-link or explicitly retire prior-identity stores in the
+   same operation — never orphan silently.
+3. **Session retention policy.** Raw transcript rows (`lcm_raw_messages`)
+   are retained only until their LCM projection/summary lineage is durable,
+   then payload-offloaded or dropped per a configurable retention window.
+   Projected `session_messages` and their FTS indexes obey the same window.
+   Append-only evidence stores (`observations`, anchors, provenance) gain
+   generation-scoped retention tied to anchor dispositions — superseded and
+   deleted dispositions release their storage.
+4. **One content copy.** Raw and projected message content must not be
+   duplicated at rest indefinitely. The projection either references raw
+   content (content-addressed) or supersedes it after durability; carrying
+   both full copies is a defect, not a design.
+5. **Incident debris ownership.** Recovery/corruption artifacts are written
+   into a single quarantined location with metadata, surfaced by Doctor,
+   and collected by the same retention machinery — never left as loose
+   sibling files.
+6. **Compaction policy.** The daemon schedules incremental vacuum/compaction
+   for stores whose free-page ratio crosses a threshold, off the hot path.
+7. **Size observability and budgets.** Per-store size, per-table growth, and
+   free-page ratio are first-class telemetry, cheap to query. Doctor exposes
+   a storage finding family (over-budget store, orphan store, stale branch
+   DBs, debris present, retention backlog). Owners can set soft budgets;
+   exceeding one is a finding, never silent.
+
+## Delivery
+
+- Doctor storage finding family lands with the PR14 Doctor slice (plan 09)
+  over the Plan 26 observability read models.
+- Branch lifecycle + registry orphan collection land with the storage
+  runtime work (S11 window) since both route through daemon-owned stores.
+- Session retention/offload extends the LCM GC follow-up cards already
+  staged in `sessions/lcm/schema.rs`.
+- Direct tests only: seeded stores with stale branches/orphans/debris must
+  produce the findings and the collections; retention windows must be
+  provable with ordinary tests. No locked gates, no receipts.
+
+## Non-goals
+
+- No lossy deletion of live, referenced evidence: retention acts on
+  superseded, orphaned, or projected-and-durable data only.
+- No background compaction that competes with foreground writes.
