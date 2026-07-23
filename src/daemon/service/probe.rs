@@ -133,8 +133,18 @@ fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<S
     IoWrite::write_all(&mut stream, preamble.as_bytes())?;
     IoWrite::flush(&mut stream)?;
 
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
     let mut reader = BufReader::new(stream);
     loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(TraceDecayError::Config {
+                message: "daemon readiness probe exceeded its absolute deadline".to_string(),
+            });
+        }
+        reader
+            .get_mut()
+            .set_read_timeout(Some(deadline.saturating_duration_since(now)))?;
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
             return Err(TraceDecayError::Config {
