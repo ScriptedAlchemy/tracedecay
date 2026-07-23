@@ -77,6 +77,28 @@ Every workspace composes from four archetypes; no bespoke layouts:
    forms, effective-vs-desired layered values side by side, typed patch
    preview → validate → CAS confirm as distinct steps.
 
+## Brain scope model
+
+Brain is the whole-brain view first. Its default scope is ALL projects — one
+aggregate map/overview across every registered project — with the project
+dimension rendered as first-class visual structure (projects as named
+clusters/regions in the brain map, per-project rows in overview cards,
+cross-project edges visible and styled distinctly). Narrowing to one project
+happens through the ordinary scope-bar chip (or clicking a project cluster,
+which is an explicit scope transition per plan 11) and every Brain surface
+re-renders under the narrowed scope without changing shape. Rules:
+
+- The all-projects aggregate is not a lobby or project picker; it is the
+  richest view (cross-project relationships, shared knowledge, global
+  health/freshness) and must stay within the graph tier budgets via
+  daemon-side clustering (project-level aggregation is the natural first
+  clustering level).
+- Coverage statements in aggregate views enumerate projects consulted vs
+  unavailable — a project whose store is unreachable renders as a truthful
+  partial/unavailable region, never silently omitted.
+- Deep links capture whether scope was all-projects or a specific project;
+  cluster-click narrowing updates the URL scope explicitly.
+
 ## Visual system
 
 Token architecture (Tailwind v4, two-stage so runtime theming works):
