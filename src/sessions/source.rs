@@ -884,6 +884,7 @@ fn stable_jsonl_file_id(
 /// Why a `SQLite` source could not yield a stable physical identity. Each
 /// variant maps to a provider-specific message at the call site; which variants
 /// are constructed depends on the target platform.
+#[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum SqliteFileIdentityError {
     Open,
