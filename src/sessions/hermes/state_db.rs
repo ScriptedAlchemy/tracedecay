@@ -571,16 +571,16 @@ fn read_new_rows_strict_sync(
             .get::<_, i64>(0)
             .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
         // Columns 21..23 are SQL byte/typeof/budget aggregates — integers only.
-        let measured = row_i64_flag(&row, 21).max(0) as u64;
+        let measured = row_i64_flag(row, 21).max(0) as u64;
         let charge = hermes_page_row_charge(measured);
-        let row_fits_budget = row_i64_flag(&row, 23) != 0;
+        let row_fits_budget = row_i64_flag(row, 23) != 0;
         if !row_fits_budget && !items.is_empty() {
             // SQL returned NULL for every text payload in this row, so defer it
             // without allocating the value that would cross the page budget.
             truncated_by_byte_budget = true;
             break;
         }
-        let mapped = map_row(rowid, &row, measured)
+        let mapped = map_row(rowid, row, measured)
             .ok_or_else(|| format!("legacy Hermes state row {rowid} is malformed"))?;
         page_bytes = page_bytes.saturating_add(charge);
         max_rowid = max_rowid.max(rowid as u64);
