@@ -12,8 +12,8 @@ use std::fmt;
 use thiserror::Error;
 use tracedecay_domain::{
     CompactContextConflictV1, CompactContextLineageEdgeV1, CompactContextOmissionV1,
-    ContextOmissionReasonV1, HydrationStateV1, RetrievalAnchorId, SessionSummaryRecordV1,
-    TemporalAssertionKindV1, TemporalCoverageCountsV1, TemporalModeV1,
+    ContextOmissionReasonV1, HydrationStateV1, RetrievalAnchorId, SessionAuthorityClassV1,
+    SessionSummaryRecordV1, TemporalAssertionKindV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
 use zeroize::Zeroizing;
 
@@ -311,6 +311,7 @@ pub async fn execute_temporal_kernel(
         &resolved,
         &resolved.lineage_edges,
         &hydration,
+        &records.summaries,
         &summary_eligibility,
     );
     let context = assemble_context_with_frames_controlled(
@@ -472,6 +473,7 @@ fn temporal_context_frames(
     resolved: &[ResolvedOccurrence],
     lineage_edges: &[ResolutionLineageEdge],
     hydration: &HydrationBatch,
+    summaries: &[SessionSummaryRecordV1],
     summary_eligibility: &SummaryLineageEligibility,
 ) -> TemporalContextFrames {
     let unknown_anchors = resolved
@@ -517,7 +519,31 @@ fn temporal_context_frames(
             supporting_anchor_ids: item.supporting_anchor_ids.clone(),
         })
         .collect();
-    let lineage = lineage_edges.iter().map(context_lineage_edge).collect();
+    let mut lineage: Vec<CompactContextLineageEdgeV1> =
+        lineage_edges.iter().map(context_lineage_edge).collect();
+    // Eligible summaries carry their own provenance: each summary anchor
+    // supports-derives from its source anchors. Surfacing that as Supports
+    // lineage keeps summary describes traceable without a stored assertion
+    // row per source.
+    for summary in summaries {
+        if !summary_eligibility
+            .eligible_anchor_ids
+            .contains(summary.summary_anchor_id())
+        {
+            continue;
+        }
+        for source_anchor in summary.source_anchors() {
+            lineage.push(CompactContextLineageEdgeV1 {
+                kind: TemporalAssertionKindV1::Supports,
+                subject_anchor_id: summary.summary_anchor_id().clone(),
+                object_anchor_id: source_anchor.clone(),
+                knowledge_at: summary.created_at(),
+                authority: SessionAuthorityClassV1::ImmutableSummary,
+                authorized: true,
+                supporting_anchor_ids: BTreeSet::new(),
+            });
+        }
+    }
     let summary_omissions = public_summary_omissions(summary_eligibility);
     let omissions = summary_omissions
         .iter()
@@ -811,6 +837,7 @@ mod scope_tests {
             &[],
             &[],
             &HydrationBatch::default(),
+            &[],
             &eligibility,
         );
 
@@ -885,6 +912,7 @@ mod scope_tests {
             &[],
             &[],
             &HydrationBatch::default(),
+            &[],
             &eligibility,
         );
 
@@ -958,6 +986,7 @@ mod scope_tests {
             &[],
             &[],
             &HydrationBatch::default(),
+            &[],
             &eligibility,
         );
 

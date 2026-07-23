@@ -1583,7 +1583,7 @@ fn non_current_summary_modes_retain_eligible_predecessors() {
 }
 
 #[test]
-fn missing_and_unknown_validity_sources_have_distinct_rejections() {
+fn unknown_validity_sources_stay_eligible_while_missing_sources_reject() {
     let session_id: SessionId = serde_json::from_str("\"session-1\"").expect("valid session id");
     let missing = summary("missing", "summary-missing", "missing-source", 7, 7);
     let unknown_valid = summary("unknown-valid", "summary-unknown", "unknown-source", 7, 7);
@@ -1614,12 +1614,20 @@ fn missing_and_unknown_validity_sources_have_distinct_rejections() {
             .get(&SessionSummaryIdV1::new("missing").expect("valid id")),
         Some(SummaryLineageRejection::MissingSource { .. })
     ));
-    assert!(matches!(
+    // Ingested messages carry no valid-time assertion today; that
+    // uncertainty surfaces through occurrence-level coverage, not by
+    // rejecting the summary's lineage outright.
+    assert!(
         eligibility
             .rejections
-            .get(&SessionSummaryIdV1::new("unknown-valid").expect("valid id")),
-        Some(SummaryLineageRejection::UnknownSourceValidTime { .. })
-    ));
+            .get(&SessionSummaryIdV1::new("unknown-valid").expect("valid id"))
+            .is_none()
+    );
+    assert!(
+        eligibility
+            .eligible_anchor_ids
+            .contains(&anchor("summary-unknown"))
+    );
 }
 
 #[test]
