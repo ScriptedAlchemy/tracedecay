@@ -1,55 +1,215 @@
 import { useQuery } from '@tanstack/react-query';
-import { fetchEnvelope } from '../../data/query/envelope.ts';
+import { RefreshCw } from 'lucide-react';
+import type { ReactNode } from 'react';
 import {
+  StorageFindingsPayloadSchema,
   StorageTelemetryPayloadSchema,
+  type StorageFindingKindStatus,
+  type StorageTelemetryRead,
   type StoreTelemetryEntry,
   type WireCoverage,
   type WireFreshness,
+  type WireLegalActionRef,
 } from '../../contracts/wire.ts';
+import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import { CapacityBar } from '../../ui/ActivityColumns.tsx';
+import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
-import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
-import { CapacityBar } from '../../ui/ActivityColumns.tsx';
+import {
+  doctorEvidencePresentation,
+  refreshOperation,
+  storageFindingLabel,
+} from './storageModel.ts';
 
-/** Observatory landing (archetype 1): storage health from the real
- * /api/storage/telemetry envelope. Every state renders truthfully. */
+/** Observatory storage health: independent typed telemetry and Doctor finding
+ * read models. A failed source never hides the other source or becomes empty. */
 export function ObservatoryPage() {
-  const query = useQuery({
+  const telemetry = useQuery({
     queryKey: ['storage', 'telemetry'],
     queryFn: () => fetchEnvelope('/api/storage/telemetry', StorageTelemetryPayloadSchema),
     refetchInterval: 30_000,
   });
+  const findings = useQuery({
+    queryKey: ['storage', 'findings'],
+    queryFn: () => fetchEnvelope('/api/storage/findings', StorageFindingsPayloadSchema),
+    refetchInterval: 30_000,
+  });
 
-  if (query.isPending) {
-    return (
-      <CenteredState kind="loading" detail="requesting storage telemetry" />
-    );
-  }
-  const result = query.data;
-  if (!result) return <CenteredState kind="unknown" detail="no response recorded" />;
-  if (result.outcome === 'transport') {
-    return <CenteredState kind={result.state as DomainStateKind} detail={result.detail ?? 'daemon unreachable'} />;
-  }
-
-  const envelope = result.envelope;
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
+    <div className="flex h-full flex-col overflow-auto">
+      <header className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Observatory</h1>
-        <StateChip kind={envelope.domain_state as DomainStateKind} />
-        <EvidenceTruthStrip
-          coverage={toStripCoverage(envelope.coverage)}
-          freshness={toStripFreshness(envelope.freshness)}
-        />
-      </div>
-      <OverviewGrid className="overflow-auto">
-        {envelope.payload.stores.map((store) => (
-          <StoreCard key={store.store} entry={store} />
-        ))}
-      </OverviewGrid>
-      <p className="border-t border-edge-subtle px-4 py-2 text-2xs text-text-muted">
-        budgets: {envelope.payload.budget_note} · growth: {envelope.payload.growth_note}
-      </p>
+        <span className="text-2xs text-text-muted">
+          storage size, reclaimable pages, and Doctor retention evidence
+        </span>
+      </header>
+
+      <StorageSection title="Store telemetry" query={telemetry.data} pending={telemetry.isPending}>
+        {(result) => (
+          <TelemetryReadModel
+            result={result}
+            refreshing={telemetry.isFetching}
+            onRefresh={() => void telemetry.refetch()}
+          />
+        )}
+      </StorageSection>
+
+      <StorageSection title="Doctor storage findings" query={findings.data} pending={findings.isPending}>
+        {(result) => (
+          <FindingsReadModel
+            result={result}
+            refreshing={findings.isFetching}
+            onRefresh={() => void findings.refetch()}
+          />
+        )}
+      </StorageSection>
+    </div>
+  );
+}
+
+function StorageSection<T>({
+  title,
+  pending,
+  query,
+  children,
+}: {
+  title: string;
+  pending: boolean;
+  query: T | undefined;
+  children: (result: T) => ReactNode;
+}) {
+  return (
+    <section className="border-b border-edge-subtle" aria-label={title}>
+      <h2 className="px-4 pt-4 text-sm font-semibold tracking-tight">{title}</h2>
+      {pending ? (
+        <ReadModelState kind="loading" detail={`requesting ${title.toLowerCase()}`} />
+      ) : query ? (
+        children(query)
+      ) : (
+        <ReadModelState kind="unknown" detail="no response recorded" />
+      )}
+    </section>
+  );
+}
+
+function TelemetryReadModel({
+  result,
+  refreshing,
+  onRefresh,
+}: {
+  result: EnvelopeResult<ReturnType<typeof StorageTelemetryPayloadSchema.parse>>;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  if (result.outcome === 'transport') {
+    return <ReadModelState kind={result.state} detail={result.detail ?? 'daemon unreachable'} />;
+  }
+  const { envelope } = result;
+  return (
+    <>
+      <EnvelopeTruth
+        state={envelope.domain_state}
+        coverage={envelope.coverage}
+        freshness={envelope.freshness}
+        legalActions={envelope.legal_actions}
+        refreshing={refreshing}
+        onRefresh={onRefresh}
+      />
+      {envelope.payload.stores.length === 0 ? (
+        <ReadModelState kind="unknown" detail="telemetry payload contained no stores" />
+      ) : (
+        <OverviewGrid>
+          {envelope.payload.stores.map((store) => (
+            <StoreCard key={`${store.role}:${store.store}`} entry={store} />
+          ))}
+        </OverviewGrid>
+      )}
+      <ReadModelNotes notes={[
+        `budgets: ${envelope.payload.budget_note}`,
+        `growth: ${envelope.payload.growth_note}`,
+      ]} />
+    </>
+  );
+}
+
+function FindingsReadModel({
+  result,
+  refreshing,
+  onRefresh,
+}: {
+  result: EnvelopeResult<ReturnType<typeof StorageFindingsPayloadSchema.parse>>;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  if (result.outcome === 'transport') {
+    return <ReadModelState kind={result.state} detail={result.detail ?? 'daemon unreachable'} />;
+  }
+  const { envelope } = result;
+  return (
+    <>
+      <EnvelopeTruth
+        state={envelope.domain_state}
+        coverage={envelope.coverage}
+        freshness={envelope.freshness}
+        legalActions={envelope.legal_actions}
+        refreshing={refreshing}
+        onRefresh={onRefresh}
+      />
+      {envelope.payload.kinds.length === 0 ? (
+        <ReadModelState kind="unknown" detail="finding status payload contained no kinds" />
+      ) : (
+        <OverviewGrid>
+          {envelope.payload.kinds.map((finding) => (
+            <FindingCard key={finding.kind} finding={finding} />
+          ))}
+        </OverviewGrid>
+      )}
+      <ReadModelNotes notes={[envelope.payload.note]} />
+    </>
+  );
+}
+
+function EnvelopeTruth({
+  state,
+  coverage,
+  freshness,
+  legalActions,
+  refreshing,
+  onRefresh,
+}: {
+  state: DomainStateKind;
+  coverage: WireCoverage;
+  freshness: WireFreshness;
+  legalActions: WireLegalActionRef[];
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const refresh = refreshOperation(legalActions);
+  return (
+    <div className="flex flex-wrap items-center gap-3 px-4 pt-2">
+      <StateChip kind={state} />
+      <EvidenceTruthStrip
+        coverage={toStripCoverage(coverage)}
+        freshness={toStripFreshness(freshness)}
+      />
+      {refresh ? (
+        <button
+          type="button"
+          className="ml-auto inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-2xs font-medium text-text-secondary hover:text-text-primary disabled:cursor-wait disabled:opacity-60"
+          onClick={onRefresh}
+          disabled={refreshing}
+          title={refresh}
+          data-operation={refresh}
+        >
+          <RefreshCw
+            aria-hidden
+            size={12}
+            className={refreshing ? 'animate-spin' : undefined}
+          />
+          {refreshing ? 'Refreshing' : 'Refresh'}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -58,28 +218,42 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
   const observed = entry.read.kind === 'observed';
   return (
     <OverviewCard title={entry.store}>
-      <div className="flex flex-col gap-1.5">
+      <div className="flex flex-col gap-2">
         <div className="flex items-center gap-2">
           <StateChip kind={readKindToState(entry.read.kind)} />
           <span className="text-2xs text-text-muted">{entry.role}</span>
         </div>
         {observed ? (
           <>
-          <CapacityBar usedBytes={entry.total_bytes} freeBytes={entry.free_bytes} />
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs tabular">
-            <dt className="text-text-muted">size</dt>
-            <dd data-cell="numeric">{formatBytes(entry.total_bytes)}</dd>
-            <dt className="text-text-muted">free pages</dt>
-            <dd data-cell="numeric">{formatBytes(entry.free_bytes)}</dd>
-            <dt className="text-text-muted">free ratio</dt>
-            <dd data-cell="numeric">
-              {entry.free_page_ratio != null ? `${(entry.free_page_ratio * 100).toFixed(1)}%` : '—'}
-            </dd>
-          </dl>
+            <CapacityBar usedBytes={entry.total_bytes} freeBytes={entry.free_bytes} />
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs tabular">
+              <dt className="text-text-muted">size</dt>
+              <dd data-cell="numeric">{formatBytes(entry.total_bytes)}</dd>
+              <dt className="text-text-muted">free pages</dt>
+              <dd data-cell="numeric">{formatBytes(entry.free_bytes)}</dd>
+              <dt className="text-text-muted">free ratio</dt>
+              <dd data-cell="numeric">
+                {entry.free_page_ratio != null
+                  ? `${(entry.free_page_ratio * 100).toFixed(1)}%`
+                  : '—'}
+              </dd>
+            </dl>
           </>
         ) : (
-          <p className="text-xs text-text-muted">telemetry not observed for this store</p>
+          <p className="text-xs text-text-muted">
+            {readUnavailableMessage(entry.read)}
+          </p>
         )}
+        <DimensionRow label="Budget" state={entry.budget.state} detail={entry.budget.reason} />
+        <DimensionRow
+          label="Growth"
+          state={entry.growth.state}
+          detail={
+            entry.growth.state === 'absent'
+              ? entry.growth.reason
+              : `${entry.growth.samples.length} table samples`
+          }
+        />
         <p className="truncate font-mono text-2xs text-text-muted" title={entry.path}>
           {entry.path}
         </p>
@@ -88,45 +262,112 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
   );
 }
 
-function CenteredState({ kind, detail }: { kind: DomainStateKind; detail?: string }) {
+function FindingCard({ finding }: { finding: StorageFindingKindStatus }) {
+  const presentation = doctorEvidencePresentation(finding.state);
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 p-8">
-      <h1 className="text-lg font-semibold tracking-tight">Observatory</h1>
+    <OverviewCard title={storageFindingLabel(finding.kind)}>
+      <div className="flex flex-col gap-2">
+        <span
+          className={`w-fit rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-2xs font-medium ${presentation.tokenClass}`}
+          data-evidence-state={finding.state}
+        >
+          {presentation.label}
+        </span>
+        <p className="text-xs text-text-secondary">{finding.reason}</p>
+        <p className="text-2xs text-text-muted">
+          required source:{' '}
+          <span className="font-mono text-text-secondary">{finding.required_source}</span>
+        </p>
+      </div>
+    </OverviewCard>
+  );
+}
+
+function DimensionRow({
+  label,
+  state,
+  detail,
+}: {
+  label: string;
+  state: string;
+  detail: string;
+}) {
+  return (
+    <div className="rounded-[var(--radius-chip)] bg-surface-2 px-2.5 py-2 text-2xs">
+      <p className="font-medium text-text-secondary">
+        {label} · <span className="capitalize">{state}</span>
+      </p>
+      <p className="mt-0.5 text-text-muted">{detail}</p>
+    </div>
+  );
+}
+
+function ReadModelState({ kind, detail }: { kind: DomainStateKind; detail?: string }) {
+  return (
+    <div className="flex min-h-28 items-center justify-center p-4">
       <StateChip kind={kind} detail={detail} />
     </div>
   );
 }
 
-function readKindToState(kind: string): DomainStateKind {
+function ReadModelNotes({ notes }: { notes: string[] }) {
+  return (
+    <p className="border-t border-edge-subtle px-4 py-2 text-2xs text-text-muted">
+      {notes.join(' · ')}
+    </p>
+  );
+}
+
+function readKindToState(kind: StorageTelemetryRead['kind']): DomainStateKind {
   switch (kind) {
     case 'observed':
       return 'ready';
     case 'unsupported':
-      return 'unknown';
+      return 'unsupported';
     case 'denied':
       return 'denied';
-    default:
+    case 'unknown':
       return 'unknown';
+  }
+}
+
+function readUnavailableMessage(read: StorageTelemetryRead): string {
+  switch (read.kind) {
+    case 'observed':
+      return '';
+    case 'unsupported':
+      return 'telemetry is unsupported for this store';
+    case 'denied':
+      return 'telemetry access was denied for this store';
+    case 'unknown':
+      return 'telemetry could not be determined for this store';
   }
 }
 
 function formatBytes(bytes: number | null): string {
   if (bytes == null) return '—';
-  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+  }
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${bytes} B`;
 }
 
 function toStripCoverage(coverage: WireCoverage) {
-  return { examined: coverage.examined, eligible: coverage.eligible } as never;
+  return {
+    completeness: coverage.completeness,
+    examined: coverage.examined,
+    eligible: coverage.eligible,
+  };
 }
 
 function toStripFreshness(freshness: WireFreshness) {
   return {
+    state: freshness.state,
     observed_at:
       freshness.observed_at_micros != null
         ? new Date(freshness.observed_at_micros / 1000).toLocaleTimeString()
         : undefined,
-  } as never;
+  };
 }

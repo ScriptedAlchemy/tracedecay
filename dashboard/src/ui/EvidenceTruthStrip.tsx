@@ -1,5 +1,15 @@
-import type { Coverage, Freshness } from '../contracts/index.ts';
 import { cn } from './cn';
+
+export interface EvidenceCoverage {
+  completeness?: string;
+  eligible?: number | null;
+  examined?: number | null;
+}
+
+export interface EvidenceFreshness {
+  state?: string;
+  observed_at?: string;
+}
 
 /** Always-visible truth strip (plan 11): coverage with denominator, freshness
  * age, counts. Unknown denominators NEVER render a percent or a meter. */
@@ -11,8 +21,8 @@ export function EvidenceTruthStrip({
   scoreKind,
   className,
 }: {
-  coverage?: Coverage | undefined;
-  freshness?: Freshness | undefined;
+  coverage?: EvidenceCoverage | undefined;
+  freshness?: EvidenceFreshness | undefined;
   citations?: number | undefined;
   omissions?: number | undefined;
   scoreKind?: string | undefined;
@@ -27,6 +37,7 @@ export function EvidenceTruthStrip({
       aria-label="Evidence"
     >
       <span>{coverageLabel(coverage)}</span>
+      {freshness?.state ? <span>freshness {freshness.state}</span> : null}
       {freshness?.observed_at ? <span>as of {freshness.observed_at}</span> : null}
       {typeof citations === 'number' ? <span>{citations} citations</span> : null}
       {typeof omissions === 'number' && omissions > 0 ? (
@@ -37,12 +48,15 @@ export function EvidenceTruthStrip({
   );
 }
 
-function coverageLabel(coverage?: Coverage): string {
+function coverageLabel(coverage?: EvidenceCoverage): string {
   if (!coverage) return 'coverage unknown';
-  const { examined, eligible } = coverage as { examined?: number | null; eligible?: number | null };
+  const { completeness, examined, eligible } = coverage;
+  const qualifier = completeness && completeness !== 'complete' ? ` · ${completeness}` : '';
   if (typeof examined === 'number' && typeof eligible === 'number' && eligible >= 0) {
-    return `coverage ${examined}/${eligible}`;
+    return `coverage ${examined}/${eligible}${qualifier}`;
   }
-  if (typeof examined === 'number') return `coverage ${examined}/? (denominator unknown)`;
-  return 'coverage unknown';
+  if (typeof examined === 'number') {
+    return `coverage ${examined}/? (denominator unknown)${qualifier}`;
+  }
+  return completeness ? `coverage ${completeness}` : 'coverage unknown';
 }

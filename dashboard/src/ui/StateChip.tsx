@@ -36,6 +36,7 @@ export type DomainStateKind =
   | 'cancelled'
   | 'timed_out'
   | 'error'
+  | 'unsupported'
   | 'unsupported_schema';
 
 const STATE: Record<
@@ -61,6 +62,11 @@ const STATE: Record<
   cancelled: { label: 'Cancelled', icon: CircleSlash, tokenClass: 'text-state-cancelled' },
   timed_out: { label: 'Timed out', icon: Clock, tokenClass: 'text-state-timed-out' },
   error: { label: 'Error', icon: XCircle, tokenClass: 'text-state-error' },
+  unsupported: {
+    label: 'Unsupported',
+    icon: CircleSlash,
+    tokenClass: 'text-state-unsupported-schema',
+  },
   unsupported_schema: {
     label: 'Unsupported schema',
     icon: FileQuestion,

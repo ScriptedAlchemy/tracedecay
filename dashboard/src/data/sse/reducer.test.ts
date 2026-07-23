@@ -94,6 +94,19 @@ describe("SSE reducer — stale-generation rejection", () => {
     r.ingest(ev({ generation: 2, event_revision: 4, event_id: "e4" }));
     expect(r.takeBatch().refetch).toBe(true);
   });
+
+  it("accepts a restarted revision sequence and refetches on a newer generation", () => {
+    const r = createSseReducer<Body>();
+    r.ingest(ev({ generation: 1, event_revision: 7, event_id: "run-1-e7" }));
+    r.takeBatch();
+
+    expect(
+      r.ingest(ev({ generation: 2, event_revision: 1, event_id: "run-2-e1" })),
+    ).toBe(true);
+    const batch = r.takeBatch();
+    expect(batch.events.map((event) => event.revision.event_revision)).toEqual([1]);
+    expect(batch.refetch).toBe(true);
+  });
 });
 
 describe("SSE reducer — revision gap => refetch once", () => {
