@@ -1206,14 +1206,28 @@ fn session_store_row_matches(table: SessionStoreTableV1, row: &SessionStoreRowV1
             SessionStoreTableV1::SessionSummarySuccessors
         }
         SessionStoreRowV1::MemoryV2Facts { .. } => SessionStoreTableV1::MemoryV2Facts,
-        SessionStoreRowV1::MemoryV2CurrentFacts { .. } => {
-            SessionStoreTableV1::MemoryV2CurrentFacts
-        }
+        SessionStoreRowV1::MemoryV2CurrentFacts { .. } => SessionStoreTableV1::MemoryV2CurrentFacts,
         SessionStoreRowV1::MemoryV2Assertions { .. } => SessionStoreTableV1::MemoryV2Assertions,
         SessionStoreRowV1::MemoryV2LineageEvents { .. } => {
             SessionStoreTableV1::MemoryV2LineageEvents
         }
         SessionStoreRowV1::RetrievalAnchors { .. } => SessionStoreTableV1::RetrievalAnchors,
+        SessionStoreRowV1::GenerationDiagnostics { .. } => {
+            SessionStoreTableV1::GenerationDiagnostics
+        }
+        SessionStoreRowV1::DiagnosticGenerationPublications { .. } => {
+            SessionStoreTableV1::DiagnosticGenerationPublications
+        }
+        SessionStoreRowV1::ConfigurationRevisions { .. } => {
+            SessionStoreTableV1::ConfigurationRevisions
+        }
+        SessionStoreRowV1::ConfigurationEntries { .. } => SessionStoreTableV1::ConfigurationEntries,
+        SessionStoreRowV1::ConfigurationMutationReceipts { .. } => {
+            SessionStoreTableV1::ConfigurationMutationReceipts
+        }
+        SessionStoreRowV1::ConfigurationAuditEvents { .. } => {
+            SessionStoreTableV1::ConfigurationAuditEvents
+        }
     };
     table == expected && is_canonical_sha256_digest(session_store_row_digest(row))
 }
@@ -1240,7 +1254,13 @@ fn session_store_row_digest(row: &SessionStoreRowV1) -> &str {
         | SessionStoreRowV1::MemoryV2CurrentFacts { row_digest, .. }
         | SessionStoreRowV1::MemoryV2Assertions { row_digest, .. }
         | SessionStoreRowV1::MemoryV2LineageEvents { row_digest, .. }
-        | SessionStoreRowV1::RetrievalAnchors { row_digest, .. } => row_digest,
+        | SessionStoreRowV1::RetrievalAnchors { row_digest, .. }
+        | SessionStoreRowV1::GenerationDiagnostics { row_digest, .. }
+        | SessionStoreRowV1::DiagnosticGenerationPublications { row_digest, .. }
+        | SessionStoreRowV1::ConfigurationRevisions { row_digest, .. }
+        | SessionStoreRowV1::ConfigurationEntries { row_digest, .. }
+        | SessionStoreRowV1::ConfigurationMutationReceipts { row_digest, .. }
+        | SessionStoreRowV1::ConfigurationAuditEvents { row_digest, .. } => row_digest,
     }
 }
 
@@ -1286,13 +1306,29 @@ fn session_store_cursor_matches(table: SessionStoreTableV1, cursor: &SessionStor
         SessionStoreCursorV1::MemoryV2CurrentFacts { .. } => {
             SessionStoreTableV1::MemoryV2CurrentFacts
         }
-        SessionStoreCursorV1::MemoryV2Assertions { .. } => {
-            SessionStoreTableV1::MemoryV2Assertions
-        }
+        SessionStoreCursorV1::MemoryV2Assertions { .. } => SessionStoreTableV1::MemoryV2Assertions,
         SessionStoreCursorV1::MemoryV2LineageEvents { .. } => {
             SessionStoreTableV1::MemoryV2LineageEvents
         }
         SessionStoreCursorV1::RetrievalAnchors { .. } => SessionStoreTableV1::RetrievalAnchors,
+        SessionStoreCursorV1::GenerationDiagnostics { .. } => {
+            SessionStoreTableV1::GenerationDiagnostics
+        }
+        SessionStoreCursorV1::DiagnosticGenerationPublications { .. } => {
+            SessionStoreTableV1::DiagnosticGenerationPublications
+        }
+        SessionStoreCursorV1::ConfigurationRevisions { .. } => {
+            SessionStoreTableV1::ConfigurationRevisions
+        }
+        SessionStoreCursorV1::ConfigurationEntries { .. } => {
+            SessionStoreTableV1::ConfigurationEntries
+        }
+        SessionStoreCursorV1::ConfigurationMutationReceipts { .. } => {
+            SessionStoreTableV1::ConfigurationMutationReceipts
+        }
+        SessionStoreCursorV1::ConfigurationAuditEvents { .. } => {
+            SessionStoreTableV1::ConfigurationAuditEvents
+        }
     };
     table == expected
 }
@@ -1504,7 +1540,7 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
     #[test]
     fn session_store_shape_helpers_accept_new_temporal_and_summary_families() {
         let digest = format!("sha256:{}", "1".repeat(64));
-        let cases: [(SessionStoreTableV1, SessionStoreRowV1, SessionStoreCursorV1); 11] = [
+        let cases: [(SessionStoreTableV1, SessionStoreRowV1, SessionStoreCursorV1); 17] = [
             (
                 SessionStoreTableV1::SessionTemporalProjectionReceipts,
                 SessionStoreRowV1::SessionTemporalProjectionReceipts {
@@ -1656,6 +1692,82 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
                 },
                 SessionStoreCursorV1::RetrievalAnchors {
                     anchor_id: "anchor-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::GenerationDiagnostics,
+                SessionStoreRowV1::GenerationDiagnostics {
+                    diagnostic_anchor: "anchor-1".to_owned(),
+                    generation_id: "gen-1".to_owned(),
+                    severity: "error".to_owned(),
+                    record_state: "active".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::GenerationDiagnostics {
+                    diagnostic_anchor: "anchor-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::DiagnosticGenerationPublications,
+                SessionStoreRowV1::DiagnosticGenerationPublications {
+                    generation_id: "gen-1".to_owned(),
+                    record_state: "active".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::DiagnosticGenerationPublications {
+                    generation_id: "gen-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::ConfigurationRevisions,
+                SessionStoreRowV1::ConfigurationRevisions {
+                    revision_id: "rev-1".to_owned(),
+                    snapshot_id: "snap-1".to_owned(),
+                    operation_kind: "set".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::ConfigurationRevisions {
+                    revision_id: "rev-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::ConfigurationEntries,
+                SessionStoreRowV1::ConfigurationEntries {
+                    revision_id: "rev-1".to_owned(),
+                    key: "key-1".to_owned(),
+                    layer_kind: "user".to_owned(),
+                    layer_id: "layer-1".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::ConfigurationEntries {
+                    revision_id: "rev-1".to_owned(),
+                    key: "key-1".to_owned(),
+                    layer_kind: "user".to_owned(),
+                    layer_id: "layer-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::ConfigurationMutationReceipts,
+                SessionStoreRowV1::ConfigurationMutationReceipts {
+                    receipt_id: "receipt-1".to_owned(),
+                    result_revision_id: "rev-1".to_owned(),
+                    activation_status: "activated".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::ConfigurationMutationReceipts {
+                    receipt_id: "receipt-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::ConfigurationAuditEvents,
+                SessionStoreRowV1::ConfigurationAuditEvents {
+                    event_id: "event-1".to_owned(),
+                    operation_kind: "set".to_owned(),
+                    base_revision_id: "rev-0".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::ConfigurationAuditEvents {
+                    event_id: "event-1".to_owned(),
                 },
             ),
         ];
