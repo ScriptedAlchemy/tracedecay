@@ -25,7 +25,9 @@ pub type FeedbackPortFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>
 /// service never invents or reconstructs that proof.
 #[derive(Clone, Debug)]
 pub enum FeedbackRouteAdmission {
-    Source(AuthorizationAdmission),
+    /// Boxed: the full admission proof is ~3x the receipt variant, and this
+    /// enum travels through async port futures by value.
+    Source(Box<AuthorizationAdmission>),
     Routed(AuthorityReceipt),
 }
 
@@ -67,7 +69,7 @@ where
         observed_at: UtcMicros,
     ) -> Result<FeedbackRouteAdmission, ApplicationProblem> {
         AuthorizationService::admit(self, context, operation, observed_at)
-            .map(FeedbackRouteAdmission::Source)
+            .map(|admission| FeedbackRouteAdmission::Source(Box::new(admission)))
     }
 
     fn recheck_publication(
