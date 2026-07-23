@@ -1,5 +1,6 @@
-import { Command, Moon, Sun } from 'lucide-react';
+import { Command, Moon, Sun, X } from 'lucide-react';
 import { cn } from '../../ui/cn';
+import { useScope } from '../../data/scope/store.ts';
 
 function toggleTheme() {
   const root = document.documentElement;
@@ -9,14 +10,29 @@ function toggleTheme() {
 }
 
 /** Always-visible active scope (plan 11: every view preserves and displays
- * scope; transitions are explicit). Chips become interactive once the scope
- * store lands; the bar ships first so no surface ever renders scopeless. */
+ * scope; transitions are explicit). All-projects is the default; a selected
+ * project shows as a dismissible chip that returns to the aggregate. */
 export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
+  const scope = useScope((s) => s.scope);
+  const selectAllProjects = useScope((s) => s.selectAllProjects);
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b border-edge-subtle bg-surface-1 px-3">
       <div className="flex min-w-0 flex-1 items-center gap-1.5" aria-label="Active scope">
         <ScopeChip label="profile" value="local" />
-        <ScopeChip label="project" value="—" muted />
+        {scope.kind === 'project' ? (
+          <button
+            type="button"
+            onClick={selectAllProjects}
+            aria-label={`Clear project scope ${scope.label}`}
+            className="inline-flex h-6 items-center gap-1 rounded-[var(--radius-chip)] border border-accent/40 bg-accent/10 px-2 text-2xs text-text-primary hover:border-accent/70"
+          >
+            <span className="text-text-muted">project</span>
+            <span className="font-medium">{scope.label}</span>
+            <X aria-hidden size={11} className="text-text-muted" />
+          </button>
+        ) : (
+          <ScopeChip label="project" value="all" muted />
+        )}
       </div>
       <button
         type="button"
