@@ -10,7 +10,12 @@ export function SettingsPage() {
   const settings = useLegacy(['settings'], '/api/settings', AnyObject);
 
   return (
-    <div className="flex h-full flex-col overflow-auto">
+    <div
+      className="flex h-full flex-col overflow-auto"
+      tabIndex={0}
+      role="region"
+      aria-label="Settings content"
+    >
       <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Settings</h1>
         <span className="text-2xs text-text-muted">effective configuration · read-only</span>

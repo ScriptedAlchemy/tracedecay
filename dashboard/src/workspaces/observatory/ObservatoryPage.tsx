@@ -268,9 +268,11 @@ function FindingCard({ finding }: { finding: StorageFindingKindStatus }) {
     <OverviewCard title={storageFindingLabel(finding.kind)}>
       <div className="flex flex-col gap-2">
         <span
-          className={`w-fit rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-2xs font-medium ${presentation.tokenClass}`}
+          className="inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-2xs font-medium text-text-secondary"
           data-evidence-state={finding.state}
         >
+          {/* Evidence-state hue rides the dot; the label stays AA-contrast. */}
+          <span aria-hidden className={`size-1.5 rounded-full ${presentation.dotClass}`} />
           {presentation.label}
         </span>
         <p className="text-xs text-text-secondary">{finding.reason}</p>

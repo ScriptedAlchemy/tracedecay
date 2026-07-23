@@ -13,8 +13,9 @@
   --raw-surface-2: oklch(0.225 0.01 260);
   --raw-surface-3: oklch(0.27 0.011 260);
   --raw-text-primary: oklch(0.93 0.005 260);
-  --raw-text-secondary: oklch(0.75 0.008 260);
-  --raw-text-muted: oklch(0.58 0.008 260);
+  --raw-text-secondary: oklch(0.78 0.008 260);
+  /* ≥4.5:1 on surface-0..3 for small text (axe color-contrast). */
+  --raw-text-muted: oklch(0.68 0.008 260);
   --raw-edge-subtle: oklch(0.32 0.01 260);
   --raw-edge-strong: oklch(0.45 0.012 260);
   --raw-accent: oklch(0.72 0.14 250);
@@ -65,19 +66,31 @@
   --raw-surface-2: oklch(0.94 0.004 260);
   --raw-surface-3: oklch(0.91 0.005 260);
   --raw-text-primary: oklch(0.22 0.01 260);
-  --raw-text-secondary: oklch(0.4 0.01 260);
-  --raw-text-muted: oklch(0.55 0.01 260);
+  --raw-text-secondary: oklch(0.38 0.01 260);
+  /* ≥4.5:1 on surface-0..3 for small text (axe color-contrast). */
+  --raw-text-muted: oklch(0.46 0.01 260);
   --raw-edge-subtle: oklch(0.88 0.005 260);
   --raw-edge-strong: oklch(0.75 0.008 260);
   --raw-accent: oklch(0.55 0.16 250);
   --raw-accent-emphasis: oklch(0.48 0.17 250);
+  /* Complete first-class light mappings for every domain state (plan 11a:
+   * "complete mappings, not overrides of a few tokens"). */
+  --raw-state-loading: oklch(0.5 0.02 260);
   --raw-state-ready: oklch(0.55 0.14 155);
   --raw-state-complete-zero: oklch(0.55 0.14 155);
   --raw-state-partial: oklch(0.6 0.13 85);
   --raw-state-stale: oklch(0.58 0.11 85);
+  --raw-state-locked: oklch(0.5 0.12 300);
   --raw-state-denied: oklch(0.52 0.17 25);
   --raw-state-unauthorized: oklch(0.52 0.17 25);
+  --raw-state-redacted: oklch(0.48 0.05 300);
+  --raw-state-conflicting: oklch(0.52 0.15 55);
+  --raw-state-offline: oklch(0.48 0.02 260);
+  --raw-state-unknown: oklch(0.48 0.02 260);
+  --raw-state-cancelled: oklch(0.5 0.06 260);
+  --raw-state-timed-out: oklch(0.52 0.12 55);
   --raw-state-error: oklch(0.5 0.19 25);
+  --raw-state-unsupported-schema: oklch(0.5 0.12 320);
   --raw-sev-info: oklch(0.55 0.08 250);
   --raw-sev-low: oklch(0.58 0.12 85);
   --raw-sev-medium: oklch(0.56 0.14 55);

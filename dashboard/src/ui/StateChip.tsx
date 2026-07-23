@@ -94,12 +94,13 @@ export function StateChip({
       className={cn(
         'inline-flex items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle',
         'bg-surface-2 px-2 py-0.5 text-2xs font-medium',
-        s.tokenClass,
         className,
       )}
       data-state={kind}
     >
-      <Icon aria-hidden size={12} className={cn(s.spin && 'animate-spin')} />
+      {/* State hue rides the icon only; label text stays AA-contrast tokens
+       * (state meaning = icon + label + data-state, never color alone). */}
+      <Icon aria-hidden size={12} className={cn(s.tokenClass, s.spin && 'animate-spin')} />
       <span className="text-text-secondary">{s.label}</span>
       {detail ? <span className="text-text-muted">· {detail}</span> : null}
     </span>

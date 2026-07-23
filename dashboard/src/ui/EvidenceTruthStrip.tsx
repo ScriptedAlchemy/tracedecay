@@ -41,7 +41,11 @@ export function EvidenceTruthStrip({
       {freshness?.observed_at ? <span>as of {freshness.observed_at}</span> : null}
       {typeof citations === 'number' ? <span>{citations} citations</span> : null}
       {typeof omissions === 'number' && omissions > 0 ? (
-        <span className="text-state-partial">{omissions} omitted</span>
+        <span className="inline-flex items-center gap-1 text-text-secondary">
+          {/* Partial-state hue rides the dot; the count stays AA-contrast. */}
+          <span aria-hidden className="size-1.5 rounded-full bg-state-partial" />
+          {omissions} omitted
+        </span>
       ) : null}
       {scoreKind ? <span className="uppercase tracking-wide">{scoreKind}</span> : null}
     </div>

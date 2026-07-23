@@ -107,7 +107,7 @@ function ProjectRow({ project }: { project: ProjectRegistryEntry }) {
         <span className="block truncate text-xs font-medium">
           {project.label}
           {project.is_active ? (
-            <span className="ml-2 rounded-[var(--radius-chip)] bg-accent/15 px-1.5 text-2xs text-accent">
+            <span className="ml-2 rounded-[var(--radius-chip)] bg-accent/15 px-1.5 text-2xs font-medium text-text-primary">
               active
             </span>
           ) : null}

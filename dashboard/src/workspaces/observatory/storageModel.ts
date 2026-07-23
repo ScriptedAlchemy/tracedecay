@@ -14,21 +14,23 @@ const FINDING_LABELS: Record<DoctorStorageFindingKind, string> = {
 
 const EVIDENCE_PRESENTATION: Record<
   DoctorEvidenceState,
-  { label: string; tokenClass: string }
+  { label: string; tokenClass: string; dotClass: string }
 > = {
   unsupported: {
     label: 'Unsupported',
     tokenClass: 'text-state-unsupported-schema',
+    dotClass: 'bg-state-unsupported-schema',
   },
-  absent: { label: 'Absent', tokenClass: 'text-state-unknown' },
-  stale: { label: 'Stale', tokenClass: 'text-state-stale' },
-  degraded: { label: 'Degraded', tokenClass: 'text-state-error' },
-  partial: { label: 'Partial', tokenClass: 'text-state-partial' },
-  unknown: { label: 'Unknown', tokenClass: 'text-state-unknown' },
-  denied: { label: 'Denied', tokenClass: 'text-state-denied' },
+  absent: { label: 'Absent', tokenClass: 'text-state-unknown', dotClass: 'bg-state-unknown' },
+  stale: { label: 'Stale', tokenClass: 'text-state-stale', dotClass: 'bg-state-stale' },
+  degraded: { label: 'Degraded', tokenClass: 'text-state-error', dotClass: 'bg-state-error' },
+  partial: { label: 'Partial', tokenClass: 'text-state-partial', dotClass: 'bg-state-partial' },
+  unknown: { label: 'Unknown', tokenClass: 'text-state-unknown', dotClass: 'bg-state-unknown' },
+  denied: { label: 'Denied', tokenClass: 'text-state-denied', dotClass: 'bg-state-denied' },
   healthy_complete_coverage: {
     label: 'Healthy · complete coverage',
     tokenClass: 'text-state-ready',
+    dotClass: 'bg-state-ready',
   },
 };
 

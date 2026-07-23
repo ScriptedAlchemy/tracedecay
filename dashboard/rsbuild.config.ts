@@ -12,6 +12,9 @@ export default defineConfig({
   },
   html: {
     title: 'TraceDecay',
+    // axe: html-has-lang — the root element must declare its language, which
+    // requires an explicit template; rsbuild's default omits `lang`.
+    template: './src/app/index.html',
   },
   output: {
     distPath: { root: 'app-dist' },
