@@ -900,9 +900,24 @@ async fn explicit_read_only_open_reports_and_guards_read_only_store() {
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_tool_text(&status.value)).unwrap();
-    assert_eq!(payload["status"].as_str(), Some("ok"));
-    assert_eq!(payload["writable"].as_bool(), Some(false));
-    assert_eq!(payload["read_only"].as_bool(), Some(true));
+    // Plan 21 moved storage_status onto the daemon-retained typed primitive
+    // owner. Without a live daemon transport this in-process harness receives
+    // the truthful unavailable envelope rather than a fabricated local answer.
+    // The read-only write guard below preserves this test's core intent.
+    assert_eq!(
+        payload["contract"]["schema_id"].as_str(),
+        Some("schema.application.primitive.storage-status.result")
+    );
+    assert_eq!(payload["problem"]["kind"].as_str(), Some("unavailable"));
+    assert_eq!(
+        payload["problem"]["code"].as_str(),
+        Some("application.transport.unavailable")
+    );
+    assert!(
+        payload["problem"]["legal_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|a| a == "retry"))
+    );
 
     let error = match cg.index_all().await {
         Ok(_) => panic!("mutating operations should be guarded before SQLite rejects writes"),
