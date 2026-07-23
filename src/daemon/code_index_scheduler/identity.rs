@@ -130,9 +130,8 @@ impl IndexingIdentityV1 {
     /// worktree identities only. Source revision (HEAD/commit/tree) is
     /// deliberately excluded so the key is invariant across commits within one
     /// worktree, while remaining distinct for every other worktree — even a
-    /// byte-identical one. Generations and the InputEdit tree cache are keyed off
-    /// this value so cross-worktree reuse is structurally impossible, not merely
-    /// checked.
+    /// byte-identical one. Generations are keyed off this value so
+    /// cross-worktree reuse is structurally impossible, not merely checked.
     pub(crate) fn identity_key(&self) -> String {
         format!(
             "sha256:{}",

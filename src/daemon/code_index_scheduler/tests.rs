@@ -845,7 +845,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
 
 // ---------------------------------------------------------------------------
 // Worktree-aware incremental indexing: identity, gix classification, the
-// hook-driven + lazy-reconcile freshness ladder, and InputEdit equivalence.
+// hook-driven + lazy-reconcile freshness ladder.
 // ---------------------------------------------------------------------------
 
 use super::CodeIndexHintPolicyV1;
@@ -1099,7 +1099,7 @@ fn git_op_in_another_process_detected_via_metadata() {
     // Long staleness bound so only tier-1 (git metadata) can fire.
     let policy = CodeIndexHintPolicyV1 {
         watch_filesystem: false,
-        staleness_threshold: Duration::from_secs(3_600),
+        staleness_threshold: Duration::from_hours(1),
     };
     let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
     let baseline = published(scheduler.reconcile_now().expect("baseline"));
@@ -1139,7 +1139,7 @@ fn identity_move_reconciles_and_never_mixes_identity() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let policy = CodeIndexHintPolicyV1 {
         watch_filesystem: false,
-        staleness_threshold: Duration::from_secs(3_600),
+        staleness_threshold: Duration::from_hours(1),
     };
     let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
     published(scheduler.reconcile_now().expect("baseline"));
