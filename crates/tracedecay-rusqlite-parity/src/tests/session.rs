@@ -124,6 +124,11 @@ fn session_counts_schema_and_keyset_pages_cover_every_closed_table() {
         ),
         (SessionStoreTable::SessionOccurrences, "session_occurrences"),
         (
+            SessionStoreTable::SessionLogicalCopyEdges,
+            "session_logical_copy_edges",
+        ),
+        (SessionStoreTable::SessionAssertions, "session_assertions"),
+        (
             SessionStoreTable::SessionSummaryNodes,
             "session_summary_nodes",
         ),
@@ -208,6 +213,131 @@ fn projection_receipt_pages_walk_the_composite_generation_keyset() {
         },
     ) else {
         panic!("summary-node count output expected");
+    };
+    assert_eq!(count.row_count, Some(1));
+}
+
+#[test]
+fn occurrence_pages_walk_the_generation_keyset() {
+    let fixture = fixture();
+    let Output::SessionStorePage(first_page) = execute(
+        &fixture.path,
+        Command::SessionStorePage {
+            family: SessionStoreFamily::Temporal,
+            table: SessionStoreTable::SessionOccurrences,
+            cursor: None,
+            limit: 1,
+        },
+    ) else {
+        panic!("occurrence page output expected");
+    };
+    assert_eq!(
+        first_page.order_columns,
+        ["session_id", "generation", "occurrence_id"]
+    );
+    assert!(matches!(
+        &first_page.rows[0],
+        SessionStoreRow::SessionOccurrences {
+            session_id,
+            generation: 1,
+            occurrence_id,
+            role,
+            row_digest,
+        } if session_id == "session-1"
+            && occurrence_id == "occurrence-1"
+            && role == "user"
+            && row_digest.starts_with("sha256:")
+    ));
+    assert!(first_page.next_cursor.is_some());
+
+    let Output::SessionStorePage(second_page) = execute(
+        &fixture.path,
+        Command::SessionStorePage {
+            family: SessionStoreFamily::Temporal,
+            table: SessionStoreTable::SessionOccurrences,
+            cursor: first_page.next_cursor,
+            limit: 1,
+        },
+    ) else {
+        panic!("second occurrence page output expected");
+    };
+    assert!(matches!(
+        &second_page.rows[0],
+        SessionStoreRow::SessionOccurrences {
+            occurrence_id,
+            role,
+            ..
+        } if occurrence_id == "occurrence-2" && role == "assistant"
+    ));
+    assert!(second_page.next_cursor.is_none());
+}
+
+#[test]
+fn logical_copy_edge_pages_walk_the_composite_occurrence_keyset() {
+    let fixture = fixture();
+    let Output::SessionStorePage(first_page) = execute(
+        &fixture.path,
+        Command::SessionStorePage {
+            family: SessionStoreFamily::Temporal,
+            table: SessionStoreTable::SessionLogicalCopyEdges,
+            cursor: None,
+            limit: 1,
+        },
+    ) else {
+        panic!("logical-copy-edge page output expected");
+    };
+    assert_eq!(
+        first_page.order_columns,
+        [
+            "session_id",
+            "generation",
+            "occurrence_id",
+            "copied_from_occurrence_id"
+        ]
+    );
+    assert!(matches!(
+        &first_page.rows[0],
+        SessionStoreRow::SessionLogicalCopyEdges {
+            session_id,
+            generation: 1,
+            occurrence_id,
+            copied_from_occurrence_id,
+            row_digest,
+        } if session_id == "session-1"
+            && occurrence_id == "occurrence-2"
+            && copied_from_occurrence_id == "occurrence-1"
+            && row_digest.starts_with("sha256:")
+    ));
+    assert!(first_page.next_cursor.is_some());
+
+    let Output::SessionStorePage(second_page) = execute(
+        &fixture.path,
+        Command::SessionStorePage {
+            family: SessionStoreFamily::Temporal,
+            table: SessionStoreTable::SessionLogicalCopyEdges,
+            cursor: first_page.next_cursor,
+            limit: 1,
+        },
+    ) else {
+        panic!("second logical-copy-edge page output expected");
+    };
+    assert!(matches!(
+        &second_page.rows[0],
+        SessionStoreRow::SessionLogicalCopyEdges {
+            occurrence_id,
+            ..
+        } if occurrence_id == "occurrence-3"
+    ));
+    assert!(second_page.next_cursor.is_none());
+
+    let Output::SessionStoreCount(count) = execute(
+        &fixture.path,
+        Command::SessionStoreCount {
+            family: SessionStoreFamily::Temporal,
+            table: SessionStoreTable::SessionAssertions,
+        },
+    ) else {
+        panic!("assertion count output expected");
     };
     assert_eq!(count.row_count, Some(1));
 }

@@ -80,6 +80,8 @@ fn subprocess_reports_closed_session_store_counts_schema_and_keyset_pages() {
         "session_temporal_observation_effects",
         "session_temporal_projection_receipts",
         "session_occurrences",
+        "session_logical_copy_edges",
+        "session_assertions",
         "session_summary_nodes",
     ] {
         let family = match table {

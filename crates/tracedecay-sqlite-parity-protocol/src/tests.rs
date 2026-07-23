@@ -127,6 +127,8 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreTable::SessionTemporalObservationEffects,
         SessionStoreTable::SessionTemporalProjectionReceipts,
         SessionStoreTable::SessionOccurrences,
+        SessionStoreTable::SessionLogicalCopyEdges,
+        SessionStoreTable::SessionAssertions,
         SessionStoreTable::SessionSummaryNodes,
     ] {
         round_trip(table);
@@ -166,6 +168,17 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
             session_id: "session".to_owned(),
             generation: 1,
             occurrence_id: "occurrence".to_owned(),
+        },
+        SessionStoreCursor::SessionLogicalCopyEdges {
+            session_id: "session".to_owned(),
+            generation: 1,
+            occurrence_id: "occurrence".to_owned(),
+            copied_from_occurrence_id: "origin".to_owned(),
+        },
+        SessionStoreCursor::SessionAssertions {
+            session_id: "session".to_owned(),
+            generation: 1,
+            assertion_id: "assertion".to_owned(),
         },
         SessionStoreCursor::SessionSummaryNodes {
             summary_id: "summary".to_owned(),
@@ -336,7 +349,7 @@ fn every_graph_session_journal_and_response_result_variant_round_trips() {
     });
 }
 
-fn session_rows() -> [SessionStoreRow; 11] {
+fn session_rows() -> [SessionStoreRow; 13] {
     [
         SessionStoreRow::Observations {
             sequence: 1,
@@ -400,6 +413,20 @@ fn session_rows() -> [SessionStoreRow; 11] {
             generation: 1,
             occurrence_id: "occurrence".to_owned(),
             role: "user".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::SessionLogicalCopyEdges {
+            session_id: "session".to_owned(),
+            generation: 1,
+            occurrence_id: "occurrence".to_owned(),
+            copied_from_occurrence_id: "origin".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::SessionAssertions {
+            session_id: "session".to_owned(),
+            generation: 1,
+            assertion_id: "assertion".to_owned(),
+            assertion_kind: "supersedes".to_owned(),
             row_digest: "row".to_owned(),
         },
         SessionStoreRow::SessionSummaryNodes {

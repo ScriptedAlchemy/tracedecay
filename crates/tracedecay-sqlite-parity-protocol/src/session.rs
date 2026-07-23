@@ -25,6 +25,8 @@ pub enum SessionStoreTable {
     SessionTemporalObservationEffects,
     SessionTemporalProjectionReceipts,
     SessionOccurrences,
+    SessionLogicalCopyEdges,
+    SessionAssertions,
     SessionSummaryNodes,
 }
 
@@ -39,7 +41,9 @@ impl SessionStoreTable {
             | Self::SessionTemporalGenerations
             | Self::SessionTemporalObservationEffects
             | Self::SessionTemporalProjectionReceipts
-            | Self::SessionOccurrences => SessionStoreFamily::Temporal,
+            | Self::SessionOccurrences
+            | Self::SessionLogicalCopyEdges
+            | Self::SessionAssertions => SessionStoreFamily::Temporal,
             Self::SessionSummaryNodes => SessionStoreFamily::Summary,
         }
     }
@@ -58,6 +62,13 @@ impl SessionStoreTable {
                 &["session_id", "generation", "batch_ordinal"]
             }
             Self::SessionOccurrences => &["session_id", "generation", "occurrence_id"],
+            Self::SessionLogicalCopyEdges => &[
+                "session_id",
+                "generation",
+                "occurrence_id",
+                "copied_from_occurrence_id",
+            ],
+            Self::SessionAssertions => &["session_id", "generation", "assertion_id"],
             Self::SessionSummaryNodes => &["summary_id"],
         }
     }
@@ -104,6 +115,17 @@ pub enum SessionStoreCursor {
         session_id: String,
         generation: i64,
         occurrence_id: String,
+    },
+    SessionLogicalCopyEdges {
+        session_id: String,
+        generation: i64,
+        occurrence_id: String,
+        copied_from_occurrence_id: String,
+    },
+    SessionAssertions {
+        session_id: String,
+        generation: i64,
+        assertion_id: String,
     },
     SessionSummaryNodes {
         summary_id: String,
@@ -228,6 +250,20 @@ pub enum SessionStoreRow {
         generation: i64,
         occurrence_id: String,
         role: String,
+        row_digest: String,
+    },
+    SessionLogicalCopyEdges {
+        session_id: String,
+        generation: i64,
+        occurrence_id: String,
+        copied_from_occurrence_id: String,
+        row_digest: String,
+    },
+    SessionAssertions {
+        session_id: String,
+        generation: i64,
+        assertion_id: String,
+        assertion_kind: String,
         row_digest: String,
     },
     SessionSummaryNodes {
@@ -378,6 +414,32 @@ fn validate_page_cursor(
         ) => {
             validate_cursor_text("session_id", session_id)?;
             validate_cursor_text("occurrence_id", occurrence_id)?;
+            *generation > 0
+        }
+        (
+            SessionStoreTable::SessionLogicalCopyEdges,
+            SessionStoreCursor::SessionLogicalCopyEdges {
+                session_id,
+                generation,
+                occurrence_id,
+                copied_from_occurrence_id,
+            },
+        ) => {
+            validate_cursor_text("session_id", session_id)?;
+            validate_cursor_text("occurrence_id", occurrence_id)?;
+            validate_cursor_text("copied_from_occurrence_id", copied_from_occurrence_id)?;
+            *generation > 0
+        }
+        (
+            SessionStoreTable::SessionAssertions,
+            SessionStoreCursor::SessionAssertions {
+                session_id,
+                generation,
+                assertion_id,
+            },
+        ) => {
+            validate_cursor_text("session_id", session_id)?;
+            validate_cursor_text("assertion_id", assertion_id)?;
             *generation > 0
         }
         (

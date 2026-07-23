@@ -139,6 +139,18 @@ pub(crate) fn session_table_spec(table: SessionStoreTable) -> TableSpec {
             "PRAGMA table_info(session_occurrences)",
             "PRAGMA foreign_key_list(session_occurrences)",
         ),
+        SessionStoreTable::SessionLogicalCopyEdges => session_table(
+            "session_logical_copy_edges",
+            "SELECT COUNT(*) FROM session_logical_copy_edges",
+            "PRAGMA table_info(session_logical_copy_edges)",
+            "PRAGMA foreign_key_list(session_logical_copy_edges)",
+        ),
+        SessionStoreTable::SessionAssertions => session_table(
+            "session_assertions",
+            "SELECT COUNT(*) FROM session_assertions",
+            "PRAGMA table_info(session_assertions)",
+            "PRAGMA foreign_key_list(session_assertions)",
+        ),
         SessionStoreTable::SessionSummaryNodes => session_table(
             "session_summary_nodes",
             "SELECT COUNT(*) FROM session_summary_nodes",
@@ -367,6 +379,68 @@ pub(crate) fn session_page_query(
                  ORDER BY session_id, generation, occurrence_id
                  LIMIT ?4",
                 vec![session_id, generation, occurrence_id, Value::Integer(limit)],
+            )
+        }
+        (SessionStoreTable::SessionLogicalCopyEdges, cursor) => {
+            let (session_id, generation, occurrence_id, copied_from_occurrence_id) = match cursor {
+                Some(SessionStoreCursor::SessionLogicalCopyEdges {
+                    session_id,
+                    generation,
+                    occurrence_id,
+                    copied_from_occurrence_id,
+                }) => (
+                    Value::Text(session_id.clone()),
+                    Value::Integer(*generation),
+                    Value::Text(occurrence_id.clone()),
+                    Value::Text(copied_from_occurrence_id.clone()),
+                ),
+                _ => (Value::Null, Value::Null, Value::Null, Value::Null),
+            };
+            (
+                "SELECT session_id, generation, occurrence_id, copied_from_occurrence_id,
+                        proof_json, knowledge_at, valid_time_json, created_at
+                 FROM session_logical_copy_edges
+                 WHERE ?1 IS NULL
+                    OR session_id > ?1
+                    OR (session_id = ?1 AND generation > ?2)
+                    OR (session_id = ?1 AND generation = ?2 AND occurrence_id > ?3)
+                    OR (session_id = ?1 AND generation = ?2 AND occurrence_id = ?3
+                        AND copied_from_occurrence_id > ?4)
+                 ORDER BY session_id, generation, occurrence_id, copied_from_occurrence_id
+                 LIMIT ?5",
+                vec![
+                    session_id,
+                    generation,
+                    occurrence_id,
+                    copied_from_occurrence_id,
+                    Value::Integer(limit),
+                ],
+            )
+        }
+        (SessionStoreTable::SessionAssertions, cursor) => {
+            let (session_id, generation, assertion_id) = match cursor {
+                Some(SessionStoreCursor::SessionAssertions {
+                    session_id,
+                    generation,
+                    assertion_id,
+                }) => (
+                    Value::Text(session_id.clone()),
+                    Value::Integer(*generation),
+                    Value::Text(assertion_id.clone()),
+                ),
+                _ => (Value::Null, Value::Null, Value::Null),
+            };
+            (
+                "SELECT session_id, generation, assertion_id, assertion_kind, subject_anchor_id,
+                        object_anchor_id, knowledge_at, valid_time_json, evidence_json
+                 FROM session_assertions
+                 WHERE ?1 IS NULL
+                    OR session_id > ?1
+                    OR (session_id = ?1 AND generation > ?2)
+                    OR (session_id = ?1 AND generation = ?2 AND assertion_id > ?3)
+                 ORDER BY session_id, generation, assertion_id
+                 LIMIT ?4",
+                vec![session_id, generation, assertion_id, Value::Integer(limit)],
             )
         }
         (SessionStoreTable::SessionSummaryNodes, cursor) => (

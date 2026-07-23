@@ -247,6 +247,22 @@ fn decode_row(table: SessionStoreTable, row: &Row<'_>) -> rusqlite::Result<Sessi
             role: row.get(12)?,
             row_digest,
         }),
+        SessionStoreTable::SessionLogicalCopyEdges => {
+            Ok(SessionStoreRow::SessionLogicalCopyEdges {
+                session_id: row.get(0)?,
+                generation: row.get(1)?,
+                occurrence_id: row.get(2)?,
+                copied_from_occurrence_id: row.get(3)?,
+                row_digest,
+            })
+        }
+        SessionStoreTable::SessionAssertions => Ok(SessionStoreRow::SessionAssertions {
+            session_id: row.get(0)?,
+            generation: row.get(1)?,
+            assertion_id: row.get(2)?,
+            assertion_kind: row.get(3)?,
+            row_digest,
+        }),
         SessionStoreTable::SessionSummaryNodes => Ok(SessionStoreRow::SessionSummaryNodes {
             summary_id: row.get(0)?,
             session_id: row.get(1)?,
@@ -323,6 +339,28 @@ fn cursor_for_row(row: &SessionStoreRow) -> SessionStoreCursor {
             session_id: session_id.clone(),
             generation: *generation,
             occurrence_id: occurrence_id.clone(),
+        },
+        SessionStoreRow::SessionLogicalCopyEdges {
+            session_id,
+            generation,
+            occurrence_id,
+            copied_from_occurrence_id,
+            ..
+        } => SessionStoreCursor::SessionLogicalCopyEdges {
+            session_id: session_id.clone(),
+            generation: *generation,
+            occurrence_id: occurrence_id.clone(),
+            copied_from_occurrence_id: copied_from_occurrence_id.clone(),
+        },
+        SessionStoreRow::SessionAssertions {
+            session_id,
+            generation,
+            assertion_id,
+            ..
+        } => SessionStoreCursor::SessionAssertions {
+            session_id: session_id.clone(),
+            generation: *generation,
+            assertion_id: assertion_id.clone(),
         },
         SessionStoreRow::SessionSummaryNodes { summary_id, .. } => {
             SessionStoreCursor::SessionSummaryNodes {

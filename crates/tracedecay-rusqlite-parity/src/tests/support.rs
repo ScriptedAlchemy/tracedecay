@@ -179,6 +179,29 @@ pub(super) fn fixture() -> Fixture {
                 index_text TEXT NOT NULL,
                 PRIMARY KEY(session_id, generation, occurrence_id)
             );
+            CREATE TABLE session_logical_copy_edges (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                occurrence_id TEXT NOT NULL,
+                copied_from_occurrence_id TEXT NOT NULL,
+                proof_json TEXT NOT NULL,
+                knowledge_at INTEGER NOT NULL,
+                valid_time_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(session_id, generation, occurrence_id, copied_from_occurrence_id)
+            );
+            CREATE TABLE session_assertions (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                assertion_id TEXT NOT NULL,
+                assertion_kind TEXT NOT NULL,
+                subject_anchor_id TEXT NOT NULL,
+                object_anchor_id TEXT NOT NULL,
+                knowledge_at INTEGER NOT NULL,
+                valid_time_json TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                PRIMARY KEY(session_id, generation, assertion_id)
+            );
             CREATE TABLE session_summary_nodes (
                 summary_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -257,9 +280,25 @@ pub(super) fn fixture() -> Fixture {
                  session_id, generation, occurrence_id, source_observation_id,
                  projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
                  valid_time_json, evidence_json, snippet_text, index_text
+             ) VALUES
+                 ('session-1', 1, 'occurrence-1', 'observation-1', 0, 'anchor-1', 'user', 1,
+                  '{\"kind\":\"unknown\"}', '{}', 'snippet', 'index'),
+                 ('session-1', 1, 'occurrence-2', 'observation-1', 1, 'anchor-2', 'assistant', 2,
+                  '{\"kind\":\"unknown\"}', '{}', 'snippet', 'index');
+             INSERT INTO session_logical_copy_edges(
+                 session_id, generation, occurrence_id, copied_from_occurrence_id,
+                 proof_json, knowledge_at, valid_time_json, created_at
+             ) VALUES
+                 ('session-1', 1, 'occurrence-2', 'occurrence-1', '{}', 2,
+                  '{\"kind\":\"unknown\"}', 2),
+                 ('session-1', 1, 'occurrence-3', 'occurrence-1', '{}', 3,
+                  '{\"kind\":\"unknown\"}', 3);
+             INSERT INTO session_assertions(
+                 session_id, generation, assertion_id, assertion_kind, subject_anchor_id,
+                 object_anchor_id, knowledge_at, valid_time_json, evidence_json
              ) VALUES (
-                 'session-1', 1, 'occurrence-1', 'observation-1', 0, 'anchor-1', 'user', 1,
-                 '{\"kind\":\"unknown\"}', '{}', 'snippet', 'index'
+                 'session-1', 1, 'assertion-1', 'supersedes', 'anchor-1', 'anchor-2', 1,
+                 '{\"kind\":\"unknown\"}', '{}'
              );
              INSERT INTO session_summary_nodes(
                  summary_id, session_id, summary_anchor_id, summary_text, index_text,
