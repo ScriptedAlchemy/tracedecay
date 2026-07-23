@@ -2654,6 +2654,42 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .read_snapshot()
                 .await
                 .map_err(|_| ConfigurationError::Unavailable)?;
+            // A durable database whose configuration tables were never created
+            // (for example a sessions.db seeded by another component before any
+            // configuration migration ran) holds no revision by definition.
+            // Counting rows in absent tables would raise a SQL error and be
+            // misreported as an availability failure, so table presence is
+            // checked first.
+            let mut table_rows = read
+                .query(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table'
+                       AND name IN (
+                           'configuration_revisions',
+                           'configuration_migration_receipts'
+                       )",
+                    (),
+                )
+                .await
+                .map_err(|_| ConfigurationError::Unavailable)?;
+            let table_count = table_rows
+                .next()
+                .await
+                .map_err(|_| ConfigurationError::Unavailable)?
+                .ok_or_else(|| {
+                    ConfigurationError::validation_message(
+                        "configuration table presence query returned no row",
+                    )
+                })?
+                .get::<i64>(0)
+                .map_err(|_| {
+                    ConfigurationError::validation_message(
+                        "configuration table count is not an integer",
+                    )
+                })?;
+            if table_count < 2 {
+                return Ok(true);
+            }
             let mut rows = read
                 .query(
                     "SELECT

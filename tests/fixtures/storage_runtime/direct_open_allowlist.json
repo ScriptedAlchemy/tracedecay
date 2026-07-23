@@ -85,6 +85,11 @@
       "disposition": "test-only repair fixture"
     },
     {
+      "path": "crates/tracedecay-rusqlite-runtime/src/repository/observation.rs",
+      "callee": "Connection::open_in_memory",
+      "disposition": "test-only observation repository fixture"
+    },
+    {
       "path": "crates/tracedecay-rusqlite-runtime/src/runtime/doctor.rs",
       "callee": "Connection::open",
       "disposition": "test-only Doctor fixture"
@@ -93,6 +98,31 @@
       "path": "crates/tracedecay-rusqlite-runtime/src/s11_evidence_tests.rs",
       "callee": "Connection::open",
       "disposition": "test-only S11 evidence fixture"
+    },
+    {
+      "path": "src/agents/context_scout_v2/store_tests.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only store fixture"
+    },
+    {
+      "path": "src/application/advisory/github_runtime.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only GitHub review store fixture"
+    },
+    {
+      "path": "src/application/advisory/github_runtime.rs",
+      "callee": "Database::open",
+      "disposition": "test-only GitHub review store fixture"
+    },
+    {
+      "path": "src/application/advisory/github_runtime/network.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only GitHub review store fixture"
+    },
+    {
+      "path": "src/application/evidence_assembly_tests.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only evidence assembly fixture"
     },
     {
       "path": "src/automation/fact_proposals_test.rs",
@@ -142,6 +172,11 @@
     {
       "path": "src/dashboard/memory_curate.rs",
       "callee": "Database::initialize",
+      "disposition": "test-only dashboard fixture"
+    },
+    {
+      "path": "src/dashboard/storage_telemetry_api.rs",
+      "callee": "Builder::new_local",
       "disposition": "test-only dashboard fixture"
     },
     {
@@ -208,6 +243,11 @@
       "path": "src/db/redundancy_pairs.rs",
       "callee": "Database::initialize",
       "disposition": "test-only store fixture"
+    },
+    {
+      "path": "src/db/retrieval_anchor_authority.rs",
+      "callee": "Database::initialize",
+      "disposition": "test-only retrieval anchor fixture"
     },
     {
       "path": "src/db/retrieval_anchor_schema.rs",
@@ -368,16 +408,6 @@
       "path": "src/store/memory/memory_repair_test.rs",
       "callee": "Database::initialize",
       "disposition": "test-only memory repair fixture"
-    },
-    {
-      "path": "src/store/memory_benchmark.rs",
-      "callee": "Database::initialize",
-      "disposition": "benchmark-only memory fixture"
-    },
-    {
-      "path": "src/store/memory_benchmark.rs",
-      "callee": "libsql::Builder::new_local",
-      "disposition": "benchmark-only memory fixture"
     }
   ]
 }
