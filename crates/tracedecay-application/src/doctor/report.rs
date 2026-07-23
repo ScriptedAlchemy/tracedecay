@@ -328,8 +328,9 @@ impl<'a> DoctorReportComposerV1<'a> {
                 DoctorFindingFamilyV1::SemanticIndex => self.compose_code_index(context).await?,
                 // No source port is wired for these families yet; they are
                 // carried as unwired rather than omitted.
-                DoctorFindingFamilyV1::LanguageServer
-                | DoctorFindingFamilyV1::Observability => unwired_family(family)?,
+                DoctorFindingFamilyV1::LanguageServer | DoctorFindingFamilyV1::Observability => {
+                    unwired_family(family)?
+                }
             };
             entries.extend(family_entries);
             coverage.push(DoctorFamilyCoverageV1 {
@@ -348,10 +349,8 @@ impl<'a> DoctorReportComposerV1<'a> {
     async fn compose_configuration(
         &self,
         context: &RequestContext,
-    ) -> Result<
-        (Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1),
-        ApplicationContractError,
-    > {
+    ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
+    {
         let Some(port) = self.configuration else {
             return unwired_family(DoctorFindingFamilyV1::Configuration);
         };
@@ -371,10 +370,8 @@ impl<'a> DoctorReportComposerV1<'a> {
     async fn compose_runtime(
         &self,
         context: &RequestContext,
-    ) -> Result<
-        (Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1),
-        ApplicationContractError,
-    > {
+    ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
+    {
         let Some(port) = self.runtime else {
             return unwired_family(DoctorFindingFamilyV1::StorageRuntime);
         };
@@ -394,10 +391,8 @@ impl<'a> DoctorReportComposerV1<'a> {
     async fn compose_host(
         &self,
         context: &RequestContext,
-    ) -> Result<
-        (Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1),
-        ApplicationContractError,
-    > {
+    ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
+    {
         let Some(port) = self.host else {
             return unwired_family(DoctorFindingFamilyV1::Advisory);
         };
@@ -417,10 +412,8 @@ impl<'a> DoctorReportComposerV1<'a> {
     async fn compose_code_index(
         &self,
         context: &RequestContext,
-    ) -> Result<
-        (Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1),
-        ApplicationContractError,
-    > {
+    ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
+    {
         let Some(port) = self.code_index else {
             return unwired_family(DoctorFindingFamilyV1::SemanticIndex);
         };
@@ -440,10 +433,8 @@ impl<'a> DoctorReportComposerV1<'a> {
     async fn compose_storage(
         &self,
         context: &RequestContext,
-    ) -> Result<
-        (Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1),
-        ApplicationContractError,
-    > {
+    ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
+    {
         let Some(port) = self.storage else {
             return unwired_family(DoctorFindingFamilyV1::Storage);
         };
@@ -558,11 +549,7 @@ fn build_coverage(
 
 /// Build the bounded human-readable coverage statement enumerating unavailable
 /// families. Kept within the 512-byte coverage-statement budget.
-fn build_statement(
-    families: &[DoctorFamilyCoverageV1],
-    consulted: usize,
-    total: usize,
-) -> String {
+fn build_statement(families: &[DoctorFamilyCoverageV1], consulted: usize, total: usize) -> String {
     let mut unavailable_list = String::new();
     for record in families {
         if let DoctorFamilyConsultationV1::Unavailable { reason } = record.consultation {

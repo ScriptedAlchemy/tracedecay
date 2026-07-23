@@ -210,7 +210,11 @@ impl EventStreamState {
     }
 
     /// Poll all real sources against `state`, appending any change events.
-    async fn poll_sources(&mut self, state: &DashboardState, scope: &DashboardScopeV1) -> Vec<DashboardEventV1> {
+    async fn poll_sources(
+        &mut self,
+        state: &DashboardState,
+        scope: &DashboardScopeV1,
+    ) -> Vec<DashboardEventV1> {
         let mut events = Vec::new();
         if let Some((digest, count)) = registry_snapshot(state).await
             && let Some(event) = self.detect_registry_change(digest, count, scope)
@@ -356,9 +360,17 @@ mod tests {
         let scope = scope();
 
         // First observation is the baseline: no event.
-        assert!(state.detect_registry_change("digest-a".into(), 3, &scope).is_none());
+        assert!(
+            state
+                .detect_registry_change("digest-a".into(), 3, &scope)
+                .is_none()
+        );
         // Same digest: still no event.
-        assert!(state.detect_registry_change("digest-a".into(), 3, &scope).is_none());
+        assert!(
+            state
+                .detect_registry_change("digest-a".into(), 3, &scope)
+                .is_none()
+        );
 
         // Seeded change: emits a monotone event carrying the new digest.
         let event = state
@@ -418,7 +430,9 @@ mod tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path()).await.expect("project init");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
         let dash = crate::dashboard::build_state(&cg)
             .await
             .expect("dashboard state");

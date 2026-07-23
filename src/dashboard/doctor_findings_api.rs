@@ -57,8 +57,7 @@ const KNOWN_FAMILIES: [DoctorFindingFamilyV1; 7] = [
     DoctorFindingFamilyV1::Observability,
 ];
 
-const UNSUPPORTED_NOTE: &str =
-    "the Doctor composing use case that produces live findings has not landed yet; \
+const UNSUPPORTED_NOTE: &str = "the Doctor composing use case that produces live findings has not landed yet; \
      the finding contract is bound but no producer source is wired server-side";
 
 /// `GET /api/doctor/findings`
@@ -127,7 +126,9 @@ mod tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path()).await.expect("project init");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
         let state = crate::dashboard::build_state(&cg)
             .await
             .expect("dashboard state");
@@ -153,11 +154,7 @@ mod tests {
     async fn findings_route_is_typed_unsupported_not_empty_or_healthy() {
         let _pin = crate::config::PinnedUserDataDir::new();
         let (_project, state) = state_for_test().await;
-        let Json(envelope) = findings(
-            State(state),
-            Query(FindingsParams { family: None }),
-        )
-        .await;
+        let Json(envelope) = findings(State(state), Query(FindingsParams { family: None })).await;
 
         assert_eq!(envelope.schema_revision, 1);
         // Absent producer -> unsupported, never complete_zero_findings/ready.

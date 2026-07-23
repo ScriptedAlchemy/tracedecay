@@ -27,8 +27,8 @@ use tracedecay_domain::UtcMicros;
 
 use super::DashboardState;
 use super::read_model::{
-    DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1, DashboardLegalActionRefV1,
-    now_micros, scope_from_state,
+    DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1,
+    DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
 
 /// One store's telemetry entry.
@@ -250,7 +250,9 @@ mod tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path()).await.expect("project init");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
         let state = crate::dashboard::build_state(&cg)
             .await
             .expect("dashboard state");
@@ -278,13 +280,20 @@ mod tests {
                 "store {} should have an observed size read",
                 entry.store
             );
-            assert!(entry.total_bytes.unwrap_or(0) > 0, "store {} sized", entry.store);
+            assert!(
+                entry.total_bytes.unwrap_or(0) > 0,
+                "store {} sized",
+                entry.store
+            );
             // Budget and growth are typed-absent, never fabricated.
             assert!(matches!(
                 entry.budget,
                 StoreBudgetDimensionV1::Unsupported { .. }
             ));
-            assert!(matches!(entry.growth, StoreGrowthDimensionV1::Absent { .. }));
+            assert!(matches!(
+                entry.growth,
+                StoreGrowthDimensionV1::Absent { .. }
+            ));
         }
 
         // Complete coverage carries a real denominator equal to the store count.

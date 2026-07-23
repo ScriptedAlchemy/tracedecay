@@ -51,10 +51,10 @@ mod memory_service;
 mod projects;
 mod read_model;
 mod savings_api;
-mod storage_findings_api;
-mod storage_telemetry_api;
 mod savings_pricing;
 mod settings_api;
+mod storage_findings_api;
+mod storage_telemetry_api;
 mod token_count;
 mod util;
 
@@ -1030,18 +1030,12 @@ fn project_api_router() -> Router<DashboardState> {
         // PR14 V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
         // family, plan-38 storage telemetry/findings, code-index freshness, and
         // the typed SSE stream. See `read_model` for the normative envelope.
-        .route(
-            "/api/doctor/findings",
-            get(doctor_findings_api::findings),
-        )
+        .route("/api/doctor/findings", get(doctor_findings_api::findings))
         .route(
             "/api/storage/telemetry",
             get(storage_telemetry_api::telemetry),
         )
-        .route(
-            "/api/storage/findings",
-            get(storage_findings_api::findings),
-        )
+        .route("/api/storage/findings", get(storage_findings_api::findings))
         .route(
             "/api/code-index/freshness",
             get(code_index_freshness_api::freshness),

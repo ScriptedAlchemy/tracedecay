@@ -161,7 +161,9 @@ pub fn configuration_finding(
                 "configuration.resolved.drifted",
                 *coverage,
                 "effective configuration diverges from the desired authority",
-                Some(action_remediation(operations::CONFIGURATION_PROTECTED_APPLY)?),
+                Some(action_remediation(
+                    operations::CONFIGURATION_PROTECTED_APPLY,
+                )?),
             ),
             ConfigurationDriftV1::PinUnavailable => source_finding(
                 family,
@@ -574,7 +576,9 @@ pub enum DoctorStorageFamilyReadV1 {
     /// The storage runtime produced these typed findings (may be empty when the
     /// profile has no stores; the composer treats an empty observed read as an
     /// absent family rather than a healthy claim).
-    Observed { findings: Vec<DoctorStorageFindingV1> },
+    Observed {
+        findings: Vec<DoctorStorageFindingV1>,
+    },
     /// Storage retention/size telemetry is unsupported on this build/platform.
     Unsupported,
     /// The storage runtime is reachable but produced no findings.

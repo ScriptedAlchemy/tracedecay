@@ -423,14 +423,21 @@ impl<T> DashboardEnvelopeV1<T> {
     /// genuinely complete coverage is enforced here: a non-complete coverage
     /// argument downgrades the state to `partial` rather than lying.
     #[must_use]
-    pub fn complete_zero_findings(scope: DashboardScopeV1, coverage: DashboardCoverageV1, payload: T) -> Self {
+    pub fn complete_zero_findings(
+        scope: DashboardScopeV1,
+        coverage: DashboardCoverageV1,
+        payload: T,
+    ) -> Self {
         let (state, freshness) = if coverage.is_complete() {
             (
                 DashboardDomainStateV1::CompleteZeroFindings,
                 DashboardFreshnessV1::fresh_now(),
             )
         } else {
-            (DashboardDomainStateV1::Partial, DashboardFreshnessV1::unknown())
+            (
+                DashboardDomainStateV1::Partial,
+                DashboardFreshnessV1::unknown(),
+            )
         };
         Self::new(scope, state, coverage, freshness, payload)
     }

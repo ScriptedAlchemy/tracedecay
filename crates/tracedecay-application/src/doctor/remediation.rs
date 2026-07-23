@@ -16,9 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApplicationContractError;
 
-use super::types::{
-    DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
-};
+use super::types::{DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1};
 
 /// Canonical owning-operation reference strings.
 ///
@@ -43,7 +41,8 @@ pub mod operations {
     pub const CONFIGURATION_PROTECTED_APPLY: &str =
         "use-case.application.configuration.protected-apply";
     /// Re-establish a requested configuration pin the authority could not honor.
-    pub const CONFIGURATION_PIN_AUTHORITY: &str = "use-case.application.configuration.pin-authority";
+    pub const CONFIGURATION_PIN_AUTHORITY: &str =
+        "use-case.application.configuration.pin-authority";
     /// Recover a stuck, degraded, or unreachable daemon/runtime.
     pub const RUNTIME_RECOVER_DAEMON: &str = "use-case.application.runtime.recover-daemon";
     /// Repair a host/agent integration whose conformance has drifted.

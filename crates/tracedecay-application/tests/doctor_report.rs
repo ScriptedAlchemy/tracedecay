@@ -12,6 +12,7 @@ mod common;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
+use tracedecay_application::doctor::operations;
 use tracedecay_application::{
     CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
     ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
@@ -19,11 +20,11 @@ use tracedecay_application::{
     DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorRemediationKindV1,
     DoctorRemediationRefV1, DoctorRemediationRegistryV1, DoctorRemediationResolutionErrorV1,
     DoctorReportComposerV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
-    DoctorStorageFindingKindV1, HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1,
-    OrphanStoreRecordV1, RequestContext, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
-    RuntimeLivenessV1, StorageByteSizeV1, StorageDoctorPort, StoreKeyV1, orphan_store_finding,
+    DoctorStorageFindingKindV1, HostConformanceV1, HostIntegrationDoctorPort,
+    HostIntegrationReadV1, OrphanStoreRecordV1, RequestContext, RuntimeHealthDoctorPort,
+    RuntimeHealthReadV1, RuntimeLivenessV1, StorageByteSizeV1, StorageDoctorPort, StoreKeyV1,
+    orphan_store_finding,
 };
-use tracedecay_application::doctor::operations;
 use tracedecay_domain::UtcMicros;
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -145,8 +146,12 @@ fn doctor_report_composes_all_families_from_mixed_sources() {
 
     // Every one of the seven families is represented; nothing is silently
     // omitted, and findings are never merged (each family contributes >= 1).
-    let families: Vec<DoctorFindingFamilyV1> =
-        report.coverage().families().iter().map(|c| c.family()).collect();
+    let families: Vec<DoctorFindingFamilyV1> = report
+        .coverage()
+        .families()
+        .iter()
+        .map(|c| c.family())
+        .collect();
     assert_eq!(families.len(), 7);
     for family in [
         DoctorFindingFamilyV1::Advisory,
@@ -223,7 +228,10 @@ fn doctor_report_coverage_statement_is_truthful_about_unavailable_families() {
     }
 
     let statement = report.coverage().statement().statement();
-    assert!(statement.contains("consulted 1/7"), "statement: {statement}");
+    assert!(
+        statement.contains("consulted 1/7"),
+        "statement: {statement}"
+    );
     assert!(statement.contains("unavailable"), "statement: {statement}");
     assert!(
         statement.contains("language_server(unwired)"),

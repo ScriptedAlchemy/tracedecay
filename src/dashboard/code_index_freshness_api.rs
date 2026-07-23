@@ -49,13 +49,11 @@ pub(crate) struct CodeIndexFreshnessPayloadV1 {
     pub note: String,
 }
 
-const REQUIRED_SOURCE: &str =
-    "a read port over crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistry \
+const REQUIRED_SOURCE: &str = "a read port over crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistry \
      (latest_generation_id, last-reconcile watermark, staleness-threshold state, \
      hook-hint counts) threaded into DashboardState";
 
-const NOTE: &str =
-    "the code-index scheduler registry is owned by the daemon runtime and is not \
+const NOTE: &str = "the code-index scheduler registry is owned by the daemon runtime and is not \
      yet exposed to the dashboard state; per-worktree generation/freshness is \
      typed unsupported until that read port is wired";
 
@@ -87,7 +85,9 @@ mod tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path()).await.expect("project init");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
         let state = crate::dashboard::build_state(&cg)
             .await
             .expect("dashboard state");
@@ -104,7 +104,10 @@ mod tests {
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unsupported);
         assert!(envelope.payload.worktrees.is_empty());
         assert!(
-            envelope.payload.required_source.contains("CodeIndexSchedulerRegistry"),
+            envelope
+                .payload
+                .required_source
+                .contains("CodeIndexSchedulerRegistry"),
             "the seam must name the registry read port"
         );
     }

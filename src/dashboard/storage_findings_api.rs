@@ -49,8 +49,7 @@ pub(crate) struct StorageFindingsPayloadV1 {
     pub note: String,
 }
 
-const NOTE: &str =
-    "the five plan-38 storage finding producers are landed, but their input read \
+const NOTE: &str = "the five plan-38 storage finding producers are landed, but their input read \
      sources are not yet wired daemon-side; each kind is typed unsupported until \
      its source is available";
 
@@ -126,7 +125,9 @@ mod tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path()).await.expect("project init");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
         let state = crate::dashboard::build_state(&cg)
             .await
             .expect("dashboard state");
