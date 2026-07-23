@@ -320,6 +320,20 @@ fn decode_row(table: SessionStoreTable, row: &Row<'_>) -> rusqlite::Result<Sessi
             projection_generation: row.get(3)?,
             row_digest,
         }),
+        SessionStoreTable::GenerationDiagnostics => Ok(SessionStoreRow::GenerationDiagnostics {
+            diagnostic_anchor: row.get(0)?,
+            generation_id: row.get(1)?,
+            severity: row.get(12)?,
+            record_state: row.get(22)?,
+            row_digest,
+        }),
+        SessionStoreTable::DiagnosticGenerationPublications => {
+            Ok(SessionStoreRow::DiagnosticGenerationPublications {
+                generation_id: row.get(0)?,
+                record_state: row.get(1)?,
+                row_digest,
+            })
+        }
     }
 }
 
@@ -482,6 +496,16 @@ fn cursor_for_row(row: &SessionStoreRow) -> SessionStoreCursor {
         SessionStoreRow::RetrievalAnchors { anchor_id, .. } => {
             SessionStoreCursor::RetrievalAnchors {
                 anchor_id: anchor_id.clone(),
+            }
+        }
+        SessionStoreRow::GenerationDiagnostics {
+            diagnostic_anchor, ..
+        } => SessionStoreCursor::GenerationDiagnostics {
+            diagnostic_anchor: diagnostic_anchor.clone(),
+        },
+        SessionStoreRow::DiagnosticGenerationPublications { generation_id, .. } => {
+            SessionStoreCursor::DiagnosticGenerationPublications {
+                generation_id: generation_id.clone(),
             }
         }
     }

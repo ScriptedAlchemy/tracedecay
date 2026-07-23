@@ -287,6 +287,39 @@ pub(crate) fn fixture() -> Fixture {
                 owner_json TEXT NOT NULL,
                 projection_generation TEXT NOT NULL
             );
+            CREATE TABLE generation_diagnostics (
+                diagnostic_anchor TEXT PRIMARY KEY,
+                generation_id TEXT NOT NULL,
+                repository TEXT NOT NULL,
+                worktree TEXT,
+                reference TEXT,
+                source_revision TEXT,
+                file_occurrence_id TEXT NOT NULL,
+                content_digest TEXT NOT NULL,
+                symbol_occurrence_id TEXT,
+                span_start INTEGER NOT NULL,
+                span_end INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                message TEXT NOT NULL,
+                message_digest TEXT NOT NULL,
+                producer_kind TEXT NOT NULL,
+                producer TEXT NOT NULL,
+                analyzer_revision TEXT NOT NULL,
+                configuration_revision TEXT NOT NULL,
+                sanitization_receipt TEXT,
+                evidence_class TEXT NOT NULL,
+                collected_at INTEGER NOT NULL,
+                record_state TEXT NOT NULL DEFAULT 'current',
+                state_generation TEXT,
+                persisted_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE diagnostic_generation_publications (
+                generation_id TEXT PRIMARY KEY,
+                record_state TEXT NOT NULL,
+                state_generation TEXT,
+                published_at INTEGER NOT NULL
+            );
             CREATE VIRTUAL TABLE nodes_fts USING fts5(
                 name, qualified_name, docstring, signature,
                 content='nodes', content_rowid='rowid'
@@ -406,6 +439,24 @@ pub(crate) fn fixture() -> Fixture {
             ) VALUES
                 ('anchor-1', '{}', '{}', 'generation-1'),
                 ('anchor-2', '{}', '{}', 'generation-2');
+            INSERT INTO generation_diagnostics(
+                diagnostic_anchor, generation_id, repository, file_occurrence_id,
+                content_digest, span_start, span_end, code, severity, message,
+                message_digest, producer_kind, producer, analyzer_revision,
+                configuration_revision, evidence_class, collected_at, record_state,
+                persisted_at
+            ) VALUES
+                ('diagnostic-1', 'generation-1', 'repo', 'file-1', 'content-1', 0, 4,
+                 'E0001', 'error', 'boom', 'message-1', 'compiler', 'rustc', 'r1', 'c1',
+                 'observed', 1, 'current', 1),
+                ('diagnostic-2', 'generation-1', 'repo', 'file-1', 'content-1', 5, 9,
+                 'W0001', 'warning', 'hmm', 'message-2', 'compiler', 'rustc', 'r1', 'c1',
+                 'observed', 2, 'superseded', 2);
+            INSERT INTO diagnostic_generation_publications(
+                generation_id, record_state, state_generation, published_at
+            ) VALUES
+                ('generation-1', 'superseded', 'generation-2', 1),
+                ('generation-2', 'current', NULL, 2);
             INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild');",
         )
         .expect("create fixture schema");

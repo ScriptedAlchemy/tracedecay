@@ -11,6 +11,7 @@ pub enum SessionStoreFamily {
     Temporal,
     Summary,
     Fact,
+    Diagnostics,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -37,6 +38,8 @@ pub enum SessionStoreTable {
     MemoryV2Assertions,
     MemoryV2LineageEvents,
     RetrievalAnchors,
+    GenerationDiagnostics,
+    DiagnosticGenerationPublications,
 }
 
 impl SessionStoreTable {
@@ -61,6 +64,9 @@ impl SessionStoreTable {
             | Self::MemoryV2Assertions
             | Self::MemoryV2LineageEvents
             | Self::RetrievalAnchors => SessionStoreFamily::Fact,
+            Self::GenerationDiagnostics | Self::DiagnosticGenerationPublications => {
+                SessionStoreFamily::Diagnostics
+            }
         }
     }
 
@@ -95,6 +101,8 @@ impl SessionStoreTable {
             Self::MemoryV2Assertions => &["assertion_id", "fact_id", "owner_kind", "project_id"],
             Self::MemoryV2LineageEvents => &["event_sequence"],
             Self::RetrievalAnchors => &["anchor_id"],
+            Self::GenerationDiagnostics => &["diagnostic_anchor"],
+            Self::DiagnosticGenerationPublications => &["generation_id"],
         }
     }
 }
@@ -188,6 +196,12 @@ pub enum SessionStoreCursor {
     },
     RetrievalAnchors {
         anchor_id: String,
+    },
+    GenerationDiagnostics {
+        diagnostic_anchor: String,
+    },
+    DiagnosticGenerationPublications {
+        generation_id: String,
     },
 }
 
@@ -378,6 +392,18 @@ pub enum SessionStoreRow {
     RetrievalAnchors {
         anchor_id: String,
         projection_generation: String,
+        row_digest: String,
+    },
+    GenerationDiagnostics {
+        diagnostic_anchor: String,
+        generation_id: String,
+        severity: String,
+        record_state: String,
+        row_digest: String,
+    },
+    DiagnosticGenerationPublications {
+        generation_id: String,
+        record_state: String,
         row_digest: String,
     },
 }
@@ -634,6 +660,20 @@ fn validate_page_cursor(
             SessionStoreCursor::RetrievalAnchors { anchor_id },
         ) => {
             validate_cursor_text("anchor_id", anchor_id)?;
+            true
+        }
+        (
+            SessionStoreTable::GenerationDiagnostics,
+            SessionStoreCursor::GenerationDiagnostics { diagnostic_anchor },
+        ) => {
+            validate_cursor_text("diagnostic_anchor", diagnostic_anchor)?;
+            true
+        }
+        (
+            SessionStoreTable::DiagnosticGenerationPublications,
+            SessionStoreCursor::DiagnosticGenerationPublications { generation_id },
+        ) => {
+            validate_cursor_text("generation_id", generation_id)?;
             true
         }
         _ => false,

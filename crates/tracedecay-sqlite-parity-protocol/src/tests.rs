@@ -114,6 +114,7 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreFamily::Temporal,
         SessionStoreFamily::Summary,
         SessionStoreFamily::Fact,
+        SessionStoreFamily::Diagnostics,
     ] {
         round_trip(family);
     }
@@ -139,6 +140,8 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreTable::MemoryV2Assertions,
         SessionStoreTable::MemoryV2LineageEvents,
         SessionStoreTable::RetrievalAnchors,
+        SessionStoreTable::GenerationDiagnostics,
+        SessionStoreTable::DiagnosticGenerationPublications,
     ] {
         round_trip(table);
     }
@@ -223,6 +226,12 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreCursor::MemoryV2LineageEvents { event_sequence: 1 },
         SessionStoreCursor::RetrievalAnchors {
             anchor_id: "anchor".to_owned(),
+        },
+        SessionStoreCursor::GenerationDiagnostics {
+            diagnostic_anchor: "diagnostic".to_owned(),
+        },
+        SessionStoreCursor::DiagnosticGenerationPublications {
+            generation_id: "generation".to_owned(),
         },
     ] {
         round_trip(cursor);
@@ -390,7 +399,7 @@ fn every_graph_session_journal_and_response_result_variant_round_trips() {
     });
 }
 
-fn session_rows() -> [SessionStoreRow; 21] {
+fn session_rows() -> [SessionStoreRow; 23] {
     [
         SessionStoreRow::Observations {
             sequence: 1,
@@ -523,6 +532,18 @@ fn session_rows() -> [SessionStoreRow; 21] {
         SessionStoreRow::RetrievalAnchors {
             anchor_id: "anchor".to_owned(),
             projection_generation: "generation".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::GenerationDiagnostics {
+            diagnostic_anchor: "diagnostic".to_owned(),
+            generation_id: "generation".to_owned(),
+            severity: "error".to_owned(),
+            record_state: "current".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::DiagnosticGenerationPublications {
+            generation_id: "generation".to_owned(),
+            record_state: "current".to_owned(),
             row_digest: "row".to_owned(),
         },
     ]

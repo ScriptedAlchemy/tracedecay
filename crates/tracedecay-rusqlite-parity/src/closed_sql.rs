@@ -205,6 +205,18 @@ pub(crate) fn session_table_spec(table: SessionStoreTable) -> TableSpec {
             "PRAGMA table_info(retrieval_anchors)",
             "PRAGMA foreign_key_list(retrieval_anchors)",
         ),
+        SessionStoreTable::GenerationDiagnostics => session_table(
+            "generation_diagnostics",
+            "SELECT COUNT(*) FROM generation_diagnostics",
+            "PRAGMA table_info(generation_diagnostics)",
+            "PRAGMA foreign_key_list(generation_diagnostics)",
+        ),
+        SessionStoreTable::DiagnosticGenerationPublications => session_table(
+            "diagnostic_generation_publications",
+            "SELECT COUNT(*) FROM diagnostic_generation_publications",
+            "PRAGMA table_info(diagnostic_generation_publications)",
+            "PRAGMA foreign_key_list(diagnostic_generation_publications)",
+        ),
     }
 }
 
@@ -698,6 +710,43 @@ pub(crate) fn session_page_query(
                     Some(SessionStoreCursor::RetrievalAnchors { anchor_id }) => {
                         Value::Text(anchor_id.clone())
                     }
+                    _ => Value::Null,
+                },
+                Value::Integer(limit),
+            ],
+        ),
+        (SessionStoreTable::GenerationDiagnostics, cursor) => (
+            "SELECT diagnostic_anchor, generation_id, repository, worktree, reference,
+                    source_revision, file_occurrence_id, content_digest, symbol_occurrence_id,
+                    span_start, span_end, code, severity, message, message_digest,
+                    producer_kind, producer, analyzer_revision, configuration_revision,
+                    sanitization_receipt, evidence_class, collected_at, record_state,
+                    state_generation, persisted_at
+             FROM generation_diagnostics
+             WHERE ?1 IS NULL OR diagnostic_anchor > ?1
+             ORDER BY diagnostic_anchor
+             LIMIT ?2",
+            vec![
+                match cursor {
+                    Some(SessionStoreCursor::GenerationDiagnostics { diagnostic_anchor }) => {
+                        Value::Text(diagnostic_anchor.clone())
+                    }
+                    _ => Value::Null,
+                },
+                Value::Integer(limit),
+            ],
+        ),
+        (SessionStoreTable::DiagnosticGenerationPublications, cursor) => (
+            "SELECT generation_id, record_state, state_generation, published_at
+             FROM diagnostic_generation_publications
+             WHERE ?1 IS NULL OR generation_id > ?1
+             ORDER BY generation_id
+             LIMIT ?2",
+            vec![
+                match cursor {
+                    Some(SessionStoreCursor::DiagnosticGenerationPublications {
+                        generation_id,
+                    }) => Value::Text(generation_id.clone()),
                     _ => Value::Null,
                 },
                 Value::Integer(limit),

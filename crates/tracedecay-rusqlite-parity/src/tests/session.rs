@@ -155,6 +155,14 @@ fn session_counts_schema_and_keyset_pages_cover_every_closed_table() {
             "memory_v2_lineage_events",
         ),
         (SessionStoreTable::RetrievalAnchors, "retrieval_anchors"),
+        (
+            SessionStoreTable::GenerationDiagnostics,
+            "generation_diagnostics",
+        ),
+        (
+            SessionStoreTable::DiagnosticGenerationPublications,
+            "diagnostic_generation_publications",
+        ),
     ] {
         let Output::SessionStorePage(page) = execute(
             &fixture.path,
@@ -681,6 +689,93 @@ fn memory_v2_lineage_event_pages_walk_the_sequence_keyset() {
     assert!(second.next_cursor.is_none());
 }
 
+#[test]
+fn generation_diagnostic_pages_walk_the_anchor_keyset() {
+    let fixture = fixture();
+    let first = single_row_page(
+        &fixture.path,
+        SessionStoreTable::GenerationDiagnostics,
+        None,
+    );
+    assert_eq!(first.order_columns, ["diagnostic_anchor"]);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::GenerationDiagnostics {
+            diagnostic_anchor,
+            generation_id,
+            severity,
+            record_state,
+            row_digest,
+        } if diagnostic_anchor == "diagnostic-1"
+            && generation_id == "generation-1"
+            && severity == "error"
+            && record_state == "current"
+            && row_digest.starts_with("sha256:")
+    ));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("generation-diagnostic cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::GenerationDiagnostics,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::GenerationDiagnostics {
+            diagnostic_anchor,
+            severity,
+            ..
+        } if diagnostic_anchor == "diagnostic-2" && severity == "warning"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn diagnostic_publication_pages_walk_the_generation_keyset_with_digest_oracle() {
+    let fixture = fixture();
+    let first = single_row_page(
+        &fixture.path,
+        SessionStoreTable::DiagnosticGenerationPublications,
+        None,
+    );
+    assert_eq!(first.order_columns, ["generation_id"]);
+    let mut oracle = CanonicalRowHasher::new();
+    oracle.update_text(b"generation-1");
+    oracle.update_text(b"superseded");
+    oracle.update_text(b"generation-2");
+    oracle.update_integer(1);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::DiagnosticGenerationPublications {
+            generation_id,
+            record_state,
+            row_digest,
+        } if generation_id == "generation-1"
+            && record_state == "superseded"
+            && row_digest == &oracle.finish()
+    ));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("diagnostic-publication cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::DiagnosticGenerationPublications,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::DiagnosticGenerationPublications {
+            generation_id,
+            record_state,
+            ..
+        } if generation_id == "generation-2" && record_state == "current"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
 /// Guards against a silent canonical-digest subset: a page query that drops or
 /// reorders a physical column still changes row digests but would otherwise pass
 /// every value assertion. Requiring the SELECT column count to equal
@@ -727,7 +822,7 @@ fn single_row_page(
     page
 }
 
-const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 21] = [
+const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 23] = [
     SessionStoreTable::Observations,
     SessionStoreTable::SourceCursors,
     SessionStoreTable::Sessions,
@@ -749,4 +844,6 @@ const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 21] = [
     SessionStoreTable::MemoryV2Assertions,
     SessionStoreTable::MemoryV2LineageEvents,
     SessionStoreTable::RetrievalAnchors,
+    SessionStoreTable::GenerationDiagnostics,
+    SessionStoreTable::DiagnosticGenerationPublications,
 ];
