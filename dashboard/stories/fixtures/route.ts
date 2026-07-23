@@ -28,7 +28,7 @@ async function fulfillApi(route: Route): Promise<void> {
   await route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify(resolveFixture(url.pathname)),
+    body: JSON.stringify(resolveFixture(url.pathname, url.search)),
   });
 }
 

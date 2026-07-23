@@ -21,6 +21,6 @@ export const handlers = [
   ),
   http.get('*/api/*', ({ request }) => {
     const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname));
+    return HttpResponse.json(resolveFixture(url.pathname, url.search));
   }),
 ];
