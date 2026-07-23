@@ -546,6 +546,21 @@ impl DaemonInvocationState {
                     resources,
                 )
             });
+        // Code-index identity is anchored on the project root's own git
+        // repository (`IndexingIdentityV1::resolve` uses `gix::open` on the
+        // root, no upward discovery). A non-git project has no code-index
+        // identity by design: skip mounting instead of failing project open —
+        // every non-code-index surface stays available.
+        if let Err(error) = gix::open(project_root) {
+            tracing::warn!(
+                event = "code_index_mount",
+                outcome = "skipped",
+                project = %project_root.display(),
+                reason = %error,
+                "project root is not a git repository; code index disabled"
+            );
+            return Ok(());
+        }
         self.code_index_schedulers
             .mount_worktree(project_root, store_root, semantic_schedule)
             .await
