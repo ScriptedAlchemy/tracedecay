@@ -99,6 +99,7 @@ fn session_counts_schema_and_keyset_pages_cover_every_closed_table() {
     assert!(second_page.next_cursor.is_none());
 
     for (table, expected) in [
+        (SessionStoreTable::SourceCursors, "source_cursors"),
         (SessionStoreTable::Sessions, "sessions"),
         (SessionStoreTable::SessionMessages, "session_messages"),
         (
@@ -140,6 +141,20 @@ fn session_counts_schema_and_keyset_pages_cover_every_closed_table() {
             SessionStoreTable::SessionSummarySuccessors,
             "session_summary_successors",
         ),
+        (SessionStoreTable::MemoryV2Facts, "memory_v2_facts"),
+        (
+            SessionStoreTable::MemoryV2CurrentFacts,
+            "memory_v2_current_facts",
+        ),
+        (
+            SessionStoreTable::MemoryV2Assertions,
+            "memory_v2_assertions",
+        ),
+        (
+            SessionStoreTable::MemoryV2LineageEvents,
+            "memory_v2_lineage_events",
+        ),
+        (SessionStoreTable::RetrievalAnchors, "retrieval_anchors"),
     ] {
         let Output::SessionStorePage(page) = execute(
             &fixture.path,
@@ -461,6 +476,211 @@ fn summary_successor_pages_walk_the_composite_keyset_with_digest_oracle() {
     assert!(second.next_cursor.is_none());
 }
 
+#[test]
+fn source_cursor_pages_walk_the_composite_keyset_with_digest_oracle() {
+    let fixture = fixture();
+    let first = single_row_page(&fixture.path, SessionStoreTable::SourceCursors, None);
+    assert_eq!(first.order_columns, ["source_json", "scope_json"]);
+    let mut oracle = CanonicalRowHasher::new();
+    oracle.update_text(br#"{"source":"a"}"#);
+    oracle.update_text(br#"{"scope":"1"}"#);
+    oracle.update_text(br#"{"cursor":"1"}"#);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::SourceCursors {
+            source_json,
+            scope_json,
+            row_digest,
+        } if source_json == r#"{"source":"a"}"#
+            && scope_json == r#"{"scope":"1"}"#
+            && row_digest == &oracle.finish()
+    ));
+    let cursor = first.next_cursor.clone().expect("source-cursor cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::SourceCursors,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::SourceCursors { scope_json, .. }
+            if scope_json == r#"{"scope":"2"}"#
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn retrieval_anchor_pages_walk_the_identifier_keyset_with_digest_oracle() {
+    let fixture = fixture();
+    let first = single_row_page(&fixture.path, SessionStoreTable::RetrievalAnchors, None);
+    assert_eq!(first.order_columns, ["anchor_id"]);
+    let mut oracle = CanonicalRowHasher::new();
+    oracle.update_text(b"anchor-1");
+    oracle.update_text(b"{}");
+    oracle.update_text(b"{}");
+    oracle.update_text(b"generation-1");
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::RetrievalAnchors {
+            anchor_id,
+            projection_generation,
+            row_digest,
+        } if anchor_id == "anchor-1"
+            && projection_generation == "generation-1"
+            && row_digest == &oracle.finish()
+    ));
+    let cursor = first.next_cursor.clone().expect("retrieval-anchor cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::RetrievalAnchors,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::RetrievalAnchors { anchor_id, .. } if anchor_id == "anchor-2"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn memory_v2_fact_pages_walk_the_owner_keyset() {
+    let fixture = fixture();
+    let first = single_row_page(&fixture.path, SessionStoreTable::MemoryV2Facts, None);
+    assert_eq!(first.order_columns, ["fact_id", "owner_kind", "project_id"]);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::MemoryV2Facts {
+            fact_id,
+            owner_kind,
+            project_id,
+            identity_json,
+            row_digest,
+        } if fact_id == "fact-1"
+            && owner_kind == "project"
+            && project_id == "proj"
+            && identity_json == "{}"
+            && row_digest.starts_with("sha256:")
+    ));
+    let cursor = first.next_cursor.clone().expect("memory-v2-fact cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::MemoryV2Facts,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::MemoryV2Facts { fact_id, .. } if fact_id == "fact-2"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn memory_v2_current_fact_pages_walk_the_owner_keyset() {
+    let fixture = fixture();
+    let first = single_row_page(&fixture.path, SessionStoreTable::MemoryV2CurrentFacts, None);
+    assert_eq!(first.order_columns, ["fact_id", "owner_kind", "project_id"]);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::MemoryV2CurrentFacts {
+            fact_id,
+            payload_access,
+            projection_state,
+            ..
+        } if fact_id == "fact-1"
+            && payload_access == "eligible"
+            && projection_state == "ready"
+    ));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("memory-v2-current-fact cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::MemoryV2CurrentFacts,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::MemoryV2CurrentFacts {
+            fact_id,
+            payload_access,
+            ..
+        } if fact_id == "fact-2" && payload_access == "redacted"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn memory_v2_assertion_pages_walk_the_composite_keyset() {
+    let fixture = fixture();
+    let first = single_row_page(&fixture.path, SessionStoreTable::MemoryV2Assertions, None);
+    assert_eq!(
+        first.order_columns,
+        ["assertion_id", "fact_id", "owner_kind", "project_id"]
+    );
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::MemoryV2Assertions {
+            assertion_id,
+            fact_id,
+            row_digest,
+            ..
+        } if assertion_id == "assertion-1"
+            && fact_id == "fact-1"
+            && row_digest.starts_with("sha256:")
+    ));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("memory-v2-assertion cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::MemoryV2Assertions,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::MemoryV2Assertions { assertion_id, .. }
+            if assertion_id == "assertion-2"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn memory_v2_lineage_event_pages_walk_the_sequence_keyset() {
+    let fixture = fixture();
+    let first = single_row_page(
+        &fixture.path,
+        SessionStoreTable::MemoryV2LineageEvents,
+        None,
+    );
+    assert_eq!(first.order_columns, ["event_sequence"]);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::MemoryV2LineageEvents {
+            event_sequence: 1,
+            event_id,
+            fact_id,
+            ..
+        } if event_id == "event-1" && fact_id == "fact-1"
+    ));
+    let cursor = first.next_cursor.clone().expect("memory-v2-lineage cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::MemoryV2LineageEvents,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::MemoryV2LineageEvents {
+            event_sequence: 2,
+            event_id,
+            ..
+        } if event_id == "event-2"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
 /// Guards against a silent canonical-digest subset: a page query that drops or
 /// reorders a physical column still changes row digests but would otherwise pass
 /// every value assertion. Requiring the SELECT column count to equal
@@ -507,8 +727,9 @@ fn single_row_page(
     page
 }
 
-const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 15] = [
+const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 21] = [
     SessionStoreTable::Observations,
+    SessionStoreTable::SourceCursors,
     SessionStoreTable::Sessions,
     SessionStoreTable::SessionMessages,
     SessionStoreTable::SessionSchemaMigrations,
@@ -523,4 +744,9 @@ const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 15] = [
     SessionStoreTable::SessionSummaryNodes,
     SessionStoreTable::SessionSummarySources,
     SessionStoreTable::SessionSummarySuccessors,
+    SessionStoreTable::MemoryV2Facts,
+    SessionStoreTable::MemoryV2CurrentFacts,
+    SessionStoreTable::MemoryV2Assertions,
+    SessionStoreTable::MemoryV2LineageEvents,
+    SessionStoreTable::RetrievalAnchors,
 ];

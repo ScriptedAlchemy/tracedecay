@@ -179,6 +179,11 @@ fn decode_row(table: SessionStoreTable, row: &Row<'_>) -> rusqlite::Result<Sessi
             payload_digest: row.get(2)?,
             row_digest,
         }),
+        SessionStoreTable::SourceCursors => Ok(SessionStoreRow::SourceCursors {
+            source_json: row.get(0)?,
+            scope_json: row.get(1)?,
+            row_digest,
+        }),
         SessionStoreTable::Sessions => Ok(SessionStoreRow::Sessions {
             provider: row.get(0)?,
             session_id: row.get(1)?,
@@ -282,6 +287,39 @@ fn decode_row(table: SessionStoreTable, row: &Row<'_>) -> rusqlite::Result<Sessi
                 row_digest,
             })
         }
+        SessionStoreTable::MemoryV2Facts => Ok(SessionStoreRow::MemoryV2Facts {
+            fact_id: row.get(0)?,
+            owner_kind: row.get(1)?,
+            project_id: row.get(2)?,
+            identity_json: row.get(4)?,
+            row_digest,
+        }),
+        SessionStoreTable::MemoryV2CurrentFacts => Ok(SessionStoreRow::MemoryV2CurrentFacts {
+            fact_id: row.get(0)?,
+            owner_kind: row.get(1)?,
+            project_id: row.get(2)?,
+            payload_access: row.get(3)?,
+            projection_state: row.get(15)?,
+            row_digest,
+        }),
+        SessionStoreTable::MemoryV2Assertions => Ok(SessionStoreRow::MemoryV2Assertions {
+            assertion_id: row.get(0)?,
+            fact_id: row.get(1)?,
+            owner_kind: row.get(2)?,
+            project_id: row.get(3)?,
+            row_digest,
+        }),
+        SessionStoreTable::MemoryV2LineageEvents => Ok(SessionStoreRow::MemoryV2LineageEvents {
+            event_sequence: row.get(0)?,
+            event_id: row.get(1)?,
+            fact_id: row.get(2)?,
+            row_digest,
+        }),
+        SessionStoreTable::RetrievalAnchors => Ok(SessionStoreRow::RetrievalAnchors {
+            anchor_id: row.get(0)?,
+            projection_generation: row.get(3)?,
+            row_digest,
+        }),
     }
 }
 
@@ -289,6 +327,14 @@ fn cursor_for_row(row: &SessionStoreRow) -> SessionStoreCursor {
     match row {
         SessionStoreRow::Observations { sequence, .. } => SessionStoreCursor::Observations {
             sequence: *sequence,
+        },
+        SessionStoreRow::SourceCursors {
+            source_json,
+            scope_json,
+            ..
+        } => SessionStoreCursor::SourceCursors {
+            source_json: source_json.clone(),
+            scope_json: scope_json.clone(),
         },
         SessionStoreRow::Sessions {
             provider,
@@ -396,6 +442,48 @@ fn cursor_for_row(row: &SessionStoreRow) -> SessionStoreCursor {
             predecessor_summary_id: predecessor_summary_id.clone(),
             successor_summary_id: successor_summary_id.clone(),
         },
+        SessionStoreRow::MemoryV2Facts {
+            fact_id,
+            owner_kind,
+            project_id,
+            ..
+        } => SessionStoreCursor::MemoryV2Facts {
+            fact_id: fact_id.clone(),
+            owner_kind: owner_kind.clone(),
+            project_id: project_id.clone(),
+        },
+        SessionStoreRow::MemoryV2CurrentFacts {
+            fact_id,
+            owner_kind,
+            project_id,
+            ..
+        } => SessionStoreCursor::MemoryV2CurrentFacts {
+            fact_id: fact_id.clone(),
+            owner_kind: owner_kind.clone(),
+            project_id: project_id.clone(),
+        },
+        SessionStoreRow::MemoryV2Assertions {
+            assertion_id,
+            fact_id,
+            owner_kind,
+            project_id,
+            ..
+        } => SessionStoreCursor::MemoryV2Assertions {
+            assertion_id: assertion_id.clone(),
+            fact_id: fact_id.clone(),
+            owner_kind: owner_kind.clone(),
+            project_id: project_id.clone(),
+        },
+        SessionStoreRow::MemoryV2LineageEvents { event_sequence, .. } => {
+            SessionStoreCursor::MemoryV2LineageEvents {
+                event_sequence: *event_sequence,
+            }
+        }
+        SessionStoreRow::RetrievalAnchors { anchor_id, .. } => {
+            SessionStoreCursor::RetrievalAnchors {
+                anchor_id: anchor_id.clone(),
+            }
+        }
     }
 }
 

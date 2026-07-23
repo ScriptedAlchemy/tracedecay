@@ -10,12 +10,14 @@ pub enum SessionStoreFamily {
     Lcm,
     Temporal,
     Summary,
+    Fact,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStoreTable {
     Observations,
+    SourceCursors,
     Sessions,
     SessionMessages,
     SessionSchemaMigrations,
@@ -30,13 +32,18 @@ pub enum SessionStoreTable {
     SessionSummaryNodes,
     SessionSummarySources,
     SessionSummarySuccessors,
+    MemoryV2Facts,
+    MemoryV2CurrentFacts,
+    MemoryV2Assertions,
+    MemoryV2LineageEvents,
+    RetrievalAnchors,
 }
 
 impl SessionStoreTable {
     #[must_use]
     pub const fn family(self) -> SessionStoreFamily {
         match self {
-            Self::Observations => SessionStoreFamily::Observation,
+            Self::Observations | Self::SourceCursors => SessionStoreFamily::Observation,
             Self::Sessions | Self::SessionMessages => SessionStoreFamily::Transcript,
             Self::SessionSchemaMigrations | Self::LcmRawMessages => SessionStoreFamily::Lcm,
             Self::SessionTemporalSchemaMigrations
@@ -49,6 +56,11 @@ impl SessionStoreTable {
             Self::SessionSummaryNodes
             | Self::SessionSummarySources
             | Self::SessionSummarySuccessors => SessionStoreFamily::Summary,
+            Self::MemoryV2Facts
+            | Self::MemoryV2CurrentFacts
+            | Self::MemoryV2Assertions
+            | Self::MemoryV2LineageEvents
+            | Self::RetrievalAnchors => SessionStoreFamily::Fact,
         }
     }
 
@@ -56,6 +68,7 @@ impl SessionStoreTable {
     pub const fn order_columns(self) -> &'static [&'static str] {
         match self {
             Self::Observations => &["sequence"],
+            Self::SourceCursors => &["source_json", "scope_json"],
             Self::Sessions => &["provider", "session_id"],
             Self::SessionMessages => &["provider", "session_id", "ordinal", "message_id"],
             Self::SessionSchemaMigrations | Self::SessionTemporalSchemaMigrations => &["name"],
@@ -76,6 +89,12 @@ impl SessionStoreTable {
             Self::SessionSummaryNodes => &["summary_id"],
             Self::SessionSummarySources => &["summary_id", "source_ordinal"],
             Self::SessionSummarySuccessors => &["predecessor_summary_id", "successor_summary_id"],
+            Self::MemoryV2Facts | Self::MemoryV2CurrentFacts => {
+                &["fact_id", "owner_kind", "project_id"]
+            }
+            Self::MemoryV2Assertions => &["assertion_id", "fact_id", "owner_kind", "project_id"],
+            Self::MemoryV2LineageEvents => &["event_sequence"],
+            Self::RetrievalAnchors => &["anchor_id"],
         }
     }
 }
@@ -85,6 +104,10 @@ impl SessionStoreTable {
 pub enum SessionStoreCursor {
     Observations {
         sequence: i64,
+    },
+    SourceCursors {
+        source_json: String,
+        scope_json: String,
     },
     Sessions {
         provider: String,
@@ -143,6 +166,28 @@ pub enum SessionStoreCursor {
     SessionSummarySuccessors {
         predecessor_summary_id: String,
         successor_summary_id: String,
+    },
+    MemoryV2Facts {
+        fact_id: String,
+        owner_kind: String,
+        project_id: String,
+    },
+    MemoryV2CurrentFacts {
+        fact_id: String,
+        owner_kind: String,
+        project_id: String,
+    },
+    MemoryV2Assertions {
+        assertion_id: String,
+        fact_id: String,
+        owner_kind: String,
+        project_id: String,
+    },
+    MemoryV2LineageEvents {
+        event_sequence: i64,
+    },
+    RetrievalAnchors {
+        anchor_id: String,
     },
 }
 
@@ -206,6 +251,11 @@ pub enum SessionStoreRow {
         sequence: i64,
         observation_id: String,
         payload_digest: String,
+        row_digest: String,
+    },
+    SourceCursors {
+        source_json: String,
+        scope_json: String,
         row_digest: String,
     },
     Sessions {
@@ -297,6 +347,39 @@ pub enum SessionStoreRow {
         successor_summary_id: String,
         row_digest: String,
     },
+    MemoryV2Facts {
+        fact_id: String,
+        owner_kind: String,
+        project_id: String,
+        identity_json: String,
+        row_digest: String,
+    },
+    MemoryV2CurrentFacts {
+        fact_id: String,
+        owner_kind: String,
+        project_id: String,
+        payload_access: String,
+        projection_state: String,
+        row_digest: String,
+    },
+    MemoryV2Assertions {
+        assertion_id: String,
+        fact_id: String,
+        owner_kind: String,
+        project_id: String,
+        row_digest: String,
+    },
+    MemoryV2LineageEvents {
+        event_sequence: i64,
+        event_id: String,
+        fact_id: String,
+        row_digest: String,
+    },
+    RetrievalAnchors {
+        anchor_id: String,
+        projection_generation: String,
+        row_digest: String,
+    },
 }
 
 pub(crate) fn validate_session_store_family(
@@ -359,6 +442,17 @@ fn validate_page_cursor(
     let valid = match (table, cursor) {
         (SessionStoreTable::Observations, SessionStoreCursor::Observations { sequence }) => {
             *sequence > 0
+        }
+        (
+            SessionStoreTable::SourceCursors,
+            SessionStoreCursor::SourceCursors {
+                source_json,
+                scope_json,
+            },
+        ) => {
+            validate_cursor_text("source_json", source_json)?;
+            validate_cursor_text("scope_json", scope_json)?;
+            true
         }
         (
             SessionStoreTable::Sessions,
@@ -493,6 +587,53 @@ fn validate_page_cursor(
         ) => {
             validate_cursor_text("predecessor_summary_id", predecessor_summary_id)?;
             validate_cursor_text("successor_summary_id", successor_summary_id)?;
+            true
+        }
+        (
+            SessionStoreTable::MemoryV2Facts,
+            SessionStoreCursor::MemoryV2Facts {
+                fact_id,
+                owner_kind,
+                project_id,
+            },
+        )
+        | (
+            SessionStoreTable::MemoryV2CurrentFacts,
+            SessionStoreCursor::MemoryV2CurrentFacts {
+                fact_id,
+                owner_kind,
+                project_id,
+            },
+        ) => {
+            validate_cursor_text("fact_id", fact_id)?;
+            validate_cursor_text("owner_kind", owner_kind)?;
+            validate_cursor_text("project_id", project_id)?;
+            true
+        }
+        (
+            SessionStoreTable::MemoryV2Assertions,
+            SessionStoreCursor::MemoryV2Assertions {
+                assertion_id,
+                fact_id,
+                owner_kind,
+                project_id,
+            },
+        ) => {
+            validate_cursor_text("assertion_id", assertion_id)?;
+            validate_cursor_text("fact_id", fact_id)?;
+            validate_cursor_text("owner_kind", owner_kind)?;
+            validate_cursor_text("project_id", project_id)?;
+            true
+        }
+        (
+            SessionStoreTable::MemoryV2LineageEvents,
+            SessionStoreCursor::MemoryV2LineageEvents { event_sequence },
+        ) => *event_sequence > 0,
+        (
+            SessionStoreTable::RetrievalAnchors,
+            SessionStoreCursor::RetrievalAnchors { anchor_id },
+        ) => {
+            validate_cursor_text("anchor_id", anchor_id)?;
             true
         }
         _ => false,

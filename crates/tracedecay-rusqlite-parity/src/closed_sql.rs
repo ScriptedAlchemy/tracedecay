@@ -85,6 +85,12 @@ pub(crate) fn session_table_spec(table: SessionStoreTable) -> TableSpec {
             "PRAGMA table_info(observations)",
             "PRAGMA foreign_key_list(observations)",
         ),
+        SessionStoreTable::SourceCursors => session_table(
+            "source_cursors",
+            "SELECT COUNT(*) FROM source_cursors",
+            "PRAGMA table_info(source_cursors)",
+            "PRAGMA foreign_key_list(source_cursors)",
+        ),
         SessionStoreTable::Sessions => session_table(
             "sessions",
             "SELECT COUNT(*) FROM sessions",
@@ -169,6 +175,36 @@ pub(crate) fn session_table_spec(table: SessionStoreTable) -> TableSpec {
             "PRAGMA table_info(session_summary_successors)",
             "PRAGMA foreign_key_list(session_summary_successors)",
         ),
+        SessionStoreTable::MemoryV2Facts => session_table(
+            "memory_v2_facts",
+            "SELECT COUNT(*) FROM memory_v2_facts",
+            "PRAGMA table_info(memory_v2_facts)",
+            "PRAGMA foreign_key_list(memory_v2_facts)",
+        ),
+        SessionStoreTable::MemoryV2CurrentFacts => session_table(
+            "memory_v2_current_facts",
+            "SELECT COUNT(*) FROM memory_v2_current_facts",
+            "PRAGMA table_info(memory_v2_current_facts)",
+            "PRAGMA foreign_key_list(memory_v2_current_facts)",
+        ),
+        SessionStoreTable::MemoryV2Assertions => session_table(
+            "memory_v2_assertions",
+            "SELECT COUNT(*) FROM memory_v2_assertions",
+            "PRAGMA table_info(memory_v2_assertions)",
+            "PRAGMA foreign_key_list(memory_v2_assertions)",
+        ),
+        SessionStoreTable::MemoryV2LineageEvents => session_table(
+            "memory_v2_lineage_events",
+            "SELECT COUNT(*) FROM memory_v2_lineage_events",
+            "PRAGMA table_info(memory_v2_lineage_events)",
+            "PRAGMA foreign_key_list(memory_v2_lineage_events)",
+        ),
+        SessionStoreTable::RetrievalAnchors => session_table(
+            "retrieval_anchors",
+            "SELECT COUNT(*) FROM retrieval_anchors",
+            "PRAGMA table_info(retrieval_anchors)",
+            "PRAGMA foreign_key_list(retrieval_anchors)",
+        ),
     }
 }
 
@@ -193,6 +229,28 @@ pub(crate) fn session_page_query(
                 Value::Integer(limit),
             ],
         ),
+        (SessionStoreTable::SourceCursors, cursor) => {
+            let (source_json, scope_json) = match cursor {
+                Some(SessionStoreCursor::SourceCursors {
+                    source_json,
+                    scope_json,
+                }) => (
+                    Value::Text(source_json.clone()),
+                    Value::Text(scope_json.clone()),
+                ),
+                _ => (Value::Null, Value::Null),
+            };
+            (
+                "SELECT source_json, scope_json, cursor_json
+                 FROM source_cursors
+                 WHERE ?1 IS NULL
+                    OR source_json > ?1
+                    OR (source_json = ?1 AND scope_json > ?2)
+                 ORDER BY source_json, scope_json
+                 LIMIT ?3",
+                vec![source_json, scope_json, Value::Integer(limit)],
+            )
+        }
         (SessionStoreTable::Sessions, cursor) => {
             let (provider, session_id) = match cursor {
                 Some(SessionStoreCursor::Sessions {
@@ -521,5 +579,129 @@ pub(crate) fn session_page_query(
                 ],
             )
         }
+        (SessionStoreTable::MemoryV2Facts, cursor) => {
+            let (fact_id, owner_kind, project_id) = match cursor {
+                Some(SessionStoreCursor::MemoryV2Facts {
+                    fact_id,
+                    owner_kind,
+                    project_id,
+                }) => (
+                    Value::Text(fact_id.clone()),
+                    Value::Text(owner_kind.clone()),
+                    Value::Text(project_id.clone()),
+                ),
+                _ => (Value::Null, Value::Null, Value::Null),
+            };
+            (
+                "SELECT fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+                 FROM memory_v2_facts
+                 WHERE ?1 IS NULL
+                    OR fact_id > ?1
+                    OR (fact_id = ?1 AND owner_kind > ?2)
+                    OR (fact_id = ?1 AND owner_kind = ?2 AND project_id > ?3)
+                 ORDER BY fact_id, owner_kind, project_id
+                 LIMIT ?4",
+                vec![fact_id, owner_kind, project_id, Value::Integer(limit)],
+            )
+        }
+        (SessionStoreTable::MemoryV2CurrentFacts, cursor) => {
+            let (fact_id, owner_kind, project_id) = match cursor {
+                Some(SessionStoreCursor::MemoryV2CurrentFacts {
+                    fact_id,
+                    owner_kind,
+                    project_id,
+                }) => (
+                    Value::Text(fact_id.clone()),
+                    Value::Text(owner_kind.clone()),
+                    Value::Text(project_id.clone()),
+                ),
+                _ => (Value::Null, Value::Null, Value::Null),
+            };
+            (
+                "SELECT fact_id, owner_kind, project_id, payload_access, trust_score,
+                        active_assertion_id, last_event_id, updated_at, retrieval_count,
+                        access_count, helpful_count, unhelpful_count, last_retrieved_at,
+                        last_recalled_at, last_feedback_at, projection_state,
+                        vector_watermark_json
+                 FROM memory_v2_current_facts
+                 WHERE ?1 IS NULL
+                    OR fact_id > ?1
+                    OR (fact_id = ?1 AND owner_kind > ?2)
+                    OR (fact_id = ?1 AND owner_kind = ?2 AND project_id > ?3)
+                 ORDER BY fact_id, owner_kind, project_id
+                 LIMIT ?4",
+                vec![fact_id, owner_kind, project_id, Value::Integer(limit)],
+            )
+        }
+        (SessionStoreTable::MemoryV2Assertions, cursor) => {
+            let (assertion_id, fact_id, owner_kind, project_id) = match cursor {
+                Some(SessionStoreCursor::MemoryV2Assertions {
+                    assertion_id,
+                    fact_id,
+                    owner_kind,
+                    project_id,
+                }) => (
+                    Value::Text(assertion_id.clone()),
+                    Value::Text(fact_id.clone()),
+                    Value::Text(owner_kind.clone()),
+                    Value::Text(project_id.clone()),
+                ),
+                _ => (Value::Null, Value::Null, Value::Null, Value::Null),
+            };
+            (
+                "SELECT assertion_id, fact_id, owner_kind, project_id, owner_json,
+                        assertion_header_json, kind_json, payload_reference_json, receipt_json,
+                        asserted_at, actor_id
+                 FROM memory_v2_assertions
+                 WHERE ?1 IS NULL
+                    OR assertion_id > ?1
+                    OR (assertion_id = ?1 AND fact_id > ?2)
+                    OR (assertion_id = ?1 AND fact_id = ?2 AND owner_kind > ?3)
+                    OR (assertion_id = ?1 AND fact_id = ?2 AND owner_kind = ?3
+                        AND project_id > ?4)
+                 ORDER BY assertion_id, fact_id, owner_kind, project_id
+                 LIMIT ?5",
+                vec![
+                    assertion_id,
+                    fact_id,
+                    owner_kind,
+                    project_id,
+                    Value::Integer(limit),
+                ],
+            )
+        }
+        (SessionStoreTable::MemoryV2LineageEvents, cursor) => (
+            "SELECT event_sequence, event_id, fact_id, owner_kind, project_id, event_json,
+                    occurred_at, recorded_at
+             FROM memory_v2_lineage_events
+             WHERE event_sequence > ?1
+             ORDER BY event_sequence
+             LIMIT ?2",
+            vec![
+                Value::Integer(match cursor {
+                    Some(SessionStoreCursor::MemoryV2LineageEvents { event_sequence }) => {
+                        *event_sequence
+                    }
+                    _ => 0,
+                }),
+                Value::Integer(limit),
+            ],
+        ),
+        (SessionStoreTable::RetrievalAnchors, cursor) => (
+            "SELECT anchor_id, anchor_json, owner_json, projection_generation
+             FROM retrieval_anchors
+             WHERE ?1 IS NULL OR anchor_id > ?1
+             ORDER BY anchor_id
+             LIMIT ?2",
+            vec![
+                match cursor {
+                    Some(SessionStoreCursor::RetrievalAnchors { anchor_id }) => {
+                        Value::Text(anchor_id.clone())
+                    }
+                    _ => Value::Null,
+                },
+                Value::Integer(limit),
+            ],
+        ),
     }
 }

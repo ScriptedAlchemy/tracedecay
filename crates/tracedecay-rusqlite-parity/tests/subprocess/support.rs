@@ -43,6 +43,12 @@ pub(crate) fn fixture() -> Fixture {
                 observation_json TEXT NOT NULL,
                 committed_cursor_json TEXT NOT NULL
             );
+            CREATE TABLE source_cursors (
+                source_json TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                cursor_json TEXT NOT NULL,
+                PRIMARY KEY(source_json, scope_json)
+            );
             CREATE TABLE sessions (
                 provider TEXT NOT NULL,
                 session_id TEXT NOT NULL,
@@ -222,6 +228,65 @@ pub(crate) fn fixture() -> Fixture {
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY(predecessor_summary_id, successor_summary_id)
             );
+            CREATE TABLE memory_v2_facts (
+                fact_id TEXT NOT NULL,
+                owner_kind TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                owner_json TEXT NOT NULL,
+                identity_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(fact_id, owner_kind, project_id)
+            );
+            CREATE TABLE memory_v2_assertions (
+                assertion_id TEXT NOT NULL,
+                fact_id TEXT NOT NULL,
+                owner_kind TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                owner_json TEXT NOT NULL,
+                assertion_header_json TEXT NOT NULL,
+                kind_json TEXT NOT NULL,
+                payload_reference_json TEXT NOT NULL,
+                receipt_json TEXT NOT NULL,
+                asserted_at INTEGER NOT NULL,
+                actor_id TEXT,
+                PRIMARY KEY(assertion_id, fact_id, owner_kind, project_id)
+            );
+            CREATE TABLE memory_v2_lineage_events (
+                event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                fact_id TEXT NOT NULL,
+                owner_kind TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                event_json TEXT NOT NULL,
+                occurred_at INTEGER NOT NULL,
+                recorded_at INTEGER NOT NULL
+            );
+            CREATE TABLE memory_v2_current_facts (
+                fact_id TEXT NOT NULL,
+                owner_kind TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                payload_access TEXT NOT NULL,
+                trust_score REAL,
+                active_assertion_id TEXT,
+                last_event_id TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                retrieval_count INTEGER NOT NULL DEFAULT 0,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                helpful_count INTEGER NOT NULL DEFAULT 0,
+                unhelpful_count INTEGER NOT NULL DEFAULT 0,
+                last_retrieved_at INTEGER,
+                last_recalled_at INTEGER,
+                last_feedback_at INTEGER,
+                projection_state TEXT NOT NULL DEFAULT 'unavailable',
+                vector_watermark_json TEXT,
+                PRIMARY KEY(fact_id, owner_kind, project_id)
+            );
+            CREATE TABLE retrieval_anchors (
+                anchor_id TEXT PRIMARY KEY,
+                anchor_json TEXT NOT NULL,
+                owner_json TEXT NOT NULL,
+                projection_generation TEXT NOT NULL
+            );
             CREATE VIRTUAL TABLE nodes_fts USING fts5(
                 name, qualified_name, docstring, signature,
                 content='nodes', content_rowid='rowid'
@@ -235,6 +300,9 @@ pub(crate) fn fixture() -> Fixture {
             ) VALUES
                 ('observation-1', 'digest-1', 'receipt', '{}', '{}'),
                 ('observation-2', 'digest-2', 'receipt', '{}', '{}');
+            INSERT INTO source_cursors(source_json, scope_json, cursor_json) VALUES
+                ('{\"source\":\"a\"}', '{\"scope\":\"1\"}', '{\"cursor\":\"1\"}'),
+                ('{\"source\":\"a\"}', '{\"scope\":\"2\"}', '{\"cursor\":\"2\"}');
             INSERT INTO sessions(provider, session_id, project_key, project_path)
             VALUES ('codex', 'session-1', 'project', '/copy');
             INSERT INTO session_messages(
@@ -308,6 +376,36 @@ pub(crate) fn fixture() -> Fixture {
             ) VALUES
                 ('summary-1', 'summary-2', 1),
                 ('summary-1', 'summary-3', 2);
+            INSERT INTO memory_v2_facts(
+                fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+            ) VALUES
+                ('fact-1', 'project', 'proj', '{}', '{}', 1),
+                ('fact-2', 'project', 'proj', '{}', '{}', 2);
+            INSERT INTO memory_v2_assertions(
+                assertion_id, fact_id, owner_kind, project_id, owner_json,
+                assertion_header_json, kind_json, payload_reference_json, receipt_json,
+                asserted_at, actor_id
+            ) VALUES
+                ('assertion-1', 'fact-1', 'project', 'proj', '{}', '{}', '{}', '{}', '{}', 1,
+                 NULL),
+                ('assertion-2', 'fact-1', 'project', 'proj', '{}', '{}', '{}', '{}', '{}', 2,
+                 NULL);
+            INSERT INTO memory_v2_lineage_events(
+                event_id, fact_id, owner_kind, project_id, event_json, occurred_at, recorded_at
+            ) VALUES
+                ('event-1', 'fact-1', 'project', 'proj', '{}', 1, 1),
+                ('event-2', 'fact-1', 'project', 'proj', '{}', 2, 2);
+            INSERT INTO memory_v2_current_facts(
+                fact_id, owner_kind, project_id, payload_access, last_event_id, updated_at,
+                projection_state
+            ) VALUES
+                ('fact-1', 'project', 'proj', 'eligible', 'event-1', 1, 'ready'),
+                ('fact-2', 'project', 'proj', 'redacted', 'event-2', 2, 'stale');
+            INSERT INTO retrieval_anchors(
+                anchor_id, anchor_json, owner_json, projection_generation
+            ) VALUES
+                ('anchor-1', '{}', '{}', 'generation-1'),
+                ('anchor-2', '{}', '{}', 'generation-2');
             INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild');",
         )
         .expect("create fixture schema");

@@ -113,11 +113,13 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreFamily::Lcm,
         SessionStoreFamily::Temporal,
         SessionStoreFamily::Summary,
+        SessionStoreFamily::Fact,
     ] {
         round_trip(family);
     }
     for table in [
         SessionStoreTable::Observations,
+        SessionStoreTable::SourceCursors,
         SessionStoreTable::Sessions,
         SessionStoreTable::SessionMessages,
         SessionStoreTable::SessionSchemaMigrations,
@@ -132,11 +134,20 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreTable::SessionSummaryNodes,
         SessionStoreTable::SessionSummarySources,
         SessionStoreTable::SessionSummarySuccessors,
+        SessionStoreTable::MemoryV2Facts,
+        SessionStoreTable::MemoryV2CurrentFacts,
+        SessionStoreTable::MemoryV2Assertions,
+        SessionStoreTable::MemoryV2LineageEvents,
+        SessionStoreTable::RetrievalAnchors,
     ] {
         round_trip(table);
     }
     for cursor in [
         SessionStoreCursor::Observations { sequence: 1 },
+        SessionStoreCursor::SourceCursors {
+            source_json: "source".to_owned(),
+            scope_json: "scope".to_owned(),
+        },
         SessionStoreCursor::Sessions {
             provider: "codex".to_owned(),
             session_id: "session".to_owned(),
@@ -192,6 +203,26 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreCursor::SessionSummarySuccessors {
             predecessor_summary_id: "summary".to_owned(),
             successor_summary_id: "successor".to_owned(),
+        },
+        SessionStoreCursor::MemoryV2Facts {
+            fact_id: "fact".to_owned(),
+            owner_kind: "project".to_owned(),
+            project_id: "project".to_owned(),
+        },
+        SessionStoreCursor::MemoryV2CurrentFacts {
+            fact_id: "fact".to_owned(),
+            owner_kind: "project".to_owned(),
+            project_id: "project".to_owned(),
+        },
+        SessionStoreCursor::MemoryV2Assertions {
+            assertion_id: "assertion".to_owned(),
+            fact_id: "fact".to_owned(),
+            owner_kind: "project".to_owned(),
+            project_id: "project".to_owned(),
+        },
+        SessionStoreCursor::MemoryV2LineageEvents { event_sequence: 1 },
+        SessionStoreCursor::RetrievalAnchors {
+            anchor_id: "anchor".to_owned(),
         },
     ] {
         round_trip(cursor);
@@ -359,12 +390,17 @@ fn every_graph_session_journal_and_response_result_variant_round_trips() {
     });
 }
 
-fn session_rows() -> [SessionStoreRow; 15] {
+fn session_rows() -> [SessionStoreRow; 21] {
     [
         SessionStoreRow::Observations {
             sequence: 1,
             observation_id: "observation".to_owned(),
             payload_digest: "payload".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::SourceCursors {
+            source_json: "source".to_owned(),
+            scope_json: "scope".to_owned(),
             row_digest: "row".to_owned(),
         },
         SessionStoreRow::Sessions {
@@ -454,6 +490,39 @@ fn session_rows() -> [SessionStoreRow; 15] {
         SessionStoreRow::SessionSummarySuccessors {
             predecessor_summary_id: "summary".to_owned(),
             successor_summary_id: "successor".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::MemoryV2Facts {
+            fact_id: "fact".to_owned(),
+            owner_kind: "project".to_owned(),
+            project_id: "project".to_owned(),
+            identity_json: "{}".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::MemoryV2CurrentFacts {
+            fact_id: "fact".to_owned(),
+            owner_kind: "project".to_owned(),
+            project_id: "project".to_owned(),
+            payload_access: "eligible".to_owned(),
+            projection_state: "ready".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::MemoryV2Assertions {
+            assertion_id: "assertion".to_owned(),
+            fact_id: "fact".to_owned(),
+            owner_kind: "project".to_owned(),
+            project_id: "project".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::MemoryV2LineageEvents {
+            event_sequence: 1,
+            event_id: "event".to_owned(),
+            fact_id: "fact".to_owned(),
+            row_digest: "row".to_owned(),
+        },
+        SessionStoreRow::RetrievalAnchors {
+            anchor_id: "anchor".to_owned(),
+            projection_generation: "generation".to_owned(),
             row_digest: "row".to_owned(),
         },
     ]

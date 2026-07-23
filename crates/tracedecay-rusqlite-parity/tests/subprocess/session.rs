@@ -71,6 +71,7 @@ fn subprocess_reports_closed_session_store_counts_schema_and_keyset_pages() {
     assert!(second["output"]["next_cursor"].is_null());
 
     for table in [
+        "source_cursors",
         "sessions",
         "session_messages",
         "session_schema_migrations",
@@ -85,13 +86,24 @@ fn subprocess_reports_closed_session_store_counts_schema_and_keyset_pages() {
         "session_summary_nodes",
         "session_summary_sources",
         "session_summary_successors",
+        "memory_v2_facts",
+        "memory_v2_current_facts",
+        "memory_v2_assertions",
+        "memory_v2_lineage_events",
+        "retrieval_anchors",
     ] {
         let family = match table {
+            "source_cursors" => "observation",
             "sessions" | "session_messages" => "transcript",
             "session_schema_migrations" | "lcm_raw_messages" => "lcm",
             "session_summary_nodes" | "session_summary_sources" | "session_summary_successors" => {
                 "summary"
             }
+            "memory_v2_facts"
+            | "memory_v2_current_facts"
+            | "memory_v2_assertions"
+            | "memory_v2_lineage_events"
+            | "retrieval_anchors" => "fact",
             _ => "temporal",
         };
         let response = invoke(&request(
