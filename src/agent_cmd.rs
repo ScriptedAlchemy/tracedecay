@@ -33,8 +33,7 @@ pub(crate) async fn handle_host_bundle_component_command(
 ) -> tracedecay::errors::Result<()> {
     if options.component.is_some() && !options.dry_run && !options.yes {
         return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "signed host component mutation requires --yes; use --dry-run first"
-                .to_string(),
+            message: "host component mutation requires --yes; use --dry-run first".to_string(),
         });
     }
     let home = tracedecay::agents::home_dir().ok_or_else(|| {

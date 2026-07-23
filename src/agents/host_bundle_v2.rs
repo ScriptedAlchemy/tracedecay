@@ -1,9 +1,9 @@
 //! Manifest-driven host bundle lifecycle contracts (Plan 27 PR13).
 //!
-//! This module plans host-registration mutations only after an external Plan
-//! 20 verifier accepts the signed manifest. It contains no signing key,
-//! credential, daemon lifecycle, product semantics, or host-specific business
-//! authority.
+//! This module plans host-registration mutations only after the embedded
+//! first-party catalog verifies manifest identity and content digests. It
+//! contains no signing key, trust root, external bundle loader, credential,
+//! daemon lifecycle, product semantics, or host-specific business authority.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -656,9 +656,10 @@ pub trait HostBundleVerificationAdapterV1 {
     fn verify_manifest(&self, manifest: &HostBundleManifestV1) -> Result<(), HostBundleError>;
 }
 
-/// Verify a signed bundle first, then produce its lifecycle plan. This keeps
-/// the older closure-based planner compatible while giving production callers
-/// one concrete verification contract.
+/// Verify embedded first-party catalog identity and content digests, then
+/// produce the lifecycle plan. This keeps the older closure-based planner
+/// compatible while giving production callers one concrete verification
+/// contract.
 pub fn plan_verified_lifecycle_mutation(
     manifest: &HostBundleManifestV1,
     request: &HostBundleLifecycleRequestV1,
@@ -815,7 +816,7 @@ pub enum HostBundleError {
     InvalidManifest,
     #[error("first-party component identity or content digest is invalid")]
     CatalogMismatch,
-    #[error("bundle signed payload cannot be canonicalized")]
+    #[error("bundle manifest payload cannot be canonicalized")]
     CanonicalizationFailed,
     #[error("bundle does not address the requested host/component")]
     WrongTarget,
@@ -939,8 +940,8 @@ pub fn plan_complete_lifecycle_mutation(
     }
 
     let mut plan = if request.operation == HostBundleLifecycleOpV1::Uninstall {
-        // A signed uninstall request authorizes lifecycle execution, but only
-        // the durable ownership receipt identifies removable files.
+        // A verified embedded uninstall target authorizes lifecycle execution,
+        // but only the durable ownership receipt identifies removable files.
         plan_lifecycle_mutation(manifest, request, &[], verify)?
     } else {
         plan_lifecycle_mutation(manifest, request, manifest_observed, verify)?
@@ -1054,9 +1055,9 @@ fn plan_artifact_action(
     }
 }
 
-/// Bytes obtained from the verified host bundle. They are checked against the
-/// signed artifact digest before any host path is touched and are never copied
-/// into receipts or journals.
+/// Bytes obtained from the verified embedded host bundle. They are checked
+/// against the cataloged artifact digest before any host path is touched and
+/// are never copied into receipts or journals.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostBundleArtifactContentV1 {
     pub relative_path: String,
@@ -1127,9 +1128,9 @@ pub struct HostBundleRollbackSeamV1 {
     pub interrupted_recovery_required: bool,
 }
 
-/// Read-only lifecycle result. Producing this value verifies the signed
-/// manifest and exact ownership observations but never opens a writer,
-/// creates a control directory, writes a receipt, or recovers a journal.
+/// Read-only lifecycle result. Producing this value verifies the embedded
+/// first-party manifest and exact ownership observations but never opens a
+/// writer, creates a control directory, writes a receipt, or recovers a journal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostBundleLifecyclePreviewV1 {
     pub plan: HostBundleMutationPlanV1,
@@ -2091,8 +2092,8 @@ fn validate_competing_extension_claims(
     Ok(())
 }
 
-/// Durable evidence that one host's feedback path moved from a previously
-/// signed core bundle to a newly signed core bundle.
+/// Durable evidence that one host's feedback path moved between two verified
+/// embedded first-party core bundle versions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackPathRollbackReceiptV1 {
@@ -2109,9 +2110,10 @@ pub struct FeedbackPathRestoreReceiptV1 {
     pub restore_receipt: HostBundleInstallReceiptV1,
 }
 
-/// Concrete feedback rollback switch backed by the same signed, receipt-based,
-/// atomic host-bundle lifecycle as install/update/repair/uninstall. It owns no
-/// host-local scorer, scheduler, store, or feedback business logic.
+/// Concrete feedback rollback switch backed by the same digest-verified,
+/// receipt-based atomic host-bundle lifecycle as
+/// install/update/repair/uninstall. It owns no host-local scorer, scheduler,
+/// store, or feedback business logic.
 pub struct FeedbackPathRollbackSwitchV1<V, S> {
     lifecycle: HostBundleLifecycleRuntimeV1<V, S>,
 }
