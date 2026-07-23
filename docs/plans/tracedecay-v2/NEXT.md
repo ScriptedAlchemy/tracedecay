@@ -4,7 +4,9 @@
 
 PR8 is complete. PR9 and PR10 have callable code-index, lexical/graph, vector-
 generation, FastEmbed, exact-flat, calibration, and fallback implementations;
-their direct quality/resource evaluation remains pending. PR11's application,
+their direct quality/resource evaluation is now recorded (2026-07-23) in the
+single benchmarks/search-quality record — an offline direct evaluation, with
+no receipts and no locked gates. PR11's application,
 policy, catalog, configuration, Git, and feedback-cycle core is implemented.
 The current delivery slice closes PR12/PR13 production reachability, host
 delivery, all-feature distribution, and the incremental indexing behavior
@@ -57,10 +59,16 @@ normal CI are stable.
    compare content and descriptor digests before parsing, so duplicate
    notifications and save-without-change perform zero parse, graph, lexical,
    or embedding work.
-4. Retain the prior Tree-sitter tree for an admitted saved-file snapshot.
-   Apply `InputEdit`, parse with the prior tree, and use `changed_ranges` to
-   narrow extraction. Tree reuse is an optimization only: canonical content,
-   descriptor, sanitizer, and chunk digests remain product identity.
+4. Retaining the prior Tree-sitter tree to apply `InputEdit` and narrow
+   extraction via `changed_ranges` is an optimization only: canonical content,
+   descriptor, sanitizer, and chunk digests remain product identity. This
+   optimization is UNIMPLEMENTED BY DECISION (2026-07-23). Adversarial review
+   found the saved-tree cache disconnected from extraction — never wired in and
+   net-negative — so it was deleted; because this clause already treats tree
+   reuse as optional, removing it stays contract-compatible. Warm parsing
+   currently reparses the admitted snapshot from canonical bytes; the tree
+   cache is retained only as a possible future optimization, not current
+   behavior.
 5. Rebuild only changed symbol chunks, enclosing structural ancestors,
    affected file-level chunks, and dependency/test-attribution closures whose
    evidence changed. Deletions produce tombstones. Rename/move reuse requires
@@ -89,23 +97,63 @@ normal CI are stable.
 ## Active implementation order
 
 1. Clear root and SQLite runtime compile blockers without weakening contracts.
+   *(Landed 2026-07-23: the rusqlite storage runtime is cut over and
+   repository reads route through the daemon-owned runtime port; the
+   outbox/inbox effects read port and the code/effects read-contract arms
+   exist. Remaining seam: the code-family read executor — the git-index store
+   is daemon-side.)*
 2. Finish PR12 application, transport, LSP, cancellation, streaming, and
-   distribution reachability.
+   distribution reachability. *(In flight.)*
 3. Finish PR13 Hook V2, Context Scout, advisory authorities, host lifecycle,
-   Cursor extension, and daemon project-open registration.
+   Cursor extension, and daemon project-open registration. *(In flight; hook
+   wiring and FastEmbed acceptance wiring may be landing concurrently.)*
 4. Mount incremental code and FastEmbed workers behind daemon-owned bounded
    scheduling while keeping project open and ordinary search non-blocking.
+   *(Partially landed 2026-07-23: worktree-aware incremental indexing is
+   implemented to the contract — exact identity resolution, `gix`
+   classification, the hook-driven primary hints, the three-tier freshness
+   ladder with a cheap stat-signature tier-2 gate and loose-ref content
+   fingerprint, opt-in watcher, and an extracted scheduler registry with
+   non-serializing cross-worktree queries via `spawn_blocking`. Project open
+   now skips code-index mounting gracefully for non-git roots — the code index
+   has no identity without a repository, and every other surface stays
+   available. Remaining: daemon-owned bounded worker mount and, if not yet
+   landed, FastEmbed acceptance wiring.)*
 5. Add worktree/edit/no-op/rename/delete/overflow/cancellation/restart
-   regressions and current/10x performance evidence.
+   regressions and current/10x performance evidence. *(Partially landed
+   2026-07-23: identity isolation, byte-reuse-without-alias,
+   staged/unstaged/untracked/deleted classification, deletion tombstoning, and
+   non-serializing query regressions exist. Remaining: current/10x performance
+   measurement evidence.)*
 6. Deliver storage retention/size/efficiency per
    [plan 38](38-storage-retention-size-and-efficiency.md): automatic
    branch-DB lifecycle, registry orphan detection/collection, session
    retention with raw/projected dedup, incident-debris ownership,
    compaction policy, and Doctor storage findings (measured driver: one
    dogfood profile reached 256 GB, reduced to ~75 GB by removing data the
-   product should never have retained).
+   product should never have retained). *(Landed 2026-07-23: all plan 38
+   sections are delivered — §1 branch lifecycle (verified pre-existing), §2
+   registry orphan detection/collection, §3 session retention (LCM
+   raw/projected dedup plus disposition-scoped evidence-store release), §4
+   one-content-copy, §5 debris contract, §6 compaction policy types, and §7
+   telemetry read models with typed Doctor storage findings. Remaining seams:
+   daemon wiring/cadence for the GC passes and the telemetry-port runtime
+   implementation.)*
 7. Run focused crate tests, all-feature workspace checks, release builds,
-   package/install checks, and normal Linux/macOS/Windows CI.
+   package/install checks, and normal Linux/macOS/Windows CI. *(Ongoing. The
+   SQLite session-store parity harness proves 27 session-store tables across
+   the temporal, summary, Fact (including retrieval anchors), Diagnostics, and
+   Configuration families, with a column-coverage guard, exact-digest oracles,
+   a shared fixture DDL, and compiler-enforced exhaustive daemon shape checks;
+   its evidence is copied-bytes self-consistency, not byte-identical-vs-libsql,
+   and one known caveat is `configuration_entries.layer_id` being
+   nullable-but-keyset-bearing. Config authority resolves-and-pins on demand at
+   open — cold-cache/restart safe — and read-only opens of unseeded stores
+   serve registry defaults. Dead-code allow remediation is complete and the
+   unwired hooks v2 ready-guidance lookup is deleted; the V2 version bump is
+   deferred to release-plz, with semver-checks declaring the release-type major
+   as its vocabulary for a breaking change while the shipped bump stays a 0.x
+   minor.)*
 
 ## Direct verification
 
@@ -129,6 +177,16 @@ normal CI are stable.
   rebuild reasons; and
 - default and explicit all-feature release artifacts pass build, test, package,
   install, host-bundle, LSP, PR12/PR13 surface, and FastEmbed smoke checks.
+
+**Status (2026-07-23).** The incremental-indexing verification items now have
+landed direct regressions: no-op/save-without-change suppression, one-symbol
+edit narrowing, deletion tombstoning, staged/unstaged/untracked/deleted
+classification, and two-worktree shared-byte reuse without identity aliasing.
+Project open and exact/lexical/graph search stay available while semantic work
+loads — including non-git roots, where code-index mounting is skipped by
+design. Remaining verification work: the full event-to-ready
+p50/p95/p99/queue/amplification performance measurements and the default and
+all-feature release-artifact gates.
 
 ## Done
 

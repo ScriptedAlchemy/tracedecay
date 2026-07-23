@@ -679,7 +679,13 @@ branch-DB lifecycle and registry orphan detection/collection land with the
 storage-runtime S11 window; session retention with raw/projected dedup
 extends the staged LCM GC cards. Measured driver: one dogfood profile
 reached 256 GB and was reduced to ~75 GB purely by removing data the
-product should never have retained.
+product should never have retained. All plan 38 sections (§1–§7) have now
+landed on this branch (2026-07-23) — branch lifecycle, registry orphan
+detection/collection, session retention with raw/projected dedup and
+disposition-scoped evidence release, one-content-copy, the debris contract,
+compaction policy types, and telemetry read models with typed Doctor storage
+findings; daemon wiring/cadence for the GC passes and the telemetry-port
+runtime implementation remain deliberate seams.
 
 PR #421 stays open through PR20. It merges only after PR20, direct product
 tests, and normal cross-platform CI are stable.
