@@ -204,7 +204,7 @@ pub fn runtime_health_read(signal: &DaemonRuntimeHealthSignalV1) -> RuntimeHealt
     }
 }
 
-/// Adapter over the daemon/runtime health snapshot (StorageRuntime family).
+/// Adapter over the daemon/runtime health snapshot (`StorageRuntime` family).
 pub struct RuntimeHealthDoctorAdapterV1 {
     read: RuntimeHealthReadV1,
 }
@@ -400,7 +400,7 @@ pub(in crate::daemon) async fn code_index_read_from_registry(
     code_index_read(signal)
 }
 
-/// Adapter over the code/semantic index mount state (SemanticIndex family).
+/// Adapter over the code/semantic index mount state (`SemanticIndex` family).
 pub struct CodeIndexMountDoctorAdapterV1 {
     read: CodeIndexMountReadV1,
 }
@@ -521,11 +521,11 @@ impl StorageDoctorPort for StorageDoctorAdapterV1 {
 pub struct DoctorKernelInputsV1 {
     /// Configuration-authority read (Configuration family).
     pub configuration: ConfigurationAuthorityReadV1,
-    /// Daemon/runtime health read (StorageRuntime family).
+    /// Daemon/runtime health read (`StorageRuntime` family).
     pub runtime: RuntimeHealthReadV1,
     /// Host/agent integration conformance read (Advisory family).
     pub host: HostIntegrationReadV1,
-    /// Code/semantic index mount read (SemanticIndex family).
+    /// Code/semantic index mount read (`SemanticIndex` family).
     pub code_index: CodeIndexMountReadV1,
     /// Storage retention/size read (Storage family).
     pub storage: DoctorStorageFamilyReadV1,

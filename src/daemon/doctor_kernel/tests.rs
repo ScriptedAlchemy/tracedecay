@@ -446,7 +446,7 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
             .families()
             .iter()
             .find(|record| record.family() == family)
-            .map(|record| record.consultation())
+            .map(tracedecay_application::DoctorFamilyCoverageV1::consultation)
     };
     assert_eq!(
         consultation(DoctorFindingFamilyV1::LanguageServer),
