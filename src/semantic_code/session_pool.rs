@@ -810,6 +810,8 @@ pub(crate) mod tests {
         let model_digest = Sha256DigestHex::of_bytes(b"model");
         let tokenizer_digest = Sha256DigestHex::of_bytes(b"tokenizer");
         let config_digest = Sha256DigestHex::of_bytes(b"config");
+        let special_tokens_digest = Sha256DigestHex::of_bytes(b"special-tokens-map");
+        let tokenizer_config_digest = Sha256DigestHex::of_bytes(b"tokenizer-config");
         let query_digest = Sha256DigestHex::of_bytes(b"query");
         let document_digest = Sha256DigestHex::of_bytes(b"document");
         let manifest = ModelArtifactManifestV1 {
@@ -846,6 +848,18 @@ pub(crate) mod tests {
                         path: "config.json".to_owned(),
                         digest: config_digest,
                         byte_length: 6,
+                    },
+                    ArtifactPackageMemberV1 {
+                        role: ArtifactMemberRoleV1::SpecialTokensMap,
+                        path: "special_tokens_map.json".to_owned(),
+                        digest: special_tokens_digest,
+                        byte_length: 2,
+                    },
+                    ArtifactPackageMemberV1 {
+                        role: ArtifactMemberRoleV1::TokenizerConfig,
+                        path: "tokenizer_config.json".to_owned(),
+                        digest: tokenizer_config_digest,
+                        byte_length: 2,
                     },
                     ArtifactPackageMemberV1 {
                         role: ArtifactMemberRoleV1::QueryInstruction,
