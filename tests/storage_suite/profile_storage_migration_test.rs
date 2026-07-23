@@ -1102,7 +1102,11 @@ async fn trace_decay_init_uses_profile_shard_when_enrolled() {
 
     assert_path_eq(&cg.store_layout().data_root, &shard_root);
     assert_path_eq(cg.db_path(), shard_root.join("tracedecay.db"));
-    assert!(shard_root.join("config.json").is_file());
+    assert!(cg.db_path().is_file());
+    assert!(
+        !shard_root.join("config.json").exists(),
+        "profile-sharded init persists configuration in the store, not a legacy config.json"
+    );
     assert!(shard_root.join(STORE_MANIFEST_FILENAME).is_file());
     assert!(
         !project.join(".tracedecay/tracedecay.db").exists(),
@@ -1146,7 +1150,10 @@ async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
         cg.store_layout().data_root,
         client_profile.join("projects/proj_explicit")
     );
-    assert!(cg.store_layout().config_path.is_file());
+    assert!(
+        !cg.store_layout().config_path.exists(),
+        "init persists configuration in the store, not a legacy config.json"
+    );
     assert!(cg.db_path().is_file());
     assert!(TraceDecay::is_initialized_with_options(
         &project,
@@ -1189,7 +1196,10 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
         cg.store_layout().data_root,
         client_profile.join("projects/proj_db_only")
     );
-    assert!(cg.store_layout().config_path.is_file());
+    assert!(
+        !cg.store_layout().config_path.exists(),
+        "init persists configuration in the store, not a legacy config.json"
+    );
     assert!(cg.db_path().is_file());
     assert!(TraceDecay::is_initialized_with_options(
         &project,
