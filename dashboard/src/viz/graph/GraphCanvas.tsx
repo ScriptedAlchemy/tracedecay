@@ -172,7 +172,7 @@ export function GraphCanvas({
     }
 
     renderer.on('enterNode', ({ node }) => {
-      if (node.startsWith(HALO)) return;
+      if (node.startsWith(HALO) || node.startsWith(PULSE)) return;
       hovered = node;
       renderer.refresh();
     });
@@ -181,7 +181,7 @@ export function GraphCanvas({
       renderer.refresh();
     });
     renderer.on('clickNode', ({ node }) => {
-      if (node.startsWith(HALO)) return;
+      if (node.startsWith(HALO) || node.startsWith(PULSE)) return;
       onSelect?.(node);
       // Traveling activation: the struck node fires now; its neighborhood
       // fires one synaptic delay later (real caller/reference edges only).
@@ -196,10 +196,45 @@ export function GraphCanvas({
     // Bloom halos: each warm node carries a companion low-alpha disc behind
     // it (managed here, invisible to reducers) — shader-free glow.
     const HALO = '__halo__';
+    const PULSE = '__pulse__';
+    // Traveling light (Glass Brain grammar): while an edge is warm, one
+    // bright point runs from the hotter endpoint to the cooler one. Pulse
+    // nodes exist only while warm and the frozen bbox keeps them from ever
+    // rescaling the camera.
+    const syncPulses = (now: number) => {
+      const [hr, hg, hb] = hotRgb;
+      const period = 900;
+      const phase = (now % period) / period;
+      for (const edge of graph.edges()) {
+        const [from, to] = graph.extremities(edge);
+        if (!from || !to || from.startsWith(HALO) || to.startsWith(HALO)) continue;
+        if (from.startsWith(PULSE) || to.startsWith(PULSE)) continue;
+        const heatFrom = field.heatOf(from);
+        const heatTo = field.heatOf(to);
+        const travel = Math.max(heatFrom, heatTo);
+        const pulseId = PULSE + edge;
+        if (travel > 0.18 && !reducedMotion) {
+          const a = graph.getNodeAttributes(heatFrom >= heatTo ? from : to);
+          const b = graph.getNodeAttributes(heatFrom >= heatTo ? to : from);
+          const pulse = {
+            x: (a['x'] as number) + ((b['x'] as number) - (a['x'] as number)) * phase,
+            y: (a['y'] as number) + ((b['y'] as number) - (a['y'] as number)) * phase,
+            size: 1.5 + 1.8 * travel,
+            color: `rgba(${hr}, ${hg}, ${hb}, ${(0.85 * travel).toFixed(3)})`,
+            label: '',
+            zIndex: 3,
+          };
+          if (graph.hasNode(pulseId)) graph.mergeNodeAttributes(pulseId, pulse);
+          else graph.addNode(pulseId, pulse);
+        } else if (graph.hasNode(pulseId)) {
+          graph.dropNode(pulseId);
+        }
+      }
+    };
     const syncHalos = () => {
       const [hr, hg, hb] = hotRgb;
       for (const node of [...graph.nodes()]) {
-        if (node.startsWith(HALO)) continue;
+        if (node.startsWith(HALO) || node.startsWith(PULSE)) continue;
         const heat = field.heatOf(node);
         const haloId = HALO + node;
         if (heat > 0.12) {
@@ -244,6 +279,8 @@ export function GraphCanvas({
     const step = (now: number) => {
       const warm = field.tick(now);
       syncHalos();
+      syncPulses(now);
+      if (!warm) for (const node of [...graph.nodes()]) if (node.startsWith(PULSE)) graph.dropNode(node);
       renderer.refresh();
       raf = warm && !reducedMotion ? requestAnimationFrame(step) : 0;
     };
