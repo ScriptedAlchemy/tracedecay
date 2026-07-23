@@ -1618,10 +1618,9 @@ fn unknown_validity_sources_stay_eligible_while_missing_sources_reject() {
     // uncertainty surfaces through occurrence-level coverage, not by
     // rejecting the summary's lineage outright.
     assert!(
-        eligibility
+        !eligibility
             .rejections
-            .get(&SessionSummaryIdV1::new("unknown-valid").expect("valid id"))
-            .is_none()
+            .contains_key(&SessionSummaryIdV1::new("unknown-valid").expect("valid id"))
     );
     assert!(
         eligibility
