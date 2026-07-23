@@ -111,6 +111,10 @@ deferred by this framing.
 
 ## Finalized implementation architecture (decided 2026-07-23; owner: design)
 
+The shell layout, layout archetypes, token architecture, and component
+conventions implementing this architecture are specified in
+[Plan 11a](11a-dashboard-design.md); it shares this section's authority.
+
 Build and packaging:
 
 - Rsbuild is the bundler. Decided; no ADR, no comparison, do not revisit.
