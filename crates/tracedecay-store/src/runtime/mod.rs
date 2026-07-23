@@ -16,6 +16,7 @@ mod lifecycle;
 mod operation;
 mod outbox;
 mod ports;
+mod repository_read;
 mod telemetry;
 
 pub use consistency::*;
@@ -25,4 +26,5 @@ pub use lifecycle::*;
 pub use operation::*;
 pub use outbox::*;
 pub use ports::*;
+pub use repository_read::*;
 pub use telemetry::*;

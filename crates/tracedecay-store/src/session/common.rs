@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::error::Error as StdError;
 use std::marker::PhantomData;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     DataVersionDigest, SessionContractError, SessionId, SessionProjectionGenerationV1,
@@ -59,7 +60,7 @@ impl SessionTemporalCapabilitiesV1 {
 }
 
 /// Read watermarks captured together before a temporal operation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionFrozenWatermarksV1 {
     active_generation: SessionProjectionGenerationV1,
     source_frontier: u64,

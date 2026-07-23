@@ -24,30 +24,23 @@ pub use attachment::{
     RepositoryAttachmentStartError, RepositoryDispatchError, RepositoryPhysicalAttachmentFactory,
     RepositoryRuntimePhysicalAttachment, RepositoryRuntimePhysicalSnapshot,
 };
-pub use configuration::{ConfigurationExecutor, ProfileReadOperationV1, ProfileReadResultV1};
-pub use diagnostics::{DiagnosticExecutor, DiagnosticReadOperationV1, DiagnosticReadResultV1};
-pub use fact::{FactExecutor, FactReadOperationV1, FactReadResultV1};
+pub use configuration::ConfigurationExecutor;
+pub use diagnostics::DiagnosticExecutor;
+pub use fact::FactExecutor;
 pub use fixtures::{AdapterParityFixtureV1, PRE_CUTOVER_ADAPTER_PARITY_FIXTURES_V1};
-pub use observation::{
-    ObservationExecutor, ObservationReadOperationV1, ObservationReadResultV1,
-    StoredObservationRowV1,
+pub use observation::ObservationExecutor;
+pub use project::ProjectExecutor;
+pub use session::SessionExecutor;
+
+// The read operation/result contract now lives in `tracedecay-store`. Re-export
+// the moved types so existing `repository::` paths keep resolving across the
+// workspace.
+pub use tracedecay_store::{
+    DiagnosticReadOperationV1, DiagnosticReadResultV1, FactReadOperationV1, FactReadResultV1,
+    ObservationReadOperationV1, ObservationReadResultV1, ProfileReadOperationV1,
+    ProfileReadResultV1, ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1,
+    RepositoryReadResultV1, SessionReadOperationV1, SessionReadResultV1, StoredObservationRowV1,
 };
-pub use project::{ProjectExecutor, ProjectReadOperationV1, ProjectReadResultV1};
-pub use session::{SessionExecutor, SessionReadOperationV1, SessionReadResultV1};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RepositoryReadOperationV1 {
-    Profile(ProfileReadOperationV1),
-    Project(ProjectReadOperationV1),
-    Session(SessionReadOperationV1),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RepositoryReadResultV1 {
-    Profile(ProfileReadResultV1),
-    Project(Box<ProjectReadResultV1>),
-    Session(SessionReadResultV1),
-}
 
 #[derive(Default)]
 pub struct ConcreteRepositoryWriteExecutor {

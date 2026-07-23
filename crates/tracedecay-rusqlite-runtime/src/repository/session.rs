@@ -10,26 +10,11 @@ use tracedecay_domain::{
     TemporalAssertionRecordV1, TemporalValidityV1, ThreadId, TurnId, UtcMicros,
 };
 use tracedecay_store::{
-    SessionFrozenWatermarksV1, SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1,
+    SessionFrozenWatermarksV1, SessionReadOperationV1, SessionReadResultV1,
+    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1,
 };
 
 use super::support::{canonical_digest, decode, encode, invalid, u64_to_i64, usize_to_i64};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SessionReadOperationV1 {
-    ProjectionBatch {
-        session_id: SessionId,
-        generation: SessionProjectionGenerationV1,
-        batch_ordinal: u64,
-    },
-    Summary(SessionSummaryIdV1),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SessionReadResultV1 {
-    ProjectionBatch(Option<SessionTemporalProjectionBatchV1>),
-    Summary(Option<SessionSummaryRecordV1>),
-}
 
 #[derive(Clone, Default)]
 pub struct SessionExecutor;

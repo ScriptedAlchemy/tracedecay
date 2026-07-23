@@ -5,6 +5,7 @@
 
 use std::future::Future;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ConfigurationAuditEvent, ConfigurationIdempotencyKey, ConfigurationReceiptId,
@@ -37,7 +38,7 @@ impl From<DomainError> for ConfigurationStoreError {
 
 pub type ConfigurationStoreResult<T> = Result<T, ConfigurationStoreError>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigurationRevisionRecordV1 {
     pub revision_id: ConfigurationRevisionId,
     pub parent_revision_id: Option<ConfigurationRevisionId>,

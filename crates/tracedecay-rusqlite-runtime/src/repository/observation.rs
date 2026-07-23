@@ -1,35 +1,10 @@
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
-use tracedecay_domain::{
-    CanonicalObservationIdV1, DurableObservationV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1,
+use tracedecay_domain::ObservationSourceCursorV1;
+use tracedecay_store::{
+    ObservationReadOperationV1, ObservationReadResultV1, ObservationWrite, StoredObservationRowV1,
 };
-use tracedecay_store::ObservationWrite;
 
 use super::support::{decode, encode, invalid};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ObservationReadOperationV1 {
-    SourceCursor {
-        source: ObservationSourceIdentityV1,
-        scope: ObservationScopeV1,
-    },
-    Observation {
-        observation_id: CanonicalObservationIdV1,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoredObservationRowV1 {
-    pub sequence: u64,
-    pub observation: DurableObservationV1,
-    pub committed_cursor: ObservationSourceCursorV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ObservationReadResultV1 {
-    SourceCursor(Option<ObservationSourceCursorV1>),
-    Observation(Box<Option<StoredObservationRowV1>>),
-}
 
 #[derive(Clone, Default)]
 pub struct ObservationExecutor;

@@ -5,21 +5,12 @@ use tracedecay_domain::{
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
     RetrievalAnchorRecordV2, UtcMicros,
 };
-use tracedecay_store::{FactCurrentQuery, FactLineageQuery, FactWriteBatch, StoredFactV1};
+use tracedecay_store::{
+    FactCurrentQuery, FactLineageQuery, FactReadOperationV1, FactReadResultV1, FactWriteBatch,
+    StoredFactV1,
+};
 
 use super::support::{decode, encode, invalid, usize_to_i64};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FactReadOperationV1 {
-    Current(FactCurrentQuery),
-    Lineage(FactLineageQuery),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FactReadResultV1 {
-    Current(Box<Option<StoredFactV1>>),
-    Lineage(Vec<FactLineageEventV1>),
-}
 
 #[derive(Clone, Default)]
 pub struct FactExecutor;

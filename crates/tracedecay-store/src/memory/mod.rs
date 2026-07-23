@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactEventId, FactId, FactOwnerV1, FactPayloadV1,
     LegacyFactMappingV1, PayloadAccessState, UtcMicros,
@@ -88,7 +89,7 @@ const MAX_COMPATIBILITY_SEARCH_BYTES: usize = 4 * 1024;
 const MAX_COMPATIBILITY_REASON_BYTES: usize = 4 * 1024;
 
 /// Deterministic current or as-of projection of one fact's lineage.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredFactV1 {
     fact_id: FactId,
     owner: FactOwnerV1,

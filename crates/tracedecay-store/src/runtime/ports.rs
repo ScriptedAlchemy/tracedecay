@@ -10,7 +10,10 @@ use super::{
     SnapshotLeaseV1, StorageRuntimeContractErrorV1, StorageRuntimeErrorV1, StoreCommitReceiptV1,
     StoreRuntimeBindingV1, UnavailableReasonV1, WatermarkCoverageStatusV1,
 };
-use super::{RepositoryOperationEnvelopeV1, StoreAuthorityEpochV1, StoreShardIdV1};
+use super::{
+    RepositoryOperationEnvelopeV1, RepositoryReadOperationV1, RepositoryReadResultV1,
+    StoreAuthorityEpochV1, StoreShardIdV1,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
@@ -268,6 +271,7 @@ pub enum RuntimeReadOperationV1 {
     GraphNode { node_id: String },
     GraphSearch { query: String, limit: u32 },
     GraphQuickCheck,
+    Repository { op: RepositoryReadOperationV1 },
 }
 
 impl RuntimeReadOperationV1 {
@@ -296,6 +300,9 @@ impl RuntimeReadOperationV1 {
                     Self::MAX_GRAPH_QUERY_BYTES,
                 )
             }
+            // Repository reads are validated by their typed store DTOs at
+            // construction; the runtime port performs no extra checks yet.
+            Self::Repository { .. } => return Ok(()),
             _ => return Ok(()),
         };
         let value = value.expect("graph operation validation always supplies text");
@@ -466,6 +473,7 @@ pub enum RuntimeReadResultV1 {
     GraphNode { node: Option<GraphNodeV1> },
     GraphSearch { results: Vec<GraphSearchResultV1> },
     GraphQuickCheck { healthy: bool },
+    Repository { result: RepositoryReadResultV1 },
 }
 
 /// Explicit history coverage for every read. `Partial`, `Stale`, and
@@ -709,7 +717,10 @@ fn validate_read_value(
         }
         (RuntimeReadOperationV1::GraphStats, RuntimeReadResultV1::GraphStats { .. })
         | (RuntimeReadOperationV1::TemporalHealth, RuntimeReadResultV1::TemporalHealth { .. })
-        | (RuntimeReadOperationV1::GraphQuickCheck, RuntimeReadResultV1::GraphQuickCheck { .. }) => {
+        | (RuntimeReadOperationV1::GraphQuickCheck, RuntimeReadResultV1::GraphQuickCheck { .. })
+        // Repository reads carry results validated by their typed store DTOs; the
+        // runtime port only enforces that the result family matches the request.
+        | (RuntimeReadOperationV1::Repository { .. }, RuntimeReadResultV1::Repository { .. }) => {
             Ok(())
         }
         (

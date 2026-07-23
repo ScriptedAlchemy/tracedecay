@@ -1,25 +1,10 @@
 use rusqlite::{Savepoint, Transaction};
-use tracedecay_store::{FactWriteBatch, ObservationWrite, SanitizedCleanDiagnosticSnapshotV1};
-
-use super::{
-    DiagnosticExecutor, DiagnosticReadOperationV1, DiagnosticReadResultV1, FactExecutor,
-    FactReadOperationV1, FactReadResultV1, ObservationExecutor, ObservationReadOperationV1,
-    ObservationReadResultV1,
+use tracedecay_store::{
+    FactWriteBatch, ObservationWrite, ProjectReadOperationV1, ProjectReadResultV1,
+    SanitizedCleanDiagnosticSnapshotV1,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProjectReadOperationV1 {
-    Fact(FactReadOperationV1),
-    Observation(ObservationReadOperationV1),
-    Diagnostics(DiagnosticReadOperationV1),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProjectReadResultV1 {
-    Fact(FactReadResultV1),
-    Observation(ObservationReadResultV1),
-    Diagnostics(DiagnosticReadResultV1),
-}
+use super::{DiagnosticExecutor, FactExecutor, ObservationExecutor};
 
 #[derive(Clone, Default)]
 pub struct ProjectExecutor {

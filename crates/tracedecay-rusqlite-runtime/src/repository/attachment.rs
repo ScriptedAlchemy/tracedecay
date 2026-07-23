@@ -291,7 +291,7 @@ impl Error for RepositoryDispatchError {
 
 #[derive(Clone, Default)]
 struct RepositoryRuntimeReadExecutor {
-    _repository: ConcreteRepositoryReadExecutor,
+    repository: ConcreteRepositoryReadExecutor,
 }
 
 impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
@@ -307,6 +307,13 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
                     .map(|value| value.eq_ignore_ascii_case("ok"))
                     .map_err(|error| infrastructure(format!("repository quick check: {error}")))?;
                 RuntimeReadResultV1::TemporalHealth { healthy }
+            }
+            RuntimeReadOperationV1::Repository { op } => {
+                let result = self
+                    .repository
+                    .execute(snapshot, op)
+                    .map_err(|error| infrastructure(format!("repository read: {error}")))?;
+                RuntimeReadResultV1::Repository { result }
             }
             _ => {
                 return Err(infrastructure(

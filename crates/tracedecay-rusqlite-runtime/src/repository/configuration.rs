@@ -8,7 +8,10 @@ use tracedecay_domain::configuration::{
     SettingKey,
 };
 use tracedecay_domain::{ActorId, UtcMicros};
-use tracedecay_store::{ConfigurationCommitV1, ConfigurationRevisionRecordV1};
+use tracedecay_store::{
+    ConfigurationCommitV1, ConfigurationRevisionRecordV1, ProfileReadOperationV1,
+    ProfileReadResultV1,
+};
 
 use super::support::{conversion, encode, invalid};
 
@@ -16,17 +19,6 @@ const SNAPSHOT_ENTRY_SCHEMA_VERSION: u16 = 1;
 const AUDIT_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 const AUTHORIZATION_NOT_RECORDED: &str = "not_recorded_by_configuration_store_v1";
 const ACTIVATION_NOT_RECORDED: &str = "not_recorded_by_configuration_store_v1";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProfileReadOperationV1 {
-    CurrentConfiguration,
-    ConfigurationRevision(ConfigurationRevisionId),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProfileReadResultV1 {
-    ConfigurationRevision(Option<ConfigurationRevisionRecordV1>),
-}
 
 #[derive(Clone, Default)]
 pub struct ConfigurationExecutor;

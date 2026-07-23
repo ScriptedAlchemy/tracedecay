@@ -4,31 +4,15 @@ use tracedecay_domain::{
     DiagnosticRecordStateV1, DiagnosticSeverityV1, FileOccurrenceId, GenerationDiagnosticV1,
     RetrievalAnchorId, SourceSpan, UtcMicros,
 };
-use tracedecay_store::SanitizedCleanDiagnosticSnapshotV1;
+use tracedecay_store::{
+    DiagnosticReadOperationV1, DiagnosticReadResultV1, SanitizedCleanDiagnosticSnapshotV1,
+};
 
 use super::support::{conversion, invalid, u64_to_i64};
 
 const CURRENT: &str = "current";
 const SUPERSEDED: &str = "superseded";
 const CLEARED: &str = "cleared";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DiagnosticReadOperationV1 {
-    CurrentGeneration,
-    Generation(CodeGenerationId),
-    CurrentForFile {
-        generation_id: CodeGenerationId,
-        file_occurrence_id: FileOccurrenceId,
-    },
-    ByAnchor(RetrievalAnchorId),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DiagnosticReadResultV1 {
-    CurrentGeneration(Option<CodeGenerationId>),
-    Records(Vec<GenerationDiagnosticV1>),
-    Record(Box<Option<GenerationDiagnosticV1>>),
-}
 
 #[derive(Clone, Default)]
 pub struct DiagnosticExecutor;

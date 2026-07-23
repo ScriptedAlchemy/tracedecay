@@ -1,5 +1,6 @@
 use std::future::Future;
 
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     LogicalCopyRecordV1, MessageOccurrenceRecordV1, SessionId, SessionProjectionGenerationV1,
     TemporalAssertionRecordV1, UtcMicros,
@@ -17,7 +18,7 @@ use super::common::{
 pub const MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS: usize = 1_000;
 
 /// One bounded candidate-generation write for a single session generation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionTemporalProjectionBatchV1 {
     session_id: SessionId,
     generation: SessionProjectionGenerationV1,

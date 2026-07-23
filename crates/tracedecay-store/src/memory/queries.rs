@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     Confidence, DomainError, FactCategoryV1, FactEventId, FactId, FactLineageEventV1, FactOwnerV1,
     LocatorDigest, RetrievalAnchorId, SourceStoreId, UtcMicros,
@@ -198,7 +199,7 @@ pub struct CurrentFactsQuery {
 }
 
 /// One current fact, authorized by its canonical owner.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FactCurrentQuery {
     owner: FactOwnerV1,
     fact_id: FactId,
@@ -287,7 +288,7 @@ impl FactAsOfQuery {
 }
 
 /// Exclusive cursor for lineage ordered by `(occurred_at, FactEventId)`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FactLineageCursor {
     occurred_at: UtcMicros,
     event_id: FactEventId,
@@ -312,7 +313,7 @@ impl FactLineageCursor {
 }
 
 /// Page of lineage events ordered by `(occurred_at, FactEventId)`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FactLineageQuery {
     owner: FactOwnerV1,
     fact_id: FactId,
