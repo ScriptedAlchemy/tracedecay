@@ -6,13 +6,10 @@
 //! composition path, which returns the typed PR9 fallback while semantic is
 //! offline/indexing). No duplicate mock retriever exists here.
 //!
-//! Outputs:
-//! - deterministic `train` / `validation` candidate records for tuning
-//! - sealed holdout *input* (queries only; never labels)
-//! - current/10x resource samples, cancellation, offline, and fallback digests
-//!
-//! Holdout labels are never loaded by this module. Tuning consumers must use
-//! only train/validation outputs.
+//! Outputs deterministic checked-in `train` / `validation` candidate records
+//! plus current/10x resource samples, cancellation, offline, and fallback
+//! digests. Labels are ordinary reviewable fixture data and never confer
+//! activation authority.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -94,8 +91,6 @@ pub enum CandidateOutputError {
     },
     #[error("{0}")]
     Contract(String),
-    #[error("holdout labels must not be supplied to tuning generation")]
-    HoldoutLabelLeak,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,7 +100,6 @@ pub struct CandidateWorkloadV1 {
     pub workload_id: String,
     pub source_repository_commit: String,
     pub source_repository_tree: String,
-    pub candidate_is_not_label_authority: bool,
     pub corpus: Vec<CorpusDocumentV1>,
     pub profile_matrix: Vec<ProfileSpecV1>,
     pub resource_budgets: ResourceBudgetsV1,
@@ -214,21 +208,9 @@ pub struct ProductionCandidateOutputV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SealedHoldoutInputV1 {
-    pub schema_version: u32,
-    pub workload_digest: String,
-    pub partition: String,
-    pub source_commit: String,
-    pub holdout_labels_included: bool,
-    pub queries: Vec<WorkloadQueryV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GenerateCandidateOutputsResultV1 {
     pub workload_digest: String,
-    pub train_validation_outputs: Vec<ProductionCandidateOutputV1>,
-    pub sealed_holdout_input: SealedHoldoutInputV1,
+    pub outputs: Vec<ProductionCandidateOutputV1>,
 }
 
 #[derive(Clone, Debug)]
@@ -236,7 +218,6 @@ pub struct GenerateCandidateOutputsOptions<'a> {
     pub repo_root: &'a Path,
     pub workload_path: Option<&'a Path>,
     pub profile_ids: Option<&'a [String]>,
-    pub include_holdout_candidates: bool,
 }
 
 #[derive(Clone, Default)]
@@ -357,8 +338,7 @@ struct PublishedCorpus {
     occurrence_map: BTreeMap<String, OccurrenceMapEntry>,
 }
 
-/// Load the checked-in PR9/PR10 candidate workload and reject any sealed
-/// holdout query that already carries a label (tuning must never see them).
+/// Load the checked-in PR9/PR10 direct-evaluation workload.
 pub fn load_candidate_workload(path: &Path) -> Result<CandidateWorkloadV1, CandidateOutputError> {
     let bytes = fs::read(path).map_err(|source| CandidateOutputError::Read {
         path: path.to_path_buf(),
@@ -387,57 +367,25 @@ pub fn validate_workload_for_tuning(
             "candidate workload schema_version must be 1".to_owned(),
         ));
     }
-    if !workload.candidate_is_not_label_authority {
-        return Err(CandidateOutputError::Contract(
-            "candidate_is_not_label_authority must be true".to_owned(),
-        ));
-    }
     for query in &workload.queries {
-        if query.partition == "sealed_holdout" && query.label.is_some() {
-            return Err(CandidateOutputError::HoldoutLabelLeak);
-        }
-        if query.partition != "train"
-            && query.partition != "validation"
-            && query.partition != "sealed_holdout"
-        {
+        if query.partition != "train" && query.partition != "validation" {
             return Err(CandidateOutputError::Contract(format!(
                 "unknown partition {}",
                 query.partition
+            )));
+        }
+        if query.label.is_none() {
+            return Err(CandidateOutputError::Contract(format!(
+                "query {} is missing its checked-in label",
+                query.query_id
             )));
         }
     }
     Ok(())
 }
 
-/// Emit sealed holdout input queries without labels. Never reads owner-label
-/// stores.
-pub fn sealed_holdout_input(
-    workload: &CandidateWorkloadV1,
-) -> Result<SealedHoldoutInputV1, CandidateOutputError> {
-    validate_workload_for_tuning(workload)?;
-    let mut queries: Vec<WorkloadQueryV1> = workload
-        .queries
-        .iter()
-        .filter(|query| query.partition == "sealed_holdout")
-        .cloned()
-        .map(|mut query| {
-            query.label = None;
-            query
-        })
-        .collect();
-    queries.sort_by(|left, right| left.query_id.cmp(&right.query_id));
-    Ok(SealedHoldoutInputV1 {
-        schema_version: 1,
-        workload_digest: compute_workload_digest(workload)?,
-        partition: "sealed_holdout".to_owned(),
-        source_commit: workload.source_repository_commit.clone(),
-        holdout_labels_included: false,
-        queries,
-    })
-}
-
-/// Generate deterministic train/validation outputs (and optional holdout
-/// candidate bytes) using the production retrieval kernel.
+/// Generate deterministic train/validation outputs using the production
+/// retrieval kernel.
 pub fn generate_candidate_outputs(
     options: &GenerateCandidateOutputsOptions<'_>,
 ) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
@@ -447,8 +395,6 @@ pub fn generate_candidate_outputs(
     );
     let workload = load_candidate_workload(&workload_path)?;
     let workload_digest = compute_workload_digest(&workload)?;
-    let sealed_holdout_input = sealed_holdout_input(&workload)?;
-
     let published = publish_corpus(options.repo_root, &workload)?;
     let profiles: Vec<&ProfileSpecV1> = match options.profile_ids {
         Some(ids) => workload
@@ -464,7 +410,7 @@ pub fn generate_candidate_outputs(
         ));
     }
 
-    let mut train_validation_outputs = Vec::new();
+    let mut outputs = Vec::new();
     for profile in profiles {
         for partition in ["train", "validation"] {
             let output = generate_partition_output(
@@ -474,21 +420,8 @@ pub fn generate_candidate_outputs(
                 &published,
                 profile,
                 partition,
-                false,
             )?;
-            train_validation_outputs.push(output);
-        }
-        if options.include_holdout_candidates {
-            let holdout = generate_partition_output(
-                options.repo_root,
-                &workload,
-                &workload_digest,
-                &published,
-                profile,
-                "sealed_holdout",
-                true,
-            )?;
-            train_validation_outputs.push(holdout);
+            outputs.push(output);
         }
     }
 
@@ -497,8 +430,7 @@ pub fn generate_candidate_outputs(
 
     Ok(GenerateCandidateOutputsResultV1 {
         workload_digest,
-        train_validation_outputs,
-        sealed_holdout_input,
+        outputs,
     })
 }
 
@@ -521,9 +453,6 @@ pub fn retrieve_partition_query_bytes(
         .iter()
         .find(|query| query.query_id == query_id)
         .ok_or_else(|| CandidateOutputError::Contract(format!("unknown query {query_id}")))?;
-    if query.partition == "sealed_holdout" && query.label.is_some() {
-        return Err(CandidateOutputError::HoldoutLabelLeak);
-    }
     let published = publish_corpus(repo_root, workload)?;
     let row = retrieve_one_query(repo_root, &published, profile, query)?;
     canonical_json_bytes(&row)
@@ -539,10 +468,7 @@ pub fn write_generate_outputs(
     })?;
     let jsonl_path = output_root.join("train-validation-candidate-outputs.jsonl");
     let mut jsonl = String::new();
-    for output in &result.train_validation_outputs {
-        if output.partition == "sealed_holdout" {
-            continue;
-        }
+    for output in &result.outputs {
         jsonl.push_str(&serde_json::to_string(output).map_err(|error| {
             CandidateOutputError::Contract(format!("serialize candidate output: {error}"))
         })?);
@@ -552,16 +478,12 @@ pub fn write_generate_outputs(
         path: jsonl_path,
         source,
     })?;
-    let holdout_path = output_root.join("sealed-holdout-input.json");
-    write_pretty_json(&holdout_path, &result.sealed_holdout_input)?;
     let summary_path = output_root.join("generate-summary.json");
     write_pretty_json(
         &summary_path,
         &serde_json::json!({
             "workload_digest": result.workload_digest,
-            "train_validation_outputs": result.train_validation_outputs.len(),
-            "sealed_holdout_queries": result.sealed_holdout_input.queries.len(),
-            "holdout_labels_included": result.sealed_holdout_input.holdout_labels_included,
+            "outputs": result.outputs.len(),
             "production_boundary": PRODUCTION_BOUNDARY,
         }),
     )?;
@@ -575,13 +497,7 @@ fn generate_partition_output(
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
     partition: &str,
-    allow_holdout_partition: bool,
 ) -> Result<ProductionCandidateOutputV1, CandidateOutputError> {
-    if partition == "sealed_holdout" && !allow_holdout_partition {
-        return Err(CandidateOutputError::Contract(
-            "holdout candidates require explicit include_holdout_candidates".to_owned(),
-        ));
-    }
     let queries: Vec<&WorkloadQueryV1> = workload
         .queries
         .iter()
@@ -592,12 +508,6 @@ fn generate_partition_output(
             "partition {partition} has no queries"
         )));
     }
-    for query in &queries {
-        if query.label.is_some() && partition == "sealed_holdout" {
-            return Err(CandidateOutputError::HoldoutLabelLeak);
-        }
-    }
-
     let mut rows = Vec::new();
     let mut latencies_us = Vec::new();
     let peak_before = peak_rss_bytes();
@@ -1538,57 +1448,24 @@ mod tests {
     }
 
     #[test]
-    fn sealed_holdout_input_never_includes_labels() {
-        let workload = workload();
-        let input = sealed_holdout_input(&workload).expect("holdout input");
-        assert!(!input.holdout_labels_included);
-        assert!(!input.queries.is_empty());
-        assert!(input.queries.iter().all(|query| query.label.is_none()));
-        assert!(
-            input
-                .queries
-                .iter()
-                .all(|query| query.partition == "sealed_holdout")
-        );
-    }
-
-    #[test]
-    fn tuning_generation_rejects_holdout_label_leak_in_workload() {
+    fn direct_workload_requires_checked_in_labels() {
         let mut workload = workload();
-        for query in &mut workload.queries {
-            if query.partition == "sealed_holdout" {
-                query.label = Some(serde_json::json!({"anchors": ["leaked"]}));
-                break;
-            }
-        }
-        let error = validate_workload_for_tuning(&workload).expect_err("label leak");
-        assert!(matches!(error, CandidateOutputError::HoldoutLabelLeak));
+        workload.queries[0].label = None;
+        let error = validate_workload_for_tuning(&workload).expect_err("missing label");
+        assert!(error.to_string().contains("missing its checked-in label"));
     }
 
     #[test]
-    fn train_validation_outputs_omit_holdout_query_ids() {
+    fn direct_outputs_cover_train_and_validation() {
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: &repo_root(),
             workload_path: None,
             profile_ids: Some(&["pr9-fallback".to_owned()]),
-            include_holdout_candidates: false,
         })
         .expect("generate");
-        let holdout_ids: BTreeSet<_> = result
-            .sealed_holdout_input
-            .queries
-            .iter()
-            .map(|query| query.query_id.clone())
-            .collect();
-        for output in &result.train_validation_outputs {
+        assert_eq!(result.outputs.len(), 2);
+        for output in &result.outputs {
             assert!(output.partition == "train" || output.partition == "validation");
-            for row in &output.queries {
-                assert!(
-                    !holdout_ids.contains(&row.query_id),
-                    "tuning output leaked holdout {}",
-                    row.query_id
-                );
-            }
             assert_eq!(output.production_boundary, PRODUCTION_BOUNDARY);
             assert_eq!(output.cancellation, REQUIRED_CANCELLATION);
             assert_eq!(output.offline, REQUIRED_OFFLINE);
@@ -1605,11 +1482,10 @@ mod tests {
             repo_root: &repo_root(),
             workload_path: None,
             profile_ids: Some(&["pr9-fallback".to_owned()]),
-            include_holdout_candidates: false,
         })
         .expect("generate");
         let train = result
-            .train_validation_outputs
+            .outputs
             .iter()
             .find(|output| output.partition == "train" && output.profile_id == "pr9-fallback")
             .expect("train output");

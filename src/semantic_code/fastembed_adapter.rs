@@ -20,7 +20,7 @@
 //!   `src/query/retrieval/ports.rs` sets the precedent that ports are
 //!   synchronous contracts with scheduling/cancellation above them. This port
 //!   is therefore synchronous; async wrapping is an integration concern.
-//! - ESCALATION-2 (manifest/domain vocabulary): the signed artifact manifest
+//! - ESCALATION-2 (manifest/domain vocabulary): the artifact manifest
 //!   and domain projection key remain separate authorities. Exhaustive bridge
 //!   matches below admit them into one private projection-artifact authority;
 //!   the runtime defines no duplicate metric/normalization/precision enums.
@@ -30,7 +30,7 @@
 //! - ESCALATION-4 (budget type): Plan 31 says deadline/cancellation limits are
 //!   fields of the shared PR9 `RetrievalBudget` and PR10 introduces no
 //!   semantic-only budget type. That domain type is outside this root-private
-//!   packet, so deadlines are modelled here as a `Duration` against the
+//!   module, so deadlines are modelled here as a `Duration` against the
 //!   injected pool clock and cancellation as the [`CancellationSignal`] trait;
 //!   the integrator adapts `RetrievalBudget` onto both.
 #![allow(dead_code)] // PR10 fastembed adapter; Plan 31 — staged
@@ -275,7 +275,7 @@ impl VerifiedEmbeddingArtifactV1 {
 
 /// Single root-private authority pairing a store-admitted artifact with an
 /// admitted domain projection. Construction exhaustively checks every pin the
-/// signed manifest and projection share before compatibility or session open.
+/// manifest and projection share before compatibility or session open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AdmittedProjectionArtifactV1 {
     runtime_artifact: VerifiedEmbeddingArtifactV1,
@@ -291,7 +291,7 @@ impl AdmittedProjectionArtifactV1 {
         let key = projection.embedding_key();
 
         require_pin(
-            artifact.artifact_digest() == &manifest.signed_identity_digest(),
+            artifact.artifact_digest() == &manifest.artifact_identity_digest(),
             ProjectionArtifactPinV1::ArtifactIdentity,
         )?;
         require_pin(
@@ -1176,8 +1176,7 @@ pub struct FakeRuntimeCounters {
     pub texts_embedded: AtomicUsize,
 }
 
-/// Deterministic offline implementation of [`EmbeddingRuntime`] (Plan 31:
-/// "fake runtime ports" are part of this preparation packet). It loads no
+/// Deterministic offline implementation of [`EmbeddingRuntime`]. It loads no
 /// model, performs no I/O and no network access, and produces hash-based
 /// pseudo-embeddings with the descriptor's declared dimensions, metric, and
 /// normalization. Same descriptor digest + same text always yields the same

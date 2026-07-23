@@ -6,7 +6,6 @@
 pub mod code_intelligence;
 pub mod configuration;
 pub mod diagnostics;
-pub mod evaluation;
 pub mod external_source;
 pub mod feedback;
 pub mod framed_log;
@@ -23,7 +22,6 @@ pub mod session_derived;
 pub use code_intelligence::*;
 pub use configuration::*;
 pub use diagnostics::*;
-pub use evaluation::*;
 pub use external_source::*;
 pub use feedback::*;
 pub use framed_log::*;

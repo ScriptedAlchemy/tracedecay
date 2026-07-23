@@ -1,14 +1,13 @@
 //! Digest-addressed model artifact store with verified resumable import
-//! (Plan 31 "Model and offline lifecycle", packet
-//! `pr10/prep-artifact-manifest`).
+//! (Plan 31 "Model and offline lifecycle").
 //!
 //! Layout under the caller-owned root (Plan-02-owned user store at
-//! integration; keyed by signed artifact digest, never an ambient cache):
+//! integration; keyed by artifact digest, never an ambient cache):
 //!
 //! ```text
 //! <root>/staging/<opaque-id>/members/*        resumable package staging
-//! <root>/staging/<opaque-id>/import.meta.json signed package identity
-//! <root>/artifacts/<signed-envelope-digest>/  verified package members
+//! <root>/staging/<opaque-id>/import.meta.json immutable package identity
+//! <root>/artifacts/<manifest-digest>/         verified package members
 //! <root>/inventory.json                       staged|verified|installed|...
 //! <root>/receipts/gc.jsonl                    append-only GC receipts
 //! <root>/.artifact-store-recovery.json        crash-recovery transaction
@@ -16,16 +15,11 @@
 //!
 //! Import accepts caller-provided bytes only. It stages under a random local
 //! directory, resumes only because the manifest supplies immutable length and
-//! digest identity, streams length + SHA-256 verification, verifies the
-//! manifest signature against the admitted trust roots BEFORE atomic rename,
-//! fsyncs file and directory, then publishes the inventory record. Corrupt,
-//! revoked, quarantined, or runtime-incompatible artifacts disable the
-//! semantic capability with a typed error — never a substitution, never a
-//! query-time download or import.
-//!
-//! QUARANTINE: not reachable from production code yet; no network types, no
-//! query/retrieval wiring, profile-independent retention, and GC.
-#![allow(dead_code)] // staged model artifact store; Plan 31 (fastembed) — not yet wired
+//! digest identity, streams length + SHA-256 verification, fsyncs files and
+//! directories, then atomically publishes the inventory record. Corrupt,
+//! revoked, quarantined, or runtime-incompatible artifacts disable semantics
+//! without substitution or query-time download.
+#![allow(dead_code)] // model artifact store; Plan 31
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -53,7 +47,6 @@ use super::manifest::{
     ArtifactMemberRoleV1, ArtifactPackageMemberV1, ModelArtifactManifestV1, ResourceCeilingV1,
     Sha256DigestHex,
 };
-use super::trust_roots::{Ed25519Verifier, TrustRootSetV1};
 
 const RECOVERY_SCHEMA_V1: &str = "tracedecay.artifact-store-recovery.v1";
 const STAGING_SCHEMA_V1: &str = "tracedecay.artifact-store-staging.v1";
@@ -73,24 +66,15 @@ pub enum ArtifactInventoryStateV1 {
 /// One digest-addressed inventory record.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactInventoryRecordV1 {
-    /// Digest of the complete signed manifest envelope. This is the package
-    /// identity and prevents same-model/different-tokenizer collisions.
+    /// Digest of the complete canonical manifest. This is the package identity
+    /// and prevents same-model/different-tokenizer collisions.
     pub artifact_digest: Sha256DigestHex,
-    /// Digest of signed payload bytes, retained for audit correlation.
+    /// Digest of canonical payload bytes, retained for audit correlation.
     pub manifest_digest: Sha256DigestHex,
-    pub trust_binding: ArtifactTrustBindingV1,
     pub members: Vec<ArtifactPackageMemberV1>,
     pub state: ArtifactInventoryStateV1,
     pub recorded_at_unix: u64,
     pub quarantine_reason: Option<QuarantineReasonV1>,
-}
-
-/// Trust evidence copied from the verified detached signature into durable
-/// inventory. The key ID and rotation epoch are both required.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactTrustBindingV1 {
-    pub root_id: String,
-    pub rotation_epoch: u32,
 }
 
 /// Stable, non-sensitive quarantine classification. Never retain input paths,
@@ -129,10 +113,6 @@ pub struct RuntimeEnvironmentV1 {
 pub enum ArtifactImportErrorV1 {
     #[error("artifact manifest rejected")]
     ManifestRejected,
-    #[error("artifact trust binding rejected")]
-    TrustRejected,
-    #[error("detached signature does not verify over canonical manifest bytes")]
-    SignatureInvalid,
     #[error("staged write exceeds the declared member length")]
     SizeExpansionBeyondDeclared,
     #[error("staged member length does not match its declared pin")]
@@ -174,10 +154,6 @@ pub enum SemanticCapabilityDisabledV1 {
     RevokedArtifact,
     #[error("artifact is quarantined")]
     QuarantinedArtifact,
-    #[error("manifest trust binding rejected")]
-    UntrustedRoot,
-    #[error("manifest signature invalid")]
-    SignatureInvalid,
     #[error("runtime is incompatible")]
     IncompatibleRuntime,
     #[error("platform is incompatible")]
@@ -313,7 +289,7 @@ impl AdmittedArtifactV1 {
     #[cfg(test)]
     pub(super) fn test_fixture(manifest: ModelArtifactManifestV1) -> Self {
         Self {
-            artifact_digest: manifest.signed_identity_digest(),
+            artifact_digest: manifest.artifact_identity_digest(),
             manifest_digest: manifest.canonical_digest(),
             manifest,
             source: None,
@@ -354,13 +330,13 @@ pub struct GcReceiptV1 {
 }
 
 /// Resume identity persisted beside staged bytes. It persists the complete
-/// signed envelope and every package member, so recovery can never infer a
+/// canonical manifest and every package member, so recovery can never infer a
 /// missing identity from an ambient cache or path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct StagingMetaV1 {
     schema: String,
     manifest: ModelArtifactManifestV1,
-    signed_manifest_digest: Sha256DigestHex,
+    manifest_identity_digest: Sha256DigestHex,
     verified_at_unix: u64,
     members: Vec<StagedMemberV1>,
 }
@@ -437,24 +413,16 @@ pub struct ModelArtifactStore {
     staging_dir: Dir,
     artifacts_dir: Dir,
     receipts_dir: Dir,
-    trust_roots: TrustRootSetV1,
-    verifier: Arc<dyn Ed25519Verifier>,
     retention: RetentionPolicyV1,
     operation_lock: Arc<Mutex<()>>,
 }
 
 impl ModelArtifactStore {
-    /// Open (creating if needed) a store rooted at `root` with the admitted
-    /// trust-root set, the signature verifier backend, and retention policy.
+    /// Open (creating if needed) a store rooted at `root`.
     pub fn open(
         root: impl Into<PathBuf>,
-        trust_roots: TrustRootSetV1,
-        verifier: Arc<dyn Ed25519Verifier>,
         retention: RetentionPolicyV1,
     ) -> Result<Self, ArtifactImportErrorV1> {
-        trust_roots
-            .validate()
-            .map_err(|_| ArtifactImportErrorV1::TrustRejected)?;
         let root = root.into();
         let root_dir = open_root_from_trusted_parent(&root)?;
         let staging_dir = open_or_create_component_dir(&root_dir, "staging")?;
@@ -466,8 +434,6 @@ impl ModelArtifactStore {
             staging_dir,
             artifacts_dir,
             receipts_dir,
-            trust_roots,
-            verifier,
             retention,
             operation_lock: Arc::new(Mutex::new(())),
         };
@@ -570,44 +536,15 @@ impl ModelArtifactStore {
         atomic_write_cap_file(&self.root_dir, &self.root, "inventory.json", &bytes)
     }
 
-    /// Verify manifest structure, trust-root admission, and the detached
-    /// Ed25519 signature over the canonical payload bytes. Runs BEFORE any
-    /// byte is staged, so a bad signature never reaches disk.
+    /// Verify the canonical manifest before any bytes are staged.
     #[allow(dead_code)] // public import gate retained for artifact runtime prep
     pub fn verify_manifest(
         &self,
         manifest: &ModelArtifactManifestV1,
-        now_unix: u64,
     ) -> Result<(), ArtifactImportErrorV1> {
-        self.verify_manifest_binding(manifest, now_unix).map(|_| ())
-    }
-
-    fn verify_manifest_binding(
-        &self,
-        manifest: &ModelArtifactManifestV1,
-        now_unix: u64,
-    ) -> Result<ArtifactTrustBindingV1, ArtifactImportErrorV1> {
         manifest
             .validate()
-            .map_err(|_| ArtifactImportErrorV1::ManifestRejected)?;
-        let root = self
-            .trust_roots
-            .resolve(&manifest.signature.trust_root_id, now_unix)
-            .map_err(|_| ArtifactImportErrorV1::TrustRejected)?;
-        if root.rotation_epoch != manifest.signature.trust_root_epoch {
-            return Err(ArtifactImportErrorV1::TrustRejected);
-        }
-        self.verifier
-            .verify_ed25519(
-                &root.public_key.to_bytes(),
-                &manifest.canonical_bytes(),
-                &manifest.signature.signature.to_bytes(),
-            )
-            .map_err(|_| ArtifactImportErrorV1::SignatureInvalid)?;
-        Ok(ArtifactTrustBindingV1 {
-            root_id: root.root_id.clone(),
-            rotation_epoch: root.rotation_epoch,
-        })
+            .map_err(|_| ArtifactImportErrorV1::ManifestRejected)
     }
 
     /// Begin a resumable import of caller-provided bytes for a verified
@@ -617,13 +554,13 @@ impl ModelArtifactStore {
         manifest: &ModelArtifactManifestV1,
         now_unix: u64,
     ) -> Result<ImportSession, ArtifactImportErrorV1> {
-        let binding = self.verify_manifest_binding(manifest, now_unix)?;
+        self.verify_manifest(manifest)?;
         let _lock = self.acquire_lock()?;
         self.recover_locked()?;
         if self
             .load_inventory_locked()?
             .records
-            .contains_key(&manifest.signed_identity_digest().to_string())
+            .contains_key(&manifest.artifact_identity_digest().to_string())
         {
             return Err(ArtifactImportErrorV1::StagingUnavailable);
         }
@@ -657,7 +594,7 @@ impl ModelArtifactStore {
         let meta = StagingMetaV1 {
             schema: STAGING_SCHEMA_V1.to_string(),
             manifest: manifest.clone(),
-            signed_manifest_digest: manifest.signed_identity_digest(),
+            manifest_identity_digest: manifest.artifact_identity_digest(),
             verified_at_unix: now_unix,
             members: manifest
                 .payload
@@ -682,13 +619,7 @@ impl ModelArtifactStore {
             )?;
         }
         write_staging_meta(&staging_dir, &self.staging_dir_for(&staging_id)?, &meta)?;
-        let record = self.record_for(
-            manifest,
-            binding,
-            ArtifactInventoryStateV1::Staged,
-            now_unix,
-            None,
-        );
+        let record = self.record_for(manifest, ArtifactInventoryStateV1::Staged, now_unix, None);
         let mut inventory = self.load_inventory_locked()?;
         inventory
             .records
@@ -714,7 +645,7 @@ impl ModelArtifactStore {
         now_unix: u64,
     ) -> Result<ImportSession, ArtifactImportErrorV1> {
         let staging_path = self.staging_dir_for(staging_id)?;
-        self.verify_manifest_binding(manifest, now_unix)?;
+        self.verify_manifest(manifest)?;
         let _lock = self.acquire_lock()?;
         self.recover_locked()?;
         let staging_dir = self
@@ -814,7 +745,7 @@ impl ModelArtifactStore {
         manifest: &ModelArtifactManifestV1,
         now_unix: u64,
     ) -> Result<ArtifactInventoryRecordV1, ArtifactImportErrorV1> {
-        let binding = self.verify_manifest_binding(manifest, now_unix)?;
+        self.verify_manifest(manifest)?;
         let _lock = self.acquire_lock()?;
         self.recover_locked()?;
         self.ensure_session_dir(&session)?;
@@ -861,13 +792,8 @@ impl ModelArtifactStore {
             }
         }
 
-        let mut record = self.record_for(
-            manifest,
-            binding,
-            ArtifactInventoryStateV1::Verified,
-            now_unix,
-            None,
-        );
+        let mut record =
+            self.record_for(manifest, ArtifactInventoryStateV1::Verified, now_unix, None);
         let mut inventory = self.load_inventory_locked()?;
         inventory
             .records
@@ -917,13 +843,8 @@ impl ModelArtifactStore {
         now_unix: u64,
     ) -> Result<(), ArtifactImportErrorV1> {
         self.ensure_session_dir(session)?;
-        let binding = ArtifactTrustBindingV1 {
-            root_id: session.meta.manifest.signature.trust_root_id.clone(),
-            rotation_epoch: session.meta.manifest.signature.trust_root_epoch,
-        };
         let record = self.record_for(
             &session.meta.manifest,
-            binding,
             ArtifactInventoryStateV1::Quarantined,
             now_unix,
             Some(reason),
@@ -972,28 +893,17 @@ impl ModelArtifactStore {
     }
 
     /// Admit an installed artifact for runtime use against host evidence.
-    /// Re-verifies trust + signature + on-disk digest; any corrupt, revoked,
-    /// quarantined, or incompatible artifact disables the semantic capability
-    /// with a typed error and no substitution.
+    /// Re-verifies the manifest and every on-disk member digest; any corrupt,
+    /// revoked, quarantined, or incompatible artifact disables semantics.
     pub(super) fn admit_for_runtime(
         &self,
         digest: &Sha256DigestHex,
         manifest: &ModelArtifactManifestV1,
         env: &RuntimeEnvironmentV1,
-        now_unix: u64,
+        _now_unix: u64,
     ) -> Result<AdmittedArtifactV1, SemanticCapabilityDisabledV1> {
-        let binding =
-            self.verify_manifest_binding(manifest, now_unix)
-                .map_err(|error| match error {
-                    ArtifactImportErrorV1::SignatureInvalid => {
-                        SemanticCapabilityDisabledV1::SignatureInvalid
-                    }
-                    ArtifactImportErrorV1::ManifestRejected
-                    | ArtifactImportErrorV1::TrustRejected => {
-                        SemanticCapabilityDisabledV1::UntrustedRoot
-                    }
-                    _ => SemanticCapabilityDisabledV1::StorageFailure,
-                })?;
+        self.verify_manifest(manifest)
+            .map_err(|_| SemanticCapabilityDisabledV1::IdentityMismatch)?;
         let _lock = self
             .acquire_lock()
             .map_err(|_| SemanticCapabilityDisabledV1::StorageFailure)?;
@@ -1020,9 +930,8 @@ impl ModelArtifactStore {
             }
         }
         if record.artifact_digest != *digest
-            || *digest != manifest.signed_identity_digest()
+            || *digest != manifest.artifact_identity_digest()
             || record.manifest_digest != manifest.canonical_digest()
-            || record.trust_binding != binding
             || record.members != manifest.payload.members
         {
             return Err(SemanticCapabilityDisabledV1::IdentityMismatch);
@@ -1097,15 +1006,13 @@ impl ModelArtifactStore {
     fn record_for(
         &self,
         manifest: &ModelArtifactManifestV1,
-        trust_binding: ArtifactTrustBindingV1,
         state: ArtifactInventoryStateV1,
         recorded_at_unix: u64,
         quarantine_reason: Option<QuarantineReasonV1>,
     ) -> ArtifactInventoryRecordV1 {
         ArtifactInventoryRecordV1 {
-            artifact_digest: manifest.signed_identity_digest(),
+            artifact_digest: manifest.artifact_identity_digest(),
             manifest_digest: manifest.canonical_digest(),
-            trust_binding,
             members: manifest.payload.members.clone(),
             state,
             recorded_at_unix,
@@ -1135,7 +1042,7 @@ impl ModelArtifactStore {
         let inventory = self.load_inventory_locked()?;
         let state = inventory
             .records
-            .get(&session.meta.signed_manifest_digest.to_string())
+            .get(&session.meta.manifest_identity_digest.to_string())
             .map(|record| record.state);
         if matches!(
             state,
@@ -1153,7 +1060,7 @@ impl ModelArtifactStore {
     ) -> bool {
         meta.schema == STAGING_SCHEMA_V1
             && meta.manifest == *manifest
-            && meta.signed_manifest_digest == manifest.signed_identity_digest()
+            && meta.manifest_identity_digest == manifest.artifact_identity_digest()
             && meta
                 .members
                 .iter()
@@ -1351,13 +1258,11 @@ impl ModelArtifactStore {
                 Ok(meta) if meta.schema == STAGING_SCHEMA_V1 => meta,
                 Ok(_) | Err(_) => continue,
             };
-            let Ok(binding) = self.verify_manifest_binding(&meta.manifest, meta.verified_at_unix)
-            else {
+            if self.verify_manifest(&meta.manifest).is_err() {
                 continue;
-            };
+            }
             let mut record = self.record_for(
                 &meta.manifest,
-                binding,
                 ArtifactInventoryStateV1::Staged,
                 meta.verified_at_unix,
                 None,
@@ -1762,33 +1667,12 @@ fn random_staging_id() -> Result<String, ArtifactImportErrorV1> {
 #[cfg(test)]
 mod tests {
     use super::super::manifest::*;
-    use super::super::trust_roots::test_support::*;
-    use super::super::trust_roots::*;
     use super::*;
     use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::Duration;
 
     const NOW: u64 = 1_500;
-
-    fn key_bytes() -> [u8; 32] {
-        [1u8; 32]
-    }
-
-    fn trust_set() -> TrustRootSetV1 {
-        TrustRootSetV1 {
-            release_roots: vec![TrustRootV1 {
-                root_id: "release-1".to_string(),
-                public_key: Ed25519PublicKeyHex::new(hex::encode(key_bytes())).unwrap(),
-                not_before_unix: 1_000,
-                not_after_unix: 2_000,
-                rotation_epoch: 1,
-                status: TrustRootStatusV1::Active,
-            }],
-            local_roots: vec![],
-            revocations: vec![],
-        }
-    }
 
     fn model_bytes() -> Vec<u8> {
         b"deterministic fake model weights".to_vec()
@@ -1810,11 +1694,9 @@ mod tests {
     }
 
     fn manifest_for(bytes: &[u8]) -> ModelArtifactManifestV1 {
-        let payload = ManifestSignedPayloadV1 {
+        let payload = ModelArtifactManifestPayloadV1 {
             schema: MODEL_ARTIFACT_MANIFEST_SCHEMA_V1.to_string(),
             artifact_id: "test-embed".to_string(),
-            signing_root_id: "release-1".to_string(),
-            signing_root_epoch: 1,
             profile_kind: ArtifactProfileKindV1::Embedding,
             spdx_license: "MIT".to_string(),
             model_member: ArtifactMemberPinV1 {
@@ -1878,18 +1760,7 @@ mod tests {
                 revision: "r1".to_string(),
             },
         };
-        let mut manifest = ModelArtifactManifestV1 {
-            payload,
-            signature: DetachedSignatureV1 {
-                algorithm: SignatureAlgorithmV1::Ed25519,
-                trust_root_id: "release-1".to_string(),
-                trust_root_epoch: 1,
-                signature: Ed25519SignatureHex::new(hex::encode([0u8; 64])).unwrap(),
-            },
-        };
-        let signature = fake_sign(&key_bytes(), &manifest.canonical_bytes());
-        manifest.signature.signature = Ed25519SignatureHex::new(hex::encode(signature)).unwrap();
-        manifest
+        ModelArtifactManifestV1 { payload }
     }
 
     fn env() -> RuntimeEnvironmentV1 {
@@ -1907,8 +1778,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelArtifactStore::open(
             dir.path().join("store"),
-            trust_set(),
-            Arc::new(FakeEd25519Verifier),
             RetentionPolicyV1 { grace_seconds: 100 },
         )
         .unwrap();
@@ -1936,7 +1805,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_signature_import_places_atomically_and_admits() {
+    fn verified_manifest_import_places_atomically_and_admits() {
         let (_dir, store) = store();
         let (manifest, digest) = import_ok(&store, &model_bytes());
         let admitted = store
@@ -1958,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_member_reader_rechecks_the_signed_artifact_identity() {
+    fn runtime_member_reader_rechecks_the_artifact_identity() {
         let (_dir, store) = store();
         let (manifest, digest) = import_ok(&store, &model_bytes());
         let admitted = store
@@ -2018,62 +1887,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_signature_is_rejected_before_any_bytes_are_staged() {
-        let (_dir, store) = store();
-        let mut manifest = manifest_for(&model_bytes());
-        let wrong_key_sig = fake_sign(&[9u8; 32], &manifest.canonical_bytes());
-        manifest.signature.signature =
-            Ed25519SignatureHex::new(hex::encode(wrong_key_sig)).unwrap();
-        assert_eq!(
-            store.begin_import(&manifest, NOW).unwrap_err(),
-            ArtifactImportErrorV1::SignatureInvalid
-        );
-        assert_eq!(
-            std::fs::read_dir(store.root.join("staging"))
-                .unwrap()
-                .count(),
-            0
-        );
-    }
-
-    #[test]
-    fn unknown_and_revoked_trust_roots_are_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut roots = trust_set();
-        let store = ModelArtifactStore::open(
-            dir.path().join("store"),
-            roots.clone(),
-            Arc::new(FakeEd25519Verifier),
-            RetentionPolicyV1 { grace_seconds: 100 },
-        )
-        .unwrap();
-        let mut unknown = manifest_for(&model_bytes());
-        unknown.signature.trust_root_id = "no-such-root".to_string();
-        assert!(matches!(
-            store.begin_import(&unknown, NOW).unwrap_err(),
-            ArtifactImportErrorV1::ManifestRejected | ArtifactImportErrorV1::TrustRejected
-        ));
-
-        roots.revocations.push(RevocationRecordV1 {
-            root_id: "release-1".to_string(),
-            revoked_at_unix: 1_200,
-            reason: "rotation drill".to_string(),
-        });
-        let revoked_store = ModelArtifactStore::open(
-            dir.path().join("store2"),
-            roots,
-            Arc::new(FakeEd25519Verifier),
-            RetentionPolicyV1 { grace_seconds: 100 },
-        )
-        .unwrap();
-        let manifest = manifest_for(&model_bytes());
-        assert!(matches!(
-            revoked_store.begin_import(&manifest, NOW).unwrap_err(),
-            ArtifactImportErrorV1::TrustRejected
-        ));
-    }
-
-    #[test]
     fn corrupted_bytes_are_rejected_at_finalize_and_quarantined() {
         let (_dir, store) = store();
         let manifest = manifest_for(&model_bytes());
@@ -2089,18 +1902,18 @@ mod tests {
         let inventory = store.inventory().unwrap();
         let record = inventory
             .records
-            .get(&manifest.signed_identity_digest().to_string())
+            .get(&manifest.artifact_identity_digest().to_string())
             .unwrap();
         assert_eq!(record.state, ArtifactInventoryStateV1::Quarantined);
         assert!(
             !store
-                .artifact_dir(&manifest.signed_identity_digest())
+                .artifact_dir(&manifest.artifact_identity_digest())
                 .exists()
         );
     }
 
     #[test]
-    fn every_signed_package_member_is_verified_before_installation() {
+    fn every_package_member_is_verified_before_installation() {
         let (_dir, store) = store();
         let bytes = model_bytes();
         let manifest = manifest_for(&bytes);
@@ -2126,7 +1939,7 @@ mod tests {
         assert_eq!(
             inventory
                 .records
-                .get(&manifest.signed_identity_digest().to_string())
+                .get(&manifest.artifact_identity_digest().to_string())
                 .unwrap()
                 .state,
             ArtifactInventoryStateV1::Quarantined
@@ -2282,7 +2095,7 @@ mod tests {
         }
         let staging_id = session.staging_id();
         let enumerated = store.staged_ids_locked().unwrap();
-        let digest = manifest.signed_identity_digest();
+        let digest = manifest.artifact_identity_digest();
         let staging_root = store.root.join("staging");
         let original = staging_root.join(&staging_id);
         let held = staging_root.join("held-original");
@@ -2385,16 +2198,7 @@ mod tests {
     fn held_artifact_and_receipt_components_preserve_replacement_sentinels() {
         let (_dir, store) = store();
         let manifest = manifest_for(b"collectible component race");
-        let record = store.record_for(
-            &manifest,
-            ArtifactTrustBindingV1 {
-                root_id: "release-1".to_string(),
-                rotation_epoch: 1,
-            },
-            ArtifactInventoryStateV1::Verified,
-            NOW,
-            None,
-        );
+        let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
         let digest = record.artifact_digest.clone();
         std::fs::create_dir_all(store.artifact_dir(&digest)).unwrap();
         let mut inventory = store.inventory().unwrap();
@@ -2457,16 +2261,7 @@ mod tests {
         store.save_inventory(&first).unwrap();
 
         let manifest = manifest_for(b"windows replacement");
-        let record = store.record_for(
-            &manifest,
-            ArtifactTrustBindingV1 {
-                root_id: "release-1".to_string(),
-                rotation_epoch: 1,
-            },
-            ArtifactInventoryStateV1::Verified,
-            NOW,
-            None,
-        );
+        let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
         let mut second = ArtifactInventoryV1::default();
         second
             .records
@@ -2500,19 +2295,14 @@ mod tests {
                 .unwrap();
         }
         let staging_id = session.staging_id();
-        let digest = manifest.signed_identity_digest();
+        let digest = manifest.artifact_identity_digest();
         let members_path = session.staging_path.join("members");
         drop(session);
         std::fs::rename(members_path, store.artifact_dir(&digest)).unwrap();
         drop(store);
 
-        let reopened = ModelArtifactStore::open(
-            store_root,
-            trust_set(),
-            Arc::new(FakeEd25519Verifier),
-            RetentionPolicyV1 { grace_seconds: 100 },
-        )
-        .unwrap();
+        let reopened =
+            ModelArtifactStore::open(store_root, RetentionPolicyV1 { grace_seconds: 100 }).unwrap();
         let inventory = reopened.inventory().unwrap();
         let record = inventory
             .records
@@ -2527,16 +2317,7 @@ mod tests {
         let (dir, store) = store();
         let store_root = dir.path().join("store");
         let manifest = manifest_for(b"interrupted gc");
-        let record = store.record_for(
-            &manifest,
-            ArtifactTrustBindingV1 {
-                root_id: "release-1".to_string(),
-                rotation_epoch: 1,
-            },
-            ArtifactInventoryStateV1::Verified,
-            NOW,
-            None,
-        );
+        let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
         let digest = record.artifact_digest.clone();
         std::fs::create_dir_all(store.artifact_dir(&digest)).unwrap();
         let mut inventory = store.inventory().unwrap();
@@ -2554,13 +2335,8 @@ mod tests {
         std::fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
         drop(store);
 
-        let reopened = ModelArtifactStore::open(
-            store_root,
-            trust_set(),
-            Arc::new(FakeEd25519Verifier),
-            RetentionPolicyV1 { grace_seconds: 100 },
-        )
-        .unwrap();
+        let reopened =
+            ModelArtifactStore::open(store_root, RetentionPolicyV1 { grace_seconds: 100 }).unwrap();
         assert!(reopened.inventory().unwrap().records.is_empty());
         assert!(!journal_path.exists());
         let receipts =
@@ -2573,24 +2349,11 @@ mod tests {
         for phase in 0..4 {
             let dir = tempfile::tempdir().unwrap();
             let store_root = dir.path().join("store");
-            let store = ModelArtifactStore::open(
-                &store_root,
-                trust_set(),
-                Arc::new(FakeEd25519Verifier),
-                RetentionPolicyV1 { grace_seconds: 100 },
-            )
-            .unwrap();
+            let store =
+                ModelArtifactStore::open(&store_root, RetentionPolicyV1 { grace_seconds: 100 })
+                    .unwrap();
             let manifest = manifest_for(format!("gc crash phase {phase}").as_bytes());
-            let record = store.record_for(
-                &manifest,
-                ArtifactTrustBindingV1 {
-                    root_id: "release-1".to_string(),
-                    rotation_epoch: 1,
-                },
-                ArtifactInventoryStateV1::Verified,
-                NOW,
-                None,
-            );
+            let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
             let digest = record.artifact_digest.clone();
             std::fs::create_dir_all(store.artifact_dir(&digest)).unwrap();
             let mut inventory = store.inventory().unwrap();
@@ -2630,13 +2393,9 @@ mod tests {
             }
             drop(store);
 
-            let reopened = ModelArtifactStore::open(
-                &store_root,
-                trust_set(),
-                Arc::new(FakeEd25519Verifier),
-                RetentionPolicyV1 { grace_seconds: 100 },
-            )
-            .unwrap();
+            let reopened =
+                ModelArtifactStore::open(&store_root, RetentionPolicyV1 { grace_seconds: 100 })
+                    .unwrap();
             assert!(reopened.inventory().unwrap().records.is_empty());
             assert!(!reopened.recovery_path().exists());
             let receipts =
@@ -2650,16 +2409,7 @@ mod tests {
         let (dir, store) = store();
         let store_root = dir.path().join("store");
         let manifest = manifest_for(b"torn receipt");
-        let record = store.record_for(
-            &manifest,
-            ArtifactTrustBindingV1 {
-                root_id: "release-1".to_string(),
-                rotation_epoch: 1,
-            },
-            ArtifactInventoryStateV1::Verified,
-            NOW,
-            None,
-        );
+        let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
         let digest = record.artifact_digest.clone();
         let old_receipt = GcReceiptV1 {
             artifact_digest: Sha256DigestHex::of_bytes(b"old receipt"),
@@ -2684,13 +2434,8 @@ mod tests {
         std::fs::write(store.recovery_path(), serde_json::to_vec(&journal).unwrap()).unwrap();
         drop(store);
 
-        let reopened = ModelArtifactStore::open(
-            store_root,
-            trust_set(),
-            Arc::new(FakeEd25519Verifier),
-            RetentionPolicyV1 { grace_seconds: 100 },
-        )
-        .unwrap();
+        let reopened =
+            ModelArtifactStore::open(store_root, RetentionPolicyV1 { grace_seconds: 100 }).unwrap();
         let receipts =
             std::fs::read_to_string(reopened.root.join("receipts").join("gc.jsonl")).unwrap();
         assert_eq!(receipts.lines().count(), 2);
@@ -2707,16 +2452,7 @@ mod tests {
         let (dir, store) = store();
         let store_root = dir.path().join("store");
         let manifest = manifest_for(b"atomic receipt replacement");
-        let record = store.record_for(
-            &manifest,
-            ArtifactTrustBindingV1 {
-                root_id: "release-1".to_string(),
-                rotation_epoch: 1,
-            },
-            ArtifactInventoryStateV1::Verified,
-            NOW,
-            None,
-        );
+        let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
         let receipt_path = store.root.join("receipts").join("gc.jsonl");
         std::fs::write(&receipt_path, b"").unwrap();
         let old_inode = std::fs::metadata(&receipt_path).unwrap().ino();
@@ -2730,13 +2466,8 @@ mod tests {
         std::fs::write(store.recovery_path(), serde_json::to_vec(&journal).unwrap()).unwrap();
         drop(store);
 
-        let reopened = ModelArtifactStore::open(
-            store_root,
-            trust_set(),
-            Arc::new(FakeEd25519Verifier),
-            RetentionPolicyV1 { grace_seconds: 100 },
-        )
-        .unwrap();
+        let reopened =
+            ModelArtifactStore::open(store_root, RetentionPolicyV1 { grace_seconds: 100 }).unwrap();
         assert_ne!(std::fs::metadata(&receipt_path).unwrap().ino(), old_inode);
         assert!(!reopened.recovery_path().exists());
     }
@@ -2783,7 +2514,7 @@ mod tests {
         assert!(matches!(
             store
                 .admit_for_runtime(
-                    &quarantined_manifest.signed_identity_digest(),
+                    &quarantined_manifest.artifact_identity_digest(),
                     &quarantined_manifest,
                     &env(),
                     NOW
@@ -2859,16 +2590,7 @@ mod tests {
         let (_dir, store) = store();
         // Seed an unreferenced Verified record directly.
         let manifest = manifest_for(b"orphan verified artifact");
-        let record = store.record_for(
-            &manifest,
-            ArtifactTrustBindingV1 {
-                root_id: "release-1".to_string(),
-                rotation_epoch: 1,
-            },
-            ArtifactInventoryStateV1::Verified,
-            NOW,
-            None,
-        );
+        let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
         let digest = record.artifact_digest.clone();
         std::fs::create_dir_all(store.artifact_dir(&digest)).unwrap();
         let mut inventory = store.inventory().unwrap();
@@ -2910,36 +2632,6 @@ mod tests {
             .admit_for_runtime(&digest_b, &manifest_b, &env(), NOW)
             .unwrap();
         assert_eq!(admitted.artifact_digest(), &digest_b);
-    }
-
-    #[test]
-    fn no_network_types_anywhere_in_this_packet() {
-        // Structural guarantee: the quarantined packet performs zero network
-        // operations. Scan the production (non-test) portion of every packet
-        // source for client/transport tokens.
-        for source in [
-            include_str!("artifact_store.rs"),
-            include_str!("manifest.rs"),
-            include_str!("trust_roots.rs"),
-        ] {
-            let production = source.split("#[cfg(test)]").next().unwrap_or(source);
-            for token in [
-                "reqwest",
-                "ureq",
-                "hyper",
-                "curl",
-                "std::net",
-                "tokio::net",
-                "TcpStream",
-                "http://",
-                "https://",
-            ] {
-                assert!(
-                    !production.contains(token),
-                    "forbidden network token `{token}` found in quarantined packet"
-                );
-            }
-        }
     }
 
     #[test]

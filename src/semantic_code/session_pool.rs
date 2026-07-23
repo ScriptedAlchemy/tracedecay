@@ -1,4 +1,4 @@
-//! PR10 quarantined preparation packet `pr10/prep-runtime-adapter`
+//! PR10 bounded semantic runtime session pool
 //! (Plan 31, `docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md`).
 //!
 //! Bounded embedding session pool. Sessions are keyed by the complete
@@ -15,17 +15,10 @@
 //! - strict identity separation: a session warmed for one projection key,
 //!   privacy domain, or key epoch never serves another.
 //!
-//! QUARANTINE STATUS: temporarily unlinked. Registration happens at
-//! integration by the Sol coordinator; this file must not be referenced from
-//! `src/lib.rs` or `src/semantic_code/mod.rs` in this packet. It depends only
-//! on the domain projection contract plus its sibling `fastembed_adapter` port
-//! surface, so it remains a quarantined `#[path]`-testable packet.
-//!
-//! See `fastembed_adapter.rs` for the ESCALATION list; ESCALATION-3
-//! (one admitted domain projection/privacy authority) and ESCALATION-4
-//! (deadlines as `Duration` against the injected clock, bridged from PR9
-//! `RetrievalBudget`) shape this file directly.
-#![allow(dead_code)] // PR10 embedding session pool; Plan 31 — staged
+//! It depends only on the domain projection contract plus its sibling
+//! `fastembed_adapter` port surface. Deadlines are `Duration` values against
+//! the injected clock, bridged from PR9 `RetrievalBudget`.
+#![allow(dead_code)] // PR10 embedding session pool; Plan 31
 
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
@@ -766,9 +759,9 @@ pub(crate) mod tests {
     use std::thread;
 
     use super::*;
-    // Two `super` steps resolve to the directory module that holds both
-    // packet files in every layout (scratch `#[path]` crate root and the
-    // integrated `src/semantic_code/` module alike).
+    // Two `super` steps resolve to the directory module in every layout
+    // (scratch `#[path]` crate root and the integrated
+    // `src/semantic_code/` module alike).
     use super::super::artifact_store::AdmittedArtifactV1;
     use super::super::fastembed_adapter::{
         AdmittedProjectionArtifactV1, BoundedSanitizedTextBatchV1, FakeEmbeddingRuntime,
@@ -776,13 +769,11 @@ pub(crate) mod tests {
     };
     use super::super::manifest::{
         ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
-        DetachedSignatureV1, DeviceClassV1, Ed25519SignatureHex,
-        EmbeddingNormalizationV1 as ManifestNormalizationV1,
+        DeviceClassV1, EmbeddingNormalizationV1 as ManifestNormalizationV1,
         EmbeddingPoolingV1 as ManifestPoolingV1, EmbeddingPrecisionV1 as ManifestPrecisionV1,
-        MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ManifestSignedPayloadV1, ModelArtifactManifestV1,
+        MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ModelArtifactManifestPayloadV1, ModelArtifactManifestV1,
         PlatformTargetV1, ResourceCeilingV1, RuntimeCompatibilityV1, SemanticMetricV1,
-        Sha256DigestHex, SignatureAlgorithmV1, TruncationPolicyV1, TruncationSideV1,
-        UpstreamSourceV1,
+        Sha256DigestHex, TruncationPolicyV1, TruncationSideV1, UpstreamSourceV1,
     };
     use tracedecay_domain::{
         ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
@@ -810,16 +801,14 @@ pub(crate) mod tests {
         let model_digest = Sha256DigestHex::of_bytes(b"model");
         let tokenizer_digest = Sha256DigestHex::of_bytes(b"tokenizer");
         let config_digest = Sha256DigestHex::of_bytes(b"config");
-        let special_tokens_digest = Sha256DigestHex::of_bytes(b"special-tokens-map");
+        let special_tokens_map_digest = Sha256DigestHex::of_bytes(b"special-tokens-map");
         let tokenizer_config_digest = Sha256DigestHex::of_bytes(b"tokenizer-config");
         let query_digest = Sha256DigestHex::of_bytes(b"query");
         let document_digest = Sha256DigestHex::of_bytes(b"document");
         let manifest = ModelArtifactManifestV1 {
-            payload: ManifestSignedPayloadV1 {
+            payload: ModelArtifactManifestPayloadV1 {
                 schema: MODEL_ARTIFACT_MANIFEST_SCHEMA_V1.to_owned(),
                 artifact_id: "fixture-embedding".to_owned(),
-                signing_root_id: "fixture-root".to_owned(),
-                signing_root_epoch: 1,
                 profile_kind: ArtifactProfileKindV1::Embedding,
                 spdx_license: "MIT".to_owned(),
                 model_member: ArtifactMemberPinV1 {
@@ -852,14 +841,14 @@ pub(crate) mod tests {
                     ArtifactPackageMemberV1 {
                         role: ArtifactMemberRoleV1::SpecialTokensMap,
                         path: "special_tokens_map.json".to_owned(),
-                        digest: special_tokens_digest,
-                        byte_length: 2,
+                        digest: special_tokens_map_digest,
+                        byte_length: 18,
                     },
                     ArtifactPackageMemberV1 {
                         role: ArtifactMemberRoleV1::TokenizerConfig,
                         path: "tokenizer_config.json".to_owned(),
                         digest: tokenizer_config_digest,
-                        byte_length: 2,
+                        byte_length: 16,
                     },
                     ArtifactPackageMemberV1 {
                         role: ArtifactMemberRoleV1::QueryInstruction,
@@ -906,12 +895,6 @@ pub(crate) mod tests {
                     version: "1".to_owned(),
                     revision: "fixture-revision".to_owned(),
                 },
-            },
-            signature: DetachedSignatureV1 {
-                algorithm: SignatureAlgorithmV1::Ed25519,
-                trust_root_id: "fixture-root".to_owned(),
-                trust_root_epoch: 1,
-                signature: Ed25519SignatureHex::new("00".repeat(64)).expect("signature fixture"),
             },
         };
         AdmittedArtifactV1::test_fixture(manifest)
@@ -1225,7 +1208,7 @@ pub(crate) mod tests {
 
         let wrong_manifest = AdmittedArtifactV1::test_fixture_with_identities(
             manifest.clone(),
-            manifest.signed_identity_digest(),
+            manifest.artifact_identity_digest(),
             Sha256DigestHex::of_bytes(b"wrong-manifest"),
         );
         assert_eq!(

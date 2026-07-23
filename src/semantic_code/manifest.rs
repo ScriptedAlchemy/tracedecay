@@ -1,20 +1,12 @@
-//! Canonical signed model-artifact manifest (Plan 31, packet
-//! `pr10/prep-artifact-manifest`, Model Artifact Contract).
+//! Canonical model-artifact manifest (Plan 31).
 //!
-//! `ModelArtifactManifestV1` pins the Ed25519 detached signature and trust-root
-//! key ID, the SHA-256 digest and byte length of the model bytes, the SPDX
-//! license, tokenizer/config/instruction digests, dimensions, metric,
-//! normalization, pooling, truncation side/length, precision, runtime/build/
-//! device constraints, and the complete resource ceiling. The detached
-//! signature covers the canonical manifest payload bytes
-//! (`ModelArtifactManifestV1::canonical_bytes`); trust roots are never fetched
-//! from the artifact being verified (Plan 20 configuration identifies the
-//! admitted trust-root ID and rotation epoch).
-//!
-//! QUARANTINE: this module is not reachable from production code yet. It
-//! performs no I/O, no network access, and no query/retrieval wiring. It is
-//! pure values plus validation, matching the PR9 contract-spine style.
-#![allow(dead_code)] // signed model artifact manifest; Plan 31 — staged
+//! `ModelArtifactManifestV1` pins every member's SHA-256 digest and byte
+//! length, the SPDX license, tokenizer/config/instruction digests, dimensions,
+//! metric, normalization, pooling, truncation, precision, runtime/build/device
+//! constraints, and the complete resource ceiling. These immutable pins are
+//! the complete local artifact-integrity contract; no signature or trust-root
+//! authority is layered on top.
+#![allow(dead_code)] // model artifact manifest; Plan 31
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
@@ -56,7 +48,6 @@ impl Sha256DigestHex {
         &self.0
     }
 }
-
 impl TryFrom<String> for Sha256DigestHex {
     type Error = ManifestValidationErrorV1;
     fn try_from(value: String) -> Result<Self, Self::Error> {
@@ -76,116 +67,13 @@ impl std::fmt::Display for Sha256DigestHex {
     }
 }
 
-/// A lowercase-hex Ed25519 public key (32 bytes, 64 chars).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Ed25519PublicKeyHex(String);
-
-impl Ed25519PublicKeyHex {
-    pub fn new(value: impl Into<String>) -> Result<Self, ManifestValidationErrorV1> {
-        let value = value.into();
-        let valid_len = hex::decode(&value).ok().is_some_and(|b| b.len() == 32);
-        if valid_len
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
-            Ok(Self(value))
-        } else {
-            Err(ManifestValidationErrorV1::MalformedHexDigest {
-                field: "ed25519_public_key".to_string(),
-            })
-        }
-    }
-
-    pub fn to_bytes(&self) -> [u8; 32] {
-        let decoded = hex::decode(&self.0)
-            .unwrap_or_else(|_| panic!("validated 32-byte hex at construction"));
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&decoded);
-        out
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for Ed25519PublicKeyHex {
-    type Error = ManifestValidationErrorV1;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<Ed25519PublicKeyHex> for String {
-    fn from(value: Ed25519PublicKeyHex) -> Self {
-        value.0
-    }
-}
-
-/// A lowercase-hex Ed25519 detached signature (64 bytes, 128 chars).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Ed25519SignatureHex(String);
-
-impl Ed25519SignatureHex {
-    pub fn new(value: impl Into<String>) -> Result<Self, ManifestValidationErrorV1> {
-        let value = value.into();
-        let valid_len = hex::decode(&value).ok().is_some_and(|b| b.len() == 64);
-        if valid_len
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
-            Ok(Self(value))
-        } else {
-            Err(ManifestValidationErrorV1::MalformedHexDigest {
-                field: "ed25519_signature".to_string(),
-            })
-        }
-    }
-
-    pub fn to_bytes(&self) -> [u8; 64] {
-        let decoded = hex::decode(&self.0)
-            .unwrap_or_else(|_| panic!("validated 64-byte hex at construction"));
-        let mut out = [0u8; 64];
-        out.copy_from_slice(&decoded);
-        out
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for Ed25519SignatureHex {
-    type Error = ManifestValidationErrorV1;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<Ed25519SignatureHex> for String {
-    fn from(value: Ed25519SignatureHex) -> Self {
-        value.0
-    }
-}
-
 /// Which semantic stage the artifact serves. Configuration selects an
-/// installed signed embedding profile and, independently, an optional
+/// installed embedding profile and, independently, an optional
 /// reranker profile (Plan 31 "Model and offline lifecycle").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ArtifactProfileKindV1 {
     Embedding,
     Reranker,
-}
-
-/// Signature algorithm for the detached manifest signature. V1 admits only
-/// Ed25519; anything else is a typed rejection, never an implicit fallback.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SignatureAlgorithmV1 {
-    Ed25519,
 }
 
 /// Canonical vector distance metric pinned by the projection identity.
@@ -243,9 +131,8 @@ pub enum TruncationSideV1 {
     Right,
 }
 
-/// Digest + byte length pin for the legacy primary model member. The complete
-/// package identity is carried by [`ArtifactPackageMemberV1`] entries in the
-/// signed payload.
+/// Digest + byte length pin for the primary model member. The complete package
+/// identity is carried by [`ArtifactPackageMemberV1`] entries in the manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactMemberPinV1 {
@@ -253,9 +140,9 @@ pub struct ArtifactMemberPinV1 {
     pub byte_length: u64,
 }
 
-/// Stable role for one signed package member. Each role has at most one
-/// member; the role and portable package path are both part of the signed
-/// identity and are never used as a local filesystem path.
+/// Stable role for one package member. Each role has at most one member; the
+/// role and portable package path are both part of the manifest identity and
+/// are never used as a local filesystem path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactMemberRoleV1 {
@@ -268,7 +155,7 @@ pub enum ArtifactMemberRoleV1 {
     DocumentInstruction,
 }
 
-/// Complete signed identity for one artifact package member.
+/// Complete immutable identity for one artifact package member.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactPackageMemberV1 {
@@ -325,17 +212,13 @@ pub struct UpstreamSourceV1 {
     pub revision: String,
 }
 
-/// The signed portion of the manifest. The detached signature covers the
-/// canonical bytes of this payload (and only this payload).
+/// Canonical manifest payload. Its compact canonical JSON bytes are the
+/// manifest identity verified before import.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ManifestSignedPayloadV1 {
+pub struct ModelArtifactManifestPayloadV1 {
     pub schema: String,
     pub artifact_id: String,
-    /// Root identity is duplicated in the signed payload so the detached
-    /// envelope cannot redirect a valid signature to another root/epoch.
-    pub signing_root_id: String,
-    pub signing_root_epoch: u32,
     pub profile_kind: ArtifactProfileKindV1,
     /// SPDX license expression for the model weights.
     pub spdx_license: String,
@@ -345,8 +228,7 @@ pub struct ManifestSignedPayloadV1 {
     pub query_instruction_digest: Option<Sha256DigestHex>,
     pub document_instruction_digest: Option<Sha256DigestHex>,
     /// Every imported byte-bearing member, including its role, package path,
-    /// digest, and exact length. This list is signed with the rest of the
-    /// payload and is the importer's source of truth.
+    /// digest, and exact length. This is the importer's source of truth.
     pub members: Vec<ArtifactPackageMemberV1>,
     pub dimensions: u32,
     pub metric: SemanticMetricV1,
@@ -360,30 +242,14 @@ pub struct ManifestSignedPayloadV1 {
     pub upstream: UpstreamSourceV1,
 }
 
-/// The detached Ed25519 signature over the canonical payload bytes, plus the
-/// trust-root key ID Plan 20 configuration uses to resolve the admitted root.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DetachedSignatureV1 {
-    pub algorithm: SignatureAlgorithmV1,
-    pub trust_root_id: String,
-    /// The admitted root's rotation epoch. A root ID alone is insufficient:
-    /// a rotated key must not authorize a package signed for an older epoch.
-    pub trust_root_epoch: u32,
-    pub signature: Ed25519SignatureHex,
-}
-
 /// The frozen V1 model artifact manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelArtifactManifestV1 {
-    pub payload: ManifestSignedPayloadV1,
-    pub signature: DetachedSignatureV1,
+    pub payload: ModelArtifactManifestPayloadV1,
 }
 
-/// Structural manifest validation failures (signature/trust verification
-/// lives in `super::trust_roots` / `super::artifact_store`; this type covers
-/// only self-contained checks).
+/// Structural manifest validation failures.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ManifestValidationErrorV1 {
     #[error("unsupported manifest schema: {0}")]
@@ -412,35 +278,26 @@ pub enum ManifestValidationErrorV1 {
     DuplicatePackageMember,
     #[error("manifest package member identity is incomplete or inconsistent")]
     InconsistentPackageMembers,
-    #[error("manifest trust-root rotation epoch must be non-zero")]
-    ZeroTrustRootEpoch,
-    #[error("signed payload and detached envelope trust bindings disagree")]
-    InconsistentTrustBinding,
     #[error("manifest is not canonical JSON: {0}")]
     NonCanonicalEncoding(String),
 }
 
 impl ModelArtifactManifestV1 {
-    /// Canonical bytes the detached signature covers: compact JSON of the
-    /// signed payload. serde emits struct fields in declaration order and the
-    /// payload contains no maps, so this encoding is byte-stable across
-    /// processes and platforms; `canonical_digest` is its SHA-256.
+    /// Canonical bytes of the complete immutable manifest. serde emits struct
+    /// fields in declaration order and the manifest contains no maps, so this
+    /// encoding is byte-stable across processes and platforms.
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(&self.payload)
-            .unwrap_or_else(|_| panic!("manifest payload serialization is infallible"))
+        serde_json::to_vec(self).unwrap_or_else(|_| panic!("manifest serialization is infallible"))
     }
 
-    /// SHA-256 over `canonical_bytes`. Stable identity for signature
-    /// verification, import-session identity, and receipts.
+    /// SHA-256 over `canonical_bytes`. Stable manifest and artifact identity.
     pub fn canonical_digest(&self) -> Sha256DigestHex {
         Sha256DigestHex::of_bytes(&self.canonical_bytes())
     }
 
-    /// Identity of the complete signed envelope. Unlike [`Self::canonical_digest`],
-    /// this binds the detached signature and admitted root rotation as well as
-    /// every package-member pin.
-    pub fn signed_identity_digest(&self) -> Sha256DigestHex {
-        Sha256DigestHex::of_bytes(&self.to_canonical_envelope_bytes())
+    /// Identity used by artifact storage and receipts.
+    pub fn artifact_identity_digest(&self) -> Sha256DigestHex {
+        self.canonical_digest()
     }
 
     pub fn package_member(&self, role: ArtifactMemberRoleV1) -> Option<&ArtifactPackageMemberV1> {
@@ -455,17 +312,17 @@ impl ModelArtifactManifestV1 {
         let manifest: Self = serde_json::from_slice(bytes)
             .map_err(|e| ManifestValidationErrorV1::NonCanonicalEncoding(e.to_string()))?;
         manifest.validate()?;
-        if manifest.to_canonical_envelope_bytes() != bytes {
+        if manifest.to_canonical_bytes() != bytes {
             return Err(ManifestValidationErrorV1::NonCanonicalEncoding(
-                "input bytes differ from the canonical envelope encoding".to_string(),
+                "input bytes differ from the canonical manifest encoding".to_string(),
             ));
         }
         Ok(manifest)
     }
 
     /// Serialize to canonical JSON bytes (round-trips through `parse`).
-    pub fn to_canonical_envelope_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_else(|_| panic!("manifest serialization is infallible"))
+    pub fn to_canonical_bytes(&self) -> Vec<u8> {
+        self.canonical_bytes()
     }
 
     /// Structural validation only: schema pin, non-empty identity fields,
@@ -481,13 +338,11 @@ impl ModelArtifactManifestV1 {
         }
         for (field, value) in [
             ("artifact_id", p.artifact_id.as_str()),
-            ("signing_root_id", p.signing_root_id.as_str()),
             ("spdx_license", p.spdx_license.as_str()),
             ("runtime.runtime", p.runtime.runtime.as_str()),
             ("runtime.build_revision", p.runtime.build_revision.as_str()),
             ("upstream.name", p.upstream.name.as_str()),
             ("upstream.version", p.upstream.version.as_str()),
-            ("trust_root_id", self.signature.trust_root_id.as_str()),
         ] {
             if value.trim().is_empty() {
                 return Err(ManifestValidationErrorV1::EmptyField {
@@ -523,18 +378,6 @@ impl ModelArtifactManifestV1 {
         if p.runtime.platforms.is_empty() {
             return Err(ManifestValidationErrorV1::NoSupportedPlatforms);
         }
-        if self.signature.trust_root_epoch == 0 {
-            return Err(ManifestValidationErrorV1::ZeroTrustRootEpoch);
-        }
-        if p.signing_root_epoch == 0 {
-            return Err(ManifestValidationErrorV1::ZeroTrustRootEpoch);
-        }
-        if p.signing_root_id != self.signature.trust_root_id
-            || p.signing_root_epoch != self.signature.trust_root_epoch
-        {
-            return Err(ManifestValidationErrorV1::InconsistentTrustBinding);
-        }
-
         let mut roles = std::collections::BTreeSet::new();
         let mut paths = std::collections::BTreeSet::new();
         for member in &p.members {
@@ -607,12 +450,10 @@ mod tests {
         Sha256DigestHex::of_bytes(text.as_bytes())
     }
 
-    fn sample_payload() -> ManifestSignedPayloadV1 {
-        ManifestSignedPayloadV1 {
+    fn sample_payload() -> ModelArtifactManifestPayloadV1 {
+        ModelArtifactManifestPayloadV1 {
             schema: MODEL_ARTIFACT_MANIFEST_SCHEMA_V1.to_string(),
             artifact_id: "bge-small-en-v1.5".to_string(),
-            signing_root_id: "tracedecay-release-2026".to_string(),
-            signing_root_epoch: 1,
             profile_kind: ArtifactProfileKindV1::Embedding,
             spdx_license: "MIT".to_string(),
             model_member: ArtifactMemberPinV1 {
@@ -693,19 +534,13 @@ mod tests {
     fn sample_manifest() -> ModelArtifactManifestV1 {
         ModelArtifactManifestV1 {
             payload: sample_payload(),
-            signature: DetachedSignatureV1 {
-                algorithm: SignatureAlgorithmV1::Ed25519,
-                trust_root_id: "tracedecay-release-2026".to_string(),
-                trust_root_epoch: 1,
-                signature: Ed25519SignatureHex::new(hex::encode([7u8; 64])).unwrap(),
-            },
         }
     }
 
     #[test]
     fn manifest_round_trip_preserves_every_field() {
         let manifest = sample_manifest();
-        let bytes = manifest.to_canonical_envelope_bytes();
+        let bytes = manifest.to_canonical_bytes();
         let parsed = ModelArtifactManifestV1::parse(&bytes).unwrap();
         assert_eq!(manifest, parsed);
     }
@@ -714,8 +549,7 @@ mod tests {
     fn canonical_bytes_and_digest_are_stable_across_reserialization() {
         let manifest = sample_manifest();
         let first = manifest.canonical_bytes();
-        let reparsed =
-            ModelArtifactManifestV1::parse(&manifest.to_canonical_envelope_bytes()).unwrap();
+        let reparsed = ModelArtifactManifestV1::parse(&manifest.to_canonical_bytes()).unwrap();
         let second = reparsed.canonical_bytes();
         assert_eq!(first, second);
         assert_eq!(manifest.canonical_digest(), reparsed.canonical_digest());
@@ -726,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_digest_changes_with_any_signed_field_change() {
+    fn canonical_digest_changes_with_any_manifest_field_change() {
         let base = sample_manifest();
         let mut changed = base.clone();
         changed.payload.dimensions = 768;
@@ -735,35 +569,18 @@ mod tests {
         let mut changed_license = base.clone();
         changed_license.payload.spdx_license = "Apache-2.0".to_string();
         assert_ne!(base.canonical_digest(), changed_license.canonical_digest());
-
-        // Signature bytes are detached: they never enter the signed digest.
-        let mut changed_sig = base.clone();
-        changed_sig.signature.signature = Ed25519SignatureHex::new(hex::encode([9u8; 64])).unwrap();
-        assert_eq!(base.canonical_digest(), changed_sig.canonical_digest());
     }
 
     #[test]
-    fn signed_payload_binds_complete_named_package_members_and_root_epoch() {
+    fn manifest_binds_complete_named_package_members() {
         let manifest = sample_manifest();
         let payload = serde_json::to_value(&manifest.payload).unwrap();
         let members = payload
             .get("members")
             .and_then(serde_json::Value::as_array)
-            .expect("signed payload must declare every package member");
+            .expect("manifest must declare every package member");
 
         assert_eq!(members.len(), 4);
-        assert_eq!(
-            payload
-                .get("signing_root_id")
-                .and_then(serde_json::Value::as_str),
-            Some("tracedecay-release-2026")
-        );
-        assert_eq!(
-            payload
-                .get("signing_root_epoch")
-                .and_then(serde_json::Value::as_u64),
-            Some(1)
-        );
         for member in members {
             let member = member.as_object().unwrap();
             assert!(member.contains_key("role"));
@@ -771,19 +588,10 @@ mod tests {
             assert!(member.contains_key("digest"));
             assert!(member.contains_key("byte_length"));
         }
-
-        let signature = serde_json::to_value(&manifest.signature).unwrap();
-        assert_eq!(
-            signature
-                .get("trust_root_epoch")
-                .and_then(serde_json::Value::as_u64),
-            Some(1),
-            "the signature must bind the admitted trust-root rotation"
-        );
     }
 
     #[test]
-    fn validate_rejects_unsafe_or_inconsistent_package_and_trust_bindings() {
+    fn validate_rejects_unsafe_or_inconsistent_package_bindings() {
         let mut traversal = sample_manifest();
         traversal.payload.members[0].path = "../model.onnx".to_string();
         assert_eq!(
@@ -796,13 +604,6 @@ mod tests {
         assert_eq!(
             duplicate_path.validate(),
             Err(ManifestValidationErrorV1::DuplicatePackageMember)
-        );
-
-        let mut rotated_envelope = sample_manifest();
-        rotated_envelope.signature.trust_root_epoch = 2;
-        assert_eq!(
-            rotated_envelope.validate(),
-            Err(ManifestValidationErrorV1::InconsistentTrustBinding)
         );
     }
 
@@ -857,12 +658,10 @@ mod tests {
         assert!(Sha256DigestHex::new("zz").is_err());
         // 0xab produces hex letters, so uppercasing is a real corruption.
         assert!(Sha256DigestHex::new(hex::encode([0xab; 32]).to_uppercase()).is_err());
-        assert!(Ed25519PublicKeyHex::new(hex::encode([1u8; 31])).is_err());
-        assert!(Ed25519SignatureHex::new(hex::encode([1u8; 63])).is_err());
 
         let mut manifest = sample_manifest();
         manifest.payload.tokenizer_digest = Sha256DigestHex::new(hex::encode([0xab; 32])).unwrap();
-        let text = String::from_utf8(manifest.to_canonical_envelope_bytes()).unwrap();
+        let text = String::from_utf8(manifest.to_canonical_bytes()).unwrap();
         let corrupted = text.replacen(
             &hex::encode([0xab; 32]),
             &hex::encode([0xab; 32]).to_uppercase(),
@@ -877,7 +676,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_noncanonical_and_unknown_fields() {
-        let canonical = sample_manifest().to_canonical_envelope_bytes();
+        let canonical = sample_manifest().to_canonical_bytes();
         let mut padded = b" ".to_vec();
         padded.extend_from_slice(&canonical);
         assert!(matches!(
