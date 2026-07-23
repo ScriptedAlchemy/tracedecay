@@ -67,6 +67,7 @@ mod core_hooks;
 mod core_lifecycle;
 mod core_logging;
 mod core_proxy;
+pub(crate) mod doctor_kernel;
 mod project_open_owners;
 pub(crate) use core_admission::*;
 pub use core_client::*;

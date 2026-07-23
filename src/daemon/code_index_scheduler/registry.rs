@@ -121,6 +121,18 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(true)
     }
 
+    /// Whether a worktree is currently mounted for `project_root`. Read-only
+    /// map membership used by the Doctor code-index mount adapter to distinguish
+    /// an unmounted worktree from a mounted-but-still-indexing one. Returns
+    /// `false` when the path cannot be canonicalized (a path Doctor could never
+    /// have mounted under).
+    pub async fn is_worktree_mounted(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        self.mounted.lock().await.contains_key(&project_root)
+    }
+
     pub async fn notify_path(&self, project_root: &Path, path: PathBuf) -> bool {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
