@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import Graph from 'graphology';
 import forceAtlas2 from 'graphology-layout-forceatlas2';
 import Sigma from 'sigma';
+import { ActivationField, cssColorToRgb, lerpRgb } from './activation.ts';
 
 export interface GraphCanvasNode {
   id: string;
@@ -42,15 +43,22 @@ export function GraphCanvas({
   selectedId,
   onSelect,
   height = 320,
+  activation,
 }: {
   nodes: GraphCanvasNode[];
   edges: GraphCanvasEdge[];
   selectedId?: string | null;
   onSelect?: (id: string | null) => void;
   height?: number;
+  /** External synapse field; when omitted the canvas owns a local one fed by
+   * selection strikes. */
+  activation?: ActivationField;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sigmaRef = useRef<Sigma | null>(null);
+  const fieldRef = useRef<ActivationField | null>(null);
+  if (activation) fieldRef.current = activation;
+  else if (!fieldRef.current) fieldRef.current = new ActivationField();
 
   useEffect(() => {
     const container = containerRef.current;
@@ -84,6 +92,10 @@ export function GraphCanvas({
 
     let colors = palette(container);
     let hovered: string | null = null;
+    const field = fieldRef.current ?? new ActivationField();
+    let nodeRgb = cssColorToRgb(colors.node);
+    let hotRgb = cssColorToRgb(colors.nodeSelected);
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     const renderer = new Sigma(graph, container, {
       renderLabels: true,
@@ -98,18 +110,41 @@ export function GraphCanvas({
         const isNeighbor =
           hovered != null && (graph.areNeighbors(node, hovered) || isHovered);
         const dimmed = hovered != null && !isNeighbor;
+        const heat = field.heatOf(node);
+        // Synapse heat: color lerps toward the accent and the node swells —
+        // a strike blooms then decays to dark (exponential half-life).
+        const baseColor = dimmed ? colors.dim : colors.node;
+        const color =
+          isSelected || isHovered
+            ? colors.nodeSelected
+            : heat > 0
+              ? lerpRgb(cssColorToRgb(baseColor), hotRgb, Math.min(1, heat))
+              : baseColor;
         return {
           ...data,
-          color: isSelected || isHovered ? colors.nodeSelected : dimmed ? colors.dim : colors.node,
-          zIndex: isSelected || isHovered ? 2 : 1,
-          label: isSelected || isHovered || data['degree'] >= maxDegree * 0.6 ? data['label'] : '',
+          color,
+          size: (data['size'] as number) * (1 + 0.5 * heat),
+          zIndex: isSelected || isHovered || heat > 0.4 ? 2 : 1,
+          label:
+            isSelected || isHovered || heat > 0.5 || data['degree'] >= maxDegree * 0.6
+              ? data['label']
+              : '',
         };
       },
       edgeReducer: (edge, data) => {
         const dimmed =
           hovered != null &&
           !graph.extremities(edge).some((end) => end === hovered);
-        return { ...data, color: dimmed ? 'transparent' : colors.edge };
+        const [from, to] = graph.extremities(edge);
+        const edgeHeat = Math.min(field.heatOf(from ?? ''), field.heatOf(to ?? ''));
+        // Edges glow while both endpoints are warm: the visible synapse.
+        const color =
+          edgeHeat > 0.05
+            ? lerpRgb(cssColorToRgb(colors.edge), hotRgb, Math.min(1, edgeHeat))
+            : dimmed
+              ? 'transparent'
+              : colors.edge;
+        return { ...data, color, size: edgeHeat > 0.05 ? 1 + 2 * edgeHeat : data['size'] };
       },
     });
     sigmaRef.current = renderer;
@@ -122,11 +157,37 @@ export function GraphCanvas({
       hovered = null;
       renderer.refresh();
     });
-    renderer.on('clickNode', ({ node }) => onSelect?.(node));
+    renderer.on('clickNode', ({ node }) => {
+      onSelect?.(node);
+      // Traveling activation: the struck node fires now; its neighborhood
+      // fires one synaptic delay later (real caller/reference edges only).
+      field.strike([node], 1);
+      const neighbors = graph.neighbors(node);
+      if (reducedMotion) field.strike(neighbors, 0.55);
+      else setTimeout(() => { field.strike(neighbors, 0.55); wake(); }, 140);
+      wake();
+    });
     renderer.on('clickStage', () => onSelect?.(null));
+
+    // Decay loop: runs only while warm; reduced-motion snaps to a single
+    // static refresh per strike instead of animating.
+    let raf = 0;
+    const step = (now: number) => {
+      const warm = field.tick(now);
+      renderer.refresh();
+      raf = warm && !reducedMotion ? requestAnimationFrame(step) : 0;
+    };
+    const wake = () => {
+      if (reducedMotion) { field.tick(performance.now()); renderer.refresh(); return; }
+      if (!raf) raf = requestAnimationFrame(step);
+    };
+    if (field.warm) wake();
 
     const themeObserver = new MutationObserver(() => {
       colors = palette(container);
+      nodeRgb = cssColorToRgb(colors.node);
+      hotRgb = cssColorToRgb(colors.nodeSelected);
+      void nodeRgb;
       renderer.setSetting('defaultEdgeColor', colors.edge);
       renderer.setSetting('labelColor', { color: colors.label });
       renderer.refresh();
@@ -137,6 +198,7 @@ export function GraphCanvas({
     });
 
     return () => {
+      if (raf) cancelAnimationFrame(raf);
       themeObserver.disconnect();
       renderer.kill();
       sigmaRef.current = null;
@@ -161,7 +223,8 @@ export function GraphCanvas({
       />
       <figcaption className="text-2xs text-text-muted">
         {nodes.length} symbols · {edges.length} relations · size = connectedness ·
-        hover isolates a neighborhood, click selects
+        hover isolates, click fires the synapse (bloom decays as activation
+        fades)
       </figcaption>
     </figure>
   );

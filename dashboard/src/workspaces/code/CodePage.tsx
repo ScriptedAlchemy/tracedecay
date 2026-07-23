@@ -10,8 +10,9 @@ import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { useLegacy } from '../../data/query/useLegacy.ts';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
+import { ActivationField } from '../../viz/graph/activation.ts';
 import {
   GraphOverviewPayloadSchema,
   GraphSearchPayloadSchema,
@@ -61,6 +62,13 @@ export function CodePage() {
       kind: edge.kind,
     }));
   }, [subgraph.data]);
+  const activationRef = useRef(new ActivationField({ halfLifeMs: 3200 }));
+  // Search results strike their nodes: querying the graph makes it fire.
+  useEffect(() => {
+    if (search.data?.outcome !== 'ok') return;
+    const hits = (search.data.data.results ?? []).map((node) => node.id);
+    if (hits.length) activationRef.current.strike(hits, 0.9);
+  }, [search.data]);
   const selectFromCanvas = useCallback(
     (id: string | null) => {
       if (id == null) return setSelected(null);
@@ -137,6 +145,7 @@ export function CodePage() {
                 selectedId={selected?.id ?? null}
                 onSelect={selectFromCanvas}
                 height={300}
+                activation={activationRef.current}
               />
             )}
           </div>
