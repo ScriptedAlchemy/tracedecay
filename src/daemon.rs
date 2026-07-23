@@ -723,11 +723,14 @@ struct ProjectOpenGates {
     gates: HashMap<ProjectRouteKey, std::sync::Weak<ProjectOpenGate>>,
     tasks: ProjectOpenTasks,
 }
+#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
 type MaintenanceTransitionGate = tokio::sync::Mutex<()>;
+#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
 type MaintenanceTransitionGates =
     HashMap<MaintenanceTransitionKey, std::sync::Weak<MaintenanceTransitionGate>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
 struct MaintenanceTransitionKey {
     profile_root: PathBuf,
     project_id: Option<String>,
@@ -735,6 +738,7 @@ struct MaintenanceTransitionKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
 enum MaintenanceRekeyOutcome {
     Completed,
     Retiring,
@@ -1180,6 +1184,7 @@ async fn project_open_tasks(gates: &tokio::sync::Mutex<ProjectOpenGates>) -> Pro
     gates.lock().await.tasks.clone()
 }
 
+#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
 async fn maintenance_transition_gate(
     gates: &tokio::sync::Mutex<MaintenanceTransitionGates>,
     key: &ProjectServerKey,
@@ -2300,6 +2305,7 @@ where
         .await
 }
 
+#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
 fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
     lifecycle: DaemonLifecycle,
     activation: ActivationFuture,

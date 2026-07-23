@@ -69,6 +69,7 @@ impl TraceDecay {
         MemoryOperationContext::generated(&owner, action, None).map_err(memory_application_error)
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))] // driven by the unix-only daemon cutover path
     fn daemon_memory_cutover_operation(&self) -> Result<MemoryOperationContext> {
         let owner = self.project_memory_owner()?;
         MemoryOperationContext::from_trusted_request_id(
@@ -296,6 +297,7 @@ impl TraceDecay {
     /// Advances exactly one persisted V1 raw-memory cutover batch. The stable
     /// receipt identity makes daemon restarts replay a completed cutover rather
     /// than creating a second import job.
+    #[cfg_attr(not(unix), allow(dead_code))] // driven by the unix-only daemon cutover path
     pub(crate) async fn advance_project_memory_cutover_once(
         &self,
     ) -> Result<tracedecay_store::CompatibilityLegacyMemoryCutoverProgressV1> {

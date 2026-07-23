@@ -120,6 +120,7 @@ impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A>
 where
     S: GitIndexTransactionStore,
 {
+    #[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
     pub(crate) fn quarantine_preview_for_test(
         &self,
         preview: &GitIndexPreviewV1,

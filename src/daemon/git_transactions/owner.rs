@@ -217,6 +217,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
     pub(crate) async fn quarantine_preview_for_test(
         &self,
         repository_root: &std::path::Path,

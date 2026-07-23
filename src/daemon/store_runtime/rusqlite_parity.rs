@@ -155,6 +155,7 @@ pub(crate) enum RusqliteParityInfrastructureErrorV1 {
 /// must contain every live store or profile root known to that caller; staging
 /// under one of those roots is rejected before a copy can be created.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(unix), allow(unreachable_code))] // early UnsupportedPlatform return
 pub(crate) async fn run_rusqlite_parity_v1(
     helper_executable: &Path,
     authority_store_path: &Path,
@@ -650,6 +651,7 @@ impl InvocationDirectory {
         for _ in 0..100 {
             let id = NEXT_INVOCATION.fetch_add(1, Ordering::Relaxed);
             let candidate = root.join(format!("rusqlite-parity-{}-{id}", std::process::id()));
+            #[cfg_attr(not(unix), allow(unused_mut))] // mode() is unix-only
             let mut builder = fs::DirBuilder::new();
             #[cfg(unix)]
             {
@@ -715,6 +717,7 @@ impl Drop for InvocationDirectory {
 }
 
 fn create_private_directory(path: &Path) -> io::Result<()> {
+    #[cfg_attr(not(unix), allow(unused_mut))] // mode() is unix-only
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -724,6 +727,7 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
     builder.create(path)
 }
 
+#[cfg_attr(not(unix), allow(unreachable_code))] // early UnsupportedPlatform return
 async fn invoke_helper(
     helper_executable: &Path,
     invocation: &InvocationDirectory,

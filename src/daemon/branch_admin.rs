@@ -199,6 +199,7 @@ impl Drop for MaintenanceReaperFinalizer {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
 pub(super) struct RetirementReaperRegistrationBarrier {
     reached: tokio::sync::watch::Sender<bool>,
     released: std::sync::Mutex<bool>,
@@ -206,6 +207,7 @@ pub(super) struct RetirementReaperRegistrationBarrier {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
 impl RetirementReaperRegistrationBarrier {
     fn new() -> Self {
         let (reached, _) = tokio::sync::watch::channel(false);

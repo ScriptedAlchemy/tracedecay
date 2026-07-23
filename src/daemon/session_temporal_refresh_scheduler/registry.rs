@@ -78,6 +78,7 @@ pub(in crate::daemon) struct SessionTemporalRefreshSchedulerRegistry {
     pub(super) projector: Arc<dyn SessionTemporalRefreshProjector>,
     pub(super) policy: SessionTemporalRefreshPolicy,
     shutting_down: AtomicBool,
+    #[cfg_attr(not(unix), allow(dead_code))] // held by the unix-only daemon shutdown path
     shutdown_guard: tokio::sync::Mutex<()>,
     project_lifecycle: tokio::sync::Mutex<()>,
     retired_project_owners: std::sync::Mutex<HashSet<StoreOwnerKey>>,
@@ -335,6 +336,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .any(|owner| database_paths.contains(&owner.graph_db_path))
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))] // invoked by the unix-only daemon shutdown path
     pub(in crate::daemon) async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         let _guard = self.shutdown_guard.lock().await;
