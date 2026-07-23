@@ -5,6 +5,7 @@
 //! use the exact same serde shapes without importing this crate.
 
 mod closed_sql;
+mod fixture_ddl;
 mod graph;
 mod service;
 mod session;
@@ -15,4 +16,5 @@ mod transport;
 #[cfg(test)]
 mod tests;
 
+pub use fixture_ddl::SESSION_STORE_FIXTURE_TABLES_DDL;
 pub use transport::serve;

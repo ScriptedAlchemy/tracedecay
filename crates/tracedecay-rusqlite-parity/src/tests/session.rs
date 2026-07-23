@@ -386,7 +386,55 @@ fn logical_copy_edge_pages_walk_the_composite_occurrence_keyset() {
     ) else {
         panic!("assertion count output expected");
     };
-    assert_eq!(count.row_count, Some(1));
+    assert_eq!(count.row_count, Some(2));
+}
+
+#[test]
+fn assertion_pages_walk_the_generation_keyset_with_digest_oracle() {
+    let fixture = fixture();
+    let first = single_row_page(&fixture.path, SessionStoreTable::SessionAssertions, None);
+    assert_eq!(
+        first.order_columns,
+        ["session_id", "generation", "assertion_id"]
+    );
+    let mut oracle = CanonicalRowHasher::new();
+    oracle.update_text(b"session-1");
+    oracle.update_integer(1);
+    oracle.update_text(b"assertion-1");
+    oracle.update_text(b"supersedes");
+    oracle.update_text(b"anchor-1");
+    oracle.update_text(b"anchor-2");
+    oracle.update_integer(1);
+    oracle.update_text(br#"{"kind":"unknown"}"#);
+    oracle.update_text(b"{}");
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::SessionAssertions {
+            session_id,
+            generation: 1,
+            assertion_id,
+            assertion_kind,
+            row_digest,
+        } if session_id == "session-1"
+            && assertion_id == "assertion-1"
+            && assertion_kind == "supersedes"
+            && row_digest == &oracle.finish()
+    ));
+    let cursor = first.next_cursor.clone().expect("assertion cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::SessionAssertions,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::SessionAssertions {
+            assertion_id,
+            assertion_kind,
+            ..
+        } if assertion_id == "assertion-2" && assertion_kind == "annotates"
+    ));
+    assert!(second.next_cursor.is_none());
 }
 
 #[test]
