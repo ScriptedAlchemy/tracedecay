@@ -551,16 +551,19 @@ fn validate_admission(
     Ok(())
 }
 
-fn scope_reference_matches_snapshot(
+pub(super) fn scope_reference_matches_snapshot(
     reference: Option<&tracedecay_domain::RefId>,
     snapshot: &RepositoryStateSnapshotV1,
 ) -> bool {
     match (reference, &snapshot.head) {
-        (None, _) => true,
         (Some(reference), tracedecay_domain::GitHeadStateV1::Attached { branch, .. }) => {
             reference.as_str() == branch
         }
-        (Some(_), _) => false,
+        (Some(reference), tracedecay_domain::GitHeadStateV1::Unborn { branch }) => {
+            reference.as_str() == branch
+        }
+        (None, tracedecay_domain::GitHeadStateV1::Detached { .. }) => true,
+        (None, _) | (Some(_), tracedecay_domain::GitHeadStateV1::Detached { .. }) => false,
     }
 }
 

@@ -10,6 +10,7 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, UseCaseId};
 
+use super::transactions::scope_reference_matches_snapshot;
 use super::{
     GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
     GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, git_index_effect_class,
@@ -248,6 +249,20 @@ fn operation_binding_must_match_the_native_operation() {
         Err(crate::ApplicationContractError::Inconsistent {
             field: "git index transaction operation binding"
         })
+    ));
+}
+
+#[test]
+fn repository_reference_binding_is_exact_and_never_implicit() {
+    let attached = snapshot("repository.fixture");
+    let matching = RefId::new("refs/heads/main").expect("matching ref");
+    let different = RefId::new("refs/heads/other").expect("different ref");
+
+    assert!(scope_reference_matches_snapshot(Some(&matching), &attached));
+    assert!(!scope_reference_matches_snapshot(None, &attached));
+    assert!(!scope_reference_matches_snapshot(
+        Some(&different),
+        &attached
     ));
 }
 
