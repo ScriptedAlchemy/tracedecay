@@ -83,11 +83,15 @@ fn subprocess_reports_closed_session_store_counts_schema_and_keyset_pages() {
         "session_logical_copy_edges",
         "session_assertions",
         "session_summary_nodes",
+        "session_summary_sources",
+        "session_summary_successors",
     ] {
         let family = match table {
             "sessions" | "session_messages" => "transcript",
             "session_schema_migrations" | "lcm_raw_messages" => "lcm",
-            "session_summary_nodes" => "summary",
+            "session_summary_nodes" | "session_summary_sources" | "session_summary_successors" => {
+                "summary"
+            }
             _ => "temporal",
         };
         let response = invoke(&request(

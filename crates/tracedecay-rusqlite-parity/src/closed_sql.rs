@@ -157,6 +157,18 @@ pub(crate) fn session_table_spec(table: SessionStoreTable) -> TableSpec {
             "PRAGMA table_info(session_summary_nodes)",
             "PRAGMA foreign_key_list(session_summary_nodes)",
         ),
+        SessionStoreTable::SessionSummarySources => session_table(
+            "session_summary_sources",
+            "SELECT COUNT(*) FROM session_summary_sources",
+            "PRAGMA table_info(session_summary_sources)",
+            "PRAGMA foreign_key_list(session_summary_sources)",
+        ),
+        SessionStoreTable::SessionSummarySuccessors => session_table(
+            "session_summary_successors",
+            "SELECT COUNT(*) FROM session_summary_successors",
+            "PRAGMA table_info(session_summary_successors)",
+            "PRAGMA foreign_key_list(session_summary_successors)",
+        ),
     }
 }
 
@@ -460,5 +472,54 @@ pub(crate) fn session_page_query(
                 Value::Integer(limit),
             ],
         ),
+        (SessionStoreTable::SessionSummarySources, cursor) => {
+            let (summary_id, source_ordinal) = match cursor {
+                Some(SessionStoreCursor::SessionSummarySources {
+                    summary_id,
+                    source_ordinal,
+                }) => (
+                    Value::Text(summary_id.clone()),
+                    Value::Integer(*source_ordinal),
+                ),
+                _ => (Value::Null, Value::Null),
+            };
+            (
+                "SELECT summary_id, source_ordinal, source_kind, source_anchor_id,
+                        source_summary_id
+                 FROM session_summary_sources
+                 WHERE ?1 IS NULL
+                    OR summary_id > ?1
+                    OR (summary_id = ?1 AND source_ordinal > ?2)
+                 ORDER BY summary_id, source_ordinal
+                 LIMIT ?3",
+                vec![summary_id, source_ordinal, Value::Integer(limit)],
+            )
+        }
+        (SessionStoreTable::SessionSummarySuccessors, cursor) => {
+            let (predecessor_summary_id, successor_summary_id) = match cursor {
+                Some(SessionStoreCursor::SessionSummarySuccessors {
+                    predecessor_summary_id,
+                    successor_summary_id,
+                }) => (
+                    Value::Text(predecessor_summary_id.clone()),
+                    Value::Text(successor_summary_id.clone()),
+                ),
+                _ => (Value::Null, Value::Null),
+            };
+            (
+                "SELECT predecessor_summary_id, successor_summary_id, created_at
+                 FROM session_summary_successors
+                 WHERE ?1 IS NULL
+                    OR predecessor_summary_id > ?1
+                    OR (predecessor_summary_id = ?1 AND successor_summary_id > ?2)
+                 ORDER BY predecessor_summary_id, successor_summary_id
+                 LIMIT ?3",
+                vec![
+                    predecessor_summary_id,
+                    successor_summary_id,
+                    Value::Integer(limit),
+                ],
+            )
+        }
     }
 }

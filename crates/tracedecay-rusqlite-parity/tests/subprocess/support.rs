@@ -208,6 +208,20 @@ pub(crate) fn fixture() -> Fixture {
                 publication_json TEXT,
                 created_at INTEGER NOT NULL
             );
+            CREATE TABLE session_summary_sources (
+                summary_id TEXT NOT NULL,
+                source_ordinal INTEGER NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_anchor_id TEXT,
+                source_summary_id TEXT,
+                PRIMARY KEY(summary_id, source_ordinal)
+            );
+            CREATE TABLE session_summary_successors (
+                predecessor_summary_id TEXT NOT NULL,
+                successor_summary_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(predecessor_summary_id, successor_summary_id)
+            );
             CREATE VIRTUAL TABLE nodes_fts USING fts5(
                 name, qualified_name, docstring, signature,
                 content='nodes', content_rowid='rowid'
@@ -281,7 +295,19 @@ pub(crate) fn fixture() -> Fixture {
             INSERT INTO session_summary_nodes(
                 summary_id, session_id, summary_anchor_id, summary_text, index_text,
                 source_horizon_json, created_at
-            ) VALUES ('summary-1', 'session-1', 'anchor-1', '', '', '{}', 1);
+            ) VALUES
+                ('summary-1', 'session-1', 'anchor-1', '', '', '{}', 1),
+                ('summary-2', 'session-1', 'anchor-2', '', '', '{}', 2);
+            INSERT INTO session_summary_sources(
+                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
+            ) VALUES
+                ('summary-1', 0, 'anchor', 'anchor-1', NULL),
+                ('summary-1', 1, 'summary', NULL, 'summary-1');
+            INSERT INTO session_summary_successors(
+                predecessor_summary_id, successor_summary_id, created_at
+            ) VALUES
+                ('summary-1', 'summary-2', 1),
+                ('summary-1', 'summary-3', 2);
             INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild');",
         )
         .expect("create fixture schema");

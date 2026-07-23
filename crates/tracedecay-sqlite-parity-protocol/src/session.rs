@@ -28,6 +28,8 @@ pub enum SessionStoreTable {
     SessionLogicalCopyEdges,
     SessionAssertions,
     SessionSummaryNodes,
+    SessionSummarySources,
+    SessionSummarySuccessors,
 }
 
 impl SessionStoreTable {
@@ -44,7 +46,9 @@ impl SessionStoreTable {
             | Self::SessionOccurrences
             | Self::SessionLogicalCopyEdges
             | Self::SessionAssertions => SessionStoreFamily::Temporal,
-            Self::SessionSummaryNodes => SessionStoreFamily::Summary,
+            Self::SessionSummaryNodes
+            | Self::SessionSummarySources
+            | Self::SessionSummarySuccessors => SessionStoreFamily::Summary,
         }
     }
 
@@ -70,6 +74,8 @@ impl SessionStoreTable {
             ],
             Self::SessionAssertions => &["session_id", "generation", "assertion_id"],
             Self::SessionSummaryNodes => &["summary_id"],
+            Self::SessionSummarySources => &["summary_id", "source_ordinal"],
+            Self::SessionSummarySuccessors => &["predecessor_summary_id", "successor_summary_id"],
         }
     }
 }
@@ -129,6 +135,14 @@ pub enum SessionStoreCursor {
     },
     SessionSummaryNodes {
         summary_id: String,
+    },
+    SessionSummarySources {
+        summary_id: String,
+        source_ordinal: i64,
+    },
+    SessionSummarySuccessors {
+        predecessor_summary_id: String,
+        successor_summary_id: String,
     },
 }
 
@@ -270,6 +284,17 @@ pub enum SessionStoreRow {
         summary_id: String,
         session_id: String,
         summary_anchor_id: String,
+        row_digest: String,
+    },
+    SessionSummarySources {
+        summary_id: String,
+        source_ordinal: i64,
+        source_kind: String,
+        row_digest: String,
+    },
+    SessionSummarySuccessors {
+        predecessor_summary_id: String,
+        successor_summary_id: String,
         row_digest: String,
     },
 }
@@ -447,6 +472,27 @@ fn validate_page_cursor(
             SessionStoreCursor::SessionSummaryNodes { summary_id },
         ) => {
             validate_cursor_text("summary_id", summary_id)?;
+            true
+        }
+        (
+            SessionStoreTable::SessionSummarySources,
+            SessionStoreCursor::SessionSummarySources {
+                summary_id,
+                source_ordinal,
+            },
+        ) => {
+            validate_cursor_text("summary_id", summary_id)?;
+            *source_ordinal >= 0
+        }
+        (
+            SessionStoreTable::SessionSummarySuccessors,
+            SessionStoreCursor::SessionSummarySuccessors {
+                predecessor_summary_id,
+                successor_summary_id,
+            },
+        ) => {
+            validate_cursor_text("predecessor_summary_id", predecessor_summary_id)?;
+            validate_cursor_text("successor_summary_id", successor_summary_id)?;
             true
         }
         _ => false,

@@ -132,6 +132,14 @@ fn session_counts_schema_and_keyset_pages_cover_every_closed_table() {
             SessionStoreTable::SessionSummaryNodes,
             "session_summary_nodes",
         ),
+        (
+            SessionStoreTable::SessionSummarySources,
+            "session_summary_sources",
+        ),
+        (
+            SessionStoreTable::SessionSummarySuccessors,
+            "session_summary_successors",
+        ),
     ] {
         let Output::SessionStorePage(page) = execute(
             &fixture.path,
@@ -214,7 +222,7 @@ fn projection_receipt_pages_walk_the_composite_generation_keyset() {
     ) else {
         panic!("summary-node count output expected");
     };
-    assert_eq!(count.row_count, Some(1));
+    assert_eq!(count.row_count, Some(2));
 }
 
 #[test]
@@ -341,3 +349,178 @@ fn logical_copy_edge_pages_walk_the_composite_occurrence_keyset() {
     };
     assert_eq!(count.row_count, Some(1));
 }
+
+#[test]
+fn summary_node_pages_walk_the_identifier_keyset() {
+    let fixture = fixture();
+    let first = single_row_page(&fixture.path, SessionStoreTable::SessionSummaryNodes, None);
+    assert_eq!(first.order_columns, ["summary_id"]);
+    let (SessionStoreRow::SessionSummaryNodes { summary_id, .. }, Some(cursor)) =
+        (&first.rows[0], first.next_cursor.clone())
+    else {
+        panic!("first summary-node page expected with cursor");
+    };
+    assert_eq!(summary_id, "summary-1");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::SessionSummaryNodes,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::SessionSummaryNodes { summary_id, .. } if summary_id == "summary-2"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn summary_source_pages_walk_the_ordinal_keyset_with_digest_oracle() {
+    let fixture = fixture();
+    let first = single_row_page(
+        &fixture.path,
+        SessionStoreTable::SessionSummarySources,
+        None,
+    );
+    assert_eq!(first.order_columns, ["summary_id", "source_ordinal"]);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::SessionSummarySources {
+            summary_id,
+            source_ordinal: 0,
+            source_kind,
+            ..
+        } if summary_id == "summary-1" && source_kind == "anchor"
+    ));
+    let mut oracle = CanonicalRowHasher::new();
+    oracle.update_text(b"summary-1");
+    oracle.update_integer(0);
+    oracle.update_text(b"anchor");
+    oracle.update_text(b"anchor-1");
+    oracle.update_null();
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::SessionSummarySources { row_digest, .. }
+            if row_digest == &oracle.finish()
+    ));
+    let cursor = first.next_cursor.clone().expect("summary-source cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::SessionSummarySources,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::SessionSummarySources {
+            source_ordinal: 1,
+            source_kind,
+            ..
+        } if source_kind == "summary"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn summary_successor_pages_walk_the_composite_keyset_with_digest_oracle() {
+    let fixture = fixture();
+    let first = single_row_page(
+        &fixture.path,
+        SessionStoreTable::SessionSummarySuccessors,
+        None,
+    );
+    assert_eq!(
+        first.order_columns,
+        ["predecessor_summary_id", "successor_summary_id"]
+    );
+    let mut oracle = CanonicalRowHasher::new();
+    oracle.update_text(b"summary-1");
+    oracle.update_text(b"summary-2");
+    oracle.update_integer(1);
+    assert!(matches!(
+        &first.rows[0],
+        SessionStoreRow::SessionSummarySuccessors {
+            predecessor_summary_id,
+            successor_summary_id,
+            row_digest,
+        } if predecessor_summary_id == "summary-1"
+            && successor_summary_id == "summary-2"
+            && row_digest == &oracle.finish()
+    ));
+    let cursor = first.next_cursor.clone().expect("summary-successor cursor");
+    let second = single_row_page(
+        &fixture.path,
+        SessionStoreTable::SessionSummarySuccessors,
+        Some(cursor),
+    );
+    assert!(matches!(
+        &second.rows[0],
+        SessionStoreRow::SessionSummarySuccessors {
+            successor_summary_id,
+            ..
+        } if successor_summary_id == "summary-3"
+    ));
+    assert!(second.next_cursor.is_none());
+}
+
+/// Guards against a silent canonical-digest subset: a page query that drops or
+/// reorders a physical column still changes row digests but would otherwise pass
+/// every value assertion. Requiring the SELECT column count to equal
+/// `PRAGMA table_info` for every closed table forecloses that regression at once.
+#[test]
+fn every_page_query_selects_the_full_physical_column_set() {
+    let fixture = fixture();
+    let connection = rusqlite::Connection::open(&fixture.path).expect("open fixture");
+    for table in ALL_SESSION_STORE_TABLES {
+        let spec = crate::closed_sql::session_table_spec(table);
+        let (sql, _params) = crate::closed_sql::session_page_query(table, None, 1);
+        let statement = connection.prepare(sql).expect("prepare page query");
+        let selected = i64::try_from(statement.column_count()).expect("column count fits i64");
+        let physical: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1)",
+                [spec.identifier],
+                |row| row.get(0),
+            )
+            .expect("pragma table_info count");
+        assert_eq!(
+            selected, physical,
+            "page query for {table:?} must select every physical column"
+        );
+    }
+}
+
+fn single_row_page(
+    path: &std::path::Path,
+    table: SessionStoreTable,
+    cursor: Option<tracedecay_sqlite_parity_protocol::SessionStoreCursor>,
+) -> tracedecay_sqlite_parity_protocol::SessionStorePage {
+    let Output::SessionStorePage(page) = execute(
+        path,
+        Command::SessionStorePage {
+            family: table.family(),
+            table,
+            cursor,
+            limit: 1,
+        },
+    ) else {
+        panic!("session-store page expected for {table:?}");
+    };
+    page
+}
+
+const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 15] = [
+    SessionStoreTable::Observations,
+    SessionStoreTable::Sessions,
+    SessionStoreTable::SessionMessages,
+    SessionStoreTable::SessionSchemaMigrations,
+    SessionStoreTable::LcmRawMessages,
+    SessionStoreTable::SessionTemporalSchemaMigrations,
+    SessionStoreTable::SessionTemporalGenerations,
+    SessionStoreTable::SessionTemporalObservationEffects,
+    SessionStoreTable::SessionTemporalProjectionReceipts,
+    SessionStoreTable::SessionOccurrences,
+    SessionStoreTable::SessionLogicalCopyEdges,
+    SessionStoreTable::SessionAssertions,
+    SessionStoreTable::SessionSummaryNodes,
+    SessionStoreTable::SessionSummarySources,
+    SessionStoreTable::SessionSummarySuccessors,
+];

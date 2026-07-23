@@ -269,6 +269,19 @@ fn decode_row(table: SessionStoreTable, row: &Row<'_>) -> rusqlite::Result<Sessi
             summary_anchor_id: row.get(2)?,
             row_digest,
         }),
+        SessionStoreTable::SessionSummarySources => Ok(SessionStoreRow::SessionSummarySources {
+            summary_id: row.get(0)?,
+            source_ordinal: row.get(1)?,
+            source_kind: row.get(2)?,
+            row_digest,
+        }),
+        SessionStoreTable::SessionSummarySuccessors => {
+            Ok(SessionStoreRow::SessionSummarySuccessors {
+                predecessor_summary_id: row.get(0)?,
+                successor_summary_id: row.get(1)?,
+                row_digest,
+            })
+        }
     }
 }
 
@@ -367,6 +380,22 @@ fn cursor_for_row(row: &SessionStoreRow) -> SessionStoreCursor {
                 summary_id: summary_id.clone(),
             }
         }
+        SessionStoreRow::SessionSummarySources {
+            summary_id,
+            source_ordinal,
+            ..
+        } => SessionStoreCursor::SessionSummarySources {
+            summary_id: summary_id.clone(),
+            source_ordinal: *source_ordinal,
+        },
+        SessionStoreRow::SessionSummarySuccessors {
+            predecessor_summary_id,
+            successor_summary_id,
+            ..
+        } => SessionStoreCursor::SessionSummarySuccessors {
+            predecessor_summary_id: predecessor_summary_id.clone(),
+            successor_summary_id: successor_summary_id.clone(),
+        },
     }
 }
 
