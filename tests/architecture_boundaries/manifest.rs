@@ -5,6 +5,7 @@
 //! git-tracked Rust sources without freezing an exact package/target snapshot.
 
 use crate::module_scanner::{normalize_identifier, normalize_relative, resolve_reachable_sources};
+#[cfg(unix)]
 use crate::query_kernel::query_kernel_violations;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -29,6 +30,7 @@ const QUERY_ALLOWED_PACKAGES: &[&str] = &[
     "tracedecay-tool-catalog",
     "zeroize",
 ];
+#[cfg(unix)]
 const TEST_WORKSPACE_MANIFESTS: &[&str] = &["Cargo.toml", "crates/tracedecay-domain/Cargo.toml"];
 const ALLOWED_ROOT_PACKAGE_ALIASES: &[(&str, &str)] = &[
     (
