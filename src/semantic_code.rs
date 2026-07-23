@@ -918,7 +918,9 @@ mod scheduling_tests {
     #[test]
     fn restart_restore_installs_current_pointer_without_indexing() {
         let handle = SemanticRuntimeSchedulingHandleV1::new();
-        let restored = pointer('r', 'r');
+        // Vector char must be a valid sha256 hex digit for `ManifestDigest`;
+        // the source char is a plain string id, so the restore mnemonic stays.
+        let restored = pointer('e', 'r');
         handle.restore_current(restored.clone());
 
         assert_eq!(handle.current(), Some(restored.clone()));
