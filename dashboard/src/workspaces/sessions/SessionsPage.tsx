@@ -12,39 +12,46 @@ import { useLegacy } from '../../data/query/useLegacy.ts';
 
 const BASE = '/api/plugins/hermes-lcm';
 
-const SessionsPayload = z
-  .object({
-    sessions: z.array(AnyObject).optional(),
-    items: z.array(AnyObject).optional(),
-  })
+const OverviewPayload = z
+  .object({ latest_sessions: z.array(AnyObject).optional() })
+  .passthrough();
+const TimelinePayload = z
+  .object({ buckets: z.array(AnyObject).optional() })
   .passthrough();
 
 /** Sessions: LCM store — overview stats + session list + drill-down. */
 export function SessionsPage() {
-  const overview = useLegacy(['lcm', 'overview'], `${BASE}/overview`, AnyObject);
-  const timeline = useLegacy(['lcm', 'timeline'], `${BASE}/timeline`, SessionsPayload);
+  const overview = useLegacy(['lcm', 'overview'], `${BASE}/overview`, OverviewPayload);
+  const timeline = useLegacy(['lcm', 'timeline'], `${BASE}/timeline`, TimelinePayload);
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null);
 
   return (
     <ExplorerSplit
       filters={
-        <LegacyBoundary title="LCM" pending={overview.isPending} result={overview.data}>
-          {(data) => (
-            <div className="flex flex-col gap-2">
-              {Object.entries(data)
-                .filter(([, v]) => typeof v === 'number' || typeof v === 'string')
-                .slice(0, 8)
-                .map(([k, v]) => (
-                  <StatTile key={k} label={k.replaceAll('_', ' ')} value={String(v)} />
+        <LegacyBoundary title="LCM" pending={timeline.isPending} result={timeline.data}>
+          {(data) => {
+            const buckets = data.buckets ?? [];
+            const recent = buckets.slice(-7);
+            return (
+              <div className="flex flex-col gap-2">
+                <StatTile label="days tracked" value={buckets.length} />
+                {recent.map((b, i) => (
+                  <StatTile
+                    key={i}
+                    label={String(b['bucket'] ?? i)}
+                    value={String(b['count'] ?? '—')}
+                    hint={`~${String(b['token_estimate'] ?? 0)} tokens`}
+                  />
                 ))}
-            </div>
-          )}
+              </div>
+            );
+          }}
         </LegacyBoundary>
       }
       list={
-        <LegacyBoundary title="Sessions" pending={timeline.isPending} result={timeline.data}>
+        <LegacyBoundary title="Sessions" pending={overview.isPending} result={overview.data}>
           {(data) => {
-            const rows = data.sessions ?? data.items ?? [];
+            const rows = data.latest_sessions ?? [];
             if (rows.length === 0)
               return (
                 <p className="p-6 text-center text-sm text-text-muted">
@@ -56,15 +63,25 @@ export function SessionsPage() {
                 {rows.map((row, i) => {
                   const id = String(row['session_id'] ?? row['id'] ?? i);
                   const provider = String(row['provider'] ?? row['source'] ?? '');
-                  const when = String(row['started_at'] ?? row['timestamp'] ?? '');
+                  const count = row['message_count'];
+                  const when = row['last_timestamp']
+                    ? new Date(Number(row['last_timestamp']) * 1000).toLocaleString()
+                    : '';
                   return (
                     <DataRow
                       key={id}
                       selected={selected === row}
                       onSelect={() => setSelected(row)}
                     >
-                      <span className="w-24 shrink-0 truncate text-text-muted">{provider}</span>
-                      <span className="min-w-0 flex-1 truncate">{id}</span>
+                      {provider ? (
+                        <span className="w-24 shrink-0 truncate text-text-muted">{provider}</span>
+                      ) : null}
+                      <span className="min-w-0 flex-1 truncate font-mono">{id}</span>
+                      {count !== undefined ? (
+                        <span className="tabular shrink-0 text-2xs text-text-muted">
+                          {String(count)} msgs
+                        </span>
+                      ) : null}
                       <span className="tabular shrink-0 text-2xs text-text-muted">{when}</span>
                     </DataRow>
                   );
