@@ -1,10 +1,13 @@
 use serde_json::json;
 
 use super::*;
+use crate::configuration::UserProfileId;
 use crate::research::{
     AccessPolicyDigest, ComponentVersion, EntityId, EntityKind, PrivacyDomainId, ProjectId,
-    SanitizationReceiptId, ScopeResolutionId,
+    RetrieverContributionIdV1, SanitizationReceiptId, ScopeResolutionId,
 };
+use crate::retrieval::SourceOccurrenceId;
+use crate::session_derived::EvidenceSpanIdV1;
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -21,6 +24,15 @@ fn owner(project: &str) -> ObservationScopeV1 {
     ObservationScopeV1::Project {
         project_id: ProjectId::new(project).unwrap(),
     }
+}
+
+fn v3_owner(project: &str, privacy: &str) -> AnchorOwnerBindingV1 {
+    AnchorOwnerBindingV1::for_project(
+        UserProfileId::new("profile.fixture").unwrap(),
+        ProjectId::new(project).unwrap(),
+        PrivacyDomainId::new(privacy).unwrap(),
+    )
+    .unwrap()
 }
 
 fn authorization() -> ResolutionAuthorizationV1 {
@@ -143,6 +155,151 @@ fn owner_is_part_of_anchor_identity() {
     .unwrap();
 
     assert_ne!(first.anchor_id(), second.anchor_id());
+}
+
+#[test]
+fn v3_targets_exact_occurrences_spans_and_contributions() {
+    let occurrence = SourceOccurrenceId::new("occurrence.fixture").unwrap();
+    let span = EvidenceSpanIdV1::new(format!("sha256:{}", "12".repeat(32))).unwrap();
+    let contribution = RetrieverContributionIdV1::new("contribution.fixture").unwrap();
+
+    for (target, expected_kind) in [
+        (
+            RetrievalAnchorTargetV3::ExactSourceOccurrence(occurrence),
+            "exact_source_occurrence",
+        ),
+        (
+            RetrievalAnchorTargetV3::ExactEvidenceSpan(span),
+            "exact_evidence_span",
+        ),
+        (
+            RetrievalAnchorTargetV3::RetrieverContribution(contribution),
+            "retriever_contribution",
+        ),
+    ] {
+        target.validate().unwrap();
+        let wire = serde_json::to_value(&target).unwrap();
+        assert_eq!(wire["kind"], json!(expected_kind));
+        assert_eq!(
+            serde_json::from_value::<RetrievalAnchorTargetV3>(wire).unwrap(),
+            target
+        );
+    }
+}
+
+#[test]
+fn v3_target_decodes_existing_v2_wire_unchanged() {
+    let v2 = entity_target("document.fixture");
+    let v2_wire = serde_json::to_value(&v2).unwrap();
+    let v3 = serde_json::from_value::<RetrievalAnchorTargetV3>(v2_wire.clone()).unwrap();
+
+    assert_eq!(serde_json::to_value(&v3).unwrap(), v2_wire);
+}
+
+#[test]
+fn v3_exact_evidence_anchor_identity_is_owner_bound() {
+    let occurrence = SourceOccurrenceId::new("occurrence.fixture").unwrap();
+    let first = derive_exact_source_occurrence_anchor_id(
+        &v3_owner("project.one", "privacy.one"),
+        &occurrence,
+    )
+    .unwrap();
+    let replay = derive_exact_source_occurrence_anchor_id(
+        &v3_owner("project.one", "privacy.one"),
+        &occurrence,
+    )
+    .unwrap();
+    let other_owner = derive_exact_source_occurrence_anchor_id(
+        &v3_owner("project.two", "privacy.one"),
+        &occurrence,
+    )
+    .unwrap();
+    let other_privacy = derive_exact_source_occurrence_anchor_id(
+        &v3_owner("project.one", "privacy.two"),
+        &occurrence,
+    )
+    .unwrap();
+
+    assert_eq!(first, replay);
+    assert_ne!(first, other_owner);
+    assert_ne!(first, other_privacy);
+    assert!(first.as_str().starts_with("retrieval.v3."));
+}
+
+#[test]
+fn v3_lineage_preserves_source_order_and_privacy_binding() {
+    let owner = v3_owner("project.fixture", "privacy.fixture");
+    let first = AnchorLineageRefV3::new(
+        0,
+        AnchorProvenanceRelationV2::DerivedFrom,
+        RetrievalAnchorId::new("retrieval.source.first").unwrap(),
+        owner.clone(),
+    )
+    .unwrap();
+    let second = AnchorLineageRefV3::new(
+        1,
+        AnchorProvenanceRelationV2::DerivedFrom,
+        RetrievalAnchorId::new("retrieval.source.second").unwrap(),
+        owner,
+    )
+    .unwrap();
+
+    validate_anchor_lineage_v3(&[first.clone(), second.clone()]).unwrap();
+    assert_eq!(first.source_ordinal(), 0);
+    assert_eq!(second.source_ordinal(), 1);
+    assert_eq!(
+        validate_anchor_lineage_v3(&[second, first]).unwrap_err(),
+        DomainError::NonCanonical {
+            field: "retrieval anchor V3 source lineage order"
+        }
+    );
+}
+
+#[test]
+fn v3_record_binds_exact_target_owner_and_ordered_lineage() {
+    let owner = v3_owner("project.fixture", "privacy.fixture");
+    let source = AnchorLineageRefV3::new(
+        0,
+        AnchorProvenanceRelationV2::DerivedFrom,
+        RetrievalAnchorId::new("retrieval.source.fixture").unwrap(),
+        owner.clone(),
+    )
+    .unwrap();
+    let parts = RetrievalAnchorRecordV3Parts {
+        target: RetrievalAnchorTargetV3::ExactSourceOccurrence(
+            SourceOccurrenceId::new("occurrence.fixture").unwrap(),
+        ),
+        owner: owner.clone(),
+        aliases: vec![],
+        occurred_at: Some(TimeInterval {
+            start: UtcMicros(1),
+            end: UtcMicros(2),
+        }),
+        ingested_at: UtcMicros(3),
+        evidence_class: EvidenceClass::Observed,
+        source_generation: AnchorSourceGenerationV3::Unknown,
+        projection_generation: ProjectionGenerationId::new("projection.fixture").unwrap(),
+        projection_watermark: VectorWatermark::default(),
+        coverage: CoverageReportV1::default(),
+        source_observations: vec![],
+        source_anchors: vec![source],
+        authorization: authorization(),
+        payload_access: PayloadAccessState::Eligible,
+        retention_class: RetentionClass::new("retention.fixture").unwrap(),
+        durability: AnchorDurabilityClass::DurableEvidence,
+    };
+    let record = RetrievalAnchorRecordV3::new(parts).unwrap();
+    let wire = serde_json::to_value(&record).unwrap();
+
+    assert_eq!(record.owner(), &owner);
+    assert!(matches!(
+        record.target(),
+        RetrievalAnchorTargetV3::ExactSourceOccurrence(_)
+    ));
+    assert_eq!(
+        serde_json::from_value::<RetrievalAnchorRecordV3>(wire).unwrap(),
+        record
+    );
 }
 
 #[test]

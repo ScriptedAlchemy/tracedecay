@@ -2,9 +2,12 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::configuration::UserProfileId;
 use crate::observation::{
     CanonicalObservationIdV1, ObservationScopeV1, ObservationSourceGenerationV1,
 };
+use crate::retrieval::SourceOccurrenceId;
+use crate::session_derived::EvidenceSpanIdV1;
 
 use super::canonical::canonical_sha256;
 use super::coverage::{CoverageReportV1, RetentionClass};
@@ -12,8 +15,8 @@ use super::error::DomainError;
 use super::evidence::{EvidenceClass, SanitizationReceiptRefV1};
 use super::git_topology::{GitTopologyAnchorTargetV1, GitTopologyGenerationRefV1};
 use super::id::{
-    BlobId, CommitId, ProjectionGenerationId, RepositoryCaptureId, RepositoryId, RetrievalAnchorId,
-    TreeId,
+    BlobId, CommitId, PrivacyDomainId, ProjectId, ProjectionGenerationId, RepositoryCaptureId,
+    RepositoryId, RetrievalAnchorId, RetrieverContributionIdV1, TreeId,
 };
 use super::resolution::ResolutionAuthorizationV1;
 use super::retrieval::{
@@ -126,9 +129,318 @@ pub enum RetrievalAnchorTargetV2 {
     GitTopology(Box<GitTopologyAnchorTargetV1>),
 }
 
-/// Canonical target type for authoritative retrieval anchors.
-pub type RetrievalAnchorTargetV3 = RetrievalAnchorTargetV2;
+/// Exact profile/project and privacy owner for V3 anchors and lineage.
+///
+/// Ambient paths, labels, store filenames, host profiles, and process state
+/// cannot fill this identity.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AnchorOwnerBindingV1 {
+    Profile {
+        profile_id: UserProfileId,
+        privacy_domain_id: PrivacyDomainId,
+    },
+    Project {
+        profile_id: UserProfileId,
+        project_id: ProjectId,
+        privacy_domain_id: PrivacyDomainId,
+    },
+}
+
+impl AnchorOwnerBindingV1 {
+    pub fn for_profile(
+        profile_id: UserProfileId,
+        privacy_domain_id: PrivacyDomainId,
+    ) -> Result<Self, DomainError> {
+        let owner = Self::Profile {
+            profile_id,
+            privacy_domain_id,
+        };
+        owner.validate()?;
+        Ok(owner)
+    }
+
+    pub fn for_project(
+        profile_id: UserProfileId,
+        project_id: ProjectId,
+        privacy_domain_id: PrivacyDomainId,
+    ) -> Result<Self, DomainError> {
+        let owner = Self::Project {
+            profile_id,
+            project_id,
+            privacy_domain_id,
+        };
+        owner.validate()?;
+        Ok(owner)
+    }
+
+    pub fn profile_id(&self) -> &UserProfileId {
+        match self {
+            Self::Profile { profile_id, .. } | Self::Project { profile_id, .. } => profile_id,
+        }
+    }
+
+    pub fn project_id(&self) -> Option<&ProjectId> {
+        match self {
+            Self::Profile { .. } => None,
+            Self::Project { project_id, .. } => Some(project_id),
+        }
+    }
+
+    pub fn privacy_domain_id(&self) -> &PrivacyDomainId {
+        match self {
+            Self::Profile {
+                privacy_domain_id, ..
+            }
+            | Self::Project {
+                privacy_domain_id, ..
+            } => privacy_domain_id,
+        }
+    }
+
+    fn observation_scope(&self) -> ObservationScopeV1 {
+        match self {
+            Self::Profile { .. } => ObservationScopeV1::Profile,
+            Self::Project { project_id, .. } => ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.profile_id().validate()?;
+        if let Some(project_id) = self.project_id() {
+            project_id.validate()?;
+        }
+        self.privacy_domain_id().validate()
+    }
+}
+
+impl<'de> Deserialize<'de> for AnchorOwnerBindingV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum Wire {
+            Profile {
+                profile_id: UserProfileId,
+                privacy_domain_id: PrivacyDomainId,
+            },
+            Project {
+                profile_id: UserProfileId,
+                project_id: ProjectId,
+                privacy_domain_id: PrivacyDomainId,
+            },
+        }
+
+        let owner = match Wire::deserialize(deserializer)? {
+            Wire::Profile {
+                profile_id,
+                privacy_domain_id,
+            } => Self::Profile {
+                profile_id,
+                privacy_domain_id,
+            },
+            Wire::Project {
+                profile_id,
+                project_id,
+                privacy_domain_id,
+            } => Self::Project {
+                profile_id,
+                project_id,
+                privacy_domain_id,
+            },
+        };
+        owner.validate().map_err(serde::de::Error::custom)?;
+        Ok(owner)
+    }
+}
+
+/// Canonical V3 target type for authoritative retrieval anchors.
+///
+/// Legacy variants intentionally keep their V2 wire representation. The V3
+/// evidence targets add immutable, payload-free references without changing
+/// persisted V2 decoding.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    content = "target",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum RetrievalAnchorTargetV3 {
+    ExactObservation(CanonicalObservationIdV1),
+    Entity(EntityRef),
+    ExactRepositoryCommit {
+        repository_id: RepositoryId,
+        commit_id: CommitId,
+    },
+    ExactRepositoryTree {
+        repository_id: RepositoryId,
+        tree_id: TreeId,
+    },
+    ExactRepositoryBlob {
+        repository_id: RepositoryId,
+        blob_id: BlobId,
+    },
+    RepositoryCapture {
+        repository_id: RepositoryId,
+        capture_id: RepositoryCaptureId,
+        receipt: SanitizationReceiptRefV1,
+    },
+    GitTopology(Box<GitTopologyAnchorTargetV1>),
+    ExactSourceOccurrence(SourceOccurrenceId),
+    ExactEvidenceSpan(EvidenceSpanIdV1),
+    RetrieverContribution(RetrieverContributionIdV1),
+}
+
 pub type RetrievalAnchorTarget = RetrievalAnchorTargetV3;
+
+impl RetrievalAnchorTargetV3 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if let Some(legacy) = self.as_v2() {
+            return legacy.validate();
+        }
+        match self {
+            Self::ExactSourceOccurrence(occurrence_id) => {
+                occurrence_id
+                    .validate()
+                    .map_err(|_| DomainError::NonCanonical {
+                        field: "source occurrence anchor target",
+                    })
+            }
+            Self::ExactEvidenceSpan(_) => Ok(()),
+            Self::RetrieverContribution(contribution_id) => contribution_id.validate(),
+            _ => unreachable!("legacy targets return before V3 evidence validation"),
+        }
+    }
+
+    fn as_v2(&self) -> Option<RetrievalAnchorTargetV2> {
+        Some(match self {
+            Self::ExactObservation(observation_id) => {
+                RetrievalAnchorTargetV2::ExactObservation(observation_id.clone())
+            }
+            Self::Entity(entity) => RetrievalAnchorTargetV2::Entity(entity.clone()),
+            Self::ExactRepositoryCommit {
+                repository_id,
+                commit_id,
+            } => RetrievalAnchorTargetV2::ExactRepositoryCommit {
+                repository_id: repository_id.clone(),
+                commit_id: commit_id.clone(),
+            },
+            Self::ExactRepositoryTree {
+                repository_id,
+                tree_id,
+            } => RetrievalAnchorTargetV2::ExactRepositoryTree {
+                repository_id: repository_id.clone(),
+                tree_id: tree_id.clone(),
+            },
+            Self::ExactRepositoryBlob {
+                repository_id,
+                blob_id,
+            } => RetrievalAnchorTargetV2::ExactRepositoryBlob {
+                repository_id: repository_id.clone(),
+                blob_id: blob_id.clone(),
+            },
+            Self::RepositoryCapture {
+                repository_id,
+                capture_id,
+                receipt,
+            } => RetrievalAnchorTargetV2::RepositoryCapture {
+                repository_id: repository_id.clone(),
+                capture_id: capture_id.clone(),
+                receipt: receipt.clone(),
+            },
+            Self::GitTopology(target) => RetrievalAnchorTargetV2::GitTopology(target.clone()),
+            Self::ExactSourceOccurrence(_)
+            | Self::ExactEvidenceSpan(_)
+            | Self::RetrieverContribution(_) => return None,
+        })
+    }
+}
+
+impl From<RetrievalAnchorTargetV2> for RetrievalAnchorTargetV3 {
+    fn from(target: RetrievalAnchorTargetV2) -> Self {
+        match target {
+            RetrievalAnchorTargetV2::ExactObservation(observation_id) => {
+                Self::ExactObservation(observation_id)
+            }
+            RetrievalAnchorTargetV2::Entity(entity) => Self::Entity(entity),
+            RetrievalAnchorTargetV2::ExactRepositoryCommit {
+                repository_id,
+                commit_id,
+            } => Self::ExactRepositoryCommit {
+                repository_id,
+                commit_id,
+            },
+            RetrievalAnchorTargetV2::ExactRepositoryTree {
+                repository_id,
+                tree_id,
+            } => Self::ExactRepositoryTree {
+                repository_id,
+                tree_id,
+            },
+            RetrievalAnchorTargetV2::ExactRepositoryBlob {
+                repository_id,
+                blob_id,
+            } => Self::ExactRepositoryBlob {
+                repository_id,
+                blob_id,
+            },
+            RetrievalAnchorTargetV2::RepositoryCapture {
+                repository_id,
+                capture_id,
+                receipt,
+            } => Self::RepositoryCapture {
+                repository_id,
+                capture_id,
+                receipt,
+            },
+            RetrievalAnchorTargetV2::GitTopology(target) => Self::GitTopology(target),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RetrievalAnchorTargetV3 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(
+            tag = "kind",
+            content = "target",
+            rename_all = "snake_case",
+            deny_unknown_fields
+        )]
+        enum EvidenceWire {
+            ExactSourceOccurrence(SourceOccurrenceId),
+            ExactEvidenceSpan(EvidenceSpanIdV1),
+            RetrieverContribution(RetrieverContributionIdV1),
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let target = if let Ok(legacy) =
+            serde_json::from_value::<RetrievalAnchorTargetV2>(value.clone())
+        {
+            legacy.into()
+        } else {
+            match serde_json::from_value::<EvidenceWire>(value).map_err(serde::de::Error::custom)? {
+                EvidenceWire::ExactSourceOccurrence(occurrence_id) => {
+                    Self::ExactSourceOccurrence(occurrence_id)
+                }
+                EvidenceWire::ExactEvidenceSpan(span_id) => Self::ExactEvidenceSpan(span_id),
+                EvidenceWire::RetrieverContribution(contribution_id) => {
+                    Self::RetrieverContribution(contribution_id)
+                }
+            }
+        };
+        target.validate().map_err(serde::de::Error::custom)?;
+        Ok(target)
+    }
+}
 
 impl RetrievalAnchorTargetV2 {
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -390,6 +702,111 @@ impl<'de> Deserialize<'de> for AnchorLineageRefV2 {
     }
 }
 
+/// Ordered, owner- and privacy-bound lineage for V3 evidence assemblies.
+///
+/// `source_ordinal` is assembly order, not chronology. Keeping it in the
+/// immutable record prevents sorted V2 lineage from silently replacing
+/// lossless cross-source order.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorLineageRefV3 {
+    source_ordinal: u64,
+    relation: AnchorProvenanceRelationV2,
+    anchor_id: RetrievalAnchorId,
+    owner: AnchorOwnerBindingV1,
+}
+
+impl AnchorLineageRefV3 {
+    pub fn new(
+        source_ordinal: u64,
+        relation: AnchorProvenanceRelationV2,
+        anchor_id: RetrievalAnchorId,
+        owner: AnchorOwnerBindingV1,
+    ) -> Result<Self, DomainError> {
+        let lineage = Self {
+            source_ordinal,
+            relation,
+            anchor_id,
+            owner,
+        };
+        lineage.validate()?;
+        Ok(lineage)
+    }
+
+    pub const fn source_ordinal(&self) -> u64 {
+        self.source_ordinal
+    }
+
+    pub const fn relation(&self) -> AnchorProvenanceRelationV2 {
+        self.relation
+    }
+
+    pub fn anchor_id(&self) -> &RetrievalAnchorId {
+        &self.anchor_id
+    }
+
+    pub fn owner(&self) -> &AnchorOwnerBindingV1 {
+        &self.owner
+    }
+
+    pub fn privacy_domain_id(&self) -> &PrivacyDomainId {
+        self.owner.privacy_domain_id()
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.anchor_id.validate()?;
+        self.owner.validate()
+    }
+}
+
+impl<'de> Deserialize<'de> for AnchorLineageRefV3 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            source_ordinal: u64,
+            relation: AnchorProvenanceRelationV2,
+            anchor_id: RetrievalAnchorId,
+            owner: AnchorOwnerBindingV1,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.source_ordinal,
+            wire.relation,
+            wire.anchor_id,
+            wire.owner,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Validate lossless V3 assembly order without inferring chronology.
+pub fn validate_anchor_lineage_v3(lineage: &[AnchorLineageRefV3]) -> Result<(), DomainError> {
+    let mut seen = BTreeSet::new();
+    for (expected_ordinal, source) in lineage.iter().enumerate() {
+        source.validate()?;
+        if source.source_ordinal
+            != u64::try_from(expected_ordinal).map_err(|_| DomainError::NonCanonical {
+                field: "retrieval anchor V3 source lineage order",
+            })?
+        {
+            return Err(DomainError::NonCanonical {
+                field: "retrieval anchor V3 source lineage order",
+            });
+        }
+        if !seen.insert((source.anchor_id(), source.owner())) {
+            return Err(DomainError::DuplicateId {
+                field: "retrieval anchor V3 source lineage",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Constructor material for a validated V2 record. `anchor_id` is omitted
 /// because it is derived exclusively from the owner and immutable target.
 #[derive(Clone, Debug)]
@@ -411,8 +828,6 @@ pub struct RetrievalAnchorRecordV2Parts {
     pub retention_class: RetentionClass,
     pub durability: AnchorDurabilityClass,
 }
-
-pub type RetrievalAnchorRecordV3Parts = RetrievalAnchorRecordV2Parts;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -436,13 +851,58 @@ pub struct RetrievalAnchorRecordV2 {
     durability: AnchorDurabilityClass,
 }
 
-pub type RetrievalAnchorRecordV3 = RetrievalAnchorRecordV2;
+/// Constructor material for an owner- and privacy-bound V3 anchor record.
+///
+/// Source lineage order is authoritative assembly order and is therefore not
+/// canonicalized by sorting.
+#[derive(Clone, Debug)]
+pub struct RetrievalAnchorRecordV3Parts {
+    pub target: RetrievalAnchorTargetV3,
+    pub owner: AnchorOwnerBindingV1,
+    pub aliases: Vec<NativeAliasV2>,
+    pub occurred_at: Option<TimeInterval>,
+    pub ingested_at: UtcMicros,
+    pub evidence_class: EvidenceClass,
+    pub source_generation: AnchorSourceGenerationV3,
+    pub projection_generation: ProjectionGenerationId,
+    pub projection_watermark: VectorWatermark,
+    pub coverage: CoverageReportV1,
+    pub source_observations: Vec<CanonicalObservationIdV1>,
+    pub source_anchors: Vec<AnchorLineageRefV3>,
+    pub authorization: ResolutionAuthorizationV1,
+    pub payload_access: PayloadAccessState,
+    pub retention_class: RetentionClass,
+    pub durability: AnchorDurabilityClass,
+}
+
+/// Authoritative V3 record for exact evidence and retriever provenance.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetrievalAnchorRecordV3 {
+    anchor_id: RetrievalAnchorId,
+    target: RetrievalAnchorTargetV3,
+    owner: AnchorOwnerBindingV1,
+    aliases: Vec<NativeAliasV2>,
+    occurred_at: Option<TimeInterval>,
+    ingested_at: UtcMicros,
+    evidence_class: EvidenceClass,
+    source_generation: AnchorSourceGenerationV3,
+    projection_generation: ProjectionGenerationId,
+    projection_watermark: VectorWatermark,
+    coverage: CoverageReportV1,
+    source_observations: Vec<CanonicalObservationIdV1>,
+    source_anchors: Vec<AnchorLineageRefV3>,
+    authorization: ResolutionAuthorizationV1,
+    payload_access: PayloadAccessState,
+    retention_class: RetentionClass,
+    durability: AnchorDurabilityClass,
+}
 
 /// Canonical authoritative retrieval-anchor record.
 ///
-/// `RetrievalAnchorRecordV1` remains only as the compatibility representation
-/// for existing research-manifest callers.
-pub type RetrievalAnchorRecord = RetrievalAnchorRecordV3;
+/// Existing product paths remain on the byte-compatible V2 record while V3
+/// evidence assemblies migrate through [`RetrievalAnchorRecordV3`].
+pub type RetrievalAnchorRecord = RetrievalAnchorRecordV2;
 
 impl RetrievalAnchorRecordV2 {
     pub fn new(mut parts: RetrievalAnchorRecordV2Parts) -> Result<Self, DomainError> {
@@ -620,6 +1080,192 @@ impl RetrievalAnchorRecordV2 {
     }
 }
 
+impl RetrievalAnchorRecordV3 {
+    pub fn new(mut parts: RetrievalAnchorRecordV3Parts) -> Result<Self, DomainError> {
+        validate_collection_bounds_v3(&parts)?;
+        parts.aliases.sort_unstable_by(|left, right| {
+            (left.locator_digest(), left.kind()).cmp(&(right.locator_digest(), right.kind()))
+        });
+        parts.source_observations.sort_unstable();
+        let anchor_id = derive_v3_anchor_id(&parts.owner, &parts.target)?;
+        let record = Self {
+            anchor_id,
+            target: parts.target,
+            owner: parts.owner,
+            aliases: parts.aliases,
+            occurred_at: parts.occurred_at,
+            ingested_at: parts.ingested_at,
+            evidence_class: parts.evidence_class,
+            source_generation: parts.source_generation,
+            projection_generation: parts.projection_generation,
+            projection_watermark: parts.projection_watermark,
+            coverage: parts.coverage,
+            source_observations: parts.source_observations,
+            source_anchors: parts.source_anchors,
+            authorization: parts.authorization,
+            payload_access: parts.payload_access,
+            retention_class: parts.retention_class,
+            durability: parts.durability,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn anchor_id(&self) -> &RetrievalAnchorId {
+        &self.anchor_id
+    }
+
+    pub fn target(&self) -> &RetrievalAnchorTargetV3 {
+        &self.target
+    }
+
+    pub fn owner(&self) -> &AnchorOwnerBindingV1 {
+        &self.owner
+    }
+
+    pub fn aliases(&self) -> &[NativeAliasV2] {
+        &self.aliases
+    }
+
+    pub fn occurred_at(&self) -> Option<TimeInterval> {
+        self.occurred_at
+    }
+
+    pub fn ingested_at(&self) -> UtcMicros {
+        self.ingested_at
+    }
+
+    pub fn evidence_class(&self) -> EvidenceClass {
+        self.evidence_class
+    }
+
+    pub fn source_generation(&self) -> &AnchorSourceGenerationV3 {
+        &self.source_generation
+    }
+
+    pub fn projection_generation(&self) -> &ProjectionGenerationId {
+        &self.projection_generation
+    }
+
+    pub fn projection_watermark(&self) -> &VectorWatermark {
+        &self.projection_watermark
+    }
+
+    pub fn coverage(&self) -> &CoverageReportV1 {
+        &self.coverage
+    }
+
+    pub fn source_observations(&self) -> &[CanonicalObservationIdV1] {
+        &self.source_observations
+    }
+
+    pub fn source_anchors(&self) -> &[AnchorLineageRefV3] {
+        &self.source_anchors
+    }
+
+    pub fn authorization(&self) -> &ResolutionAuthorizationV1 {
+        &self.authorization
+    }
+
+    pub fn payload_access(&self) -> PayloadAccessState {
+        self.payload_access
+    }
+
+    pub fn retention_class(&self) -> &RetentionClass {
+        &self.retention_class
+    }
+
+    pub fn durability(&self) -> &AnchorDurabilityClass {
+        &self.durability
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.anchor_id.validate()?;
+        self.target.validate()?;
+        self.owner.validate()?;
+        validate_source_generation_v3(&self.source_generation, &self.target)?;
+        if let Some(legacy) = self.target.as_v2() {
+            if legacy.requires_project_owner() && self.owner.project_id().is_none() {
+                return Err(DomainError::UnknownReference {
+                    field: "repository anchor V3 owner",
+                });
+            }
+            if let RetrievalAnchorTargetV2::GitTopology(target) = legacy
+                && self.owner.project_id() != Some(target.project_id())
+            {
+                return Err(DomainError::UnknownReference {
+                    field: "git topology anchor V3 project owner",
+                });
+            }
+        }
+        if let Some(occurred_at) = &self.occurred_at {
+            occurred_at.validate()?;
+        }
+        self.projection_generation.validate()?;
+        for shard in self.projection_watermark.components.keys() {
+            shard.validate()?;
+        }
+        self.coverage.validate()?;
+        self.authorization.validate()?;
+        if &self.authorization.privacy_domain_id != self.owner.privacy_domain_id() {
+            return Err(DomainError::UnknownReference {
+                field: "retrieval anchor V3 authorization owner",
+            });
+        }
+        for alias in &self.aliases {
+            alias.validate()?;
+        }
+        ensure_unique_aliases(&self.aliases)?;
+        ensure_unique_observations(&self.source_observations)?;
+        if let RetrievalAnchorTargetV3::ExactObservation(target) = &self.target
+            && !self.source_observations.contains(target)
+        {
+            return Err(DomainError::UnknownReference {
+                field: "exact observation source lineage",
+            });
+        }
+        validate_anchor_lineage_v3(&self.source_anchors)?;
+        if matches!(
+            self.target,
+            RetrievalAnchorTargetV3::ExactSourceOccurrence(_)
+                | RetrievalAnchorTargetV3::ExactEvidenceSpan(_)
+                | RetrievalAnchorTargetV3::RetrieverContribution(_)
+        ) && self.source_anchors.is_empty()
+        {
+            return Err(DomainError::UnknownReference {
+                field: "exact evidence source lineage",
+            });
+        }
+        if let RetrievalAnchorTargetV3::GitTopology(target) = &self.target {
+            for expected in target.ordered_sources() {
+                if !self
+                    .source_anchors
+                    .iter()
+                    .any(|source| source.anchor_id() == &expected.anchor_id)
+                {
+                    return Err(DomainError::UnknownReference {
+                        field: "git topology ordered source lineage",
+                    });
+                }
+            }
+        }
+        for source in &self.source_anchors {
+            if source.owner() != &self.owner {
+                return Err(DomainError::UnknownReference {
+                    field: "retrieval anchor V3 lineage owner",
+                });
+            }
+            if source.anchor_id() == &self.anchor_id {
+                return Err(DomainError::SelfSupersession);
+            }
+        }
+        if self.anchor_id != derive_v3_anchor_id(&self.owner, &self.target)? {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
 /// Derive the canonical retrieval anchor for one durable observation.
 ///
 /// Projection generations and rebuild watermarks are deliberately excluded:
@@ -642,6 +1288,39 @@ pub fn derive_git_topology_anchor_id(
     derive_anchor_id(
         owner,
         &RetrievalAnchorTargetV2::GitTopology(Box::new(target.clone())),
+    )
+}
+
+/// Derive the canonical public anchor for one exact source occurrence.
+pub fn derive_exact_source_occurrence_anchor_id(
+    owner: &AnchorOwnerBindingV1,
+    occurrence_id: &SourceOccurrenceId,
+) -> Result<RetrievalAnchorId, DomainError> {
+    derive_v3_anchor_id(
+        owner,
+        &RetrievalAnchorTargetV3::ExactSourceOccurrence(occurrence_id.clone()),
+    )
+}
+
+/// Derive the canonical public anchor for one immutable evidence span.
+pub fn derive_exact_evidence_span_anchor_id(
+    owner: &AnchorOwnerBindingV1,
+    span_id: &EvidenceSpanIdV1,
+) -> Result<RetrievalAnchorId, DomainError> {
+    derive_v3_anchor_id(
+        owner,
+        &RetrievalAnchorTargetV3::ExactEvidenceSpan(span_id.clone()),
+    )
+}
+
+/// Derive the canonical public anchor for one retriever contribution.
+pub fn derive_retriever_contribution_anchor_id(
+    owner: &AnchorOwnerBindingV1,
+    contribution_id: &RetrieverContributionIdV1,
+) -> Result<RetrievalAnchorId, DomainError> {
+    derive_v3_anchor_id(
+        owner,
+        &RetrievalAnchorTargetV3::RetrieverContribution(contribution_id.clone()),
     )
 }
 
@@ -700,6 +1379,61 @@ impl<'de> Deserialize<'de> for RetrievalAnchorRecordV2 {
     }
 }
 
+impl<'de> Deserialize<'de> for RetrievalAnchorRecordV3 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            anchor_id: RetrievalAnchorId,
+            target: RetrievalAnchorTargetV3,
+            owner: AnchorOwnerBindingV1,
+            aliases: Vec<NativeAliasV2>,
+            occurred_at: Option<TimeInterval>,
+            ingested_at: UtcMicros,
+            evidence_class: EvidenceClass,
+            source_generation: AnchorSourceGenerationV3,
+            projection_generation: ProjectionGenerationId,
+            projection_watermark: VectorWatermark,
+            coverage: CoverageReportV1,
+            source_observations: Vec<CanonicalObservationIdV1>,
+            source_anchors: Vec<AnchorLineageRefV3>,
+            authorization: ResolutionAuthorizationV1,
+            payload_access: PayloadAccessState,
+            retention_class: RetentionClass,
+            durability: AnchorDurabilityClass,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let claimed_id = wire.anchor_id;
+        let record = Self::new(RetrievalAnchorRecordV3Parts {
+            target: wire.target,
+            owner: wire.owner,
+            aliases: wire.aliases,
+            occurred_at: wire.occurred_at,
+            ingested_at: wire.ingested_at,
+            evidence_class: wire.evidence_class,
+            source_generation: wire.source_generation,
+            projection_generation: wire.projection_generation,
+            projection_watermark: wire.projection_watermark,
+            coverage: wire.coverage,
+            source_observations: wire.source_observations,
+            source_anchors: wire.source_anchors,
+            authorization: wire.authorization,
+            payload_access: wire.payload_access,
+            retention_class: wire.retention_class,
+            durability: wire.durability,
+        })
+        .map_err(serde::de::Error::custom)?;
+        if claimed_id != record.anchor_id {
+            return Err(serde::de::Error::custom(DomainError::DigestMismatch));
+        }
+        Ok(record)
+    }
+}
+
 fn derive_anchor_id(
     owner: &ObservationScopeV1,
     target: &RetrievalAnchorTargetV2,
@@ -729,6 +1463,30 @@ fn derive_anchor_id(
         "v2"
     };
     RetrievalAnchorId::new(format!("retrieval.{version}.{}", digest.as_str()))
+}
+
+fn derive_v3_anchor_id(
+    owner: &AnchorOwnerBindingV1,
+    target: &RetrievalAnchorTargetV3,
+) -> Result<RetrievalAnchorId, DomainError> {
+    #[derive(Serialize)]
+    struct Identity<'a> {
+        domain: &'static str,
+        owner: &'a AnchorOwnerBindingV1,
+        target: &'a RetrievalAnchorTargetV3,
+    }
+
+    owner.validate()?;
+    target.validate()?;
+    if let Some(legacy) = target.as_v2() {
+        return derive_anchor_id(&owner.observation_scope(), &legacy);
+    }
+    let digest = canonical_sha256(&Identity {
+        domain: RETRIEVAL_ANCHOR_V3_ID_DOMAIN,
+        owner,
+        target,
+    })?;
+    RetrievalAnchorId::new(format!("retrieval.v3.{}", digest.as_str()))
 }
 
 fn validate_owner(owner: &ObservationScopeV1) -> Result<(), DomainError> {
@@ -777,6 +1535,41 @@ fn validate_collection_bounds(parts: &RetrievalAnchorRecordV2Parts) -> Result<()
         });
     }
     Ok(())
+}
+
+fn validate_collection_bounds_v3(parts: &RetrievalAnchorRecordV3Parts) -> Result<(), DomainError> {
+    if parts.aliases.len() > MAX_ANCHOR_ALIASES {
+        return Err(DomainError::NonCanonical {
+            field: "retrieval anchor aliases",
+        });
+    }
+    if parts.source_observations.len() > MAX_ANCHOR_SOURCE_OBSERVATIONS {
+        return Err(DomainError::NonCanonical {
+            field: "retrieval anchor source observations",
+        });
+    }
+    if parts.source_anchors.len() > MAX_ANCHOR_SOURCE_ANCHORS {
+        return Err(DomainError::NonCanonical {
+            field: "retrieval anchor V3 source lineage",
+        });
+    }
+    Ok(())
+}
+
+fn validate_source_generation_v3(
+    source: &AnchorSourceGenerationV3,
+    target: &RetrievalAnchorTargetV3,
+) -> Result<(), DomainError> {
+    if let Some(legacy) = target.as_v2() {
+        return source.validate_for_target(&legacy);
+    }
+    match source {
+        AnchorSourceGenerationV3::RepositoryCapture(capture_id) => capture_id.validate(),
+        AnchorSourceGenerationV3::GitTopology(generation) => generation.validate(),
+        AnchorSourceGenerationV3::Observation(_)
+        | AnchorSourceGenerationV3::Unavailable
+        | AnchorSourceGenerationV3::Unknown => Ok(()),
+    }
 }
 
 fn ensure_unique_observations(
