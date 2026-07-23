@@ -1369,6 +1369,7 @@ impl GlobalDb {
     /// path. It is inert by default (`LcmRetentionConfig::default()` has every
     /// window `None`). External-payload offloads are written under this store's
     /// own `storage_root`, so the caller never needs to resolve it.
+    #[cfg_attr(not(unix), allow(dead_code))] // driven by the unix-only git-watch scheduler
     pub(crate) async fn run_session_lcm_retention(
         &self,
         provider: &str,
