@@ -1194,6 +1194,15 @@ fn session_store_row_matches(table: SessionStoreTableV1, row: &SessionStoreRowV1
         ) | (
             SessionStoreTableV1::SessionTemporalObservationEffects,
             SessionStoreRowV1::SessionTemporalObservationEffects { .. }
+        ) | (
+            SessionStoreTableV1::SessionTemporalProjectionReceipts,
+            SessionStoreRowV1::SessionTemporalProjectionReceipts { .. }
+        ) | (
+            SessionStoreTableV1::SessionOccurrences,
+            SessionStoreRowV1::SessionOccurrences { .. }
+        ) | (
+            SessionStoreTableV1::SessionSummaryNodes,
+            SessionStoreRowV1::SessionSummaryNodes { .. }
         )
     );
     shape_matches && is_canonical_sha256_digest(session_store_row_digest(row))
@@ -1208,7 +1217,10 @@ fn session_store_row_digest(row: &SessionStoreRowV1) -> &str {
         | SessionStoreRowV1::LcmRawMessages { row_digest, .. }
         | SessionStoreRowV1::SessionTemporalSchemaMigrations { row_digest, .. }
         | SessionStoreRowV1::SessionTemporalGenerations { row_digest, .. }
-        | SessionStoreRowV1::SessionTemporalObservationEffects { row_digest, .. } => row_digest,
+        | SessionStoreRowV1::SessionTemporalObservationEffects { row_digest, .. }
+        | SessionStoreRowV1::SessionTemporalProjectionReceipts { row_digest, .. }
+        | SessionStoreRowV1::SessionOccurrences { row_digest, .. }
+        | SessionStoreRowV1::SessionSummaryNodes { row_digest, .. } => row_digest,
     }
 }
 
@@ -1239,6 +1251,15 @@ fn session_store_cursor_matches(table: SessionStoreTableV1, cursor: &SessionStor
         ) | (
             SessionStoreTableV1::SessionTemporalObservationEffects,
             SessionStoreCursorV1::SessionTemporalObservationEffects { .. }
+        ) | (
+            SessionStoreTableV1::SessionTemporalProjectionReceipts,
+            SessionStoreCursorV1::SessionTemporalProjectionReceipts { .. }
+        ) | (
+            SessionStoreTableV1::SessionOccurrences,
+            SessionStoreCursorV1::SessionOccurrences { .. }
+        ) | (
+            SessionStoreTableV1::SessionSummaryNodes,
+            SessionStoreCursorV1::SessionSummaryNodes { .. }
         )
     )
 }
@@ -1445,6 +1466,65 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
             }],
             next_cursor: Some(SessionStoreCursorV1::Observations { sequence: 1 }),
         })
+    }
+
+    #[test]
+    fn session_store_shape_helpers_accept_new_temporal_and_summary_families() {
+        let digest = format!("sha256:{}", "1".repeat(64));
+        let cases: [(SessionStoreTableV1, SessionStoreRowV1, SessionStoreCursorV1); 3] = [
+            (
+                SessionStoreTableV1::SessionTemporalProjectionReceipts,
+                SessionStoreRowV1::SessionTemporalProjectionReceipts {
+                    session_id: "session-1".to_owned(),
+                    generation: 1,
+                    batch_ordinal: 0,
+                    batch_digest: "batch-1".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::SessionTemporalProjectionReceipts {
+                    session_id: "session-1".to_owned(),
+                    generation: 1,
+                    batch_ordinal: 0,
+                },
+            ),
+            (
+                SessionStoreTableV1::SessionOccurrences,
+                SessionStoreRowV1::SessionOccurrences {
+                    session_id: "session-1".to_owned(),
+                    generation: 1,
+                    occurrence_id: "occurrence-1".to_owned(),
+                    role: "user".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::SessionOccurrences {
+                    session_id: "session-1".to_owned(),
+                    generation: 1,
+                    occurrence_id: "occurrence-1".to_owned(),
+                },
+            ),
+            (
+                SessionStoreTableV1::SessionSummaryNodes,
+                SessionStoreRowV1::SessionSummaryNodes {
+                    summary_id: "summary-1".to_owned(),
+                    session_id: "session-1".to_owned(),
+                    summary_anchor_id: "anchor-1".to_owned(),
+                    row_digest: digest.clone(),
+                },
+                SessionStoreCursorV1::SessionSummaryNodes {
+                    summary_id: "summary-1".to_owned(),
+                },
+            ),
+        ];
+        for (table, row, cursor) in &cases {
+            assert!(
+                session_store_row_matches(*table, row),
+                "row shape must match for {table:?}"
+            );
+            assert!(
+                session_store_cursor_matches(*table, cursor),
+                "cursor shape must match for {table:?}"
+            );
+        }
     }
 
     #[tokio::test]
