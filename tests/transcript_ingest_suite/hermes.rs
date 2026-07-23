@@ -29,6 +29,8 @@ use crate::support::{
 };
 
 const SESSION_ID: &str = "20260101_000000_abc123";
+static HERMES_FIXTURE_OWNED_STORE_READY: tokio::sync::OnceCell<()> =
+    tokio::sync::OnceCell::const_new();
 
 async fn ingest_for_project(db: &GlobalDb, project_root: &Path) -> TranscriptIngestStats {
     ingest_for_project_with_id(db, project_root, fixture_project_id()).await
@@ -120,6 +122,19 @@ async fn write_hermes_profile(
 ) -> PathBuf {
     let profile_dir = hermes_home.join("profiles").join(profile);
     std::fs::create_dir_all(&profile_dir).unwrap();
+    HERMES_FIXTURE_OWNED_STORE_READY
+        .get_or_init(|| async {
+            // This mixed-engine test binary still contains the owned-store
+            // libsql compatibility layer. Match production startup order so
+            // it configures serialized SQLite before any foreign rusqlite
+            // fixture is opened; all `state.db` writes below remain rusqlite.
+            let initialization_path = profile_dir.join(".owned-store-initialization.db");
+            let db = GlobalDb::open_at_without_structured_backfill(&initialization_path)
+                .await
+                .expect("initialize owned storage before foreign SQLite fixtures");
+            drop(db);
+        })
+        .await;
     let config = match pinned_project {
         Some(pinned_project) => {
             // The pin is JSON-encoded exactly as `tracedecay install --agent
@@ -137,7 +152,7 @@ async fn write_hermes_profile(
     std::fs::write(profile_dir.join("config.yaml"), config).unwrap();
 
     let state_db = profile_dir.join("state.db");
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     conn.execute(
         "CREATE TABLE sessions (
             id TEXT PRIMARY KEY,
@@ -163,7 +178,6 @@ async fn write_hermes_profile(
         )",
         (),
     )
-    .await
     .unwrap();
     conn.execute(
         "CREATE TABLE messages (
@@ -183,7 +197,6 @@ async fn write_hermes_profile(
         )",
         (),
     )
-    .await
     .unwrap();
 
     conn.execute(
@@ -192,9 +205,8 @@ async fn write_hermes_profile(
                                cache_write_tokens, reasoning_tokens)
          VALUES (?1, 'tui', 'gpt-5.5', 1780629300.0, 1780629340.0,
                  'Billing pipeline fix', 96443, 3804, 1064960, 0, 2061)",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
 
     // Real Hermes row shapes: a session_meta bootstrap row (must be skipped),
@@ -251,21 +263,17 @@ async fn write_hermes_profile(
             "INSERT INTO messages (session_id, role, content, tool_calls, tool_name,
                                    timestamp, finish_reason)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            libsql::params![SESSION_ID, role, content, tool_calls, tool_name, ts, finish],
+            rusqlite::params![SESSION_ID, role, content, tool_calls, tool_name, ts, finish],
         )
-        .await
         .unwrap();
     }
     state_db
 }
 
-async fn open_state_db(path: &Path) -> libsql::Connection {
-    libsql::Builder::new_local(path)
-        .build()
-        .await
-        .unwrap()
-        .connect()
-        .unwrap()
+fn open_state_db(path: &Path) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    conn
 }
 
 #[tokio::test]
@@ -381,12 +389,10 @@ async fn hermes_secret_is_sanitized_before_observation_and_projection() {
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
     let secret = "sk-proj-hermes-canary-1234567890";
     open_state_db(&state_db)
-        .await
         .execute(
             "UPDATE messages SET content = ?1 WHERE role = 'user'",
-            libsql::params![format!("Hermes sanitizer safe text: {secret}")],
+            rusqlite::params![format!("Hermes sanitizer safe text: {secret}")],
         )
-        .await
         .unwrap();
     let db = open_project_session_db(&project).await.unwrap();
 
@@ -410,13 +416,13 @@ async fn hermes_parent_session_id_marks_subagent_session() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     conn.execute(
         "UPDATE sessions SET parent_session_id = 'parent-hermes-session' WHERE id = ?1",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
+    drop(conn);
 
     let db = open_project_session_db(&project).await.unwrap();
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
@@ -540,14 +546,14 @@ async fn hermes_ingest_is_incremental_and_idempotent() {
         0
     );
 
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp)
          VALUES (?1, 'user', 'Also add a regression test', 1780629400.4)",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
+    drop(conn);
 
     let stats = ingest_homes(&db, &homes, &project).await;
     assert_eq!(stats.messages_upserted, 1);
@@ -610,13 +616,12 @@ async fn hermes_incremental_ingest_converges_with_full_rebuild() {
         4
     );
 
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp)
          VALUES (?1, 'user', 'Also add a regression test', 1780629400.4)",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
     drop(conn);
     assert_eq!(
@@ -659,14 +664,13 @@ async fn hermes_replacement_replay_preserves_message_identity() {
 
     let replacement_root = tmp.path().join("replacement");
     let replacement = write_hermes_profile(&replacement_root, "test", Some(&project)).await;
-    let conn = open_state_db(&replacement).await;
+    let conn = open_state_db(&replacement);
     conn.execute(
         "UPDATE sessions
          SET model = 'gpt-5.6', input_tokens = 100000, output_tokens = 4000
          WHERE id = ?1",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
     drop(conn);
     let original_profile = state_db.parent().unwrap();
@@ -691,28 +695,26 @@ async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
     let second_project = tmp.path().join("second-project");
     crate::support::init_project_at(&second_project);
     let state_db = write_hermes_profile(&hermes_home, "test", None).await;
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     conn.execute(
         "UPDATE sessions SET cwd = ?1 WHERE id = ?2",
-        libsql::params![first_project.to_string_lossy().as_ref(), SESSION_ID],
+        rusqlite::params![first_project.to_string_lossy().as_ref(), SESSION_ID],
     )
-    .await
     .unwrap();
     let second_session = "20260101_000100_def456";
     conn.execute(
         "INSERT INTO sessions (id, source, model, started_at, cwd, title)
          VALUES (?1, 'telegram', 'gpt-5.5', 1780629500.0, ?2, 'Second project')",
-        libsql::params![second_session, second_project.to_string_lossy().as_ref()],
+        rusqlite::params![second_session, second_project.to_string_lossy().as_ref()],
     )
-    .await
     .unwrap();
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp)
          VALUES (?1, 'user', 'Route this message to the second project', 1780629501.0)",
-        libsql::params![second_session],
+        rusqlite::params![second_session],
     )
-    .await
     .unwrap();
+    drop(conn);
 
     let first_db = open_project_session_db(&first_project).await.unwrap();
     let second_db = open_project_session_db(&second_project).await.unwrap();
@@ -832,7 +834,7 @@ async fn sweep_skips_rewound_rows_and_surfaces_reasoning_only_turns() {
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
 
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     let reasoning_fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../fixtures/provider_normalization/hermes/assistant_reasoning.input.json"
     ))
@@ -841,14 +843,13 @@ async fn sweep_skips_rewound_rows_and_surfaces_reasoning_only_turns() {
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp, active)
          VALUES (?1, 'user', 'rewound secret prompt', 1780629400.0, 0)",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
     conn.execute(
         "INSERT INTO messages (session_id, role, content, reasoning, timestamp)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        libsql::params![
+        rusqlite::params![
             SESSION_ID,
             reasoning_fixture["role"].as_str().unwrap(),
             reasoning_fixture["content"].as_str().unwrap(),
@@ -856,8 +857,8 @@ async fn sweep_skips_rewound_rows_and_surfaces_reasoning_only_turns() {
             reasoning_fixture["timestamp"].as_f64().unwrap(),
         ],
     )
-    .await
     .unwrap();
+    drop(conn);
 
     let db = open_project_session_db(&project).await.unwrap();
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
@@ -901,8 +902,8 @@ async fn sweep_reads_legacy_stores_without_active_or_reasoning_columns() {
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
 
     // Rebuild `messages` with the pre-v12 shape (no active, no reasoning).
-    let conn = open_state_db(&state_db).await;
-    conn.execute("DROP TABLE messages", ()).await.unwrap();
+    let conn = open_state_db(&state_db);
+    conn.execute("DROP TABLE messages", ()).unwrap();
     conn.execute(
         "CREATE TABLE messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -915,15 +916,14 @@ async fn sweep_reads_legacy_stores_without_active_or_reasoning_columns() {
         )",
         (),
     )
-    .await
     .unwrap();
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp)
          VALUES (?1, 'user', 'legacy schema prompt', 1780629300.0)",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
+    drop(conn);
 
     let db = open_project_session_db(&project).await.unwrap();
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
@@ -965,13 +965,13 @@ async fn unpinned_profile_uses_session_cwd_as_project_provenance() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", None).await;
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     conn.execute(
         "UPDATE sessions SET cwd = ?1 WHERE id = ?2",
-        libsql::params![project.to_string_lossy().as_ref(), SESSION_ID],
+        rusqlite::params![project.to_string_lossy().as_ref(), SESSION_ID],
     )
-    .await
     .unwrap();
+    drop(conn);
 
     let db = open_project_session_db(&project).await.unwrap();
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
@@ -994,7 +994,7 @@ async fn unpinned_projectless_session_routes_only_a_tool_proven_turn() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", None).await;
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     let tool_calls = json!([{
         "id": "call_project_context",
         "type": "function",
@@ -1010,10 +1010,10 @@ async fn unpinned_projectless_session_routes_only_a_tool_proven_turn() {
     conn.execute(
         "UPDATE messages SET tool_calls = ?1
          WHERE session_id = ?2 AND tool_calls IS NOT NULL",
-        libsql::params![tool_calls, SESSION_ID],
+        rusqlite::params![tool_calls, SESSION_ID],
     )
-    .await
     .unwrap();
+    drop(conn);
 
     let db = open_project_session_db(&project).await.unwrap();
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
@@ -1038,12 +1038,11 @@ async fn explicit_tool_route_overrides_session_cwd_without_cross_project_duplica
     let tool_project = tmp.path().join("tool-project");
     crate::support::init_project_at(&tool_project);
     let state_db = write_hermes_profile(&hermes_home, "test", None).await;
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     conn.execute(
         "UPDATE sessions SET cwd = ?1 WHERE id = ?2",
-        libsql::params![session_project.to_string_lossy().as_ref(), SESSION_ID],
+        rusqlite::params![session_project.to_string_lossy().as_ref(), SESSION_ID],
     )
-    .await
     .unwrap();
     let tool_calls = json!([{
         "id": "call_other_project",
@@ -1060,10 +1059,10 @@ async fn explicit_tool_route_overrides_session_cwd_without_cross_project_duplica
     conn.execute(
         "UPDATE messages SET tool_calls = ?1
          WHERE session_id = ?2 AND tool_calls IS NOT NULL",
-        libsql::params![tool_calls, SESSION_ID],
+        rusqlite::params![tool_calls, SESSION_ID],
     )
-    .await
     .unwrap();
+    drop(conn);
 
     let session_db = open_project_session_db(&session_project).await.unwrap();
     let session_stats = ingest_homes(
@@ -1097,7 +1096,7 @@ async fn user_sweep_keeps_canonical_turns_routed_to_registered_projects() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, registered) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", None).await;
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     let tool_calls = json!([{
         "function": {
             "name": "tracedecay_context",
@@ -1107,10 +1106,10 @@ async fn user_sweep_keeps_canonical_turns_routed_to_registered_projects() {
     .to_string();
     conn.execute(
         "UPDATE messages SET tool_calls = ?1 WHERE session_id = ?2 AND tool_calls IS NOT NULL",
-        libsql::params![tool_calls, SESSION_ID],
+        rusqlite::params![tool_calls, SESSION_ID],
     )
-    .await
     .unwrap();
+    drop(conn);
     let user_db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
         .await
         .unwrap();
@@ -1131,19 +1130,18 @@ async fn user_sweep_keeps_registered_session_cwd_as_canonical_history() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, registered) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", None).await;
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     conn.execute(
         "UPDATE sessions SET cwd = ?1 WHERE id = ?2",
-        libsql::params![registered.to_string_lossy().as_ref(), SESSION_ID],
+        rusqlite::params![registered.to_string_lossy().as_ref(), SESSION_ID],
     )
-    .await
     .unwrap();
     conn.execute(
         "UPDATE messages SET tool_calls = NULL WHERE session_id = ?1",
         [SESSION_ID],
     )
-    .await
     .unwrap();
+    drop(conn);
     let user_db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
         .await
         .unwrap();
@@ -1183,13 +1181,12 @@ async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
     assert!(prefix_cursor.position() >= u64::try_from(before).unwrap());
     drop(db);
 
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp)
          VALUES (?1, 'user', 'Hermes projection retry suffix', 1780629410.1)",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
     drop(conn);
 
@@ -1258,14 +1255,13 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
         .expect("committed Hermes observation cursor");
     assert!(prefix_cursor.position() >= u64::try_from(before).unwrap());
 
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     // Incomplete/malformed tool_calls JSON on an otherwise complete row.
     conn.execute(
         "INSERT INTO messages (session_id, role, content, tool_calls, timestamp, finish_reason)
          VALUES (?1, 'assistant', '', '{not-json', 1780629420.2, 'tool_calls')",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
     drop(conn);
 
@@ -1278,7 +1274,7 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
         .expect("committed Hermes observation cursor");
     assert_eq!(malformed_cursor.position(), prefix_cursor.position() + 1);
 
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     conn.execute(
         "UPDATE messages
          SET content = 'Repaired Hermes row at covered identity',
@@ -1286,14 +1282,12 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
          WHERE id = 5",
         (),
     )
-        .await
-        .unwrap();
+    .unwrap();
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp)
          VALUES (?1, 'user', 'Valid Hermes row after malformed tool_calls', 1780629430.3)",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
     drop(conn);
 
@@ -1370,14 +1364,13 @@ async fn hermes_conflicting_identity_does_not_overwrite_committed_observation() 
         .await
         .expect("committed Hermes observation cursor");
 
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     // Same immutable message evidence as the final assistant row in write_hermes_profile.
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp, finish_reason)
          VALUES (?1, 'assistant', 'The billing pipeline test is fixed.', 1780629330.9, 'stop')",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
     drop(conn);
 
@@ -1506,7 +1499,7 @@ async fn hermes_zeroblob_content_is_covered_without_payload_leak() {
         .await
         .expect("committed Hermes observation cursor");
 
-    let conn = open_state_db(&state_db).await;
+    let conn = open_state_db(&state_db);
     // Hostile payload exists only inside SQLite (zeroblob); Rust never builds it.
     let hostile_bytes = MAX_OBSERVATION_RECORD_BYTES.saturating_add(1);
     conn.execute(
@@ -1516,14 +1509,12 @@ async fn hermes_zeroblob_content_is_covered_without_payload_leak() {
         ),
         (),
     )
-    .await
     .unwrap();
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp)
          VALUES (?1, 'assistant', 'Hermes row after zeroblob cover', 1780629450.0)",
-        libsql::params![SESSION_ID],
+        rusqlite::params![SESSION_ID],
     )
-    .await
     .unwrap();
     drop(conn);
 

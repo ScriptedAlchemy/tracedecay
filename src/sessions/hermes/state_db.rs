@@ -133,6 +133,26 @@ pub(crate) fn select_new_messages_sql(
     } else {
         "1"
     };
+    let tool_name_raw = if message_columns.contains("tool_name") {
+        "m.tool_name"
+    } else {
+        "NULL"
+    };
+    let tool_calls_raw = if message_columns.contains("tool_calls") {
+        "m.tool_calls"
+    } else {
+        "NULL"
+    };
+    let session_model_raw = if session_columns.contains("model") {
+        "s.model"
+    } else {
+        "NULL"
+    };
+    let parent_session_id_raw = if session_columns.contains("parent_session_id") {
+        "s.parent_session_id"
+    } else {
+        "NULL"
+    };
     let session_cwd_raw = if session_columns.contains("cwd") {
         "s.cwd"
     } else {
@@ -158,6 +178,31 @@ pub(crate) fn select_new_messages_sql(
     } else {
         "NULL"
     };
+    let input_tokens_raw = if session_columns.contains("input_tokens") {
+        "s.input_tokens"
+    } else {
+        "NULL"
+    };
+    let output_tokens_raw = if session_columns.contains("output_tokens") {
+        "s.output_tokens"
+    } else {
+        "NULL"
+    };
+    let cache_read_tokens_raw = if session_columns.contains("cache_read_tokens") {
+        "s.cache_read_tokens"
+    } else {
+        "NULL"
+    };
+    let cache_write_tokens_raw = if session_columns.contains("cache_write_tokens") {
+        "s.cache_write_tokens"
+    } else {
+        "NULL"
+    };
+    let reasoning_tokens_raw = if session_columns.contains("reasoning_tokens") {
+        "s.reasoning_tokens"
+    } else {
+        "NULL"
+    };
     let id_max = MAX_HERMES_IDENTITY_BYTES;
     let value_max = MAX_HERMES_VALUE_BYTES;
     let measured = format!(
@@ -166,10 +211,10 @@ pub(crate) fn select_new_messages_sql(
         role_len = sql_capped_len("m.role", id_max),
         content_len = sql_capped_len("m.content", value_max),
         reasoning_len = sql_capped_len(reasoning_raw, value_max),
-        tool_name_len = sql_capped_len("m.tool_name", id_max),
-        tool_calls_len = sql_capped_len("m.tool_calls", value_max),
-        model_len = sql_capped_len("s.model", id_max),
-        parent_len = sql_capped_len("s.parent_session_id", id_max),
+        tool_name_len = sql_capped_len(tool_name_raw, id_max),
+        tool_calls_len = sql_capped_len(tool_calls_raw, value_max),
+        model_len = sql_capped_len(session_model_raw, id_max),
+        parent_len = sql_capped_len(parent_session_id_raw, id_max),
         cwd_len = sql_capped_len(session_cwd_raw, value_max),
         source_len = sql_capped_len(session_source_raw, id_max),
         title_len = sql_capped_len(session_title_raw, value_max),
@@ -180,10 +225,10 @@ pub(crate) fn select_new_messages_sql(
         role_os = sql_value_oversized("m.role", id_max),
         content_os = sql_value_oversized("m.content", value_max),
         reasoning_os = sql_value_oversized(reasoning_raw, value_max),
-        tool_name_os = sql_value_oversized("m.tool_name", id_max),
-        tool_calls_os = sql_value_oversized("m.tool_calls", value_max),
-        model_os = sql_value_oversized("s.model", id_max),
-        parent_os = sql_value_oversized("s.parent_session_id", id_max),
+        tool_name_os = sql_value_oversized(tool_name_raw, id_max),
+        tool_calls_os = sql_value_oversized(tool_calls_raw, value_max),
+        model_os = sql_value_oversized(session_model_raw, id_max),
+        parent_os = sql_value_oversized(parent_session_id_raw, id_max),
         cwd_os = sql_value_oversized(session_cwd_raw, value_max),
         source_os = sql_value_oversized(session_source_raw, id_max),
         title_os = sql_value_oversized(session_title_raw, value_max),
@@ -193,21 +238,21 @@ pub(crate) fn select_new_messages_sql(
     let role = sql_bounded_text("m.role", id_max, &row_fits_budget);
     let content = sql_bounded_text("m.content", value_max, &row_fits_budget);
     let reasoning = sql_bounded_text(reasoning_raw, value_max, &row_fits_budget);
-    let tool_name = sql_bounded_text("m.tool_name", id_max, &row_fits_budget);
-    let tool_calls = sql_bounded_text("m.tool_calls", value_max, &row_fits_budget);
-    let model = sql_bounded_text("s.model", id_max, &row_fits_budget);
-    let parent_session_id = sql_bounded_text("s.parent_session_id", id_max, &row_fits_budget);
+    let tool_name = sql_bounded_text(tool_name_raw, id_max, &row_fits_budget);
+    let tool_calls = sql_bounded_text(tool_calls_raw, value_max, &row_fits_budget);
+    let model = sql_bounded_text(session_model_raw, id_max, &row_fits_budget);
+    let parent_session_id = sql_bounded_text(parent_session_id_raw, id_max, &row_fits_budget);
     let session_cwd = sql_bounded_text(session_cwd_raw, value_max, &row_fits_budget);
     let session_source = sql_bounded_text(session_source_raw, id_max, &row_fits_budget);
     let session_title = sql_bounded_text(session_title_raw, value_max, &row_fits_budget);
     let timestamp = sql_bounded_number("m.timestamp");
     let session_started_at = sql_bounded_number(session_started_at);
     let session_ended_at = sql_bounded_number(session_ended_at);
-    let input_tokens = sql_bounded_number("s.input_tokens");
-    let output_tokens = sql_bounded_number("s.output_tokens");
-    let cache_read_tokens = sql_bounded_number("s.cache_read_tokens");
-    let cache_write_tokens = sql_bounded_number("s.cache_write_tokens");
-    let reasoning_tokens = sql_bounded_number("s.reasoning_tokens");
+    let input_tokens = sql_bounded_number(input_tokens_raw);
+    let output_tokens = sql_bounded_number(output_tokens_raw);
+    let cache_read_tokens = sql_bounded_number(cache_read_tokens_raw);
+    let cache_write_tokens = sql_bounded_number(cache_write_tokens_raw);
+    let reasoning_tokens = sql_bounded_number(reasoning_tokens_raw);
     let active = sql_bounded_number(active_expr);
     let typed_oversized = format!(
         "CASE WHEN ({oversized}) > 0 OR ({measured}) > {MAX_HERMES_PAGE_BYTES} \
@@ -521,10 +566,7 @@ pub(crate) async fn try_ingest_user_state_db_bounded(
 pub(crate) async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String> {
     let owned = path.to_path_buf();
     let opened = tokio::task::spawn_blocking(move || {
-        rusqlite::Connection::open_with_flags(
-            &owned,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
+        tracedecay_rusqlite_runtime::open_immutable_reader(&owned)
     })
     .await
     .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))?;

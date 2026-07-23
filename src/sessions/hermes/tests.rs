@@ -15,6 +15,24 @@ use crate::sessions::shared::StoredCursor;
 
 use super::*;
 
+static HERMES_UNIT_FIXTURE_OWNED_STORE_READY: tokio::sync::OnceCell<()> =
+    tokio::sync::OnceCell::const_new();
+
+async fn initialize_owned_store_before_foreign_fixture(directory: &std::path::Path) {
+    HERMES_UNIT_FIXTURE_OWNED_STORE_READY
+        .get_or_init(|| async {
+            // The mixed-engine unit-test binary still contains the owned-store
+            // compatibility layer. Match production startup order before any
+            // foreign rusqlite fixture initializes SQLite.
+            let path = directory.join(".owned-store-initialization.db");
+            let db = GlobalDb::open_at_without_structured_backfill(&path)
+                .await
+                .expect("initialize owned storage before foreign SQLite fixtures");
+            drop(db);
+        })
+        .await;
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_sqlite_incarnation_keeps_identity_and_refreshes_resume_fingerprint() {
@@ -712,12 +730,13 @@ fn hermes_workflow_lookalike_fields_do_not_emit_workflow_lifecycle() {
 #[tokio::test]
 async fn zeroblob_content_is_covered_without_materializing_payload() {
     let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
     let path = dir.path().join("state.db");
     {
-        let db = libsql::Builder::new_local(&path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        conn.execute(
-            "CREATE TABLE sessions (
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = DELETE;
+             CREATE TABLE sessions (
                     id TEXT PRIMARY KEY,
                     model TEXT,
                     parent_session_id TEXT,
@@ -727,13 +746,8 @@ async fn zeroblob_content_is_covered_without_materializing_payload() {
                     cache_read_tokens INTEGER,
                     cache_write_tokens INTEGER,
                     reasoning_tokens INTEGER
-                )",
-            (),
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "CREATE TABLE messages (
+                );
+             CREATE TABLE messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT NOT NULL,
                     role TEXT NOT NULL,
@@ -743,10 +757,8 @@ async fn zeroblob_content_is_covered_without_materializing_payload() {
                     timestamp REAL NOT NULL,
                     reasoning TEXT,
                     active INTEGER NOT NULL DEFAULT 1
-                )",
-            (),
+                );",
         )
-        .await
         .unwrap();
         // Generate the hostile value inside SQLite — never as a Rust String/Vec.
         let hostile_bytes = MAX_HERMES_VALUE_BYTES.saturating_add(1);
@@ -757,7 +769,6 @@ async fn zeroblob_content_is_covered_without_materializing_payload() {
             ),
             (),
         )
-        .await
         .unwrap();
         conn.execute(
             &format!(
@@ -766,14 +777,12 @@ async fn zeroblob_content_is_covered_without_materializing_payload() {
             ),
             (),
         )
-        .await
         .unwrap();
         conn.execute(
             "INSERT INTO messages (session_id, role, content, timestamp)
                  VALUES ('sess-zeroblob', 'assistant', 'safe trailing row', 2.0)",
             (),
         )
-        .await
         .unwrap();
     }
 
@@ -817,11 +826,12 @@ async fn zeroblob_content_is_covered_without_materializing_payload() {
 #[tokio::test]
 async fn page_byte_budget_stops_collection_before_unbounded_growth() {
     let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
     let path = dir.path().join("state.db");
-    let db = libsql::Builder::new_local(&path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    conn.execute(
-        "CREATE TABLE sessions (
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode = DELETE;
+         CREATE TABLE sessions (
                 id TEXT PRIMARY KEY,
                 model TEXT,
                 parent_session_id TEXT,
@@ -831,13 +841,8 @@ async fn page_byte_budget_stops_collection_before_unbounded_growth() {
                 cache_read_tokens INTEGER,
                 cache_write_tokens INTEGER,
                 reasoning_tokens INTEGER
-            )",
-        (),
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "CREATE TABLE messages (
+            );
+         CREATE TABLE messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
@@ -847,20 +852,17 @@ async fn page_byte_budget_stops_collection_before_unbounded_growth() {
                 timestamp REAL NOT NULL,
                 reasoning TEXT,
                 active INTEGER NOT NULL DEFAULT 1
-            )",
-        (),
+            );",
     )
-    .await
     .unwrap();
     conn.execute(
         "INSERT INTO sessions (id, model) VALUES ('sess-page', 'model')",
         (),
     )
-    .await
     .unwrap();
     // Build three max-sized TEXT payloads inside SQLite. The product path
     // must gate the second row against the remaining page bytes before
-    // libsql materializes it as a Rust String.
+    // rusqlite materializes it as a Rust String.
     let sqlite_blob_bytes = MAX_HERMES_VALUE_BYTES / 2;
     for index in 0..3 {
         conn.execute(
@@ -868,13 +870,11 @@ async fn page_byte_budget_stops_collection_before_unbounded_growth() {
                 "INSERT INTO messages (session_id, role, content, timestamp)
                      SELECT 'sess-page', 'user', hex(zeroblob({sqlite_blob_bytes})), ?1"
             ),
-            libsql::params![f64::from(index)],
+            rusqlite::params![f64::from(index)],
         )
-        .await
         .unwrap();
     }
     drop(conn);
-    drop(db);
 
     let conn = open_read_only_strict(&path).await.unwrap();
     let message_cols = message_columns(&conn).await.unwrap();
@@ -904,34 +904,27 @@ async fn page_byte_budget_stops_collection_before_unbounded_growth() {
 #[tokio::test]
 async fn utf8_byte_gate_rejects_multibyte_text_before_materialization() {
     let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
     let path = dir.path().join("state.db");
-    let db = libsql::Builder::new_local(&path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    conn.execute(
-        "CREATE TABLE sessions (
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode = DELETE;
+         CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, model TEXT, parent_session_id TEXT, cwd TEXT,
                 input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
                 cache_write_tokens INTEGER, reasoning_tokens INTEGER
-            )",
-        (),
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "CREATE TABLE messages (
+            );
+         CREATE TABLE messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
                 role TEXT NOT NULL, content TEXT, tool_name TEXT, tool_calls TEXT,
                 timestamp REAL NOT NULL, reasoning TEXT, active INTEGER NOT NULL DEFAULT 1
-            )",
-        (),
+            );",
     )
-    .await
     .unwrap();
     conn.execute(
         "INSERT INTO sessions (id, model) VALUES ('sess-utf8', 'model')",
         (),
     )
-    .await
     .unwrap();
     // 600,000 `é` code points are 1,200,000 UTF-8 bytes. SQLite
     // length(TEXT) would undercount this below the 1 MiB byte ceiling.
@@ -941,10 +934,8 @@ async fn utf8_byte_gate_rejects_multibyte_text_before_materialization() {
                     replace(hex(zeroblob(600000)), '00', 'é'), 1.0",
         (),
     )
-    .await
     .unwrap();
     drop(conn);
-    drop(db);
 
     let conn = open_read_only_strict(&path).await.unwrap();
     let message_cols = message_columns(&conn).await.unwrap();
@@ -960,4 +951,146 @@ async fn utf8_byte_gate_rejects_multibyte_text_before_materialization() {
         page.items[0].sql_measured_bytes > MAX_HERMES_VALUE_BYTES as u64,
         "UTF-8 byte length must drive the typed oversized outcome"
     );
+}
+
+fn write_minimal_legacy_state_db(path: &std::path::Path, rows: usize) {
+    let mut conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode = DELETE;
+         CREATE TABLE sessions (id TEXT PRIMARY KEY);
+         CREATE TABLE messages (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             session_id TEXT NOT NULL,
+             role TEXT NOT NULL,
+             content TEXT,
+             timestamp REAL NOT NULL
+         );
+         INSERT INTO sessions (id) VALUES ('legacy-session');",
+    )
+    .unwrap();
+    let transaction = conn.transaction().unwrap();
+    for index in 0..rows {
+        transaction
+            .execute(
+                "INSERT INTO messages (session_id, role, content, timestamp)
+                 VALUES ('legacy-session', 'user', ?1, ?2)",
+                rusqlite::params![format!("legacy row {index}"), index as f64],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
+fn sqlite_sidecar(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    sidecar.into()
+}
+
+#[tokio::test]
+async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let missing = dir.path().join("missing.db");
+    assert!(open_read_only_strict(&missing).await.is_err());
+    assert!(!missing.exists());
+
+    let path = dir.path().join("state.db");
+    write_minimal_legacy_state_db(&path, 1);
+    let before = std::fs::read(&path).unwrap();
+    let wal = sqlite_sidecar(&path, "-wal");
+    let shm = sqlite_sidecar(&path, "-shm");
+    let journal = sqlite_sidecar(&path, "-journal");
+
+    let conn = open_read_only_strict(&path).await.unwrap();
+    let policy = conn
+        .with(|conn| {
+            let pragma = |name| {
+                conn.pragma_query_value(None, name, |row| row.get::<_, i64>(0))
+                    .unwrap()
+            };
+            (
+                pragma("query_only"),
+                pragma("foreign_keys"),
+                pragma("trusted_schema"),
+                pragma("busy_timeout"),
+                conn.limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED)
+                    .unwrap(),
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content, timestamp)
+                     VALUES ('legacy-session', 'user', 'write probe', 2.0)",
+                    [],
+                )
+                .is_err(),
+                conn.execute_batch("ATTACH DATABASE ':memory:' AS other")
+                    .is_err(),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(policy, (1, 1, 0, 0, 0, true, true));
+    drop(conn);
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!wal.exists());
+    assert!(!shm.exists());
+    assert!(!journal.exists());
+}
+
+#[tokio::test]
+async fn minimal_legacy_schema_reads_without_optional_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let path = dir.path().join("state.db");
+    write_minimal_legacy_state_db(&path, 1);
+
+    let conn = open_read_only_strict(&path).await.unwrap();
+    let select_sql = select_new_messages_sql(
+        &message_columns(&conn).await.unwrap(),
+        &table_columns(&conn, "sessions").await.unwrap(),
+    );
+    let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
+        .await
+        .unwrap();
+
+    assert_eq!(page.items.len(), 1);
+    let row = &page.items[0];
+    assert_eq!(row.session_id, "legacy-session");
+    assert_eq!(row.content.as_deref(), Some("legacy row 0"));
+    assert!(row.tool_name.is_none());
+    assert!(row.tool_calls.is_none());
+    assert!(row.session_model.is_none());
+    assert!(row.parent_session_id.is_none());
+    assert!(row.session_input_tokens.is_none());
+    assert_eq!(row.active, 1);
+}
+
+#[tokio::test]
+async fn legacy_schema_paginates_without_gaps_or_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let path = dir.path().join("state.db");
+    write_minimal_legacy_state_db(&path, CHUNK_ROWS + 3);
+
+    let conn = open_read_only_strict(&path).await.unwrap();
+    let select_sql = select_new_messages_sql(
+        &message_columns(&conn).await.unwrap(),
+        &table_columns(&conn, "sessions").await.unwrap(),
+    );
+    let first = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
+        .await
+        .unwrap();
+    let second = read_new_rows_strict(&conn, &select_sql, first.new_cursor)
+        .await
+        .unwrap();
+
+    assert_eq!(first.items.len(), CHUNK_ROWS);
+    assert_eq!(second.items.len(), 3);
+    let ids = first
+        .items
+        .iter()
+        .chain(&second.items)
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, (1..=(CHUNK_ROWS + 3) as i64).collect::<Vec<_>>());
 }
