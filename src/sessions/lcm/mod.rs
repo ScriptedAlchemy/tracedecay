@@ -10,6 +10,7 @@ pub mod payload;
 pub mod query;
 pub mod raw;
 mod replay_transactions;
+pub mod retention;
 pub mod schema;
 pub mod security;
 mod summarizer;
@@ -43,3 +44,7 @@ pub use types::{
 };
 
 pub use gc::LcmGcReport;
+pub use retention::{
+    LcmRetentionConfig, LcmRetentionPhaseReport, LcmRetentionReport, RetentionMode,
+    run_session_retention,
+};
