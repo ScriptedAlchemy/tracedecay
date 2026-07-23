@@ -54,3 +54,33 @@ cargo run --bin tracedecay-search-eval -- compare \
 The end-to-end flow itself is validated by the `search_quality_suite` and
 `search_eval_cli_test` Rust tests; those tests are the quality gate, not any
 separate checker over the record file.
+
+### PR10 semantic/vector section
+
+The same `direct-evaluation-record-v1.json` also carries a
+`pr10_semantic_vector_evaluation` section for the PR10 semantic/vector path:
+vector generation, the FastEmbed local-artifact runtime, exact-flat/lexical/
+graph fusion and calibration, and the PR9 semantic-abstention fallback. Because
+those semantic contracts, determinism, and fail-closed behavior are asserted by
+the Rust test suites rather than the CLI, that section records the executed
+suites (by feature/surface and date, never by commit hash) instead of a
+CLI transcript. It is produced offline with no network and no downloaded model
+runtime (embeddings are the deterministic in-process fake; the real FastEmbed
+constructor is asserted present by source inspection, not invoked):
+
+```sh
+cargo test --all-features --no-fail-fast \
+  --test semantic_search_suite \
+  --test pr10_vector_generation_prep_test \
+  --test pr10_artifact_runtime_prep_test \
+  --test search_quality_suite \
+  --test search_eval_cli_test \
+  --test search_eval_holdout_authority_test
+```
+
+Use `cargo test --test <name>` (not `cargo nextest -E 'binary(...)'`) so only
+the non-test lib is linked: these integration binaries are unaffected by the
+lib unit-test target, which can be independently uncompilable during unrelated
+in-flight work. All 153 tests across the 6 binaries pass. Real-model
+latency/resource benchmarks and any accept/reject quality outcome remain
+pending on a locked-quality run, exactly as for the PR9 flow.

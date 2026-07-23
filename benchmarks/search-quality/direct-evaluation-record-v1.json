@@ -50,6 +50,80 @@
       "detail": "The checked-in fixtures are contract_only authority; authoritative direct holdout labels are intentionally not committed, so no accept/reject quality conclusion is produced. Run compare with --holdout-labels and --saved-candidates against a locked-quality run to reach an Accepted or Rejected outcome."
     }
   ],
+  "pr10_semantic_vector_evaluation": {
+    "evaluated_on": "2026-07-23",
+    "surface": "PR10 semantic/vector search path: vector generation, the FastEmbed local-artifact runtime, exact-flat/lexical/graph fusion and calibration, and the PR9 semantic-abstention fallback.",
+    "description": "Direct offline evaluation of the PR10 semantic/vector path by executing the checked-in Rust test suites with ordinary Cargo. No network, no downloaded model runtime, no owner receipts, gates, packets, or attestation. Semantic embeddings in these suites are the deterministic in-process fake runtime; the real FastEmbed constructor path is asserted by source inspection, not invoked.",
+    "generated_by": [
+      "cargo test --all-features --no-fail-fast --test semantic_search_suite --test pr10_vector_generation_prep_test --test pr10_artifact_runtime_prep_test --test search_quality_suite --test search_eval_cli_test --test search_eval_holdout_authority_test",
+      "cargo run --bin tracedecay-search-eval --all-features -- generate-candidates"
+    ],
+    "invocation_notes": "Run with `cargo test --test <name>` (not `cargo nextest -E binary(...)`) so only the non-test lib is linked; these integration binaries are unaffected by the lib unit-test target, which can be independently uncompilable during unrelated in-flight work.",
+    "cli_generate_candidates_default_profiles": {
+      "status": "recorded",
+      "production_boundary": "CompositionKernel::compose",
+      "train_validation_outputs": 6,
+      "sealed_holdout_queries": 15,
+      "holdout_labels_included": false,
+      "candidate_workload_digest": "sha256:61f6252eb2827a87cc8ee8185bffa444d16ac3afa64933f35d0036dcec2184d2",
+      "detail": "The default (all-profile, semantic-inclusive) generate-candidates run completes offline through the production CompositionKernel::compose boundary and emits deterministic candidate bytes: 6 train/validation outputs versus the 2 produced by the pr9-fallback-only run above, while the semantic lane returns the byte-identical PR9 fallback offline. Sealed holdout input carries queries only, never labels. Emitted candidate bytes are machine-local run output and are not frozen here."
+    },
+    "test_suites": [
+      {
+        "suite": "semantic_search_suite",
+        "status": "pass",
+        "tests_passed": 6,
+        "tests_failed": 0,
+        "covers": "PR10 semantic benchmark workload/result/evidence-anchor schema validation (round-trip, kind contracts, strata, digests, 10x chunk-multiplier), and the CalibratedSemanticQueryService retrieval contract: every non-ready semantic index state (Unavailable/Indexing/Degraded/Failed/Stale/Incompatible) preserves byte-identical PR9 fallback under FallbackAllowed and returns a typed StrictUnavailable error under StrictSemantic. Non-ready semantic lanes are never invoked."
+      },
+      {
+        "suite": "pr10_vector_generation_prep_test",
+        "status": "pass",
+        "tests_passed": 17,
+        "tests_failed": 0,
+        "covers": "PR10 vector generation: embedding projection-key completeness/determinism and Plan-25 mapping, projection+privacy authority, canonical-chunk fake projection with Plan-25 receipts, atomic checkpoint/active-pointer publication, unchanged-generation vector reuse without re-inference, fail-closed rejection of invalid fake vectors and key-only reuse, duplicate-row rejection without advancing the checkpoint, and generation-identity equality across single- vs multi-batch publications. Uses the deterministic fake projector; no model inference or vector download."
+      },
+      {
+        "suite": "pr10_artifact_runtime_prep_test",
+        "status": "pass",
+        "tests_passed": 98,
+        "tests_failed": 0,
+        "covers": "PR10 FastEmbed local-artifact runtime: signed-manifest round-trip/canonical-digest/validator rules, trust-root resolution (release vs local, expiry/revocation/retirement windows), artifact-store atomic signature-verified import, model catalog (default Jina code model pinned, unknown rejected), session pool lifecycle (reuse, reaping, memory/hard-session ceilings, identity/privacy separation, FIFO waiter queue, cancellation, typed non-blocking exhaustion), runtime-query saturation/omission and atomically-current-generation binding, async reload atomic swap, and the deterministic fake embedder. One source-inspection test asserts the production runtime initializes FastEmbed via `try_new_from_user_defined(` (verified local bytes), never `TextEmbedding::try_new(` (download constructor), never falls back to `FakeEmbeddingRuntime`, uses no network/ambient-cache surface (reqwest/ureq/hf_hub/HF_*/FASTEMBED_CACHE_*), and that the artifact store does not publish `activate(`. No network and no model download; the real FastEmbed constructor is asserted present by source inspection, not executed."
+      },
+      {
+        "suite": "search_quality_suite",
+        "status": "pass",
+        "tests_passed": 27,
+        "tests_failed": 0,
+        "covers": "PR9/PR10 candidate producers and single-root fusion over the real sanitized fixtures: exact-admission authority classification and authority-minted proofs, fielded BM25 whole-term/subtoken distinction, deterministic phrase and bounded-fuzzy recovery, freshness coverage and page cutoff, CompositionKernel fusion with score-domain calibration profiles across exact/lexical/graph lanes with graph complete/denied/unavailable dispositions and late hydration, plus fixture integrity, contamination-partition disjointness (22 development / 9 sealed-holdout queries, 10 corpus snapshots), and the evaluator compare/ablation contract. Exercises the production CompositionKernel and calibration path directly."
+      },
+      {
+        "suite": "search_eval_cli_test",
+        "status": "pass",
+        "tests_passed": 4,
+        "tests_failed": 0,
+        "covers": "tracedecay-search-eval CLI: validate reports frozen fixture/run/holdout digests without emitting outputs; compare is contract_only-blocked (exit 3) and writes an immutable, append-only, no-promotion report that supersedes by revision; invalid run manifests fail (exit 2) before opening any holdout labels; CLI help exposes no packet/seal/owner surface."
+      },
+      {
+        "suite": "search_eval_holdout_authority_test",
+        "status": "pass",
+        "tests_passed": 1,
+        "tests_failed": 0,
+        "covers": "Sealed-holdout authority: holdout labels remain sealed and are not accessible through the contract-only evaluation path."
+      }
+    ],
+    "totals": {
+      "tests_passed": 153,
+      "tests_failed": 0,
+      "binaries": 6
+    },
+    "test_side_repair": {
+      "file": "tests/pr10_artifact_runtime_prep_test.rs",
+      "change": "Hardened the `production()` source-extraction helper in `semantic_runtime_uses_verified_fastembed_bytes_without_network_or_fallback`. The helper split the file at the first `#[cfg(test)]` string to drop test scaffolding, but production code added a `#[cfg(test)] use std::sync::Arc;` inline import among the top-of-file use statements, which truncated the inspected source and hid the real production FastEmbed constructor, failing the positive `try_new_from_user_defined(` assertion. The helper now strips single-line `#[cfg(test)]`-guarded use imports before locating the scaffolding boundary.",
+      "classification": "Test-helper fragility, not a product regression: the product source still initializes FastEmbed via try_new_from_user_defined, still has no TextEmbedding::try_new download constructor, and still confines FakeEmbeddingRuntime to #[cfg(test)]."
+    },
+    "conclusion": "The PR10 semantic/vector direct-evaluation path runs end-to-end offline and is green: 153 tests across 6 binaries pass, 0 fail. Vector generation, the FastEmbed local-artifact runtime, calibration/fusion, and the PR9 semantic-abstention fallback are all exercised without network or model download. Real-model latency/resource benchmarks and any accept/reject quality outcome remain pending on a locked-quality run with direct holdout labels, exactly as for the PR9 CLI flow above."
+  },
   "thresholds": "None declared for these fixtures; metrics are reported with status recorded rather than judged against an invented bar.",
   "conclusion": "Direct evaluation flow runs end-to-end offline. Quality outcome is pending until direct holdout labels for a locked-quality run are supplied."
 }
