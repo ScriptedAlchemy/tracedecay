@@ -24,10 +24,14 @@ if (storedTheme === 'light' || storedTheme === 'dark') {
   document.documentElement.dataset['theme'] = storedTheme;
 }
 
+import { EventsProvider } from '../data/sse/useEvents.tsx';
+
 createRoot(rootEl).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <EventsProvider>
+        <RouterProvider router={router} />
+      </EventsProvider>
     </QueryClientProvider>
   </React.StrictMode>,
 );
