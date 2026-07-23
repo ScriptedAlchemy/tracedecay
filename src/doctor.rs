@@ -353,6 +353,56 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
     daemon_runtime_status(&result)
 }
 
+pub async fn wait_for_daemon_startup_health(
+    timeout: std::time::Duration,
+) -> crate::errors::Result<()> {
+    let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_progress = std::time::Instant::now();
+    loop {
+        if daemon_project_status(&project_path)
+            .await
+            .is_ok_and(|status| daemon_startup_health_ready(&status))
+        {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "daemon startup recovery did not converge before Doctor validation"
+                    .to_string(),
+            });
+        }
+        if now.duration_since(last_progress) >= std::time::Duration::from_secs(20) {
+            eprintln!(
+                "Waiting for daemon schema migration and compatibility projections to converge…"
+            );
+            last_progress = now;
+        }
+        tokio::time::sleep(
+            std::time::Duration::from_millis(500).min(deadline.saturating_duration_since(now)),
+        )
+        .await;
+    }
+}
+
+fn daemon_startup_health_ready(status: &serde_json::Value) -> bool {
+    let storage = status.get("storage_health");
+    let storage_ready = storage
+        .and_then(|storage| storage.get("quick_check_ok"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && storage
+            .and_then(|storage| storage.get("authority_audit_ok"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    let temporal_ready = temporal_health::diagnose(status.get("session_temporal_health"))
+        .lines()
+        .iter()
+        .all(|line| line.level != temporal_health::TemporalHealthLineLevel::Fail);
+    storage_ready && temporal_ready
+}
+
 fn daemon_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",

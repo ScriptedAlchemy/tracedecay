@@ -501,6 +501,11 @@ async fn run_forward_only_post_update_command(
     if let Err(error) = verify_forward_only_binary_version(&spec.tracedecay_bin) {
         return Err(forward_only_failure(&spec, error));
     }
+    if let Err(error) =
+        tracedecay::doctor::wait_for_daemon_startup_health(std::time::Duration::from_mins(3)).await
+    {
+        return Err(forward_only_failure(&spec, error));
+    }
     tracedecay::doctor::run_doctor(None)
         .await
         .map_err(|error| forward_only_failure(&spec, error))

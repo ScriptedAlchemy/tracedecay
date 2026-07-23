@@ -1696,3 +1696,30 @@ fn doctor_result_preserves_daemon_and_storage_errors() {
         "config error: doctor storage health check failed"
     );
 }
+
+#[test]
+fn daemon_startup_health_waits_for_storage_and_temporal_convergence() {
+    let healthy = serde_json::json!({
+        "storage_health": {
+            "quick_check_ok": true,
+            "authority_audit_ok": true
+        }
+    });
+    assert!(super::daemon_startup_health_ready(&healthy));
+
+    let migrating = serde_json::json!({
+        "storage_health": {
+            "quick_check_error": "project_store_schema_unsupported",
+            "authority_audit_reason": "authority_audit_not_run"
+        },
+        "session_temporal_health": {
+            "status": "unavailable",
+            "reason": "compatibility_drift",
+            "findings": [{
+                "kind": "compatibility_drift",
+                "count": 1
+            }]
+        }
+    });
+    assert!(!super::daemon_startup_health_ready(&migrating));
+}
