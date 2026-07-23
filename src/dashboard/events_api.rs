@@ -250,7 +250,7 @@ pub(crate) async fn events(State(state): State<DashboardState>) -> impl IntoResp
             tick = tick.saturating_add(1);
 
             let mut batch: Vec<DashboardEventV1> = Vec::new();
-            if tick % HEARTBEAT_EVERY_TICKS == 0 {
+            if tick.is_multiple_of(HEARTBEAT_EVERY_TICKS) {
                 batch.push(stream_state.heartbeat(&scope));
             }
             batch.extend(stream_state.poll_sources(&state, &scope).await);

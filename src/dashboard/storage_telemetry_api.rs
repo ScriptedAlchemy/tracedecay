@@ -142,6 +142,7 @@ pub(crate) async fn telemetry(
 
 /// Sample one store's size from a live connection. A pragma failure produces a
 /// typed [`StorageTelemetryReadV1::Unknown`], never a fabricated size.
+#[allow(clippy::expect_used)] // the "store" fallback key is statically valid
 async fn sample_entry(role: &str, path: &str, conn: &Connection) -> StoreTelemetryEntryV1 {
     let store_name = store_file_name(path);
     let store_key = StoreKeyV1::new(store_name.clone());

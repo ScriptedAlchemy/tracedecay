@@ -171,8 +171,7 @@ pub(super) async fn run_gc(
 fn now_secs_i64() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
 /// Reads a single-value integer `PRAGMA` off `conn`, defaulting to zero when the
