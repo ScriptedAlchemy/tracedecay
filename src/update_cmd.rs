@@ -916,6 +916,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
+    #[cfg(unix)]
+    use super::verify_forward_only_binary_version;
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
         dogfood_forward_only_target_state, health_pass_failure_result, normalize_bin_path,
@@ -923,8 +925,6 @@ mod tests {
         prepare_post_update_lease, reinstall_failure_result, restart_daemon_service_with,
         run_install_then_refresh,
     };
-    #[cfg(unix)]
-    use super::verify_forward_only_binary_version;
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
 
