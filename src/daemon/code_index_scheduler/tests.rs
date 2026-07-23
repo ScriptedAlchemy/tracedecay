@@ -1224,3 +1224,171 @@ fn reparse_matches_full_parse_chunks() {
         "sequential-edit and fresh-store reconcile produce byte-identical chunk lanes"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Query-admission serving generation: an unpinned query resolves through the
+// freshness ladder to the latest complete generation; an explicit caller pin
+// is served generation-bound and read-only, bypassing freshness entirely.
+// ---------------------------------------------------------------------------
+
+/// Wait for the registry-mounted worktree to publish its first generation.
+async fn wait_for_initial_generation(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+) -> tracedecay_domain::CodeGenerationId {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(generation) = registry.latest_generation_id(path).await {
+                break generation;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial generation published")
+}
+
+/// A query that pins no explicit generation (the reserved unpinned sentinel)
+/// resolves its serving generation through the three-tier freshness ladder. An
+/// out-of-band git commit after indexing is caught by the tier-1 `.git`
+/// metadata check at query admission, so the unpinned query serves the freshly
+/// reconciled latest generation rather than the stale one indexed at mount.
+#[tokio::test]
+async fn unpinned_query_serves_freshness_resolved_latest_generation() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount daemon-owned scheduler");
+    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
+
+    // Capture the stable repository/worktree identity from the generation
+    // indexed at mount, before the out-of-band change moves HEAD.
+    let latest = registry
+        .generation_for(&initial)
+        .await
+        .expect("mounted generation");
+    let repository = latest.generation.snapshot().repository.clone();
+    let worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+
+    // Another process commits a change. Nothing notifies the scheduler, and no
+    // filesystem watcher exists, so `latest_complete` still reports `initial`
+    // until a freshness check runs at query admission.
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "external"]);
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(initial.clone()),
+        "an out-of-band commit is not reflected until the freshness ladder runs"
+    );
+
+    // An unpinned query resolves the serving generation through the ladder.
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    let scope =
+        CodeQueryScope::new(super::queries::unpinned_latest_generation(), None).expect("scope");
+    let request =
+        ExactOccurrenceRequest::new("alpha", None, scope, query_meta()).expect("exact request");
+    let outcome = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await;
+
+    let served = match outcome {
+        RetrievalPortOutcome::Completed(evidence) => {
+            evidence.payload.expect("exact page").generation
+        }
+        other => panic!("expected a completed unpinned query, got {other:?}"),
+    };
+    assert_ne!(
+        served, initial,
+        "the unpinned query serves the freshness-resolved latest generation, not the stale one"
+    );
+    assert_eq!(
+        Some(served),
+        registry.latest_generation_id(fixture.path()).await,
+        "query admission reconciled the out-of-band commit into the served generation"
+    );
+
+    registry.shutdown().await;
+}
+
+/// An explicit caller-pinned generation is served generation-bound and
+/// read-only: the freshness ladder is bypassed, so an out-of-band commit after
+/// indexing never mutates the served generation and never triggers a reconcile.
+#[tokio::test]
+async fn pinned_query_bypasses_freshness_resolution() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount daemon-owned scheduler");
+    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
+
+    let latest = registry
+        .generation_for(&initial)
+        .await
+        .expect("mounted generation");
+    let repository = latest.generation.snapshot().repository.clone();
+    let worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+
+    // The same out-of-band commit as the unpinned case: it would be caught by
+    // the tier-1 metadata check *if* the freshness ladder ran.
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "external"]);
+
+    // The caller pins the exact generation indexed at mount.
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    let scope = CodeQueryScope::new(initial.clone(), None).expect("scope");
+    let request =
+        ExactOccurrenceRequest::new("alpha", None, scope, query_meta()).expect("exact request");
+    let outcome = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await;
+
+    let served = match outcome {
+        RetrievalPortOutcome::Completed(evidence) => {
+            evidence.payload.expect("exact page").generation
+        }
+        other => panic!("expected a completed pinned query, got {other:?}"),
+    };
+    assert_eq!(
+        served, initial,
+        "a pinned query serves exactly the requested generation, bypassing freshness"
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(initial),
+        "the pinned read never triggers a reconcile of the out-of-band commit"
+    );
+
+    registry.shutdown().await;
+}

@@ -41,6 +41,26 @@ use crate::query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
 
+/// The reserved [`CodeGenerationId`] a caller supplies to request ordinary
+/// (unpinned) search: it pins no specific immutable generation, so the serving
+/// generation is resolved through the three-tier freshness ladder to the latest
+/// complete compatible generation (NEXT.md clause 8). Any other value is an
+/// explicit caller pin that is served generation-bound and read-only.
+pub(in crate::daemon) const UNPINNED_LATEST_GENERATION_SENTINEL: &str =
+    "code-generation:unpinned-latest.v1";
+
+/// Construct the reserved unpinned-latest [`CodeGenerationId`] sentinel a caller
+/// passes when it wants the freshness-resolved latest complete generation
+/// rather than a pinned one.
+pub(in crate::daemon) fn unpinned_latest_generation() -> CodeGenerationId {
+    CodeGenerationId::new(UNPINNED_LATEST_GENERATION_SENTINEL)
+        .unwrap_or_else(|_| panic!("static unpinned-latest generation sentinel is valid"))
+}
+
+fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
+    generation.as_str() == UNPINNED_LATEST_GENERATION_SENTINEL
+}
+
 impl CodeIndexSchedulerRegistryV1 {
     pub(super) async fn generation_for(
         &self,
@@ -55,6 +75,27 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         }
         None
+    }
+
+    /// Resolve the generation a callable-code query serves.
+    ///
+    /// An explicit, caller-pinned generation is matched exactly and served
+    /// generation-bound and read-only — the freshness ladder is deliberately
+    /// bypassed so a pin is a stable, reproducible read. The reserved unpinned
+    /// sentinel instead runs the three-tier freshness ladder and serves the
+    /// latest complete compatible generation, so out-of-band changes are
+    /// reconciled at query admission without any standing filesystem watcher.
+    /// Partial, stale, failed, or incompatible generations never surface here:
+    /// the ladder only ever returns the latest complete generation.
+    pub(super) async fn resolve_serving_generation(
+        &self,
+        requested: &CodeGenerationId,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        if is_unpinned_latest(requested) {
+            self.latest_complete_fresh_any().await
+        } else {
+            self.generation_for(requested).await
+        }
     }
 }
 
@@ -226,6 +267,7 @@ fn chunk_occurrence(
 
 fn exact_page(
     latest: &LatestCompleteCodeIndexV1,
+    served_generation: &CodeGenerationId,
     request: &ExactOccurrenceRequest,
     batch: RetrieverBatch<ExactLaneEvidence>,
 ) -> CodeQueryPage<ExactOccurrenceRecord> {
@@ -256,7 +298,7 @@ fn exact_page(
         });
     }
     CodeQueryPage::new(
-        request.scope.generation.clone(),
+        served_generation.clone(),
         items,
         Some(batch.coverage.eligible),
         None,
@@ -267,6 +309,7 @@ fn exact_page(
 
 fn lexical_page(
     latest: &LatestCompleteCodeIndexV1,
+    served_generation: &CodeGenerationId,
     request: &PhraseSearchRequest,
     batch: RetrieverBatch<LexicalLaneEvidence>,
 ) -> CodeQueryPage<LexicalOccurrenceRecord> {
@@ -294,7 +337,7 @@ fn lexical_page(
         });
     }
     CodeQueryPage::new(
-        request.scope.generation.clone(),
+        served_generation.clone(),
         items,
         Some(batch.coverage.eligible),
         None,
@@ -344,7 +387,7 @@ fn symbol_record(
 
 fn graph_page(
     latest: &LatestCompleteCodeIndexV1,
-    request: &CodeRelationRequest,
+    served_generation: &CodeGenerationId,
     batch: RetrieverBatch<GraphLaneEvidence>,
 ) -> CodeQueryPage<SymbolRelationRecord> {
     let mut items = Vec::new();
@@ -374,7 +417,7 @@ fn graph_page(
         });
     }
     CodeQueryPage::new(
-        request.scope.generation.clone(),
+        served_generation.clone(),
         items,
         Some(batch.coverage.eligible),
         None,
@@ -423,9 +466,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a ExactOccurrenceRequest,
     ) -> CallableCodeQueryFuture<'a, ExactOccurrenceRecord> {
         Box::pin(async move {
-            let Some(latest) = self.generation_for(&request.scope.generation).await else {
+            let Some(latest) = self.resolve_serving_generation(&request.scope.generation).await
+            else {
                 return unavailable(tracedecay_domain::UtcMicros(0));
             };
+            let served_generation = latest.generation.manifest().generation_id.clone();
             let finished_at = latest.generation.manifest().seal.sealed_at;
             let Ok(base) = base_request(
                 &context,
@@ -450,7 +495,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             );
             let lane_request = ExactLaneRequest {
                 literals: authority.parse_literals(&query_view, &base),
-                generation: request.scope.generation.clone(),
+                generation: served_generation.clone(),
                 budget: base.budget,
                 base,
                 query_view: &query_view,
@@ -460,7 +505,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             };
             match owners.exact.retrieve_exact(&lane_request) {
                 Ok(outcome) => lane_result(outcome, finished_at, |batch| {
-                    exact_page(&latest, request, batch)
+                    exact_page(&latest, &served_generation, request, batch)
                 }),
                 Err(_) => unavailable(finished_at),
             }
@@ -473,9 +518,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a PhraseSearchRequest,
     ) -> CallableCodeQueryFuture<'a, LexicalOccurrenceRecord> {
         Box::pin(async move {
-            let Some(latest) = self.generation_for(&request.scope.generation).await else {
+            let Some(latest) = self.resolve_serving_generation(&request.scope.generation).await
+            else {
                 return unavailable(tracedecay_domain::UtcMicros(0));
             };
+            let served_generation = latest.generation.manifest().generation_id.clone();
             let finished_at = latest.generation.manifest().seal.sealed_at;
             let Ok(base) = base_request(
                 &context,
@@ -493,7 +540,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .collect::<Vec<_>>();
             let lane_request = LexicalLaneRequest {
                 query_view: &request.query,
-                generation: request.scope.generation.clone(),
+                generation: served_generation.clone(),
                 whole_terms: whole_terms.clone(),
                 subtokens: whole_terms
                     .iter()
@@ -514,7 +561,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             };
             match owners.lexical.retrieve_lexical(&lane_request) {
                 Ok(outcome) => lane_result(outcome, finished_at, |batch| {
-                    lexical_page(&latest, request, batch)
+                    lexical_page(&latest, &served_generation, request, batch)
                 }),
                 Err(_) => unavailable(finished_at),
             }
@@ -527,9 +574,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeRelationRequest,
     ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
-            let Some(latest) = self.generation_for(&request.scope.generation).await else {
+            let Some(latest) = self.resolve_serving_generation(&request.scope.generation).await
+            else {
                 return unavailable(tracedecay_domain::UtcMicros(0));
             };
+            let served_generation = latest.generation.manifest().generation_id.clone();
             let finished_at = latest.generation.manifest().seal.sealed_at;
             let Ok(base) = base_request(
                 &context,
@@ -561,7 +610,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 ))
                 .unwrap_or_else(|_| panic!("validated symbol creates anchor")),
                 occurrence: CodeOccurrenceRefV1 {
-                    generation: request.scope.generation.clone(),
+                    generation: served_generation.clone(),
                     file: chunk.anchor.file_occurrence_id.clone(),
                     symbol: Some(symbol),
                     chunk: Some(chunk.id.clone()),
@@ -571,7 +620,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 source_occurrence,
             };
             let lane_request = GraphLaneRequest {
-                generation: request.scope.generation.clone(),
+                generation: served_generation.clone(),
                 seed_anchors: vec![seed],
                 edge_kinds: vec![RelationEdgeKindV1::Calls],
                 max_depth: request.maximum_depth,
@@ -583,7 +632,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             };
             match owners.graph.retrieve_graph(&lane_request) {
                 Ok(outcome) => lane_result(outcome, finished_at, |batch| {
-                    graph_page(&latest, request, batch)
+                    graph_page(&latest, &served_generation, batch)
                 }),
                 Err(_) => unavailable(finished_at),
             }

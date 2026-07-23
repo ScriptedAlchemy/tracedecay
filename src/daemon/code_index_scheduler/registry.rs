@@ -206,6 +206,30 @@ impl CodeIndexSchedulerRegistryV1 {
         .flatten()
     }
 
+    /// Unpinned serving resolution: run the freshness ladder over each mounted
+    /// worktree and return the first latest complete generation. The daemon
+    /// mounts one worktree per query context, so this resolves that worktree's
+    /// freshest complete generation. This is the freshness-gated entry ordinary
+    /// (unpinned) search uses when the caller pins no explicit generation, so
+    /// out-of-band changes are reconciled at query admission with no watcher.
+    ///
+    /// Keys are cloned under a short map lock and each per-worktree freshness
+    /// reconcile then runs through [`Self::latest_complete_fresh`], which drops
+    /// the registry guard before its blocking work — one worktree's reconcile
+    /// never serializes another worktree's query on the registry map.
+    pub async fn latest_complete_fresh_any(&self) -> Option<LatestCompleteCodeIndexV1> {
+        let roots = {
+            let mounted = self.mounted.lock().await;
+            mounted.keys().cloned().collect::<Vec<PathBuf>>()
+        };
+        for root in roots {
+            if let Some(latest) = self.latest_complete_fresh(&root).await {
+                return Some(latest);
+            }
+        }
+        None
+    }
+
     /// The per-worktree scheduler handle, cloned out of the registry map. Test
     /// support for proving that holding one worktree's scheduler lock does not
     /// block another worktree's freshness query on the registry map.
