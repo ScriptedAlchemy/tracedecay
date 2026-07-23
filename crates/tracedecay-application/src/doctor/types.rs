@@ -33,6 +33,12 @@ pub enum DoctorFindingFamilyV1 {
     /// Store, graph, and temporal runtime health plus migration coverage
     /// (`RuntimeReadOperationV1` health family, `StoreRuntimeHandle`).
     StorageRuntime,
+    /// Storage retention, size, and efficiency over Plan 26 observability read
+    /// models (Plan 38 §7). Distinct from [`Self::StorageRuntime`] health: this
+    /// family surfaces over-budget stores, identity-drift orphans, stale branch
+    /// DBs, quarantined incident debris, and retention backlog. The typed
+    /// subclass vocabulary is [`DoctorStorageFindingKindV1`].
+    Storage,
     /// Language-server / analyzer engine status (Plan 35 LSP gateway,
     /// `AnalyzerState`).
     LanguageServer,
@@ -41,6 +47,32 @@ pub enum DoctorFindingFamilyV1 {
     /// Denominator-safe measurement and telemetry health (Plan 26 analytics /
     /// accounting read models, session ingest).
     Observability,
+}
+
+/// Typed subclasses of the [`DoctorFindingFamilyV1::Storage`] finding family
+/// (Plan 38 §7).
+///
+/// The storage family never reports a silent overage: each subclass names one
+/// observable retention/size condition Doctor surfaces over the Plan 26 size
+/// observability read models. The set is closed and grows only through a future
+/// versioned enum, never by widening an existing subclass.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorStorageFindingKindV1 {
+    /// A store exceeds its owner-configured soft size budget.
+    OverBudgetStore,
+    /// A store whose project identity no longer resolves to a live repository
+    /// root (identity-drift orphan), reported with age and size.
+    OrphanStore,
+    /// Branch-scoped databases whose git refs are gone and are awaiting
+    /// lifecycle removal.
+    StaleBranchDbs,
+    /// Quarantined recovery/corruption artifacts are present and awaiting
+    /// collection.
+    IncidentDebrisPresent,
+    /// Retention-eligible rows or stores are past their window and awaiting
+    /// offload/collection.
+    RetentionBacklog,
 }
 
 /// Exact Doctor evidence states from Plan 09 §PR14.
@@ -635,6 +667,86 @@ mod tests {
             );
         }
         assert!(DoctorEvidenceStateV1::HealthyCompleteCoverage.is_healthy_complete());
+    }
+
+    #[test]
+    fn doctor_storage_family_finding_constructs_and_carries_remediation() {
+        let finding = DoctorFindingV1::new(
+            DoctorFindingFamilyV1::Storage,
+            DoctorEvidenceStateV1::Degraded,
+            vec![evidence(
+                DoctorFindingFamilyV1::Storage,
+                "storage.orphan-store.age-42d",
+            )],
+            complete_coverage(),
+            Some(remediation()),
+        )
+        .expect("storage finding");
+        assert_eq!(finding.family(), DoctorFindingFamilyV1::Storage);
+        assert!(!finding.state().is_healthy_complete());
+        assert!(finding.remediation().is_some());
+    }
+
+    #[test]
+    fn doctor_storage_family_healthy_finding_still_rejects_partial_coverage() {
+        let error = DoctorFindingV1::new(
+            DoctorFindingFamilyV1::Storage,
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            vec![evidence(
+                DoctorFindingFamilyV1::Storage,
+                "storage.size.within-budget",
+            )],
+            partial_coverage(),
+            None,
+        )
+        .expect_err("partial coverage cannot be healthy");
+        assert_eq!(
+            error,
+            ApplicationContractError::Inconsistent {
+                field: "doctor healthy coverage"
+            }
+        );
+    }
+
+    #[test]
+    fn doctor_storage_finding_kinds_serialize_to_stable_snake_case() {
+        for (kind, expected) in [
+            (
+                DoctorStorageFindingKindV1::OverBudgetStore,
+                "over_budget_store",
+            ),
+            (DoctorStorageFindingKindV1::OrphanStore, "orphan_store"),
+            (
+                DoctorStorageFindingKindV1::StaleBranchDbs,
+                "stale_branch_dbs",
+            ),
+            (
+                DoctorStorageFindingKindV1::IncidentDebrisPresent,
+                "incident_debris_present",
+            ),
+            (
+                DoctorStorageFindingKindV1::RetentionBacklog,
+                "retention_backlog",
+            ),
+        ] {
+            let encoded = serde_json::to_string(&kind).expect("serialize");
+            assert_eq!(encoded, format!("\"{expected}\""), "{kind:?}");
+            let decoded: DoctorStorageFindingKindV1 =
+                serde_json::from_str(&encoded).expect("deserialize");
+            assert_eq!(decoded, kind);
+        }
+    }
+
+    #[test]
+    fn doctor_storage_finding_kinds_are_distinct_from_storage_runtime_family() {
+        assert_ne!(
+            DoctorFindingFamilyV1::Storage,
+            DoctorFindingFamilyV1::StorageRuntime
+        );
+        assert_eq!(
+            serde_json::to_string(&DoctorFindingFamilyV1::Storage).expect("serialize"),
+            "\"storage\""
+        );
     }
 
     #[test]

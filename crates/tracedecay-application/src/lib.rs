@@ -49,6 +49,7 @@ pub use doctor::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
     DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
     DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
+    DoctorStorageFindingKindV1,
 };
 pub use error::ApplicationContractError;
 pub use external_source::{
