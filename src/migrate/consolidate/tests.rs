@@ -825,7 +825,7 @@ async fn fixture_from_template() -> Option<Fixture> {
 
 /// Re-points the copied store at its new location: global-DB project rows and
 /// aliases (recomputed git common dir + fresh path aliases), the two store
-/// manifests (project_root/data_root), and the repository-identity marker.
+/// manifests (`project_root/data_root`), and the repository-identity marker.
 async fn apply_fixture_fixups(project: &Path, profile: &Path) -> Option<()> {
     let git_common_dir = crate::worktree::git_common_dir(project)?;
     let global = GlobalDb::open_at_without_structured_backfill(&profile.join("global.db")).await?;

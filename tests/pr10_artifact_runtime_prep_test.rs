@@ -42,13 +42,13 @@ fn production(source: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
     let mut lines = source.lines().peekable();
     while let Some(line) = lines.next() {
-        if line.trim() == "#[cfg(test)]" {
-            if let Some(next) = lines.peek() {
-                let next = next.trim();
-                if next.starts_with("use ") && next.ends_with(';') {
-                    lines.next(); // drop the guarded `use` line as well
-                    continue;
-                }
+        if line.trim() == "#[cfg(test)]"
+            && let Some(next) = lines.peek()
+        {
+            let next = next.trim();
+            if next.starts_with("use ") && next.ends_with(';') {
+                lines.next(); // drop the guarded `use` line as well
+                continue;
             }
         }
         kept.push(line);

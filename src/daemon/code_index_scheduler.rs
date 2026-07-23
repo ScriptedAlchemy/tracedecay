@@ -70,7 +70,7 @@ const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
 
 /// How the scheduler is hinted about changes.
 ///
-/// TraceDecay's edits are agent-driven, so the daemon already learns about
+/// `TraceDecay`'s edits are agent-driven, so the daemon already learns about
 /// touched paths through host after-file-edit hooks; those are the primary
 /// hint source and require no standing filesystem watches. gix status remains
 /// the sole truth, reconciled lazily (on open, on hook receipt, and on the

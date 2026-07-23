@@ -215,10 +215,10 @@ fn decode_outbox(
     {
         return Err(corrupt("outbox entry is bound to a different shard"));
     }
-    if let Some(expected) = expected {
-        if entry.identity.effect_id != *expected {
-            return Err(corrupt("outbox entry identity does not match the request"));
-        }
+    if let Some(expected) = expected
+        && entry.identity.effect_id != *expected
+    {
+        return Err(corrupt("outbox entry identity does not match the request"));
     }
     Ok(entry)
 }
@@ -237,10 +237,10 @@ fn decode_inbox(
     {
         return Err(corrupt("inbox receipt is bound to a different shard"));
     }
-    if let Some(expected) = expected {
-        if receipt.identity.effect_id != *expected {
-            return Err(corrupt("inbox receipt identity does not match the request"));
-        }
+    if let Some(expected) = expected
+        && receipt.identity.effect_id != *expected
+    {
+        return Err(corrupt("inbox receipt identity does not match the request"));
     }
     Ok(receipt)
 }

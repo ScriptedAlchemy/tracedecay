@@ -33,7 +33,7 @@ pub struct StoreCensusEntry {
     pub canonical_root: PathBuf,
     /// Registry display root, when distinct from the canonical root.
     pub display_root: Option<PathBuf>,
-    /// On-disk store data directory (profile_root joined with the store relpath).
+    /// On-disk store data directory (`profile_root` joined with the store relpath).
     pub data_root: PathBuf,
     /// `project_root` recorded in the store manifest, when the manifest was read.
     pub manifest_root: Option<PathBuf>,
@@ -94,15 +94,14 @@ fn classify_one(entry: &StoreCensusEntry) -> StoreDisposition {
     }
     // Registry identity is dead. If the manifest still names a live root the
     // repository moved rather than vanished — re-link instead of collecting.
-    if let Some(manifest_root) = entry.manifest_root.as_deref() {
-        if manifest_root != entry.canonical_root
-            && entry.display_root.as_deref() != Some(manifest_root)
-            && root_is_live(manifest_root)
-        {
-            return StoreDisposition::Relinkable {
-                live_root: manifest_root.to_path_buf(),
-            };
-        }
+    if let Some(manifest_root) = entry.manifest_root.as_deref()
+        && manifest_root != entry.canonical_root
+        && entry.display_root.as_deref() != Some(manifest_root)
+        && root_is_live(manifest_root)
+    {
+        return StoreDisposition::Relinkable {
+            live_root: manifest_root.to_path_buf(),
+        };
     }
     StoreDisposition::Orphaned
 }
