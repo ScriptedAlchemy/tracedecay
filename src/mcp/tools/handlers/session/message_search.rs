@@ -1,4 +1,3 @@
-#![allow(dead_code)] // in-flight feature APIs not yet wired; see clippy sweep
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
@@ -426,6 +425,8 @@ pub(crate) enum SessionRetrievalUnavailableReason {
     RefreshWorkerRecovering,
     RefreshWorkerStopped,
     UnsupportedQuery,
+    #[allow(dead_code)]
+    // Complete terminal-reason contract; produced by the injected retrieval service in the follow-up wiring slice.
     RequestContextInvalid,
     TemporalStoreUnavailable,
     HydrationUnavailable,
