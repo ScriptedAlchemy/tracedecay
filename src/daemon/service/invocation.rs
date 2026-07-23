@@ -1240,7 +1240,17 @@ async fn execute_feedback(
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
-        return concealed_application_problem(wire_request_id);
+        // No feedback owner registered means the feedback read service is
+        // absent, not that a specific handle is hidden. Report the fail-closed
+        // infrastructure truth (Unavailable); concealment semantics only apply
+        // once the service exists and a caller names an unknown handle.
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "feedback.owner_unavailable".to_owned(),
+                message: "The feedback read owner is unavailable".to_owned(),
+            }),
+        );
     };
     let Ok(request_id) = RequestId::new(wire_request_id.clone()) else {
         return DaemonInvocationResponse::problem(
