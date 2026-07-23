@@ -830,13 +830,12 @@ async fn read_executor_keyset_walks_recovery_candidates() {
     }
 
     let executor = GitIndexReadExecutor::new(&store);
-    let candidates_query = |after: Option<GitIndexIdempotencyKey>, limit: u32| {
-        CodeRecoveryCandidatesQueryV1 {
+    let candidates_query =
+        |after: Option<GitIndexIdempotencyKey>, limit: u32| CodeRecoveryCandidatesQueryV1 {
             repository_id: repository_id.clone(),
             after,
             limit,
-        }
-    };
+        };
 
     let first = candidates_page(&executor, candidates_query(None, 2)).await;
     assert_eq!(

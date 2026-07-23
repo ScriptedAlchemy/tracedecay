@@ -1,4 +1,5 @@
-#![allow(dead_code)] // staged S11 read-port surface: the daemon read-port
+#![allow(dead_code)]
+// staged S11 read-port surface: the daemon read-port
 // dispatcher that will route `RepositoryReadOperationV1::Code` here is not yet
 // wired (the runtime executor rejects Code by design), so this executor is
 // exercised by its module tests until that dispatcher lands.
@@ -84,7 +85,11 @@ impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
             });
         }
         let records = self.store.recovery_candidates(&query.repository_id).await?;
-        Ok(paginate_candidates(records, query.after.as_ref(), query.limit))
+        Ok(paginate_candidates(
+            records,
+            query.after.as_ref(),
+            query.limit,
+        ))
     }
 
     /// Keyset page over the repositories that hold recovery records, ordered by
