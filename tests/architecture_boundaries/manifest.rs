@@ -172,6 +172,13 @@ fn parse_cargo_source_layout(
         if manifest_path == Path::new("Cargo.toml") {
             validate_query_dependency_aliases(&package.dependencies, &mut boundary_violations);
         } else {
+            if !manifest_path.starts_with("crates") {
+                boundary_violations.insert(format!(
+                    "workspace member {} manifest {} is outside the approved crates/ layout",
+                    package.name,
+                    manifest_path.display()
+                ));
+            }
             validate_contract_package_dependencies(
                 &manifest_path,
                 &package.dependencies,
@@ -635,6 +642,9 @@ pub(crate) fn inspect_physical_manifest_paths(
         if manifest_classification(&logical) != ManifestClassification::FirstParty {
             continue;
         }
+        if logical != Path::new("Cargo.toml") && !logical.starts_with("crates") {
+            violations.insert(out_of_layout_manifest_violation(repository, &logical));
+        }
         manifests.insert(logical.clone());
         let absolute = repository.join(&logical);
         let canonical = match fs::canonicalize(&absolute) {
@@ -714,6 +724,34 @@ fn collect_symlinked_rust_sources(
         }
     }
     Ok(())
+}
+
+/// Describes a first-party Cargo manifest tracked outside the approved
+/// `Cargo.toml`/`crates/` layout. The message quotes the physical package and
+/// library identity read from the manifest so the contract cannot be satisfied
+/// by renaming the package or its target.
+fn out_of_layout_manifest_violation(repository: &Path, logical: &Path) -> String {
+    let package = manifest_declared_name(repository, logical, "package")
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let library =
+        manifest_declared_name(repository, logical, "lib").unwrap_or_else(|| package.clone());
+    format!(
+        "first-party manifest {} declares package {} (lib {}) outside the approved crates/ layout",
+        logical.display(),
+        package,
+        library
+    )
+}
+
+/// Reads the `name` field from the `[package]` or `[lib]` table of a manifest.
+fn manifest_declared_name(repository: &Path, logical: &Path, table: &str) -> Option<String> {
+    let contents = fs::read_to_string(repository.join(logical)).ok()?;
+    let document: toml::Table = contents.parse().ok()?;
+    document
+        .get(table)?
+        .get("name")?
+        .as_str()
+        .map(str::to_string)
 }
 
 fn manifest_classification(path: &Path) -> ManifestClassification {
