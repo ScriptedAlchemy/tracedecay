@@ -45,6 +45,11 @@ pub(super) async fn handle_application_surface(
         object.remove("__mcp_request_id");
     }
     let render_args = request_args.clone();
+    if let Some(object) = request_args.as_object_mut() {
+        // `format` selects the rendered output only; it is not part of any
+        // reviewed surface schema and must not reach schema validation.
+        object.remove("format");
+    }
     let request_id = protocol_request_id.unwrap_or(request_id()?);
     let request = match parse_application_surface_request(operation, request_args) {
         Ok(request) => request,

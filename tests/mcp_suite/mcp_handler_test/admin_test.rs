@@ -388,7 +388,9 @@ fn active_project_and_storage_status_tools_are_advertised_readonly() {
         assert!(
             tool.input_schema["properties"]
                 .as_object()
-                .is_some_and(|properties| properties.keys().all(|key| key == "format")),
+                .is_some_and(|properties| properties
+                    .keys()
+                    .all(|key| key == "format" || key == "include_details")),
             "{name} should not require callers to pass resolver internals"
         );
         assert_eq!(
@@ -480,49 +482,31 @@ async fn storage_status_tool_summarizes_active_project_store_health() {
         .unwrap();
 
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"].as_str(), Some("ok"));
+    // Plan 21 moved this tool onto the daemon-retained typed primitive owner.
+    // Without a daemon transport (this in-process harness), the canonical
+    // outcome is the truthful unavailable problem envelope — never a
+    // fabricated local answer. Daemon-backed "ok" coverage lives in the
+    // runtime acceptance suite.
     assert_eq!(
-        payload["active_project"]["project_root"].as_str(),
-        Some(project_root.as_str())
+        payload["contract"]["schema_id"].as_str(),
+        Some("schema.application.primitive.storage-status.result")
     );
+    assert_eq!(payload["problem"]["kind"].as_str(), Some("unavailable"));
     assert_eq!(
-        payload["active_project"]["storage"]["graph_db_path"].as_str(),
-        Some(graph_db_path.as_str())
+        payload["problem"]["code"].as_str(),
+        Some("application.transport.unavailable")
     );
-    assert_eq!(
-        payload["active_project"]["storage"]["class"],
-        "code_project"
-    );
-    assert_eq!(payload["writable"].as_bool(), Some(true));
     assert!(
-        payload["warnings"]
+        payload["problem"]["legal_actions"]
             .as_array()
-            .is_some_and(|warnings| warnings.is_empty())
+            .is_some_and(|actions| actions.iter().any(|a| a == "retry"))
     );
-    assert_eq!(
-        payload["paths"]["graph_db_path"].as_str(),
-        Some(graph_db_path.as_str())
+    let _ = (
+        project_root,
+        graph_db_path,
+        config_path,
+        sync_lock_path,
+        branch_add_lock_path,
+        layout,
     );
-    assert_eq!(
-        payload["paths"]["config_path"].as_str(),
-        Some(config_path.as_str())
-    );
-    assert_eq!(
-        payload["locks"]["sync_lock_path"].as_str(),
-        Some(sync_lock_path.as_str())
-    );
-    assert_eq!(
-        payload["locks"]["branch_add_lock_path"].as_str(),
-        Some(branch_add_lock_path.as_str())
-    );
-    assert_eq!(
-        payload["locks"]["sync_lock_exists"].as_bool(),
-        Some(layout.sync_lock_path.exists())
-    );
-    assert_eq!(
-        payload["locks"]["branch_add_lock_exists"].as_bool(),
-        Some(layout.branch_add_lock_path.exists())
-    );
-    assert_eq!(payload["quotas"]["enforced"].as_bool(), Some(false));
-    assert_eq!(payload["quotas"]["graph_db_size_limit_bytes"], Value::Null);
 }
