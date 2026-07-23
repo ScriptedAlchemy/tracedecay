@@ -25,6 +25,7 @@ const QUERY_ALLOWED_ROOTS: &[&str] = &[
     "serde",
     "serde_json",
     "sha2",
+    "static_assertions",
     "std",
     "thiserror",
     "tracedecay_domain",
@@ -37,6 +38,10 @@ const QUERY_ALLOWED_CRATE_PATHS: &[&[&str]] = &[&[
     "chunks",
     "ExtractionAdmittedCodeSearchChunkV1",
 ]];
+/// Pure compile-time macros re-exported from allowlisted crates. Unlike the
+/// built-in macros in [`QUERY_ALLOWED_MACROS`], these must be imported before
+/// use, so the import-shadowing guard deliberately does not flag them.
+const QUERY_ALLOWED_IMPORTED_MACROS: &[&str] = &["assert_not_impl_any"];
 const QUERY_ALLOWED_MACROS: &[&str] = &[
     "assert",
     "assert_eq",
@@ -54,8 +59,8 @@ const QUERY_ALLOWED_MACROS: &[&str] = &[
     "writeln",
 ];
 const QUERY_ALLOWED_PRELUDE_PATH_ROOTS: &[&str] = &[
-    "Box", "Option", "Result", "String", "Vec", "bool", "char", "f32", "f64", "i8", "i16", "i32",
-    "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128", "usize",
+    "Box", "Option", "Result", "String", "ToString", "Vec", "bool", "char", "f32", "f64", "i8",
+    "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128", "usize",
 ];
 const QUERY_ALLOWED_DERIVES: &[&str] = &[
     "Clone",
@@ -643,6 +648,75 @@ fn module_level_query_names(tokens: &[Token], scope: &[String]) -> BTreeSet<Stri
         .collect()
 }
 
+/// Collects the leaf names re-exported by module-level `pub use` statements in
+/// the given scope. A `pub use path::Name` (or `pub use path::{A, B as C}`)
+/// adds `Name`/`A`/`C` to the module's public surface, so glob imports such as
+/// `use super::*` in a child module can resolve them. Glob re-exports
+/// (`pub use path::*`) are left to the existing local module-target resolution.
+fn module_level_reexport_names(tokens: &[Token], scope: &[String]) -> BTreeSet<String> {
+    let (scopes, depths) = token_module_scopes_and_depths(tokens);
+    let mut names = BTreeSet::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if !token_is_ident(tokens.get(index), "use") {
+            index += 1;
+            continue;
+        }
+        if scopes[index] != *scope || depths[index] != scope.len() || !is_pub_use(tokens, index) {
+            index += 1;
+            continue;
+        }
+        let mut cursor = index + 1;
+        let mut bindings = Vec::new();
+        scan_use_tree(
+            tokens,
+            &mut cursor,
+            &[],
+            &scopes[index],
+            true,
+            &mut bindings,
+        );
+        for binding in bindings {
+            if binding.glob {
+                continue;
+            }
+            let leaf = binding.alias.or_else(|| binding.path.last().cloned());
+            if let Some(leaf) = leaf
+                && leaf != "self"
+            {
+                names.insert(leaf);
+            }
+        }
+        while cursor < tokens.len() && tokens.get(cursor) != Some(&Token::Punct(';')) {
+            cursor += 1;
+        }
+        index = cursor.saturating_add(1);
+    }
+    names
+}
+
+/// Reports whether the `use` at `use_index` carries a `pub` (or `pub(..)`)
+/// visibility, i.e. it re-exports rather than privately importing.
+fn is_pub_use(tokens: &[Token], use_index: usize) -> bool {
+    if use_index == 0 {
+        return false;
+    }
+    if token_is_ident(tokens.get(use_index - 1), "pub") {
+        return true;
+    }
+    // pub(crate) / pub(super) / pub(in ..) use: the token before `use` is ')'.
+    if tokens.get(use_index - 1) == Some(&Token::Punct(')')) {
+        let mut cursor = use_index - 1;
+        while cursor > 0 && tokens.get(cursor) != Some(&Token::Punct('(')) {
+            cursor -= 1;
+        }
+        if cursor > 0 && token_is_ident(tokens.get(cursor - 1), "pub") {
+            return true;
+        }
+    }
+    false
+}
+
 fn validate_query_path(
     path: &[String],
     module_depth: usize,
@@ -703,7 +777,10 @@ fn validate_query_macros(tokens: &[Token], violations: &mut BTreeSet<String>) {
         if !matches!(tokens.get(index + 2), Some(Token::Punct('(' | '[' | '{'))) {
             continue;
         }
-        if !QUERY_ALLOWED_MACROS.contains(&name.as_str()) && !local_macros.contains(name) {
+        if !QUERY_ALLOWED_MACROS.contains(&name.as_str())
+            && !QUERY_ALLOWED_IMPORTED_MACROS.contains(&name.as_str())
+            && !local_macros.contains(name)
+        {
             violations.insert(format!(
                 "non-allowlisted code-generating macro {name}!; query source permits only explicit pure macros"
             ));
@@ -847,22 +924,28 @@ fn validate_query_attributes(
         } else {
             let exact = match normalized.as_str() {
                 "allow" => {
-                    body == [
-                        Token::Ident("allow".to_string()),
-                        Token::Punct('('),
-                        Token::Ident("deprecated".to_string()),
-                        Token::Punct(')'),
-                    ] || body
-                        == [
-                            Token::Ident("allow".to_string()),
+                    matches!(
+                        body,
+                        [
+                            Token::Ident(allow),
                             Token::Punct('('),
-                            Token::Ident("clippy".to_string()),
-                            Token::Punct(':'),
-                            Token::Punct(':'),
-                            Token::Ident("too_many_arguments".to_string()),
+                            Token::Ident(lint),
                             Token::Punct(')'),
-                        ]
+                        ] if allow == "allow" && (lint == "deprecated" || lint == "dead_code")
+                    ) || matches!(
+                        body,
+                        [
+                            Token::Ident(allow),
+                            Token::Punct('('),
+                            Token::Ident(clippy),
+                            Token::Punct(':'),
+                            Token::Punct(':'),
+                            Token::Ident(_),
+                            Token::Punct(')'),
+                        ] if allow == "allow" && clippy == "clippy"
+                    )
                 }
+                "must_use" => body == [Token::Ident("must_use".to_string())],
                 "cfg" => {
                     body == [
                         Token::Ident("cfg".to_string()),
@@ -1117,11 +1200,9 @@ fn build_query_module_graph(
             let mut full_scope = context.module_path.clone();
             full_scope.extend(scope.clone());
             graph.modules.insert(full_scope.clone());
-            graph
-                .symbols
-                .entry(full_scope)
-                .or_default()
-                .extend(module_level_query_names(&tokens, &scope));
+            let mut names = module_level_query_names(&tokens, &scope);
+            names.extend(module_level_reexport_names(&tokens, &scope));
+            graph.symbols.entry(full_scope).or_default().extend(names);
         }
         for index in 0..tokens.len().saturating_sub(2) {
             if scopes[index].len() != depths[index]
