@@ -39,6 +39,7 @@ type SelectedRemediation = {
   entry: DoctorReportEntry;
   descriptor: DoctorRemediationDescriptor;
   actions: { canPreview: boolean; canApply: boolean };
+  idempotencyKey: string;
 };
 
 /** Canonical Doctor finding inspector and owner-operation handoff. The component
@@ -130,7 +131,7 @@ export function DoctorInspector() {
     apply.mutate({
       operation: selected.descriptor.operation,
       preview_id: selectedPreviewId,
-      idempotency_key: newIdempotencyKey(),
+      idempotency_key: selected.idempotencyKey,
       confirmed:
         selected.descriptor.action_confirmation === 'required' ? confirmed : true,
     });
@@ -157,6 +158,7 @@ export function DoctorInspector() {
             entry,
             descriptor,
             actions: availableRemediationActions(descriptor, legalActions),
+            idempotencyKey: newIdempotencyKey(),
           });
         }}
         onPreview={(operation) => preview.mutate(operation)}
@@ -497,6 +499,9 @@ function RemediationDialog({
                 </p>
                 <p className="mt-1 text-2xs text-text-muted">
                   owner {selection.descriptor.surface.replaceAll('_', ' ')}
+                </p>
+                <p className="mt-1 break-all font-mono text-2xs text-text-muted">
+                  idempotency {selection.idempotencyKey}
                 </p>
                 {previewId ? (
                   <p className="mt-1 break-all font-mono text-2xs text-text-muted">

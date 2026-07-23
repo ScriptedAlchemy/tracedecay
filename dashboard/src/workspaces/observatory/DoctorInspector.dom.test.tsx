@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DoctorInspector } from './DoctorInspector.tsx';
@@ -104,6 +104,22 @@ describe('DoctorInspector', () => {
       preview_id: 'preview.doctor.preview',
       confirmed: true,
     });
+
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: /I confirm this exact owner operation/,
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Apply remediation' }));
+    await waitFor(() => {
+      expect(
+        calls.filter(({ url }) => url === '/api/doctor/remediations/apply'),
+      ).toHaveLength(2);
+    });
+    const applyBodies = calls
+      .filter(({ url }) => url === '/api/doctor/remediations/apply')
+      .map(({ init }) => JSON.parse(String(init?.body)));
+    expect(applyBodies[1]?.idempotency_key).toBe(applyBodies[0]?.idempotency_key);
   });
 
   it('resumes the durable owner status identity after a reload', async () => {
