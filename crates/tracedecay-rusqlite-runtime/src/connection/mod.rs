@@ -270,6 +270,31 @@ fn authorize_maintenance(_: AuthContext<'_>) -> Authorization {
     Authorization::Allow
 }
 
+/// Schema-introspection pragmas that only read metadata and cannot mutate the
+/// database, file, or connection configuration. These stay available even to
+/// read-only lanes (for example the immutable Doctor health reader) so column
+/// and index shape audits work without opening a writable connection.
+fn is_read_only_introspection_pragma(pragma_name: &str) -> bool {
+    const READ_ONLY_INTROSPECTION_PRAGMAS: &[&str] = &[
+        "collation_list",
+        "database_list",
+        "foreign_key_check",
+        "foreign_key_list",
+        "function_list",
+        "index_info",
+        "index_list",
+        "index_xinfo",
+        "module_list",
+        "pragma_list",
+        "table_info",
+        "table_list",
+        "table_xinfo",
+    ];
+    READ_ONLY_INTROSPECTION_PRAGMAS
+        .iter()
+        .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate))
+}
+
 fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
     if mode == ConnectionMode::Maintenance {
         return Authorization::Allow;
@@ -307,9 +332,10 @@ fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
                 pragma_name,
                 pragma_value: Some(_),
             }
-            if mode != ConnectionMode::Writer
-                || (!pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
-                    && !pragma_name.eq_ignore_ascii_case("wal_checkpoint"))
+            if !is_read_only_introspection_pragma(pragma_name)
+                && (mode != ConnectionMode::Writer
+                    || (!pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
+                        && !pragma_name.eq_ignore_ascii_case("wal_checkpoint")))
         )
         || (mode == ConnectionMode::Reader
             && matches!(
