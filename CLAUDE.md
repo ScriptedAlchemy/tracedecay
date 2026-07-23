@@ -4,8 +4,9 @@
 
 - These rules describe Zack's machine-local development environment, not
   TraceDecay product behavior, public contributor setup, or hosted CI.
-- Run ordinary `cargo` commands. The machine-local shim allocates concurrent
-  build lanes; do not set `CARGO_TARGET_DIR` or `TRACEDECAY_DATA_DIR` yourself.
+- Run ordinary `cargo` commands directly (no build shim is installed); do not
+  set `CARGO_TARGET_DIR` or `TRACEDECAY_DATA_DIR` yourself. Concurrent agents
+  share the repo `target/` — waiting on cargo's directory lock is normal.
 - Do not add `--locked` to local or agent Cargo commands. Existing CI,
   packaging, and `cargo install` commands may require lockfile reproducibility.
 - Scope development checks narrowly. Before handoff, run the relevant
