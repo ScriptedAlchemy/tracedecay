@@ -30,7 +30,6 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
     ScoreDomainId, SnapshotFileDispositionV1, UtcMicros, WorktreeId, canonical_sha256,
 };
-use tree_sitter::{InputEdit, Parser, Point, Range};
 
 use crate::{
     application::code_index::{
@@ -419,7 +418,6 @@ impl PendingHintsV1 {
 struct CapturedSnapshotV1 {
     snapshot: SanitizedCodeSnapshotV1,
     captured_files: Vec<CodeIndexCapturedFileV1>,
-    bytes_by_path: BTreeMap<String, Arc<[u8]>>,
     changed_paths: BTreeSet<String>,
 }
 
@@ -430,8 +428,6 @@ pub(super) struct CodeIndexPublishEvidenceV1 {
     pub snapshot_content_identity: ContentDigest,
     pub lane_digest: ManifestDigest,
     pub file_occurrence_ids: Vec<FileOccurrenceId>,
-    pub incremental_parse_files: usize,
-    pub changed_ranges: usize,
     pub reextracted_files: usize,
     pub changed_chunks: usize,
     pub reused_chunks: usize,
@@ -570,13 +566,17 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     git_metadata: identity::GitMetadataFingerprintV1,
     /// Tier-2 bounded-staleness clock: when truth was last reconciled.
     last_reconciled_at: Instant,
+    /// Tier-2 cheap prefilter: stat-level (path, mtime, size) signature of the
+    /// present source candidates at last reconcile. A quiet repository whose
+    /// signature is unchanged resets the staleness clock without paying the
+    /// O(repo) read+hash capture.
+    last_stat_signature: Option<String>,
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     owner: ProductionOwner,
     hints: Arc<Mutex<PendingHintsV1>>,
     wake: Arc<tokio::sync::Notify>,
     epoch: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
-    saved_trees: tree_cache::SavedTreeCacheV1,
     latest_content_identity: Option<ContentDigest>,
     watcher: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
     /// Optional PR10 hook: schedule `FastEmbed` projection without joining it.
@@ -647,7 +647,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
-        let saved_trees = tree_cache::SavedTreeCacheV1::new(identity.identity_key());
         let mut scheduler = Self {
             project_root,
             identity,
@@ -656,13 +655,13 @@ impl CodeIndexWorktreeSchedulerV1 {
             policy,
             git_metadata,
             last_reconciled_at: Instant::now(),
+            last_stat_signature: None,
             byte_pool,
             owner,
             hints,
             wake,
             epoch,
             shutting_down: Arc::new(AtomicBool::new(false)),
-            saved_trees,
             latest_content_identity,
             watcher: None,
             semantic_schedule: None,
@@ -754,9 +753,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             ));
         }
         self.identity = resolved;
-        // Sample tier-1 git metadata for the state we are reconciling to; stored
-        // on return so the next query-admission check compares against it.
+        // Sample tier-1 git metadata and the tier-2 stat signature for the state
+        // we are reconciling to; stored on return so the next query-admission
+        // check compares against them.
         let sampled_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let sampled_signature = self.worktree_stat_signature().ok();
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
             let hints = self
@@ -767,15 +768,13 @@ impl CodeIndexWorktreeSchedulerV1 {
             overflow_reconciled |= hints.overflow;
             let captured = self.capture_authoritative_snapshot()?;
             if self.latest_content_identity.as_ref() == Some(&captured.snapshot.content_identity) {
-                self.mark_reconciled(sampled_metadata);
+                self.mark_reconciled(sampled_metadata, sampled_signature);
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity: captured.snapshot.content_identity,
                     overflow_reconciled,
                 }));
             }
 
-            let (saved_tree_inputs, incremental_parse_files, changed_ranges) =
-                self.incremental_parse_evidence(&captured)?;
             let control = DaemonCodeIndexControlV1::new(
                 Arc::clone(&self.epoch),
                 Arc::clone(&self.shutting_down),
@@ -804,11 +803,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 Err(error) => return Err(error.into()),
             };
-            let identity_key = self.identity.identity_key();
-            self.saved_trees
-                .commit_batch(&identity_key, saved_tree_inputs);
             self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
-            self.mark_reconciled(sampled_metadata.clone());
+            self.mark_reconciled(sampled_metadata.clone(), sampled_signature.clone());
 
             // PR10: enqueue FastEmbed projection without waiting on download/index.
             if let Some(schedule) = &self.semantic_schedule {
@@ -839,8 +835,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                         .iter()
                         .map(|file| file.file_occurrence_id.clone())
                         .collect(),
-                    incremental_parse_files,
-                    changed_ranges,
                     reextracted_files: captured.changed_paths.len(),
                     changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
                     reused_chunks: changes.reused.len(),
@@ -851,9 +845,56 @@ impl CodeIndexWorktreeSchedulerV1 {
         unreachable!("the bounded reconciliation loop returns on its final attempt")
     }
 
-    fn mark_reconciled(&mut self, metadata: identity::GitMetadataFingerprintV1) {
+    fn mark_reconciled(
+        &mut self,
+        metadata: identity::GitMetadataFingerprintV1,
+        signature: Option<String>,
+    ) {
         self.git_metadata = metadata;
+        self.last_stat_signature = signature;
         self.last_reconciled_at = Instant::now();
+    }
+
+    /// A cheap stat-level (path, mtime, size) signature of the present source
+    /// candidates. It opens gix and runs stat-based status (no byte reads, no
+    /// content hashing), so it can gate the far more expensive read+hash capture
+    /// on the tier-2 query path when nothing has actually changed on disk.
+    fn worktree_stat_signature(&self) -> Result<String, CodeIndexSchedulerErrorV1> {
+        let repository = gix::open(&self.project_root)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+        let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+        let registry = StaticLanguageRegistry::new();
+        let mut buf = Vec::new();
+        for logical_path in classification.candidate_paths() {
+            let absolute = self.project_root.join(&logical_path);
+            let Some(extension) = absolute.extension().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if registry
+                .descriptor_for_extension(&extension.to_lowercase())
+                .is_none()
+            {
+                continue;
+            }
+            let Ok(metadata) = std::fs::metadata(&absolute) else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let mtime_nanos = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0u128, |elapsed| elapsed.as_nanos());
+            buf.extend_from_slice(logical_path.as_bytes());
+            buf.push(0);
+            buf.extend_from_slice(&metadata.len().to_le_bytes());
+            buf.extend_from_slice(&mtime_nanos.to_le_bytes());
+            buf.push(0xff);
+        }
+        Ok(format!("sha256:{}", sha256_hex(&buf)))
     }
 
     /// Deliver debounced hook hints (exact touched paths) into the incremental
@@ -887,13 +928,27 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn ensure_fresh_for_query(&mut self) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let git_changed = identity::GitMetadataFingerprintV1::capture(&self.project_root)
             .differs_from(&self.git_metadata);
-        let past_staleness_bound =
-            self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold;
-        if git_changed || past_staleness_bound {
+        if git_changed {
+            // Tier 1: a git-mediated mutation is authoritative evidence; reconcile.
             self.reconcile_now()?;
             return Ok(true);
         }
-        Ok(false)
+        if self.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
+            return Ok(false);
+        }
+        // Tier 2: the bounded-staleness window elapsed. Gate the O(repo)
+        // read+hash capture behind a cheap stat-level signature so a quiet
+        // repository just resets its clock instead of re-reading every file.
+        match self.worktree_stat_signature() {
+            Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
+                self.last_reconciled_at = Instant::now();
+                Ok(false)
+            }
+            _ => {
+                self.reconcile_now()?;
+                Ok(true)
+            }
+        }
     }
 
     /// The exact identity this scheduler is currently bound to.
@@ -934,7 +989,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         let registry = StaticLanguageRegistry::new();
         let mut files = Vec::new();
         let mut captured_files = Vec::new();
-        let mut bytes_by_path = BTreeMap::new();
         for logical_path in candidate_paths {
             let absolute = self.project_root.join(&logical_path);
             if !absolute.is_file() {
@@ -966,7 +1020,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 file_occurrence_id: occurrence,
                 sanitized_bytes: shared.to_vec(),
             });
-            bytes_by_path.insert(logical_path, shared);
         }
         files.sort_by(|left, right| {
             (&left.logical_path, &left.file_occurrence_id)
@@ -988,267 +1041,16 @@ impl CodeIndexWorktreeSchedulerV1 {
                 files,
             },
             captured_files,
-            bytes_by_path,
             changed_paths,
         })
     }
 
-    fn incremental_parse_evidence(
-        &mut self,
-        captured: &CapturedSnapshotV1,
-    ) -> Result<(Vec<tree_cache::SavedTreeInputV1>, usize, usize), CodeIndexSchedulerErrorV1> {
-        let mut inputs = Vec::new();
-        let mut incremental_files = 0;
-        let mut changed_range_count = 0;
-        for file in &captured.snapshot.files {
-            let bytes = captured
-                .bytes_by_path
-                .get(&file.logical_path)
-                .unwrap_or_else(|| panic!("captured file bytes exist"));
-            let language = file
-                .language
-                .as_ref()
-                .unwrap_or_else(|| panic!("present source has a language"));
-            let mut parser = Parser::new();
-            parser
-                .set_language(
-                    &crate::extraction::ts_provider::try_language(language.as_str())
-                        .map_err(CodeIndexSchedulerErrorV1::Identity)?,
-                )
-                .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-            // The retained tree (if any) is structurally isolated to this
-            // worktree's identity by the cache key; a miss just full-parses.
-            let (tree, changed_ranges) = match self.saved_trees.get(&file.logical_path) {
-                Some(saved) if saved.bytes.as_ref() != bytes.as_ref() => {
-                    let mut edited = saved.tree.clone();
-                    edited.edit(&single_input_edit(&saved.bytes, bytes));
-                    let tree = parser.parse(bytes.as_ref(), Some(&edited)).ok_or_else(|| {
-                        CodeIndexSchedulerErrorV1::Identity(
-                            "tree-sitter incremental parse returned no tree".to_owned(),
-                        )
-                    })?;
-                    let ranges = edited.changed_ranges(&tree).collect::<Vec<_>>();
-                    incremental_files += 1;
-                    changed_range_count += ranges.len().max(1);
-                    (tree, ranges)
-                }
-                Some(saved) => (saved.tree, Vec::<Range>::new()),
-                None => (
-                    parser.parse(bytes.as_ref(), None).ok_or_else(|| {
-                        CodeIndexSchedulerErrorV1::Identity(
-                            "tree-sitter initial parse returned no tree".to_owned(),
-                        )
-                    })?,
-                    Vec::new(),
-                ),
-            };
-            let _ = changed_ranges;
-            inputs.push(tree_cache::SavedTreeInputV1 {
-                path: file.logical_path.clone(),
-                bytes: Arc::clone(bytes),
-                digest: file.content_digest.clone(),
-                tree,
-            });
-        }
-        Ok((inputs, incremental_files, changed_range_count))
-    }
 }
 
 impl Drop for CodeIndexWorktreeSchedulerV1 {
     fn drop(&mut self) {
         self.shutting_down.store(true, Ordering::Release);
         self.watcher.take();
-    }
-}
-
-struct MountedCodeIndexWorktreeV1 {
-    scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-#[derive(Clone)]
-pub(super) struct CodeIndexSchedulerRegistryV1 {
-    max_worktrees: usize,
-    byte_pool: Arc<SharedCodeIndexBytePoolV1>,
-    mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
-}
-
-impl CodeIndexSchedulerRegistryV1 {
-    pub fn new(max_worktrees: usize) -> Self {
-        Self {
-            max_worktrees,
-            byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
-            mounted: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-        }
-    }
-
-    pub fn open_worktree(
-        &self,
-        project_root: &Path,
-        store_root: PathBuf,
-    ) -> Result<CodeIndexWorktreeSchedulerV1, CodeIndexSchedulerErrorV1> {
-        if self.max_worktrees == 0 {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler capacity is zero".to_owned(),
-            ));
-        }
-        CodeIndexWorktreeSchedulerV1::open(project_root, store_root, Arc::clone(&self.byte_pool))
-    }
-
-    pub fn byte_pool_stats(&self) -> CodeIndexBytePoolStatsV1 {
-        self.byte_pool.stats()
-    }
-
-    pub async fn mount_worktree(
-        &self,
-        project_root: &Path,
-        store_root: PathBuf,
-        semantic_schedule: Option<
-            crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
-        >,
-    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
-        let project_root = project_root.canonicalize()?;
-        let mut mounted = self.mounted.lock().await;
-        if mounted.contains_key(&project_root) {
-            return Ok(false);
-        }
-        if mounted.len() >= self.max_worktrees {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler capacity is exhausted".to_owned(),
-            ));
-        }
-        let mut opened = self.open_worktree(
-            &project_root,
-            store_root.join(sha256_hex(project_root.to_string_lossy().as_bytes())),
-        )?;
-        if let Some(hook) = semantic_schedule {
-            if let Some(latest) = opened.latest_complete() {
-                let _ = hook(&latest.generation);
-            }
-            opened.set_semantic_schedule_hook(hook);
-        }
-        let scheduler = Arc::new(Mutex::new(opened));
-        let (wake, shutting_down) = {
-            let scheduler = scheduler
-                .lock()
-                .unwrap_or_else(|_| panic!("code-index scheduler lock"));
-            (
-                Arc::clone(&scheduler.wake),
-                Arc::clone(&scheduler.shutting_down),
-            )
-        };
-        let worker_scheduler = Arc::clone(&scheduler);
-        let worker_wake = Arc::clone(&wake);
-        let task = tokio::spawn(async move {
-            loop {
-                worker_wake.notified().await;
-                if shutting_down.load(Ordering::Acquire) {
-                    return;
-                }
-                let scheduler = Arc::clone(&worker_scheduler);
-                let result = tokio::task::spawn_blocking(move || {
-                    scheduler
-                        .lock()
-                        .unwrap_or_else(|_| panic!("code-index scheduler lock"))
-                        .reconcile_now()
-                })
-                .await;
-                if result.is_err() || shutting_down.load(Ordering::Acquire) {
-                    return;
-                }
-            }
-        });
-        mounted.insert(project_root, MountedCodeIndexWorktreeV1 { scheduler, task });
-        wake.notify_one();
-        Ok(true)
-    }
-
-    pub async fn notify_path(&self, project_root: &Path, path: PathBuf) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
-            return false;
-        };
-        let mounted = self.mounted.lock().await;
-        let Some(worktree) = mounted.get(&project_root) else {
-            return false;
-        };
-        worktree
-            .scheduler
-            .lock()
-            .unwrap_or_else(|_| panic!("code-index scheduler lock"))
-            .notify_path(path);
-        true
-    }
-
-    /// Primary hint path: deliver the exact touched paths carried by a host
-    /// after-file-edit hook into the mounted worktree's incremental queue.
-    /// `rel_paths` are repository-relative; they are resolved against the
-    /// project root. Returns `true` when a worktree was mounted to receive them.
-    pub async fn notify_hook_paths(&self, project_root: &Path, rel_paths: &[String]) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
-            return false;
-        };
-        let mounted = self.mounted.lock().await;
-        let Some(worktree) = mounted.get(&project_root) else {
-            return false;
-        };
-        let absolute = rel_paths
-            .iter()
-            .map(|rel| project_root.join(rel))
-            .collect::<Vec<_>>();
-        worktree
-            .scheduler
-            .lock()
-            .unwrap_or_else(|_| panic!("code-index scheduler lock"))
-            .notify_hook_paths(absolute);
-        true
-    }
-
-    pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {
-        let project_root = project_root.canonicalize().ok()?;
-        let mounted = self.mounted.lock().await;
-        let worktree = mounted.get(&project_root)?;
-        worktree
-            .scheduler
-            .lock()
-            .ok()?
-            .latest_complete()
-            .map(|latest| latest.generation.manifest().generation_id.clone())
-    }
-
-    /// Query-admission entry point: run the freshness ladder (tier-1 git
-    /// metadata, tier-2 bounded staleness, tier-3 identity re-resolution) before
-    /// returning the latest complete generation, so external out-of-band changes
-    /// are reconciled without any standing filesystem watcher.
-    pub async fn latest_complete_fresh(
-        &self,
-        project_root: &Path,
-    ) -> Option<LatestCompleteCodeIndexV1> {
-        let project_root = project_root.canonicalize().ok()?;
-        let mounted = self.mounted.lock().await;
-        let worktree = mounted.get(&project_root)?;
-        let mut scheduler = worktree
-            .scheduler
-            .lock()
-            .unwrap_or_else(|_| panic!("code-index scheduler lock"));
-        // A freshness reconcile failure is non-fatal for serving: fall back to
-        // the last complete generation rather than denying the query.
-        let _ = scheduler.ensure_fresh_for_query();
-        scheduler.latest_complete()
-    }
-
-    pub async fn shutdown(&self) {
-        let mounted = std::mem::take(&mut *self.mounted.lock().await);
-        for worktree in mounted.values() {
-            let scheduler = worktree
-                .scheduler
-                .lock()
-                .unwrap_or_else(|_| panic!("code-index scheduler lock"));
-            scheduler.shutting_down.store(true, Ordering::Release);
-            scheduler.wake.notify_one();
-        }
-        for (_, worktree) in mounted {
-            let _ = worktree.task.await;
-        }
     }
 }
 
@@ -1329,45 +1131,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn single_input_edit(old: &[u8], new: &[u8]) -> InputEdit {
-    let prefix = old
-        .iter()
-        .zip(new)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let suffix = old[prefix..]
-        .iter()
-        .rev()
-        .zip(new[prefix..].iter().rev())
-        .take_while(|(left, right)| left == right)
-        .count();
-    let old_end = old.len() - suffix;
-    let new_end = new.len() - suffix;
-    InputEdit {
-        start_byte: prefix,
-        old_end_byte: old_end,
-        new_end_byte: new_end,
-        start_position: point_for_offset(old, prefix),
-        old_end_position: point_for_offset(old, old_end),
-        new_end_position: point_for_offset(new, new_end),
-    }
-}
-
-fn point_for_offset(bytes: &[u8], offset: usize) -> Point {
-    let prefix = &bytes[..offset.min(bytes.len())];
-    #[allow(clippy::naive_bytecount)] // no bytecount dependency; simple scan is fine
-    let row = prefix.iter().filter(|byte| **byte == b'\n').count();
-    let column = prefix
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(prefix.len(), |newline| prefix.len() - newline - 1);
-    Point::new(row, column)
-}
-
 #[cfg(test)]
 mod tests;
 
 mod classification;
 mod identity;
 mod queries;
-mod tree_cache;
+mod registry;
+
+// The registry surface lives in `registry.rs`; re-export it so its public path
+// (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures
+// stay stable for the daemon and MCP server that mount and query worktrees.
+pub(in crate::daemon) use registry::CodeIndexSchedulerRegistryV1;
