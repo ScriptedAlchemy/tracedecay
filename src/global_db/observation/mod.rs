@@ -1,6 +1,7 @@
 mod codec;
 mod persist;
 mod provenance_backfill;
+pub mod retention;
 mod schema;
 
 #[cfg(test)]
@@ -250,6 +251,27 @@ impl GlobalDb {
             ),
             record: Box::new(record),
         })
+    }
+
+    /// Typed entry point for generation-scoped observation-evidence retention
+    /// (plan 38 §3). Releases the `observations`/`retrieval_anchors`/
+    /// `observation_repository_provenance` payloads governed by superseded or
+    /// deleted anchor dispositions, under the configured windows.
+    ///
+    /// Daemon-wiring seam: a retention scheduler calls this on the owner
+    /// store's connection off the hot path (mirroring the sibling
+    /// [`crate::sessions::lcm::retention`] slice). It is inert by default
+    /// (`ObservationRetentionConfig::default()` has every window `None`) and is
+    /// intentionally *not* wired into the daemon yet.
+    #[allow(dead_code)] // Removed when the daemon retention scheduler calls this seam.
+    pub(crate) async fn run_observation_retention(
+        &self,
+        generation: Option<&str>,
+        config: &retention::ObservationRetentionConfig,
+        mode: retention::RetentionMode,
+        now: i64,
+    ) -> crate::errors::Result<retention::ObservationRetentionReport> {
+        retention::run_observation_retention(&self.conn, generation, config, mode, now).await
     }
 
     pub(crate) async fn replay_observations_result(
