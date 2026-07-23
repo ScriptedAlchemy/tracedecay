@@ -426,13 +426,7 @@ impl ScoreDomainCalibrationV1 {
             .raw_max_micros
             .checked_sub(self.raw_min_micros)
             .ok_or(RetrievalContractError::InvalidCalibrationRange)?;
-        let feature =
-            offset
-                .checked_mul(1_000_000)
-                .ok_or(RetrievalContractError::FixedPointOverflow {
-                    operation: "calibration scale",
-                })?
-                / span;
+        let feature = u128::from(offset) * 1_000_000_u128 / u128::from(span);
         u32::try_from(feature).map_err(|_| RetrievalContractError::FixedPointOverflow {
             operation: "calibration result",
         })
@@ -1573,6 +1567,21 @@ mod tests {
         assert_eq!(
             FixedPointScore(2_000_000).checked_weight(500_000),
             Ok(1_000_000)
+        );
+    }
+
+    #[test]
+    fn score_calibration_handles_the_full_u64_domain_without_intermediate_overflow() {
+        let calibration = ScoreDomainCalibrationV1 {
+            calibration_profile_id: id("calibration.fixture.v1"),
+            score_domain: id("score.fixture.v1"),
+            raw_min_micros: 0,
+            raw_max_micros: u64::MAX,
+        };
+
+        assert_eq!(
+            calibration.calibrate(FixedPointScore(u64::MAX / 2)),
+            Ok(499_999)
         );
     }
 
