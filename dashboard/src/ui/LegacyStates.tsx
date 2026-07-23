@@ -47,9 +47,9 @@ export function CenteredState({
 /** Compact stat tile for overview grids. */
 export function StatTile({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
   return (
-    <div className="flex flex-col gap-0.5 rounded-[var(--radius-chip)] bg-surface-2 px-3 py-2">
-      <span className="text-2xs text-text-muted">{label}</span>
-      <span className="tabular text-sm font-semibold" data-cell="numeric">
+    <div className="flex flex-col gap-0.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-3 py-2.5">
+      <span className="text-2xs uppercase tracking-wide text-text-muted">{label}</span>
+      <span className="tabular text-xl font-semibold leading-tight text-text-primary" data-cell="numeric">
         {value}
       </span>
       {hint ? <span className="text-2xs text-text-muted">{hint}</span> : null}

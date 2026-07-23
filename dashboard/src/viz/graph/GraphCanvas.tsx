@@ -77,7 +77,8 @@ export function GraphCanvas({
         degree: node.degree,
         x: Math.cos(angle),
         y: Math.sin(angle),
-        size: 3 + 8 * Math.sqrt(node.degree / maxDegree),
+        size: 5 + 9 * Math.sqrt(node.degree / maxDegree),
+        isHub: node.degree >= maxDegree * 0.75,
       });
     });
     for (const edge of edges) {
@@ -85,9 +86,12 @@ export function GraphCanvas({
         graph.addEdge(edge.source, edge.target, { kind: edge.kind });
       }
     }
+    const fa2 = forceAtlas2.inferSettings(graph);
     forceAtlas2.assign(graph, {
       iterations: 200,
-      settings: forceAtlas2.inferSettings(graph),
+      // Small graphs over-spread with inferred gravity; pull clusters in so
+      // the tissue reads dense, not lost in the void.
+      settings: { ...fa2, gravity: (fa2.gravity ?? 1) * (nodes.length < 60 ? 8 : 2), scalingRatio: 4 },
     });
 
     let colors = palette(container);
@@ -99,9 +103,9 @@ export function GraphCanvas({
 
     const renderer = new Sigma(graph, container, {
       renderLabels: true,
-      labelRenderedSizeThreshold: 9,
+      labelRenderedSizeThreshold: nodes.length <= 60 ? 5 : 9,
       labelFont: 'ui-monospace, monospace',
-      labelSize: 10,
+      labelSize: 11,
       labelColor: { color: colors.label },
       defaultEdgeColor: colors.edge,
       nodeReducer: (node, data) => {
@@ -114,19 +118,20 @@ export function GraphCanvas({
         // Synapse heat: color lerps toward the accent and the node swells —
         // a strike blooms then decays to dark (exponential half-life).
         const baseColor = dimmed ? colors.dim : colors.node;
+        const resting = data['isHub'] ? colors.label : baseColor;
         const color =
           isSelected || isHovered
             ? colors.nodeSelected
             : heat > 0
-              ? lerpRgb(cssColorToRgb(baseColor), hotRgb, Math.min(1, heat))
-              : baseColor;
+              ? lerpRgb(cssColorToRgb(resting), hotRgb, Math.min(1, heat))
+              : resting;
         return {
           ...data,
           color,
           size: (data['size'] as number) * (1 + 0.5 * heat),
           zIndex: isSelected || isHovered || heat > 0.4 ? 2 : 1,
           label:
-            isSelected || isHovered || heat > 0.5 || data['degree'] >= maxDegree * 0.6
+            isSelected || isHovered || heat > 0.5 || data['isHub'] || nodes.length <= 60
               ? data['label']
               : '',
         };
@@ -247,7 +252,7 @@ export function GraphCanvas({
       <div
         ref={containerRef}
         style={{ height }}
-        className="overflow-hidden rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-0"
+        className="overflow-hidden rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-0 [background:radial-gradient(120%_90%_at_50%_40%,var(--raw-surface-1)_0%,var(--raw-surface-0)_58%,oklch(0.11_0.01_260)_100%)]"
         role="img"
         aria-label={`Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`}
       />
