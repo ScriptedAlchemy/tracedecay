@@ -79,8 +79,31 @@ pub(crate) async fn ensure_authority_invariant_schema(
 pub(crate) async fn ensure_authority_invariants(
     conn: &Connection,
     force_exhaustive: bool,
+    is_fresh: bool,
 ) -> crate::errors::Result<()> {
     let trigger_contracts_were_intact = ensure_authority_invariant_schema(conn).await?;
+    if is_fresh {
+        // This open created the authority schema from an empty database, so
+        // every table the row audits below would scan is guaranteed empty. An
+        // exhaustive pass over empty tables produces exactly the default
+        // (all-zero) checkpoint with zero audited counts, so write that
+        // baseline directly and skip the empty-table scans (~40-60ms on every
+        // first open). `is_fresh` is never set on reopen, so corruption
+        // detection for existing stores is unchanged; triggers were still
+        // (re)installed by `ensure_authority_invariant_schema` above.
+        return write_audit_checkpoint(
+            conn,
+            AuditProgress {
+                checkpoint: AuditCheckpoint::default(),
+                receipts_audited: 0,
+                observations_audited: 0,
+                provenance_audited: 0,
+                dispositions_audited: 0,
+                aliases_audited: 0,
+            },
+        )
+        .await;
+    }
     let checkpoint = if !force_exhaustive && trigger_contracts_were_intact {
         match read_audit_checkpoint(conn).await? {
             Some(checkpoint) if audit_checkpoint_is_plausible(conn, checkpoint).await? => {

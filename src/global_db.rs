@@ -1548,13 +1548,19 @@ impl GlobalDb {
         authority: DatabaseAuthority,
         slot: GlobalDbSlot,
     ) -> crate::errors::Result<Self> {
+        // Freshness is decided before the connection opens: a missing database
+        // file means this open creates the schema from empty, so the
+        // observation-authority row audits can skip guaranteed-empty tables. An
+        // existing file (any prior process/reopen) is never treated as fresh,
+        // so corruption detection for existing stores is unchanged.
+        let is_fresh = !db_path.is_file();
         let db = Self::open_local(db_path, false, authority, Some(slot)).await?;
 
         schema_stages::ensure_registry(&db).await?;
         schema_stages::ensure_configuration(&db).await?;
         schema_stages::ensure_git_index_transactions(&db).await?;
         schema_stages::ensure_transcript(&db).await?;
-        schema_stages::ensure_observation_authority(&db).await?;
+        schema_stages::ensure_observation_authority(&db, is_fresh).await?;
         schema_stages::ensure_composed_context(&db).await?;
         db.recover_pending_payload_deletes().await?;
         // Recover structured rows skipped by legacy transcript parsers. This

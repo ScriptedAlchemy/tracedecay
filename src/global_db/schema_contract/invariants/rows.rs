@@ -491,6 +491,44 @@ mod tests {
         );
     }
 
+    /// `is_fresh` skips the row audits on the creating open, but a reopen
+    /// (`is_fresh = false`) still runs the exhaustive audit and rejects
+    /// corruption — the freshness fast path must be invisible on reopen.
+    #[tokio::test]
+    async fn fresh_open_skips_row_audits_but_reopen_audits_exhaustively() {
+        let (_dir, db) = open_db().await;
+        let conn = db.conn();
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
+             DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
+             DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
+             INSERT INTO session_query_cursor_keys (
+                key_id, key_version, key_material, created_at, retired_at
+             ) VALUES
+                ('cursor-a', 1, X'01', 100, NULL),
+                ('cursor-b', 2, X'02', 200, NULL);",
+        )
+        .await
+        .expect("seed corrupt cursor keys");
+
+        // Fresh creation skips the row audits, so the seeded corruption is not
+        // scanned even with force_exhaustive requested.
+        super::super::ensure_authority_invariants(conn, true, true)
+            .await
+            .expect("fresh creation skips the row audits");
+
+        // A reopen audits exhaustively and rejects the same corruption.
+        let error = super::super::ensure_authority_invariants(conn, true, false)
+            .await
+            .expect_err("reopen must run the exhaustive audit");
+        assert!(
+            error
+                .to_string()
+                .contains("session cursor key rotation state is invalid"),
+            "reopen audit missed corruption: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn bounded_and_exhaustive_reject_corrupt_session_cursor_keys() {
         let (_dir, db) = open_db().await;

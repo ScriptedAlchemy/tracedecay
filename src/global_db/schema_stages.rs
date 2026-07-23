@@ -277,7 +277,10 @@ pub(super) async fn ensure_transcript(db: &GlobalDb) -> crate::errors::Result<()
         .map_err(|error| global_db_operation_error("commit global transcript schema", error))
 }
 
-pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors::Result<()> {
+pub(super) async fn ensure_observation_authority(
+    db: &GlobalDb,
+    is_fresh: bool,
+) -> crate::errors::Result<()> {
     let force_exhaustive = !authority_invariant_triggers_intact(&db.conn).await?;
     let transaction = db
         .begin_write_transaction()
@@ -313,7 +316,7 @@ pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors
     // introspection pass costs ~50ms on every first open (each non-daemon
     // CLI/hook process pays it), and every open still validates fail-closed
     // once above.
-    ensure_authority_invariants(&transaction, force_exhaustive).await?;
+    ensure_authority_invariants(&transaction, force_exhaustive, is_fresh).await?;
     transaction.commit().await.map_err(|error| {
         global_db_operation_error("commit observation authority validation", error)
     })
