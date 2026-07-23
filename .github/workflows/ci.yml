@@ -711,9 +711,10 @@ jobs:
           rust-toolchain: manual
           # The V2 storage cutover intentionally breaks the pre-V2 public API.
           # Release-plz owns the version bump at release time (the drift guard
-          # forbids pre-bumping in the PR), so tell semver-checks the next
-          # release is breaking instead of inferring from the unchanged version.
-          release-type: major
+          # forbids pre-bumping in the PR); the merge ships as a 0.x minor
+          # release, which semver permits to break, so declare that here
+          # instead of letting the action infer from the unchanged version.
+          release-type: minor
 
   clippy:
     name: Clippy
