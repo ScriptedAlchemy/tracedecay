@@ -21,6 +21,7 @@ import {
   refreshOperation,
   storageFindingLabel,
 } from './storageModel.ts';
+import { DoctorInspector } from './DoctorInspector.tsx';
 
 /** Observatory storage health: independent typed telemetry and Doctor finding
  * read models. A failed source never hides the other source or becomes empty. */
@@ -44,6 +45,8 @@ export function ObservatoryPage() {
           storage size, reclaimable pages, and Doctor retention evidence
         </span>
       </header>
+
+      <DoctorInspector />
 
       <StorageSection title="Store telemetry" query={telemetry.data} pending={telemetry.isPending}>
         {(result) => (

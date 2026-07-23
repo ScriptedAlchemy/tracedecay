@@ -114,6 +114,7 @@ describe('Observatory storage read models', () => {
     expect(doctorEvidencePresentation(payload.kinds[3]!.state)).toEqual({
       label: 'Degraded',
       tokenClass: 'text-state-error',
+      dotClass: 'bg-state-error',
     });
   });
 

@@ -1,0 +1,641 @@
+import * as Dialog from '@radix-ui/react-dialog';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Activity, FileSearch, RefreshCw, ShieldCheck, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type {
+  DoctorFindingsPayload,
+  DoctorRemediationDescriptor,
+  DoctorRemediationOperation,
+  DoctorRemediationPayload,
+  DoctorReportEntry,
+  WireCoverage,
+  WireFreshness,
+  WireLegalActionRef,
+} from '../../contracts/wire.ts';
+import {
+  applyDoctorRemediation,
+  doctorFindingsQueryKey,
+  doctorOperationQueryKey,
+  fetchDoctorFindings,
+  fetchDoctorRemediationStatus,
+  previewDoctorRemediation,
+} from '../../data/query/doctor.ts';
+import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
+import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
+import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid.tsx';
+import {
+  availableRemediationActions,
+  doctorEvidencePresentation,
+  doctorFamilyLabel,
+  isTerminalDoctorOperation,
+  readActiveDoctorOperation,
+  remediationForEntry,
+  saveActiveDoctorOperation,
+  sameDoctorScope,
+} from './doctorModel.ts';
+
+type SelectedRemediation = {
+  entry: DoctorReportEntry;
+  descriptor: DoctorRemediationDescriptor;
+  actions: { canPreview: boolean; canApply: boolean };
+};
+
+/** Canonical Doctor finding inspector and owner-operation handoff. The component
+ * renders server-supplied findings/actions only; it owns no diagnosis or repair. */
+export function DoctorInspector() {
+  const queryClient = useQueryClient();
+  const findings = useQuery({
+    queryKey: doctorFindingsQueryKey,
+    queryFn: () => fetchDoctorFindings(),
+    refetchInterval: 30_000,
+  });
+  const [selected, setSelected] = useState<SelectedRemediation | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [activeOperation, setActiveOperation] = useState(readActiveDoctorOperation);
+  const reobservedOperation = useRef<string | null>(null);
+  const currentScope =
+    findings.data?.outcome === 'envelope' ? findings.data.envelope.scope : null;
+  const activeScopeMatches =
+    activeOperation && currentScope
+      ? sameDoctorScope(activeOperation.scope, currentScope)
+      : false;
+
+  const rememberOperation = (result: EnvelopeResult<DoctorRemediationPayload>) => {
+    const operation = operationFromResult(result);
+    if (!operation || result.outcome !== 'envelope') return;
+    const active = {
+      schema_revision: 1 as const,
+      operation_id: operation.operation_id,
+      scope: result.envelope.scope,
+    };
+    setActiveOperation(active);
+    saveActiveDoctorOperation(active);
+  };
+
+  const preview = useMutation({
+    mutationFn: previewDoctorRemediation,
+    onSuccess: rememberOperation,
+  });
+  const apply = useMutation({
+    mutationFn: applyDoctorRemediation,
+    onSuccess: (result) => {
+      rememberOperation(result);
+      setConfirmed(false);
+    },
+  });
+  const status = useQuery({
+    queryKey: doctorOperationQueryKey(activeOperation?.operation_id ?? 'inactive'),
+    queryFn: () => fetchDoctorRemediationStatus(activeOperation!.operation_id),
+    enabled: activeOperation != null && activeScopeMatches,
+    refetchInterval: (query) => {
+      const operation = operationFromResult(query.state.data);
+      return operation?.phase === 'running' ? 2_000 : false;
+    },
+  });
+
+  const observedOperation =
+    operationFromResult(status.data) ??
+    operationFromResult(apply.data) ??
+    operationFromResult(preview.data);
+
+  useEffect(() => {
+    if (
+      observedOperation &&
+      isTerminalDoctorOperation(observedOperation) &&
+      observedOperation.phase !== 'previewed' &&
+      reobservedOperation.current !== observedOperation.operation_id
+    ) {
+      reobservedOperation.current = observedOperation.operation_id;
+      void queryClient.invalidateQueries({ queryKey: doctorFindingsQueryKey });
+    }
+  }, [observedOperation, queryClient]);
+
+  const selectedPreviewId = useMemo(() => {
+    if (!selected) return null;
+    for (const result of [status.data, preview.data]) {
+      const operation = operationFromResult(result);
+      if (
+        operation?.owning_operation === selected.descriptor.operation &&
+        operation.preview_id
+      ) {
+        return operation.preview_id;
+      }
+    }
+    return null;
+  }, [preview.data, selected, status.data]);
+
+  const submitApply = () => {
+    if (!selected) return;
+    apply.mutate({
+      operation: selected.descriptor.operation,
+      preview_id: selectedPreviewId,
+      idempotency_key: newIdempotencyKey(),
+      confirmed:
+        selected.descriptor.action_confirmation === 'required' ? confirmed : true,
+    });
+  };
+
+  return (
+    <section className="border-b border-edge-subtle" aria-label="Doctor diagnosis">
+      <div className="flex flex-wrap items-center gap-2 px-4 pt-4">
+        <Activity aria-hidden size={14} className="text-accent" />
+        <h2 className="text-sm font-semibold tracking-tight">Doctor diagnosis</h2>
+        <span className="text-2xs text-text-muted">
+          canonical evidence and owner-supplied remediation
+        </span>
+      </div>
+
+      <DoctorFindings
+        result={findings.data}
+        pending={findings.isPending}
+        refreshing={findings.isFetching}
+        onRefresh={() => void findings.refetch()}
+        onInspect={(entry, descriptor, legalActions) => {
+          setConfirmed(false);
+          setSelected({
+            entry,
+            descriptor,
+            actions: availableRemediationActions(descriptor, legalActions),
+          });
+        }}
+        onPreview={(operation) => preview.mutate(operation)}
+        previewing={preview.isPending}
+      />
+
+      <OperationStatus
+        result={status.data ?? apply.data ?? preview.data}
+        pending={status.isFetching || apply.isPending || preview.isPending}
+        operationId={activeOperation?.operation_id ?? null}
+        scopeMismatch={activeOperation != null && currentScope != null && !activeScopeMatches}
+      />
+
+      <RemediationDialog
+        selection={selected}
+        confirmed={confirmed}
+        previewId={selectedPreviewId}
+        applying={apply.isPending}
+        result={apply.data}
+        onConfirmedChange={setConfirmed}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelected(null);
+            setConfirmed(false);
+            apply.reset();
+          }
+        }}
+        onApply={submitApply}
+      />
+    </section>
+  );
+}
+
+function DoctorFindings({
+  result,
+  pending,
+  refreshing,
+  previewing,
+  onRefresh,
+  onInspect,
+  onPreview,
+}: {
+  result: EnvelopeResult<DoctorFindingsPayload> | undefined;
+  pending: boolean;
+  refreshing: boolean;
+  previewing: boolean;
+  onRefresh: () => void;
+  onInspect: (
+    entry: DoctorReportEntry,
+    descriptor: DoctorRemediationDescriptor,
+    legalActions: WireLegalActionRef[],
+  ) => void;
+  onPreview: (operation: string) => void;
+}) {
+  if (pending) {
+    return <DoctorState kind="loading" detail="requesting canonical Doctor findings" />;
+  }
+  if (!result) return <DoctorState kind="unknown" detail="no Doctor response recorded" />;
+  if (result.outcome === 'transport') {
+    return <DoctorState kind={result.state} detail={result.detail ?? 'daemon unreachable'} />;
+  }
+
+  const { envelope } = result;
+  const refresh = envelope.legal_actions.find((action) => action.kind === 'refresh');
+  if (envelope.payload.entries.length === 0) {
+    return (
+      <>
+        <DoctorTruth
+          coverage={envelope.coverage}
+          freshness={envelope.freshness}
+          state={envelope.domain_state}
+          refresh={refresh}
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+        />
+        <DoctorState kind={envelope.domain_state} detail={envelope.payload.note} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <DoctorTruth
+        coverage={envelope.coverage}
+        freshness={envelope.freshness}
+        state={envelope.domain_state}
+        refresh={refresh}
+        refreshing={refreshing}
+        onRefresh={onRefresh}
+      />
+      <OverviewGrid>
+        {envelope.payload.entries.map((entry, index) => {
+          const descriptor = remediationForEntry(entry, envelope.payload.remediations);
+          const actions = descriptor
+            ? availableRemediationActions(descriptor, envelope.legal_actions)
+            : { canPreview: false, canApply: false };
+          return (
+            <FindingCard
+              key={`${entry.finding.family}:${entry.storage_kind ?? 'general'}:${index}`}
+              entry={entry}
+              descriptor={descriptor}
+              actions={actions}
+              previewing={previewing}
+              onPreview={onPreview}
+              onInspect={() => {
+                if (descriptor) onInspect(entry, descriptor, envelope.legal_actions);
+              }}
+            />
+          );
+        })}
+      </OverviewGrid>
+      <p className="border-t border-edge-subtle px-4 py-2 text-2xs text-text-muted">
+        {envelope.payload.note}
+      </p>
+    </>
+  );
+}
+
+function FindingCard({
+  entry,
+  descriptor,
+  actions,
+  previewing,
+  onPreview,
+  onInspect,
+}: {
+  entry: DoctorReportEntry;
+  descriptor: DoctorRemediationDescriptor | undefined;
+  actions: { canPreview: boolean; canApply: boolean };
+  previewing: boolean;
+  onPreview: (operation: string) => void;
+  onInspect: () => void;
+}) {
+  const { finding } = entry;
+  const evidence = doctorEvidencePresentation(finding.state);
+  return (
+    <OverviewCard title={doctorFamilyLabel(finding.family)}>
+      <div className="flex flex-col gap-2">
+        <span
+          className={`inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-2xs font-medium ${evidence.tokenClass}`}
+          data-evidence-state={finding.state}
+        >
+          {evidence.label}
+        </span>
+        <EvidenceTruthStrip
+          coverage={{ completeness: finding.coverage.completeness }}
+          citations={finding.evidence.length}
+        />
+        <p className="text-xs text-text-secondary">{finding.coverage.statement}</p>
+        {descriptor ? (
+          <div className="rounded-[var(--radius-chip)] bg-surface-2 p-2.5">
+            <p className="text-xs text-text-secondary">{descriptor.summary}</p>
+            <p className="mt-1 truncate font-mono text-2xs text-text-muted">
+              {descriptor.operation}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {actions.canPreview ? (
+                <button
+                  type="button"
+                  className={secondaryButtonClass}
+                  onClick={() => onPreview(descriptor.operation)}
+                  disabled={previewing}
+                >
+                  {previewing ? 'Previewing' : 'Preview'}
+                </button>
+              ) : null}
+              {actions.canApply ? (
+                <button type="button" className={primaryButtonClass} onClick={onInspect}>
+                  Review remediation
+                </button>
+              ) : null}
+            </div>
+            {!actions.canPreview && !actions.canApply ? (
+              <p className="mt-2 text-2xs text-text-muted">
+                No authorized remediation action is currently available.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </OverviewCard>
+  );
+}
+
+function DoctorTruth({
+  coverage,
+  freshness,
+  state,
+  refresh,
+  refreshing,
+  onRefresh,
+}: {
+  coverage: WireCoverage;
+  freshness: WireFreshness;
+  state: DomainStateKind;
+  refresh: WireLegalActionRef | undefined;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 px-4 pt-2">
+      <StateChip kind={state} />
+      <EvidenceTruthStrip
+        coverage={{
+          completeness: coverage.completeness,
+          eligible: coverage.eligible,
+          examined: coverage.examined,
+        }}
+        freshness={{
+          state: freshness.state,
+          observed_at:
+            freshness.observed_at_micros == null
+              ? undefined
+              : new Date(freshness.observed_at_micros / 1000).toLocaleTimeString(),
+        }}
+        omissions={coverage.omitted ?? undefined}
+      />
+      {refresh ? (
+        <button
+          type="button"
+          className={`${secondaryButtonClass} ml-auto`}
+          onClick={onRefresh}
+          disabled={refreshing}
+          data-operation={refresh.operation}
+        >
+          <RefreshCw aria-hidden size={12} className={refreshing ? 'animate-spin' : undefined} />
+          {refreshing ? 'Refreshing' : 'Refresh'}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function OperationStatus({
+  result,
+  pending,
+  operationId,
+  scopeMismatch,
+}: {
+  result: EnvelopeResult<DoctorRemediationPayload> | undefined;
+  pending: boolean;
+  operationId: string | null;
+  scopeMismatch: boolean;
+}) {
+  if (!operationId && !result) return null;
+  if (scopeMismatch) {
+    return (
+      <DoctorState
+        kind="conflicting"
+        detail="saved remediation belongs to a different dashboard scope"
+      />
+    );
+  }
+  if (pending && !result) {
+    return <DoctorState kind="loading" detail="checking remediation operation" />;
+  }
+  if (!result) return <DoctorState kind="unknown" detail="operation status is unavailable" />;
+  if (result.outcome === 'transport') {
+    return <DoctorState kind={result.state} detail={result.detail ?? 'operation owner unreachable'} />;
+  }
+  const { payload } = result.envelope;
+  if (payload.status === 'unavailable') {
+    return (
+      <DoctorState
+        kind={result.envelope.domain_state}
+        detail={`remediation ${payload.reason.replaceAll('_', ' ')}`}
+      />
+    );
+  }
+  return (
+    <div className="mx-4 mb-4 flex flex-wrap items-center gap-3 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-3 py-2">
+      <StateChip kind={operationPhaseState(payload.operation.phase)} />
+      <span className="text-xs text-text-secondary">
+        Remediation {payload.operation.phase.replaceAll('_', ' ')}
+      </span>
+      <span className="truncate font-mono text-2xs text-text-muted">
+        {payload.operation.operation_id}
+      </span>
+      {payload.operation.execution ? (
+        <span className="ml-auto text-2xs text-text-muted">
+          receipt {payload.operation.execution.termination.replaceAll('_', ' ')}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function RemediationDialog({
+  selection,
+  confirmed,
+  previewId,
+  applying,
+  result,
+  onConfirmedChange,
+  onOpenChange,
+  onApply,
+}: {
+  selection: SelectedRemediation | null;
+  confirmed: boolean;
+  previewId: string | null;
+  applying: boolean;
+  result: EnvelopeResult<DoctorRemediationPayload> | undefined;
+  onConfirmedChange: (confirmed: boolean) => void;
+  onOpenChange: (open: boolean) => void;
+  onApply: () => void;
+}) {
+  const confirmationRequired =
+    selection?.descriptor.action_confirmation === 'required';
+  return (
+    <Dialog.Root open={selection != null} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[min(36rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-5 shadow-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <Dialog.Title className="text-base font-semibold tracking-tight">
+                Confirm owner remediation
+              </Dialog.Title>
+              <Dialog.Description className="mt-1 text-xs text-text-muted">
+                Doctor supplies the reference; the owning application operation rechecks authority
+                and performs any effect.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close
+              className="rounded-[var(--radius-chip)] p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+              aria-label="Close remediation"
+            >
+              <X aria-hidden size={16} />
+            </Dialog.Close>
+          </div>
+
+          {selection ? (
+            <div className="mt-4 flex flex-col gap-3">
+              <div className="rounded-[var(--radius-standard)] bg-surface-2 p-3">
+                <p className="text-sm text-text-secondary">{selection.descriptor.summary}</p>
+                <p className="mt-2 break-all font-mono text-2xs text-text-muted">
+                  {selection.descriptor.operation}
+                </p>
+                <p className="mt-1 text-2xs text-text-muted">
+                  owner {selection.descriptor.surface.replaceAll('_', ' ')}
+                </p>
+                {previewId ? (
+                  <p className="mt-1 break-all font-mono text-2xs text-text-muted">
+                    preview {previewId}
+                  </p>
+                ) : null}
+              </div>
+
+              <FindingEvidence entry={selection.entry} />
+
+              {confirmationRequired ? (
+                <label className="flex items-start gap-2 rounded-[var(--radius-standard)] border border-edge-subtle p-3 text-xs text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={confirmed}
+                    onChange={(event) => onConfirmedChange(event.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    I confirm this exact owner operation for the displayed scope and evidence.
+                  </span>
+                </label>
+              ) : null}
+
+              <RemediationResult result={result} />
+
+              <div className="flex justify-end gap-2">
+                <Dialog.Close className={secondaryButtonClass}>Cancel</Dialog.Close>
+                <button
+                  type="button"
+                  className={primaryButtonClass}
+                  onClick={onApply}
+                  disabled={
+                    applying ||
+                    !selection.actions.canApply ||
+                    (confirmationRequired && !confirmed)
+                  }
+                >
+                  <ShieldCheck aria-hidden size={13} />
+                  {applying ? 'Applying' : 'Apply remediation'}
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function FindingEvidence({ entry }: { entry: DoctorReportEntry }) {
+  return (
+    <div>
+      <p className="text-2xs font-medium uppercase tracking-wide text-text-muted">
+        Evidence
+      </p>
+      <ul className="mt-1 space-y-1">
+        {entry.finding.evidence.map((evidence) => (
+          <li
+            key={`${evidence.family}:${evidence.reference}`}
+            className="flex items-start gap-1.5 text-2xs text-text-secondary"
+          >
+            <FileSearch aria-hidden size={11} className="mt-0.5 shrink-0 text-text-muted" />
+            <span className="font-mono">{evidence.reference}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function RemediationResult({
+  result,
+}: {
+  result: EnvelopeResult<DoctorRemediationPayload> | undefined;
+}) {
+  if (!result) return null;
+  if (result.outcome === 'transport') {
+    return <StateChip kind={result.state} detail={result.detail ?? 'owner unreachable'} />;
+  }
+  const { payload } = result.envelope;
+  return payload.status === 'unavailable' ? (
+    <StateChip
+      kind={result.envelope.domain_state}
+      detail={payload.reason.replaceAll('_', ' ')}
+    />
+  ) : (
+    <StateChip
+      kind={operationPhaseState(payload.operation.phase)}
+      detail={payload.operation.phase.replaceAll('_', ' ')}
+    />
+  );
+}
+
+function DoctorState({ kind, detail }: { kind: DomainStateKind; detail: string }) {
+  return (
+    <div className="flex min-h-24 items-center justify-center p-4">
+      <StateChip kind={kind} detail={detail} />
+    </div>
+  );
+}
+
+function operationFromResult(
+  result: EnvelopeResult<DoctorRemediationPayload> | undefined,
+): DoctorRemediationOperation | null {
+  if (result?.outcome !== 'envelope') return null;
+  const { payload } = result.envelope;
+  return payload.status === 'operation' ? payload.operation : null;
+}
+
+function operationPhaseState(
+  phase: DoctorRemediationOperation['phase'],
+): DomainStateKind {
+  switch (phase) {
+    case 'previewed':
+    case 'completed':
+      return 'ready';
+    case 'running':
+    case 'partial':
+      return 'partial';
+    case 'cancelled':
+      return 'cancelled';
+    case 'timed_out':
+      return 'timed_out';
+    case 'failed':
+    case 'effect_unknown':
+      return 'error';
+  }
+}
+
+function newIdempotencyKey(): string {
+  const suffix =
+    typeof globalThis.crypto?.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now()}`;
+  return `idempotency.dashboard-doctor.${suffix}`;
+}
+
+const secondaryButtonClass =
+  'inline-flex h-7 items-center justify-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-2xs font-medium text-text-secondary hover:text-text-primary disabled:cursor-wait disabled:opacity-60';
+const primaryButtonClass =
+  'inline-flex h-7 items-center justify-center gap-1.5 rounded-[var(--radius-standard)] border border-accent/50 bg-accent/15 px-2.5 text-2xs font-semibold text-text-primary hover:border-accent disabled:cursor-not-allowed disabled:opacity-50';

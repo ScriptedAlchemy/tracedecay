@@ -278,3 +278,259 @@ export const StorageFindingsPayloadSchema = z.object({
   note: z.string(),
 });
 export type StorageFindingsPayload = z.infer<typeof StorageFindingsPayloadSchema>;
+
+/* ---- /api/doctor findings + remediation payloads ---- */
+
+export const DoctorFindingFamilySchema = z.enum([
+  'advisory',
+  'configuration',
+  'storage_runtime',
+  'storage',
+  'language_server',
+  'semantic_index',
+  'observability',
+]);
+export type DoctorFindingFamily = z.infer<typeof DoctorFindingFamilySchema>;
+
+export const DoctorCoverageCompletenessSchema = z.enum(['complete', 'partial', 'unknown']);
+export type DoctorCoverageCompleteness = z.infer<typeof DoctorCoverageCompletenessSchema>;
+
+export const DoctorRemediationKindSchema = z.enum(['preview', 'action']);
+export type DoctorRemediationKind = z.infer<typeof DoctorRemediationKindSchema>;
+
+export const DoctorEvidenceRefSchema = z.object({
+  family: DoctorFindingFamilySchema,
+  reference: z.string(),
+});
+export type DoctorEvidenceRef = z.infer<typeof DoctorEvidenceRefSchema>;
+
+export const DoctorCoverageStatementSchema = z.object({
+  completeness: DoctorCoverageCompletenessSchema,
+  statement: z.string(),
+});
+export type DoctorCoverageStatement = z.infer<typeof DoctorCoverageStatementSchema>;
+
+export const DoctorRemediationRefSchema = z.object({
+  owning_operation: z.string(),
+  kind: DoctorRemediationKindSchema,
+});
+export type DoctorRemediationRef = z.infer<typeof DoctorRemediationRefSchema>;
+
+export const DoctorFindingSchema = z.object({
+  family: DoctorFindingFamilySchema,
+  state: DoctorEvidenceStateSchema,
+  evidence: z.array(DoctorEvidenceRefSchema),
+  coverage: DoctorCoverageStatementSchema,
+  remediation: DoctorRemediationRefSchema.nullable(),
+});
+export type DoctorFinding = z.infer<typeof DoctorFindingSchema>;
+
+export const DoctorReportEntrySchema = z.object({
+  finding: DoctorFindingSchema,
+  storage_kind: DoctorStorageFindingKindSchema.nullable(),
+});
+export type DoctorReportEntry = z.infer<typeof DoctorReportEntrySchema>;
+
+export const DoctorFamilyUnavailableReasonSchema = z.enum([
+  'unwired',
+  'unsupported',
+  'absent',
+  'denied',
+  'unknown',
+]);
+export type DoctorFamilyUnavailableReason = z.infer<
+  typeof DoctorFamilyUnavailableReasonSchema
+>;
+
+export const DoctorFamilyConsultationSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('consulted') }),
+  z.object({
+    status: z.literal('unavailable'),
+    reason: DoctorFamilyUnavailableReasonSchema,
+  }),
+]);
+export type DoctorFamilyConsultation = z.infer<typeof DoctorFamilyConsultationSchema>;
+
+export const DoctorFamilyCoverageSchema = z.object({
+  family: DoctorFindingFamilySchema,
+  consultation: DoctorFamilyConsultationSchema,
+});
+export type DoctorFamilyCoverage = z.infer<typeof DoctorFamilyCoverageSchema>;
+
+export const DoctorReportCoverageSchema = z.object({
+  families: z.array(DoctorFamilyCoverageSchema),
+  completeness: DoctorCoverageCompletenessSchema,
+  statement: DoctorCoverageStatementSchema,
+});
+export type DoctorReportCoverage = z.infer<typeof DoctorReportCoverageSchema>;
+
+export const DoctorOwningSurfaceSchema = z.enum([
+  'configuration_control_plane',
+  'storage_runtime',
+  'daemon_runtime',
+  'host_integration',
+  'semantic_index_runtime',
+]);
+export type DoctorOwningSurface = z.infer<typeof DoctorOwningSurfaceSchema>;
+
+export const DoctorConfirmationRequirementSchema = z.enum(['required', 'not_required']);
+export type DoctorConfirmationRequirement = z.infer<
+  typeof DoctorConfirmationRequirementSchema
+>;
+
+export const DoctorRemediationDescriptorSchema = z.object({
+  operation: z.string(),
+  surface: DoctorOwningSurfaceSchema,
+  preview_available: z.boolean(),
+  action_confirmation: DoctorConfirmationRequirementSchema,
+  summary: z.string(),
+});
+export type DoctorRemediationDescriptor = z.infer<typeof DoctorRemediationDescriptorSchema>;
+
+export const DoctorFindingsPayloadSchema = z.object({
+  family_filter: DoctorFindingFamilySchema.nullable(),
+  entries: z.array(DoctorReportEntrySchema),
+  report_coverage: DoctorReportCoverageSchema.nullable(),
+  remediations: z.array(DoctorRemediationDescriptorSchema),
+  known_families: z.array(DoctorFindingFamilySchema),
+  note: z.string(),
+});
+export type DoctorFindingsPayload = z.infer<typeof DoctorFindingsPayloadSchema>;
+
+export const DoctorRemediationPreviewRequestSchema = z.object({
+  operation: z.string(),
+});
+export type DoctorRemediationPreviewRequest = z.infer<
+  typeof DoctorRemediationPreviewRequestSchema
+>;
+
+export const DoctorRemediationApplyRequestSchema = z.object({
+  operation: z.string(),
+  preview_id: z.string().nullable(),
+  idempotency_key: z.string(),
+  confirmed: z.boolean(),
+});
+export type DoctorRemediationApplyRequest = z.infer<
+  typeof DoctorRemediationApplyRequestSchema
+>;
+
+export const DoctorRemediationOperationPhaseSchema = z.enum([
+  'previewed',
+  'running',
+  'completed',
+  'cancelled',
+  'timed_out',
+  'failed',
+  'partial',
+  'effect_unknown',
+]);
+export type DoctorRemediationOperationPhase = z.infer<
+  typeof DoctorRemediationOperationPhaseSchema
+>;
+
+export const DoctorCancellationStageSchema = z.enum([
+  'before_admission',
+  'before_read',
+  'during_read',
+  'before_effect',
+  'effect_in_flight',
+  'reconciling',
+  'after_commit',
+]);
+
+export const DoctorOperationTerminationSchema = z.enum([
+  'completed',
+  'cancelled',
+  'timed_out',
+  'failed',
+  'partial',
+  'effect_unknown',
+]);
+
+export const DoctorOperationReceiptSchema = z.object({
+  started_at: z.number(),
+  ended_at: z.number(),
+  effective_deadline: z.object({ expires_at: z.number() }),
+  cancellation: z
+    .object({
+      stage: DoctorCancellationStageSchema,
+      observed_at: z.number(),
+    })
+    .nullable(),
+  budget: z.object({
+    units_consumed: z.number(),
+    bytes_consumed: z.number(),
+    elapsed_micros: z.number(),
+  }),
+  termination: DoctorOperationTerminationSchema,
+});
+export type DoctorOperationReceipt = z.infer<typeof DoctorOperationReceiptSchema>;
+
+export const DoctorEffectReceiptSchema = z.object({
+  operation: z.string(),
+  request_id: z.string(),
+  actor: z.string(),
+  scope: z.object({
+    project_id: z.string(),
+    repository_id: z.string(),
+    worktree_id: z.string(),
+    reference: z.string().nullable(),
+    scope_digest: z.string(),
+  }),
+  effect_class: z.enum([
+    'read',
+    'preview',
+    'source_edit',
+    'git_index_stage',
+    'git_index_unstage',
+    'git_index_commit',
+    'configuration_write',
+    'administrative',
+  ]),
+  idempotency_key: z.string(),
+  input_digest: z.string(),
+  expected_state: z.string(),
+  policy_digest: z.string(),
+  configuration_digest: z.string(),
+  catalog_digest: z.string(),
+  privacy_digest: z.string(),
+  outcome: DoctorOperationTerminationSchema,
+  committed_state: z.string().nullable(),
+  external_proof: z.string().nullable(),
+});
+export type DoctorEffectReceipt = z.infer<typeof DoctorEffectReceiptSchema>;
+
+export const DoctorRemediationOperationSchema = z.object({
+  operation_id: z.string(),
+  owning_operation: z.string(),
+  phase: DoctorRemediationOperationPhaseSchema,
+  preview_id: z.string().nullable(),
+  execution: DoctorOperationReceiptSchema.nullable(),
+  effect_receipt: DoctorEffectReceiptSchema.nullable(),
+});
+export type DoctorRemediationOperation = z.infer<
+  typeof DoctorRemediationOperationSchema
+>;
+
+export const DoctorRemediationDispatchErrorSchema = z.enum([
+  'unsupported',
+  'denied',
+  'invalid_reference',
+  'confirmation_required',
+  'owner_unavailable',
+]);
+export type DoctorRemediationDispatchError = z.infer<
+  typeof DoctorRemediationDispatchErrorSchema
+>;
+
+export const DoctorRemediationPayloadSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('operation'),
+    operation: DoctorRemediationOperationSchema,
+  }),
+  z.object({
+    status: z.literal('unavailable'),
+    reason: DoctorRemediationDispatchErrorSchema,
+  }),
+]);
+export type DoctorRemediationPayload = z.infer<typeof DoctorRemediationPayloadSchema>;
