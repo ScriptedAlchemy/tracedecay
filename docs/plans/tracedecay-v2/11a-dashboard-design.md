@@ -161,6 +161,39 @@ comfortably beside them and feel unmistakably its own.
   visual-regression suite (Playwright screenshots on the pinned runner)
   guards the approved compositions afterward.
 
+## Continuous visual enforcement
+
+Visual quality is checked by machinery throughout development, not only at
+review:
+
+- **Screenshot harness** (`npm run visual:audit`): Playwright renders every
+  registered surface (workspace routes, archetype demos, each component's
+  key states from a story registry) across both themes x three breakpoints
+  (320, 768, 1440) x reduced-motion and contrast-more, against MSW fixture
+  data covering the domain states. Output is a browsable gallery (one HTML
+  index) plus a machine manifest. The registry is code: adding a workspace
+  or state without registering its story fails the audit.
+- **Baseline diffing**: approved galleries are committed as baselines;
+  `visual:audit --diff` fails on pixel drift beyond a perceptual threshold
+  (odiff/pixelmatch) outside explicitly re-approved regions. Baseline
+  updates are their own commits, reviewed by the design owner — a code PR
+  can never silently change approved pixels.
+- **Automated audit rules** run over the same renders: axe (WCAG) per
+  surface, token-compliance scan (computed styles must resolve to token
+  variables — raw hex/px drift fails), focus-visibility check (every
+  focusable element screenshotted in :focus-visible), CLS probe (skeleton
+  vs settled geometry), and information-density heuristics (min touch
+  targets, max competing accents per region) as warnings.
+- **Agent audit loop**: every implementation lane must run the dev server,
+  exercise its surface with the preview/Playwright tooling, capture the
+  gallery for its slice, LOOK at it, and attach the gallery path + a
+  self-audit paragraph (what matches the spec, what deviates and why) to
+  its report. "Compiles and tests pass" is not done; unaudited UI is
+  unreviewable and gets bounced.
+- **CI**: the visual suite runs on the pinned runner in the frontend gate;
+  diffs and axe failures block; the gallery uploads as a run artifact so
+  review happens on real renders, not local claims.
+
 ## Component conventions
 
 - **EvidenceTruthStrip**: one-line strip on every compact result — authority
