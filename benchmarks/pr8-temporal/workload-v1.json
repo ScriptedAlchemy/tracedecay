@@ -12,7 +12,7 @@
   },
   "profile": {
     "manifest_path": "Cargo.toml",
-    "manifest_sha256": "523b56e2e398573ce51ca4935a31ca76eb188677b7fdbf5d547fef9a2378e015",
+    "manifest_sha256": "f12aeaa3ab017dc22fdefa5dc99f64028b7ce80db5166cea49888fff49b8b7e0",
     "cargo_profile": "bench",
     "opt_level": 3,
     "debug": false,
@@ -103,11 +103,11 @@
     },
     {
       "path": "Cargo.toml",
-      "sha256": "523b56e2e398573ce51ca4935a31ca76eb188677b7fdbf5d547fef9a2378e015"
+      "sha256": "f12aeaa3ab017dc22fdefa5dc99f64028b7ce80db5166cea49888fff49b8b7e0"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "6df6c2bf98a5dd4cdc23f74a84879506596dc45f18c5d5d5fffaff81a038e4cb"
+      "sha256": "ad348151bb9b0ecb9be3cf58a8d608d8c0eac0d9c8bd1aa7cfc52d3e8e38980b"
     },
     {
       "path": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
@@ -127,7 +127,7 @@
     },
     {
       "path": "benchmarks/pr8-temporal/README.md",
-      "sha256": "37572012c111caa7cfa790c480f7f657144304393a8b5e3f5a4f9e4f9e594ba9"
+      "sha256": "d61349a80dc52cc65fb6a3dcc83a8e1ba882ba918e89f41b25c5118f0d31c6c5"
     }
   ],
   "command": "scripts/run-pr8-temporal-benchmark.sh --run"
