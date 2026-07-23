@@ -1070,24 +1070,21 @@ fn read_changed_file_returns_none_for_missing_file() {
 
 #[tokio::test]
 async fn read_new_rows_tracks_last_rowid() {
-    // A synthetic SQLite-backed source exercises the RowCursor kind.
-    let db = libsql::Builder::new_local(":memory:")
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    conn.execute("CREATE TABLE turns (role TEXT, text TEXT)", ())
-        .await
-        .unwrap();
-    conn.execute(
-        "INSERT INTO turns (role, text) VALUES ('user', 'hello'), ('assistant', 'hi')",
-        (),
+    // A synthetic SQLite-backed source exercises the RowCursor kind. Seed via
+    // a shared in-memory database so the reader handle observes later writes.
+    let seed =
+        rusqlite::Connection::open("file:read_new_rows_tracks?mode=memory&cache=shared").unwrap();
+    seed.execute_batch(
+        "CREATE TABLE turns (role TEXT, text TEXT);\n\
+         INSERT INTO turns (role, text) VALUES ('user', 'hello'), ('assistant', 'hi');",
     )
-    .await
     .unwrap();
+    let conn = crate::sessions::shared::SqliteReadConn::new(
+        rusqlite::Connection::open("file:read_new_rows_tracks?mode=memory&cache=shared").unwrap(),
+    );
 
     let sql = "SELECT rowid, role, text FROM turns WHERE rowid > ? ORDER BY rowid";
-    let map = |_rowid: i64, row: &libsql::Row| row.get::<String>(2).ok();
+    let map = |_rowid: i64, row: &rusqlite::Row<'_>| row.get::<_, String>(2).ok();
     let first = read_new_rows(&conn, sql, StoredCursor::default(), map)
         .await
         .unwrap();
@@ -1100,11 +1097,10 @@ async fn read_new_rows_tracks_last_rowid() {
         .unwrap();
     assert_eq!(again.items.len(), 0);
 
-    conn.execute(
+    seed.execute(
         "INSERT INTO turns (role, text) VALUES ('user', 'again')",
         (),
     )
-    .await
     .unwrap();
     let third = read_new_rows(&conn, sql, again.new_cursor, map)
         .await
@@ -1115,17 +1111,15 @@ async fn read_new_rows_tracks_last_rowid() {
 
 #[tokio::test]
 async fn read_new_rows_returns_none_for_invalid_query() {
-    let db = libsql::Builder::new_local(":memory:")
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
+    let conn = crate::sessions::shared::SqliteReadConn::new(
+        rusqlite::Connection::open_in_memory().unwrap(),
+    );
 
     let rows = read_new_rows(
         &conn,
         "SELECT not_a_column FROM missing_table WHERE rowid > ? ORDER BY rowid",
         StoredCursor::default(),
-        |_rowid: i64, row: &libsql::Row| row.get::<String>(0).ok(),
+        |_rowid: i64, row: &rusqlite::Row<'_>| row.get::<_, String>(0).ok(),
     )
     .await;
 

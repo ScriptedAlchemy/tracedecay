@@ -6,7 +6,6 @@ use super::sqlite::*;
 use super::store::*;
 use super::*;
 
-use libsql::Builder;
 use serde_json::{Value, json};
 use tracedecay_domain::{CanonicalObservationFactV1, CanonicalWorkflowSemanticKindV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
@@ -474,24 +473,23 @@ fn composer_is_compacted_true_promotes_compaction_fact() {
     )));
 }
 
+// Foreign-store fixtures use the same SQLite engine as the production reader;
+// initializing libsql after an immutable rusqlite open is process-global misuse.
 async fn open_temp_kv_db_with_rows(rows: &[(&str, &str)]) -> (tempfile::TempDir, ReadOnlyDb) {
     let tmp = tempfile::TempDir::new().unwrap();
     let path = tmp.path().join("state.vscdb");
     {
-        let db = Builder::new_local(&path).build().await.unwrap();
-        let conn = db.connect().unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
             "PRAGMA journal_mode=DELETE;\n\
              CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
         )
-        .await
         .unwrap();
         for (key, value) in rows {
             conn.execute(
                 "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
-                libsql::params![*key, *value],
+                rusqlite::params![*key, *value],
             )
-            .await
             .unwrap();
         }
     }
@@ -503,18 +501,160 @@ async fn open_temp_kv_db_with_sql(setup_sql: &str) -> (tempfile::TempDir, ReadOn
     let tmp = tempfile::TempDir::new().unwrap();
     let path = tmp.path().join("state.vscdb");
     {
-        let db = Builder::new_local(&path).build().await.unwrap();
-        let conn = db.connect().unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
             "PRAGMA journal_mode=DELETE;\n\
              CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
         )
-        .await
         .unwrap();
-        conn.execute_batch(setup_sql).await.unwrap();
+        conn.execute_batch(setup_sql).unwrap();
     }
     let ro = open_readonly_immutable(&path).await.expect("open readonly");
     (tmp, ro)
+}
+
+#[tokio::test]
+async fn rusqlite_foreign_reader_is_immutable_query_only_and_no_create() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let missing = tmp.path().join("missing-state.vscdb");
+    assert!(open_readonly_immutable(&missing).await.is_none());
+    assert!(
+        !missing.exists(),
+        "read-only foreign open must not create a missing Cursor database"
+    );
+
+    let path = tmp.path().join("state.vscdb");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO cursorDiskKV(key, value) VALUES ('composerData:one', '{}');",
+        )
+        .unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    let before_modified = path.metadata().unwrap().modified().unwrap();
+    let sidecar = |suffix: &str| {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        std::path::PathBuf::from(sidecar)
+    };
+    let wal = sidecar("-wal");
+    let shm = sidecar("-shm");
+    let journal = sidecar("-journal");
+    assert!(!wal.exists());
+    assert!(!shm.exists());
+    assert!(!journal.exists());
+
+    let ro = open_readonly_immutable(&path)
+        .await
+        .expect("open foreign DB");
+    let query_only = ro
+        .conn
+        .with(|conn| conn.pragma_query_value(None, "query_only", |row| row.get::<_, i64>(0)))
+        .await
+        .expect("blocking read completed")
+        .expect("read query_only");
+    assert_eq!(query_only, 1);
+    let write = ro
+        .conn
+        .with(|conn| {
+            conn.execute(
+                "INSERT INTO cursorDiskKV(key, value) VALUES ('forbidden', 'write')",
+                (),
+            )
+        })
+        .await
+        .expect("blocking write attempt completed");
+    assert!(write.is_err(), "foreign reader must reject every write");
+    drop(ro);
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        path.metadata().unwrap().modified().unwrap(),
+        before_modified
+    );
+    assert!(
+        !wal.exists(),
+        "immutable read must not create a WAL sidecar"
+    );
+    assert!(
+        !shm.exists(),
+        "immutable read must not create a SHM sidecar"
+    );
+    assert!(
+        !journal.exists(),
+        "immutable read must not create a rollback journal"
+    );
+}
+
+#[tokio::test]
+async fn rusqlite_composer_key_scan_pages_without_gaps_or_duplicates() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("state.vscdb");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA page_size=65536;
+             VACUUM;
+             PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+        let transaction = conn.unchecked_transaction().unwrap();
+        {
+            let mut insert = transaction
+                .prepare("INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)")
+                .unwrap();
+            for index in 0..(COMPOSER_KEY_SCAN_PAGE + 7) {
+                insert
+                    .execute(rusqlite::params![
+                        format!("composerData:{index:06}"),
+                        format!("value-{index}")
+                    ])
+                    .unwrap();
+            }
+            insert
+                .execute(rusqlite::params!["outside-prefix", "ignored"])
+                .unwrap();
+            insert
+                .execute(rusqlite::params![
+                    "composerData:000100-null",
+                    rusqlite::types::Null
+                ])
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+
+    let ro = open_readonly_immutable(&path)
+        .await
+        .expect("open foreign DB");
+    let page_size = ro
+        .conn
+        .with(|conn| conn.pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0)))
+        .await
+        .expect("blocking page-size read completed")
+        .expect("read page size");
+    assert_eq!(page_size, 65_536);
+    let first = scan_composer_keys_page(&ro.conn, None, COMPOSER_KEY_SCAN_PAGE).await;
+    assert_eq!(first.len(), COMPOSER_KEY_SCAN_PAGE);
+    let first_last = first.last().unwrap().0.clone();
+    let second = scan_composer_keys_page(&ro.conn, Some(&first_last), COMPOSER_KEY_SCAN_PAGE).await;
+    assert_eq!(second.len(), 7);
+
+    let keys = first
+        .into_iter()
+        .chain(second)
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    assert_eq!(keys.len(), COMPOSER_KEY_SCAN_PAGE + 7);
+    assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        keys.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        keys.len()
+    );
 }
 
 #[tokio::test]
@@ -577,14 +717,12 @@ async fn store_blob_zeroblob_is_skipped_without_full_table_select() {
     let path = tmp.path().join("store.db");
     let root = "aa".repeat(32);
     {
-        let db = Builder::new_local(&path).build().await.unwrap();
-        let conn = db.connect().unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
             "PRAGMA journal_mode=DELETE;\n\
              CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);\n\
              CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);",
         )
-        .await
         .unwrap();
         let leaf = "bb".repeat(32);
         let meta = serde_json::json!({
@@ -594,29 +732,24 @@ async fn store_blob_zeroblob_is_skipped_without_full_table_select() {
         });
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('0', ?1)",
-            libsql::params![encode_hex(meta.to_string().as_bytes())],
+            rusqlite::params![encode_hex(meta.to_string().as_bytes())],
         )
-        .await
         .unwrap();
         let hostile = (max_composer_record_bytes() as i64).saturating_add(64);
         conn.execute(
             "INSERT INTO blobs(id, data) VALUES (?1, zeroblob(?2))",
-            libsql::params![root.clone(), hostile],
+            rusqlite::params![root.clone(), hostile],
         )
-        .await
         .unwrap();
         conn.execute(
             "INSERT INTO blobs(id, data) VALUES (?1, ?2)",
-            libsql::params![
+            rusqlite::params![
                 leaf,
-                libsql::Value::Blob(
-                    serde_json::json!({"role":"user","content":"reachable"})
-                        .to_string()
-                        .into_bytes()
-                )
+                serde_json::json!({"role":"user","content":"reachable"})
+                    .to_string()
+                    .into_bytes()
             ],
         )
-        .await
         .unwrap();
     }
 

@@ -27,10 +27,10 @@ use super::capture::{
 };
 use super::observation::composer_todos_have_admittable_items;
 use super::sqlite::{
-    BoundedSqliteValue, ComposerProject, DEFAULT_COMPOSER_SWEEP_BYTES, MAX_COMPOSER_ENVELOPE_BYTES,
-    MAX_COMPOSER_SQLITE_KEY_BYTES, composer_budget_bytes, composer_id_from_envelope_key,
-    composer_source_charge, envelope_project, fetch_bubble_bounded, fetch_kv_text_bounded,
-    open_readonly_immutable, workspace_hash,
+    BoundedSqliteValue, COMPOSER_KEY_SCAN_PAGE, ComposerProject, DEFAULT_COMPOSER_SWEEP_BYTES,
+    MAX_COMPOSER_ENVELOPE_BYTES, MAX_COMPOSER_SQLITE_KEY_BYTES, composer_budget_bytes,
+    composer_id_from_envelope_key, composer_source_charge, envelope_project, fetch_bubble_bounded,
+    fetch_kv_text_bounded, open_readonly_immutable, scan_composer_keys_page, workspace_hash,
 };
 use super::store::{
     MAX_COMPOSER_STORE_BLOB_VISITS, StoreWalkOutcome, order_store_messages_bounded,
@@ -306,276 +306,232 @@ impl CursorComposerSource {
         let conn = &ro.conn;
         // Indexed prefix scan of keys + byte lengths only — never SELECT full
         // envelope text here. Point-fetch materializes only when the UTF-8 byte
-        // length fits both ceilings.
-        let Ok(mut rows) = conn
-            .query(
-                "SELECT key, length(CAST(value AS BLOB)) AS nbytes \
-                 FROM cursorDiskKV \
-                 WHERE key >= 'composerData:' AND key < 'composerData;' \
-                   AND length(CAST(key AS BLOB)) <= ?1",
-                libsql::params![MAX_COMPOSER_SQLITE_KEY_BYTES as i64],
-            )
-            .await
-        else {
-            return;
-        };
-
+        // length fits both ceilings. Keyset pagination over the `cursorDiskKV`
+        // primary key reproduces the original index-ordered streaming scan
+        // while holding at most one page of keys in memory.
         let mut ingested_this_pass = 0usize;
-        while let Ok(Some(row)) = rows.next().await {
-            let Ok(key) = row.get::<String>(0) else {
-                continue;
+        let mut scan_after: Option<String> = None;
+        'scan: loop {
+            let page =
+                scan_composer_keys_page(conn, scan_after.as_deref(), COMPOSER_KEY_SCAN_PAGE).await;
+            let Some(last_key) = page.last().map(|(key, _)| key.clone()) else {
+                break;
             };
-            let Some(nbytes) = row.get::<i64>(1).ok().filter(|n| *n >= 0).map(|n| n as u64) else {
-                continue;
-            };
-            if nbytes > MAX_COMPOSER_ENVELOPE_BYTES {
-                if !byte_budget
-                    .try_consume(nbytes.min(MAX_COMPOSER_ENVELOPE_BYTES.saturating_add(1)))
-                {
-                    break;
+            let page_full = page.len() == COMPOSER_KEY_SCAN_PAGE;
+            for (key, nbytes) in page {
+                if nbytes > MAX_COMPOSER_ENVELOPE_BYTES {
+                    if !byte_budget
+                        .try_consume(nbytes.min(MAX_COMPOSER_ENVELOPE_BYTES.saturating_add(1)))
+                    {
+                        break 'scan;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if byte_budget.exhausted() {
-                byte_budget.defer();
-                break;
-            }
-            if byte_budget
-                .remaining()
-                .is_some_and(|remaining| nbytes > remaining)
-            {
-                byte_budget.defer();
-                break;
-            }
-            let value = match fetch_kv_text_bounded(
-                conn,
-                &key,
-                MAX_COMPOSER_ENVELOPE_BYTES,
-                byte_budget.remaining(),
-            )
-            .await
-            {
-                BoundedSqliteValue::Ready { value, .. } => value,
-                BoundedSqliteValue::BudgetExceeded { .. } => {
+                if byte_budget.exhausted() {
                     byte_budget.defer();
-                    break;
+                    break 'scan;
                 }
-                BoundedSqliteValue::Oversized { .. }
-                | BoundedSqliteValue::Malformed { .. }
-                | BoundedSqliteValue::Missing => continue,
-            };
-            if !byte_budget.try_consume(nbytes) {
-                break;
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(&value) else {
-                continue;
-            };
-            let Some(composer_id) = envelope
-                .get("composerId")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty() && id.len() as u64 <= MAX_COMPOSER_SQLITE_KEY_BYTES)
-                .map(str::to_string)
-                .or_else(|| composer_id_from_envelope_key(&key).map(str::to_string))
-            else {
-                continue;
-            };
-            let Some(project) = envelope_project(&envelope) else {
-                continue;
-            };
-            if let Some(ws_hash) = workspace_hash(&envelope) {
-                if workspace_paths.contains_key(&ws_hash)
-                    || workspace_paths.len() < MAX_COMPOSER_STORE_BLOB_VISITS
+                if byte_budget
+                    .remaining()
+                    .is_some_and(|remaining| nbytes > remaining)
                 {
-                    workspace_paths
-                        .entry(ws_hash)
-                        .or_insert_with(|| project.path.clone());
+                    byte_budget.defer();
+                    break 'scan;
+                }
+                let value = match fetch_kv_text_bounded(
+                    conn,
+                    &key,
+                    MAX_COMPOSER_ENVELOPE_BYTES,
+                    byte_budget.remaining(),
+                )
+                .await
+                {
+                    BoundedSqliteValue::Ready { value, .. } => value,
+                    BoundedSqliteValue::BudgetExceeded { .. } => {
+                        byte_budget.defer();
+                        break 'scan;
+                    }
+                    BoundedSqliteValue::Oversized { .. }
+                    | BoundedSqliteValue::Malformed { .. }
+                    | BoundedSqliteValue::Missing => continue,
+                };
+                if !byte_budget.try_consume(nbytes) {
+                    break 'scan;
+                }
+                let Ok(envelope) = serde_json::from_str::<Value>(&value) else {
+                    continue;
+                };
+                let Some(composer_id) = envelope
+                    .get("composerId")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty() && id.len() as u64 <= MAX_COMPOSER_SQLITE_KEY_BYTES)
+                    .map(str::to_string)
+                    .or_else(|| composer_id_from_envelope_key(&key).map(str::to_string))
+                else {
+                    continue;
+                };
+                let Some(project) = envelope_project(&envelope) else {
+                    continue;
+                };
+                if let Some(ws_hash) = workspace_hash(&envelope) {
+                    if workspace_paths.contains_key(&ws_hash)
+                        || workspace_paths.len() < MAX_COMPOSER_STORE_BLOB_VISITS
+                    {
+                        workspace_paths
+                            .entry(ws_hash)
+                            .or_insert_with(|| project.path.clone());
+                    } else {
+                        byte_budget.defer();
+                    }
+                }
+                let selected_project = match context.project_root {
+                    Some(root) if path_belongs_to_project(Path::new(&project.path), root) => {
+                        ComposerProject {
+                            path: project.path.clone(),
+                        }
+                    }
+                    Some(_) => continue,
+                    None if context
+                        .registered_roots
+                        .iter()
+                        .any(|root| path_belongs_to_project(Path::new(&project.path), root)) =>
+                    {
+                        continue;
+                    }
+                    None => ComposerProject {
+                        path: "user".to_string(),
+                    },
+                };
+                // Keep JSONL dedupe state bounded independently of SQLite row count.
+                if outcome.owned_session_ids.contains(&composer_id)
+                    || outcome.owned_session_ids.len() < MAX_COMPOSER_STORE_BLOB_VISITS
+                {
+                    outcome.owned_session_ids.insert(composer_id.clone());
                 } else {
                     byte_budget.defer();
                 }
-            }
-            let selected_project = match context.project_root {
-                Some(root) if path_belongs_to_project(Path::new(&project.path), root) => {
-                    ComposerProject {
-                        path: project.path.clone(),
-                    }
-                }
-                Some(_) => continue,
-                None if context
-                    .registered_roots
-                    .iter()
-                    .any(|root| path_belongs_to_project(Path::new(&project.path), root)) =>
-                {
-                    continue;
-                }
-                None => ComposerProject {
-                    path: "user".to_string(),
-                },
-            };
-            // Keep JSONL dedupe state bounded independently of SQLite row count.
-            if outcome.owned_session_ids.contains(&composer_id)
-                || outcome.owned_session_ids.len() < MAX_COMPOSER_STORE_BLOB_VISITS
-            {
-                outcome.owned_session_ids.insert(composer_id.clone());
-            } else {
-                byte_budget.defer();
-            }
 
-            let headers = envelope
-                .get("fullConversationHeadersOnly")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            if ingested_this_pass >= envelope_cap {
-                // Deferred to a later pass; still owned so JSONL stands down.
-                continue;
-            }
-            let Some(generation) = snapshot_generation(&self.state_db_path) else {
-                continue;
-            };
-            let mut session_accepted = false;
-            let mut messages = 0_u64;
-            if composer_todos_have_admittable_items(&envelope)
-                && let Some(todo_checkpoint) = composer_envelope_todo_checkpoint(&envelope)
-                && let Ok(envelope_source) = cursor_composer_envelope_source(&composer_id)
-                && let Ok(envelope_expected_cursor) = context
-                    .facade
-                    .get_source_cursor(&envelope_source, &context.scope)
-                    .await
-            {
-                // Same generation + position is not enough: envelope todos mutate
-                // in place. Skip only when the stored resume fingerprint still
-                // matches the current todo checkpoint.
-                let envelope_already_covered =
-                    envelope_expected_cursor.as_ref().is_some_and(|cursor| {
-                        cursor.generation() == generation
-                            && cursor.position() >= 1
-                            && cursor.resume_fingerprint() == Some(todo_checkpoint)
+                let headers = envelope
+                    .get("fullConversationHeadersOnly")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if ingested_this_pass >= envelope_cap {
+                    // Deferred to a later pass; still owned so JSONL stands down.
+                    continue;
+                }
+                let Some(generation) = snapshot_generation(&self.state_db_path) else {
+                    continue;
+                };
+                let mut session_accepted = false;
+                let mut messages = 0_u64;
+                if composer_todos_have_admittable_items(&envelope)
+                    && let Some(todo_checkpoint) = composer_envelope_todo_checkpoint(&envelope)
+                    && let Ok(envelope_source) = cursor_composer_envelope_source(&composer_id)
+                    && let Ok(envelope_expected_cursor) = context
+                        .facade
+                        .get_source_cursor(&envelope_source, &context.scope)
+                        .await
+                {
+                    // Same generation + position is not enough: envelope todos mutate
+                    // in place. Skip only when the stored resume fingerprint still
+                    // matches the current todo checkpoint.
+                    let envelope_already_covered =
+                        envelope_expected_cursor.as_ref().is_some_and(|cursor| {
+                            cursor.generation() == generation
+                                && cursor.position() >= 1
+                                && cursor.resume_fingerprint() == Some(todo_checkpoint)
+                        });
+                    if !envelope_already_covered
+                        && let Ok(request) =
+                            build_cursor_composer_envelope_capture_request_for_project(
+                                &composer_id,
+                                &envelope,
+                                Some(&selected_project.path),
+                                context.scope.clone(),
+                                generation,
+                                envelope_expected_cursor,
+                            )
+                        && let Ok(outcome) = context.facade.capture_observation(request).await
+                        && let CaptureObservationOutcome::Persisted {
+                            outcome: persisted, ..
+                        } = outcome
+                    {
+                        session_accepted = true;
+                        if matches!(*persisted, ObservationPersistOutcome::Committed(_)) {
+                            messages = messages.saturating_add(1);
+                        }
+                    }
+                }
+                for (position, header) in headers.iter().enumerate() {
+                    let Some(bubble_id) = header.get("bubbleId").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if context
+                        .db
+                        .get_session_message(PROVIDER, &format!("{composer_id}:{bubble_id}"))
+                        .await
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    let header_position = position as u64;
+                    let Ok(source) = cursor_composer_source(&composer_id) else {
+                        break;
+                    };
+                    let Ok(expected_cursor) = context
+                        .facade
+                        .get_source_cursor(&source, &context.scope)
+                        .await
+                    else {
+                        break;
+                    };
+                    let position = expected_cursor.as_ref().map_or(header_position, |cursor| {
+                        if cursor.generation() == generation {
+                            cursor.position().max(header_position)
+                        } else {
+                            header_position
+                        }
                     });
-                if !envelope_already_covered
-                    && let Ok(request) = build_cursor_composer_envelope_capture_request_for_project(
-                        &composer_id,
-                        &envelope,
-                        Some(&selected_project.path),
-                        context.scope.clone(),
-                        generation,
-                        envelope_expected_cursor,
-                    )
-                    && let Ok(outcome) = context.facade.capture_observation(request).await
-                    && let CaptureObservationOutcome::Persisted {
-                        outcome: persisted, ..
-                    } = outcome
-                {
-                    session_accepted = true;
-                    if matches!(*persisted, ObservationPersistOutcome::Committed(_)) {
-                        messages = messages.saturating_add(1);
-                    }
-                }
-            }
-            for (position, header) in headers.iter().enumerate() {
-                let Some(bubble_id) = header.get("bubbleId").and_then(Value::as_str) else {
-                    continue;
-                };
-                if context
-                    .db
-                    .get_session_message(PROVIDER, &format!("{composer_id}:{bubble_id}"))
-                    .await
-                    .is_some()
-                {
-                    continue;
-                }
-                let header_position = position as u64;
-                let Ok(source) = cursor_composer_source(&composer_id) else {
-                    break;
-                };
-                let Ok(expected_cursor) = context
-                    .facade
-                    .get_source_cursor(&source, &context.scope)
-                    .await
-                else {
-                    break;
-                };
-                let position = expected_cursor.as_ref().map_or(header_position, |cursor| {
-                    if cursor.generation() == generation {
-                        cursor.position().max(header_position)
-                    } else {
-                        header_position
-                    }
-                });
-                if byte_budget.exhausted() {
-                    byte_budget.defer();
-                    break;
-                }
-                match fetch_bubble_bounded(conn, &composer_id, bubble_id, byte_budget.remaining())
-                    .await
-                {
-                    BoundedSqliteValue::Missing => {}
-                    BoundedSqliteValue::Oversized { byte_len } => {
-                        if !byte_budget.try_consume(composer_source_charge(byte_len)) {
-                            break;
-                        }
-                        if advance_composer_coverage(
-                            ComposerCoverageContext {
-                                facade: context.facade,
-                                scope: &context.scope,
-                                generation,
-                            },
-                            source,
-                            position,
-                            expected_cursor,
-                            ObservationCoverageReason::OversizedFrame,
-                            None,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    BoundedSqliteValue::Malformed { byte_len } => {
-                        if !byte_budget.try_consume(composer_source_charge(byte_len)) {
-                            break;
-                        }
-                        if advance_composer_coverage(
-                            ComposerCoverageContext {
-                                facade: context.facade,
-                                scope: &context.scope,
-                                generation,
-                            },
-                            source,
-                            position,
-                            expected_cursor,
-                            ObservationCoverageReason::MalformedFrame,
-                            None,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    BoundedSqliteValue::BudgetExceeded { .. } => {
+                    if byte_budget.exhausted() {
                         byte_budget.defer();
                         break;
                     }
-                    BoundedSqliteValue::Ready {
-                        byte_len,
-                        value: bubble,
-                    } => {
-                        if !byte_budget.try_consume(byte_len.max(composer_budget_bytes(&bubble))) {
-                            break;
+                    match fetch_bubble_bounded(
+                        conn,
+                        &composer_id,
+                        bubble_id,
+                        byte_budget.remaining(),
+                    )
+                    .await
+                    {
+                        BoundedSqliteValue::Missing => {}
+                        BoundedSqliteValue::Oversized { byte_len } => {
+                            if !byte_budget.try_consume(composer_source_charge(byte_len)) {
+                                break;
+                            }
+                            if advance_composer_coverage(
+                                ComposerCoverageContext {
+                                    facade: context.facade,
+                                    scope: &context.scope,
+                                    generation,
+                                },
+                                source,
+                                position,
+                                expected_cursor,
+                                ObservationCoverageReason::OversizedFrame,
+                                None,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
                         }
-                        let request = build_cursor_composer_capture_request_for_project(
-                            &composer_id,
-                            bubble_id,
-                            &bubble,
-                            Some(&selected_project.path),
-                            Some(&envelope),
-                            context.scope.clone(),
-                            generation,
-                            position,
-                            expected_cursor.clone(),
-                        );
-                        let Ok(request) = request else {
+                        BoundedSqliteValue::Malformed { byte_len } => {
+                            if !byte_budget.try_consume(composer_source_charge(byte_len)) {
+                                break;
+                            }
                             if advance_composer_coverage(
                                 ComposerCoverageContext {
                                     facade: context.facade,
@@ -593,18 +549,32 @@ impl CursorComposerSource {
                             {
                                 break;
                             }
-                            continue;
-                        };
-                        match context.facade.capture_observation(request).await {
-                            Ok(CaptureObservationOutcome::Persisted {
-                                outcome: persisted, ..
-                            }) => {
-                                session_accepted = true;
-                                if matches!(*persisted, ObservationPersistOutcome::Committed(_)) {
-                                    messages = messages.saturating_add(1);
-                                }
+                        }
+                        BoundedSqliteValue::BudgetExceeded { .. } => {
+                            byte_budget.defer();
+                            break;
+                        }
+                        BoundedSqliteValue::Ready {
+                            byte_len,
+                            value: bubble,
+                        } => {
+                            if !byte_budget
+                                .try_consume(byte_len.max(composer_budget_bytes(&bubble)))
+                            {
+                                break;
                             }
-                            Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
+                            let request = build_cursor_composer_capture_request_for_project(
+                                &composer_id,
+                                bubble_id,
+                                &bubble,
+                                Some(&selected_project.path),
+                                Some(&envelope),
+                                context.scope.clone(),
+                                generation,
+                                position,
+                                expected_cursor.clone(),
+                            );
+                            let Ok(request) = request else {
                                 if advance_composer_coverage(
                                     ComposerCoverageContext {
                                         facade: context.facade,
@@ -614,43 +584,79 @@ impl CursorComposerSource {
                                     source,
                                     position,
                                     expected_cursor,
-                                    ObservationCoverageReason::SanitizerRejected,
-                                    Some(receipt),
+                                    ObservationCoverageReason::MalformedFrame,
+                                    None,
                                 )
                                 .await
                                 .is_err()
                                 {
                                     break;
                                 }
-                            }
-                            Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
-                                if advance_composer_coverage(
-                                    ComposerCoverageContext {
-                                        facade: context.facade,
-                                        scope: &context.scope,
-                                        generation,
-                                    },
-                                    source,
-                                    position,
-                                    expected_cursor,
-                                    ObservationCoverageReason::SanitizerQuarantined,
-                                    Some(receipt),
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    break;
+                                continue;
+                            };
+                            match context.facade.capture_observation(request).await {
+                                Ok(CaptureObservationOutcome::Persisted {
+                                    outcome: persisted,
+                                    ..
+                                }) => {
+                                    session_accepted = true;
+                                    if matches!(*persisted, ObservationPersistOutcome::Committed(_))
+                                    {
+                                        messages = messages.saturating_add(1);
+                                    }
                                 }
+                                Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
+                                    if advance_composer_coverage(
+                                        ComposerCoverageContext {
+                                            facade: context.facade,
+                                            scope: &context.scope,
+                                            generation,
+                                        },
+                                        source,
+                                        position,
+                                        expected_cursor,
+                                        ObservationCoverageReason::SanitizerRejected,
+                                        Some(receipt),
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
+                                    if advance_composer_coverage(
+                                        ComposerCoverageContext {
+                                            facade: context.facade,
+                                            scope: &context.scope,
+                                            generation,
+                                        },
+                                        source,
+                                        position,
+                                        expected_cursor,
+                                        ObservationCoverageReason::SanitizerQuarantined,
+                                        Some(receipt),
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
                             }
-                            Err(_) => break,
                         }
                     }
                 }
+                if session_accepted {
+                    ingested_this_pass += 1;
+                    outcome.add(1, messages);
+                }
             }
-            if session_accepted {
-                ingested_this_pass += 1;
-                outcome.add(1, messages);
+            if !page_full {
+                break;
             }
+            scan_after = Some(last_key);
         }
     }
 

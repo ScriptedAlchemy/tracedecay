@@ -1,18 +1,17 @@
 //! Length-gated, strictly read-only `SQLite` access helpers for the Cursor
 //! composer stores (`state.vscdb` KV lookups and `store.db` handles).
+//!
+//! S11: this module reads foreign Cursor databases through the bundled
+//! rusqlite engine (immutable read-only URI opens). Every SQL call runs on a
+//! blocking thread via [`CursorConn::with`], so async ingest callers never
+//! block the executor and futures holding a [`CursorConn`] stay `Send`.
 
 use std::path::Path;
 
-use libsql::OpenFlags;
 use serde_json::Value;
 
 use crate::privacy::MAX_OBSERVATION_RECORD_BYTES;
 use crate::sessions::source::MAX_JSONL_RECORD_BYTES;
-
-/// `SQLITE_OPEN_URI` — not exposed by libsql's [`OpenFlags`], so we OR the raw
-/// bit in (libsql forwards `flags.bits()` verbatim to `sqlite3_open_v2`). This
-/// makes `SQLite` interpret the `file:…?immutable=1` URI filename.
-const SQLITE_OPEN_URI: i32 = 0x0000_0040;
 
 /// Outcome of a length-gated `SQLite` text/blob fetch that never materializes
 /// oversized or over-budget payloads into `Rust`.
@@ -68,57 +67,121 @@ pub(crate) const DEFAULT_COMPOSER_SWEEP_BYTES: u64 = MAX_COMPOSER_ENVELOPE_BYTES
 /// Maximum UTF-8 bytes in one `SQLite` key / blob id.
 pub(crate) const MAX_COMPOSER_SQLITE_KEY_BYTES: u64 = 512;
 
-/// A read-only connection paired with its owning [`libsql::Database`] so the
-/// underlying handle stays alive for the connection's lifetime.
+/// Rows fetched per keyset-paginated `composerData:` key scan page. The scan
+/// walks the `cursorDiskKV` primary key in order, so pagination reproduces the
+/// original indexed prefix scan while keeping at most one page in memory.
+pub(crate) const COMPOSER_KEY_SCAN_PAGE: usize = 1024;
+
+/// Shared foreign-store read handle (see [`crate::sessions::shared`]),
+/// aliased locally for the Cursor composer reader signatures.
+pub(crate) use crate::sessions::shared::SqliteReadConn as CursorConn;
+
+/// A read-only connection to a Cursor composer store.
 pub(crate) struct ReadOnlyDb {
-    _db: libsql::Database,
-    pub(crate) conn: libsql::Connection,
+    pub(crate) conn: CursorConn,
 }
 
 /// Open a `SQLite` file strictly read-only and immutable (no locking, no
-/// `-wal`/`-shm` writes) via a `file:…?immutable=1&mode=ro` URI.
+/// `-wal`/`-shm` writes) via a `file:…?immutable=1&mode=ro` URI. The runtime
+/// helper also pins `busy_timeout = 0` and verifies `query_only = ON`.
 pub(crate) async fn open_readonly_immutable(db_path: &Path) -> Option<ReadOnlyDb> {
-    let uri = crate::sqlite_read_snapshot::immutable_uri(db_path).ok()?;
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::from_bits_retain(SQLITE_OPEN_URI);
-    let db =
-        crate::db::libsql_local::open_local_database_with_flags(std::path::Path::new(&uri), flags)
-            .await
-            .ok()?;
-    let conn = db.connect().ok()?;
-    // Belt-and-suspenders against ever mutating the live store.
-    let _ = conn.execute_batch("PRAGMA query_only = ON;").await;
-    Some(ReadOnlyDb { _db: db, conn })
+    let path = db_path.to_path_buf();
+    let conn = tokio::task::spawn_blocking(move || {
+        tracedecay_rusqlite_runtime::open_immutable_reader(&path).ok()
+    })
+    .await
+    .ok()??;
+    Some(ReadOnlyDb {
+        conn: CursorConn::new(conn),
+    })
 }
 
-pub(crate) async fn fetch_kv_text_bounded(
-    conn: &libsql::Connection,
+/// One keyset page of `composerData:` keys with their value byte lengths.
+/// Passing `after = None` starts at the prefix lower bound; passing the last
+/// key of the previous page continues the primary-key-ordered scan. Never
+/// materializes envelope text — keys and byte lengths only.
+pub(crate) async fn scan_composer_keys_page(
+    conn: &CursorConn,
+    after: Option<&str>,
+    limit: usize,
+) -> Vec<(String, u64)> {
+    let after = after.map(str::to_string);
+    conn.with(move |conn| {
+        let (sql, lower) = match &after {
+            Some(last) => (
+                "SELECT key, length(CAST(value AS BLOB)) AS nbytes \
+                 FROM cursorDiskKV \
+                 WHERE key > ?1 AND key < 'composerData;' \
+                   AND typeof(key) = 'text' AND value IS NOT NULL \
+                   AND length(CAST(key AS BLOB)) <= ?2 \
+                 ORDER BY key \
+                 LIMIT ?3",
+                last.as_str(),
+            ),
+            None => (
+                "SELECT key, length(CAST(value AS BLOB)) AS nbytes \
+                 FROM cursorDiskKV \
+                 WHERE key >= ?1 AND key < 'composerData;' \
+                   AND typeof(key) = 'text' AND value IS NOT NULL \
+                   AND length(CAST(key AS BLOB)) <= ?2 \
+                 ORDER BY key \
+                 LIMIT ?3",
+                "composerData:",
+            ),
+        };
+        let Ok(mut stmt) = conn.prepare(sql) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map(
+            rusqlite::params![lower, MAX_COMPOSER_SQLITE_KEY_BYTES as i64, limit as i64],
+            |row| {
+                let key = row.get::<_, String>(0)?;
+                let nbytes = row.get::<_, i64>(1)?;
+                Ok((key, nbytes))
+            },
+        );
+        let Ok(rows) = rows else {
+            return Vec::new();
+        };
+        rows.filter_map(|row| {
+            let (key, nbytes) = row.ok()?;
+            let nbytes = u64::try_from(nbytes).ok()?;
+            Some((key, nbytes))
+        })
+        .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+fn fetch_kv_text_bounded_sync(
+    conn: &rusqlite::Connection,
     key: &str,
     max_bytes: u64,
     remaining: Option<u64>,
 ) -> BoundedSqliteValue<String> {
     let effective_cap = effective_sqlite_cap(max_bytes, remaining);
-    let Ok(mut rows) = conn
-        .query(
-            "SELECT length(CAST(value AS BLOB)) AS nbytes, \
-             CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
-             FROM cursorDiskKV WHERE key = ?2",
-            libsql::params![effective_cap as i64, key],
-        )
-        .await
-    else {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT length(CAST(value AS BLOB)) AS nbytes, \
+         CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
+         FROM cursorDiskKV WHERE key = ?2",
+    ) else {
         return BoundedSqliteValue::Missing;
     };
-    let Ok(Some(row)) = rows.next().await else {
+    let Ok(mut rows) = stmt.query(rusqlite::params![effective_cap as i64, key]) else {
         return BoundedSqliteValue::Missing;
     };
-    let Ok(nbytes_i) = row.get::<i64>(0) else {
+    let Ok(Some(row)) = rows.next() else {
+        return BoundedSqliteValue::Missing;
+    };
+    let Ok(nbytes_i) = row.get::<_, i64>(0) else {
         return BoundedSqliteValue::Missing;
     };
     if nbytes_i < 0 {
         return BoundedSqliteValue::Missing;
     }
     let byte_len = nbytes_i as u64;
-    match row.get::<String>(1) {
+    match row.get::<_, String>(1) {
         Ok(value) => BoundedSqliteValue::Ready { byte_len, value },
         Err(_) if byte_len > max_bytes => BoundedSqliteValue::Oversized { byte_len },
         Err(_) if remaining.is_some_and(|cap| byte_len > cap) => {
@@ -128,8 +191,20 @@ pub(crate) async fn fetch_kv_text_bounded(
     }
 }
 
+pub(crate) async fn fetch_kv_text_bounded(
+    conn: &CursorConn,
+    key: &str,
+    max_bytes: u64,
+    remaining: Option<u64>,
+) -> BoundedSqliteValue<String> {
+    let key = key.to_string();
+    conn.with(move |conn| fetch_kv_text_bounded_sync(conn, &key, max_bytes, remaining))
+        .await
+        .unwrap_or(BoundedSqliteValue::Missing)
+}
+
 pub(crate) async fn fetch_bubble_bounded(
-    conn: &libsql::Connection,
+    conn: &CursorConn,
     composer_id: &str,
     bubble_id: &str,
     remaining: Option<u64>,

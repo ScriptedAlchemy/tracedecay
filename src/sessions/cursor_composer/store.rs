@@ -11,7 +11,7 @@ use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::snapshot_observation::MAX_SNAPSHOT_METADATA_BYTES;
 
 use super::sqlite::{
-    BoundedSqliteValue, MAX_COMPOSER_SQLITE_KEY_BYTES, composer_source_charge,
+    BoundedSqliteValue, CursorConn, MAX_COMPOSER_SQLITE_KEY_BYTES, composer_source_charge,
     effective_sqlite_cap, epoch_ms_to_secs, max_composer_record_bytes,
 };
 
@@ -105,31 +105,27 @@ fn store_blob_message(bytes: &[u8]) -> Option<(String, Value)> {
     Some((role, content))
 }
 
-async fn fetch_store_blob_bounded(
-    conn: &libsql::Connection,
+fn fetch_store_blob_bounded_sync(
+    conn: &rusqlite::Connection,
     blob_id: &str,
     remaining: Option<u64>,
 ) -> BoundedSqliteValue<Vec<u8>> {
-    if blob_id.is_empty() || blob_id.len() as u64 > MAX_COMPOSER_SQLITE_KEY_BYTES {
-        return BoundedSqliteValue::Missing;
-    }
     let max_bytes = max_composer_record_bytes();
     let effective_cap = effective_sqlite_cap(max_bytes, remaining);
-    let Ok(mut rows) = conn
-        .query(
-            "SELECT length(CAST(data AS BLOB)) AS nbytes, \
-             CASE WHEN length(CAST(data AS BLOB)) <= ?1 THEN data ELSE NULL END AS payload \
-             FROM blobs WHERE id = ?2",
-            libsql::params![effective_cap as i64, blob_id],
-        )
-        .await
-    else {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT length(CAST(data AS BLOB)) AS nbytes, \
+         CASE WHEN length(CAST(data AS BLOB)) <= ?1 THEN data ELSE NULL END AS payload \
+         FROM blobs WHERE id = ?2",
+    ) else {
         return BoundedSqliteValue::Missing;
     };
-    let Ok(Some(row)) = rows.next().await else {
+    let Ok(mut rows) = stmt.query(rusqlite::params![effective_cap as i64, blob_id]) else {
         return BoundedSqliteValue::Missing;
     };
-    let Ok(nbytes_i) = row.get::<i64>(0) else {
+    let Ok(Some(row)) = rows.next() else {
+        return BoundedSqliteValue::Missing;
+    };
+    let Ok(nbytes_i) = row.get::<_, i64>(0) else {
         return BoundedSqliteValue::Missing;
     };
     if nbytes_i < 0 {
@@ -137,8 +133,8 @@ async fn fetch_store_blob_bounded(
     }
     let byte_len = nbytes_i as u64;
     let data = row
-        .get::<Vec<u8>>(1)
-        .or_else(|_| row.get::<String>(1).map(String::into_bytes));
+        .get::<_, Vec<u8>>(1)
+        .or_else(|_| row.get::<_, String>(1).map(String::into_bytes));
     match data {
         Ok(value) => BoundedSqliteValue::Ready { byte_len, value },
         Err(_) if byte_len > max_bytes => BoundedSqliteValue::Oversized { byte_len },
@@ -149,27 +145,54 @@ async fn fetch_store_blob_bounded(
     }
 }
 
+async fn fetch_store_blob_bounded(
+    conn: &CursorConn,
+    blob_id: &str,
+    remaining: Option<u64>,
+) -> BoundedSqliteValue<Vec<u8>> {
+    if blob_id.is_empty() || blob_id.len() as u64 > MAX_COMPOSER_SQLITE_KEY_BYTES {
+        return BoundedSqliteValue::Missing;
+    }
+    let blob_id = blob_id.to_string();
+    conn.with(move |conn| fetch_store_blob_bounded_sync(conn, &blob_id, remaining))
+        .await
+        .unwrap_or(BoundedSqliteValue::Missing)
+}
+
 pub(crate) async fn read_store_meta_bounded(
-    conn: &libsql::Connection,
+    conn: &CursorConn,
+    remaining: Option<u64>,
+) -> BoundedSqliteValue<StoreMeta> {
+    conn.with(move |conn| read_store_meta_bounded_sync(conn, remaining))
+        .await
+        .unwrap_or(BoundedSqliteValue::Missing)
+}
+
+fn read_store_meta_bounded_sync(
+    conn: &rusqlite::Connection,
     remaining: Option<u64>,
 ) -> BoundedSqliteValue<StoreMeta> {
     let decoded_cap = effective_sqlite_cap(MAX_COMPOSER_STORE_META_BYTES, remaining);
     let encoded_cap = decoded_cap.saturating_mul(2);
-    let Ok(mut rows) = conn
-        .query(
-            "SELECT length(CAST(value AS BLOB)) AS nbytes, \
-             CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
-             FROM meta WHERE key = '0'",
-            libsql::params![encoded_cap as i64],
-        )
-        .await
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT length(CAST(value AS BLOB)) AS nbytes, \
+         CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
+         FROM meta WHERE key = '0'",
+    ) else {
+        return BoundedSqliteValue::Missing;
+    };
+    let Ok(mut rows) = stmt.query(rusqlite::params![encoded_cap as i64]) else {
+        return BoundedSqliteValue::Missing;
+    };
+    let Ok(Some(row)) = rows.next() else {
+        return BoundedSqliteValue::Missing;
+    };
+    let Some(encoded_bytes) = row
+        .get::<_, i64>(0)
+        .ok()
+        .filter(|n| *n >= 0)
+        .map(|n| n as u64)
     else {
-        return BoundedSqliteValue::Missing;
-    };
-    let Ok(Some(row)) = rows.next().await else {
-        return BoundedSqliteValue::Missing;
-    };
-    let Some(encoded_bytes) = row.get::<i64>(0).ok().filter(|n| *n >= 0).map(|n| n as u64) else {
         return BoundedSqliteValue::Missing;
     };
     let decoded_bytes = encoded_bytes.saturating_add(1) / 2;
@@ -183,7 +206,7 @@ pub(crate) async fn read_store_meta_bounded(
             byte_len: decoded_bytes,
         };
     }
-    let Ok(hex) = row.get::<String>(1) else {
+    let Ok(hex) = row.get::<_, String>(1) else {
         return BoundedSqliteValue::Malformed {
             byte_len: decoded_bytes,
         };
@@ -231,7 +254,7 @@ pub(crate) async fn read_store_meta_bounded(
 /// primary key with SQL length/budget gates. Never `SELECT`s the full `blobs`
 /// table. Charges reachable blob bytes against `byte_budget` as they materialize.
 pub(crate) async fn order_store_messages_bounded(
-    conn: &libsql::Connection,
+    conn: &CursorConn,
     root: Option<&str>,
     byte_budget: &mut IngestByteBudget,
 ) -> StoreWalkOutcome {
@@ -257,30 +280,38 @@ pub(crate) async fn order_store_messages_bounded(
         }
     }
 
-    // Fallback: id-sorted leaf scan — ids only first, then length-gated fetches.
-    let Ok(mut rows) = conn
-        .query(
-            "SELECT id FROM blobs \
-             WHERE length(CAST(id AS BLOB)) <= ?1 \
-             ORDER BY id \
-             LIMIT ?2",
-            libsql::params![
-                MAX_COMPOSER_SQLITE_KEY_BYTES as i64,
-                MAX_COMPOSER_STORE_BLOB_VISITS as i64
-            ],
-        )
+    // Fallback: id-sorted leaf scan — ids only first, then length-gated
+    // fetches. The scan is already `LIMIT`-bounded, so one buffered page
+    // reproduces the original cursor semantics exactly.
+    let ids = conn
+        .with(|conn| {
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT id FROM blobs \
+                 WHERE length(CAST(id AS BLOB)) <= ?1 \
+                 ORDER BY id \
+                 LIMIT ?2",
+            ) else {
+                return Vec::new();
+            };
+            let rows = stmt.query_map(
+                rusqlite::params![
+                    MAX_COMPOSER_SQLITE_KEY_BYTES as i64,
+                    MAX_COMPOSER_STORE_BLOB_VISITS as i64
+                ],
+                |row| row.get::<_, String>(0),
+            );
+            let Ok(rows) = rows else {
+                return Vec::new();
+            };
+            rows.filter_map(std::result::Result::ok).collect::<Vec<_>>()
+        })
         .await
-    else {
-        return StoreWalkOutcome::Messages(ordered);
-    };
-    while let Ok(Some(row)) = rows.next().await {
+        .unwrap_or_default();
+    for id in ids {
         if visited.len() >= MAX_COMPOSER_STORE_BLOB_VISITS {
             byte_budget.defer();
             break;
         }
-        let Ok(id) = row.get::<String>(0) else {
-            continue;
-        };
         if !visited.insert(id.clone()) {
             continue;
         }
@@ -322,7 +353,7 @@ pub(crate) async fn order_store_messages_bounded(
 }
 
 async fn walk_store_blob_bounded(
-    conn: &libsql::Connection,
+    conn: &CursorConn,
     id: &str,
     byte_budget: &mut IngestByteBudget,
     visited: &mut HashSet<String>,

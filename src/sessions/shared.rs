@@ -6,10 +6,48 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
 
 use crate::sessions::SessionMessageRecord;
+
+/// Shareable handle to a read-only rusqlite connection over a foreign
+/// (non-TraceDecay-owned) `SQLite` store.
+///
+/// S11: foreign session readers run on the bundled rusqlite engine. The mutex
+/// makes the handle `Sync`, so async ingest futures may hold it across await
+/// points and stay `Send`; every SQL call runs on a blocking thread via
+/// [`SqliteReadConn::with`], keeping the async executor unblocked.
+#[derive(Clone)]
+pub struct SqliteReadConn {
+    inner: Arc<Mutex<rusqlite::Connection>>,
+}
+
+impl SqliteReadConn {
+    pub fn new(conn: rusqlite::Connection) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(conn)),
+        }
+    }
+
+    /// Runs `body` against the connection on a blocking thread. Returns `None`
+    /// only if the blocking task itself fails (cancellation/panic), which
+    /// callers degrade to the same outcome as any SQL error.
+    pub async fn with<T, F>(&self, body: F) -> Option<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&rusqlite::Connection) -> T + Send + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
+            body(&guard)
+        })
+        .await
+        .ok()
+    }
+}
 
 /// Generic per-transcript backlog threshold for warning that automatic
 /// session transcript catch-up may not drain recall transcripts quickly enough.
@@ -61,22 +99,48 @@ pub struct NewRows<T> {
 ///
 /// Selects rows whose rowid is greater than `prev.position` (the last-seen
 /// rowid), ordered ascending, mapping each through `map_row` *during* iteration
-/// (libsql rows must not outlive the cursor) and advancing the stored cursor to
-/// the maximum rowid seen. `select_sql` must select the rowid as its first
+/// (rows must not outlive the statement cursor) and advancing the stored cursor
+/// to the maximum rowid seen. `select_sql` must select the rowid as its first
 /// column and accept a single `?` bound to the previous rowid, e.g.
 /// `"SELECT rowid, role, text FROM turns WHERE rowid > ? ORDER BY rowid"`.
 /// Fail-open: any query error yields `None`; `map_row` returning `None` skips
-/// that row while still advancing the cursor.
-pub async fn read_new_rows<T>(
-    conn: &libsql::Connection,
+/// that row while still advancing the cursor. The whole read runs as one
+/// blocking call on the connection's thread.
+pub async fn read_new_rows<T, F>(
+    conn: &SqliteReadConn,
     select_sql: &str,
     prev: StoredCursor,
-    mut map_row: impl FnMut(i64, &libsql::Row) -> Option<T>,
-) -> Option<NewRows<T>> {
-    let mut result_rows = match conn
-        .query(select_sql, libsql::params![prev.position as i64])
+    map_row: F,
+) -> Option<NewRows<T>>
+where
+    T: Send + 'static,
+    F: FnMut(i64, &rusqlite::Row<'_>) -> Option<T> + Send + 'static,
+{
+    let select_sql = select_sql.to_string();
+    conn.with(move |conn| read_new_rows_sync(conn, &select_sql, prev, map_row))
         .await
-    {
+        .flatten()
+}
+
+fn read_new_rows_sync<T>(
+    conn: &rusqlite::Connection,
+    select_sql: &str,
+    prev: StoredCursor,
+    mut map_row: impl FnMut(i64, &rusqlite::Row<'_>) -> Option<T>,
+) -> Option<NewRows<T>> {
+    let mut statement = match conn.prepare(select_sql) {
+        Ok(statement) => statement,
+        Err(error) => {
+            tracing::debug!(
+                select_sql,
+                previous_rowid = prev.position,
+                error = %error,
+                "skipping transcript row source query"
+            );
+            return None;
+        }
+    };
+    let mut result_rows = match statement.query(rusqlite::params![prev.position as i64]) {
         Ok(rows) => rows,
         Err(error) => {
             tracing::debug!(
@@ -91,8 +155,8 @@ pub async fn read_new_rows<T>(
 
     let mut items = Vec::new();
     let mut max_rowid = prev.position;
-    while let Ok(Some(row)) = result_rows.next().await {
-        let Ok(rowid) = row.get::<i64>(0) else {
+    while let Ok(Some(row)) = result_rows.next() {
+        let Ok(rowid) = row.get::<_, i64>(0) else {
             tracing::debug!(
                 select_sql,
                 "skipping transcript row without rowid in column 0"
@@ -102,7 +166,7 @@ pub async fn read_new_rows<T>(
         if rowid as u64 > max_rowid {
             max_rowid = rowid as u64;
         }
-        if let Some(item) = map_row(rowid, &row) {
+        if let Some(item) = map_row(rowid, row) {
             items.push(item);
         }
     }
