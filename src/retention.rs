@@ -20,6 +20,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, TraceDecayError};
 
+/// Store-level (whole-directory) orphan detection and collection. Row-level
+/// pruning below stays inside a live store; `orphan_stores` collects entire
+/// profile-sharded store directories whose project identity no longer resolves
+/// to a live repository root (plan 38, §2).
+pub mod orphan_stores;
+
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 
 /// Every prunable table stores its event time in a nullable `timestamp`

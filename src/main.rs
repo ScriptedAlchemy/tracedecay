@@ -515,10 +515,18 @@ async fn dispatch_command(
     host_bundle: HostBundleCliOptions,
 ) -> tracedecay::errors::Result<()> {
     let family = CommandFamily::for_command(&command);
-    if host_bundle.component.is_some() && !matches!(family, CommandFamily::Agent) {
+    // `--component`, `--dry-run`, and `--yes` are declared as global flags so
+    // clap accepts them before the subcommand is known, but they are only
+    // meaningful for the agent-lifecycle commands. Enforcing that scope here
+    // (rather than via a global clap `requires = "component"`) keeps the flags
+    // from leaking a spurious `--component` requirement onto unrelated verbs
+    // such as `branch gc` and `migrate registry-gc`.
+    if !matches!(family, CommandFamily::Agent)
+        && (host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.yes)
+    {
         return Err(tracedecay::errors::TraceDecayError::Config {
             message:
-                "--component is only valid with install, update-plugin, reinstall, or uninstall"
+                "--component, --dry-run, and --yes are only valid with install, update-plugin, reinstall, or uninstall"
                     .to_string(),
         });
     }
@@ -771,6 +779,20 @@ async fn dispatch_agent_command(
     command: Commands,
     host_bundle: HostBundleCliOptions,
 ) -> tracedecay::errors::Result<()> {
+    // `--dry-run` / `--yes` preview or confirm a first-party component
+    // mutation, so they require `--component` to name the target. This mirrors
+    // the requirement clap used to encode globally, now scoped to the agent
+    // lifecycle commands that actually consume it. `feedback-rollback` uses its
+    // own action-local flags and rejects the globals itself.
+    if !matches!(command, Commands::FeedbackRollback { .. })
+        && host_bundle.component.is_none()
+        && (host_bundle.dry_run || host_bundle.yes)
+    {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "--dry-run and --yes require --component to select the target host component"
+                .to_string(),
+        });
+    }
     match command {
         Commands::Install {
             agent,

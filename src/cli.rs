@@ -72,11 +72,15 @@ pub struct Cli {
     /// the host's canonical component set atomically
     #[arg(long, global = true, value_enum)]
     pub component: Option<HostBundleComponentArg>,
-    /// Verify and print the exact signed lifecycle plan without mutating
-    #[arg(long, global = true, requires = "component", conflicts_with = "yes")]
+    /// Verify and print the exact signed lifecycle plan without mutating.
+    /// Valid only alongside the agent-lifecycle commands; dispatch enforces the
+    /// `--component` pairing so this global flag never demands `--component`
+    /// from unrelated subcommands (e.g. `branch gc`, `migrate registry-gc`).
+    #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
-    /// Confirm a first-party component mutation
-    #[arg(long, global = true, requires = "component")]
+    /// Confirm a first-party component mutation. Scope is enforced in dispatch,
+    /// not by a global clap `requires`, so it does not leak onto other commands.
+    #[arg(long, global = true)]
     pub yes: bool,
     #[command(subcommand)]
     pub command: Option<Commands>,
