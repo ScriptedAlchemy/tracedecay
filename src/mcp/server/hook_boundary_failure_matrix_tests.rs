@@ -340,7 +340,8 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
 async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
     let (cg, project, _pin) = init_indexed_repo().await;
     let expected_root = cg.project_root().to_path_buf();
-    let recorded: Arc<Mutex<Vec<(PathBuf, Vec<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+    type RecordedDeliveries = Arc<Mutex<Vec<(PathBuf, Vec<String>)>>>;
+    let recorded: RecordedDeliveries = Arc::new(Mutex::new(Vec::new()));
     let sink_recorded = Arc::clone(&recorded);
     let sink: super::CodeIndexHookSink = Arc::new(move |root: PathBuf, rel_paths: Vec<String>| {
         let sink_recorded = Arc::clone(&sink_recorded);
@@ -362,21 +363,23 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
 
     Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
 
-    let recorded = recorded.lock().unwrap();
-    assert_eq!(
-        recorded.len(),
-        1,
-        "after-edit hook must reach the code-index scheduler bridge exactly once"
-    );
-    let (root, rel_paths) = &recorded[0];
-    assert_eq!(
-        root, &expected_root,
-        "sink must receive the served project root"
-    );
-    assert_eq!(
-        rel_paths,
-        &vec!["src/lib.rs".to_owned()],
-        "sink must receive the exact touched rel paths carried by the hook"
-    );
+    {
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "after-edit hook must reach the code-index scheduler bridge exactly once"
+        );
+        let (root, rel_paths) = &recorded[0];
+        assert_eq!(
+            root, &expected_root,
+            "sink must receive the served project root"
+        );
+        assert_eq!(
+            rel_paths,
+            &vec!["src/lib.rs".to_owned()],
+            "sink must receive the exact touched rel paths carried by the hook"
+        );
+    }
     server.shutdown().await;
 }
