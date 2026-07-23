@@ -15,6 +15,11 @@ resolver = "3"
 
 [workspace.metadata.cargo-shear]
 ignored-paths = [
+    # Consumed only by scripts/check-distribution-acceptance.sh, which copies
+    # this file into the extracted package's `examples/` dir and builds it as
+    # `--example fastembed_distribution_acceptance`. It is deliberately not a
+    # source-repo target, so its "unlinked file" report is a false positive.
+    "tests/distribution/fastembed/acceptance.rs",
     "eval/hermetic/fixtures/tool-args/*.rs",
     "eval/hermetic/fixtures/tool-args-other/*.rs",
     "evals/agent_adoption/fixture_broken/*.rs",
