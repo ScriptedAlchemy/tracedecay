@@ -9,6 +9,7 @@ import {
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
+import { formatCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
@@ -113,9 +114,9 @@ export function CodePage() {
               return (
                 <div className="flex flex-col gap-3">
                   <div className="grid grid-cols-3 gap-2">
-                    <StatTile label="nodes" value={data.totals.nodes.toLocaleString()} />
-                    <StatTile label="edges" value={data.totals.edges.toLocaleString()} />
-                    <StatTile label="files" value={data.totals.files.toLocaleString()} />
+                    <StatTile label="nodes" value={formatCount(data.totals.nodes)} />
+                    <StatTile label="edges" value={formatCount(data.totals.edges)} />
+                    <StatTile label="files" value={formatCount(data.totals.files)} />
                   </div>
                   {kinds.length > 0 ? (
                     <figure className="flex flex-col gap-1">

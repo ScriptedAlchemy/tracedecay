@@ -23,6 +23,11 @@ export const ProjectRegistryEntrySchema = z
     alias_count: z.number(),
     last_seen_at: z.number(),
     is_active: z.boolean().optional(),
+    /** Graph mass (total nodes/edges across the project's stores). Optional:
+     * the registry does not serve it yet; neurons size by store_count until
+     * the backend lands mass telemetry, then upgrade automatically. */
+    graph_node_count: z.number().optional(),
+    graph_edge_count: z.number().optional(),
   })
   .passthrough();
 export type ProjectRegistryEntry = z.infer<typeof ProjectRegistryEntrySchema>;
