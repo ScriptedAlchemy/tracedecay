@@ -218,6 +218,57 @@ review:
   temporal trace, conflict/proximity heatmap) are Canvas + D3 scales with
   the synchronized accessible table as the semantic source of truth.
 
+## Visualization catalog (decided 2026-07-23 from deep research)
+
+Every data domain gets a designed home. Three engineering pillars are built
+once and reused everywhere:
+
+1. **The track engine** (bespoke, Perfetto-model): one viewport-sized canvas,
+   lane virtualization via a visible-track bounds list, zoned hit-testing to
+   stable IDs (CPU interval-tree, no GPU readback), visible-time-window data
+   querying with server-side quantization, Canvas2D first with an optional
+   eval-free WebGL batch path (CSP forbids eval-based WebGL — the speedscope
+   lesson). Serves: Loom span waterfalls, causal arcs, dual-time scrubber
+   lanes, execution-topology lanes/rails, commit rails, conflict heatmap.
+2. **The playback controller** (bespoke): event-sourced fold over immutable
+   frames (state at T = fold of frames ≤ cursor; never interpolate),
+   two-track dual-time scrubber (observation lane + valid lane, typed
+   event-kind markers, lockable cursors, retroactive corrections marked by
+   shape), follow-live via suspend-on-scroll-back + floating return-to-live.
+   Shared by Loom, Sessions replay, and execution topology.
+3. **The selection store** (Zustand, stable-ID pub/sub using the crossfilter
+   technique — filter mask over sorted ID indices, IDs only, no payloads):
+   one selection resolved identically across graph/table/lanes/timeline.
+
+Per-domain assignments:
+
+| Domain | Visualization | Engine |
+|---|---|---|
+| Code/Brain/Knowledge graphs | force topology, ego views | Sigma.js + Graphology (color-picking, reducers) |
+| Task DAGs / decomposition (Plan 24) | layered DAG + critical path | d3-dag (MIT) headless in a Worker; tight-tree-style ranking, IndexedDB layout cache keyed by graph version, edge virtualization |
+| Commit/branch history (Delivery) | commit rails | hand-rolled canvas, pvigier active-branches algorithm, interval-tree hits |
+| PR review / merge queue / checks | review lanes + check matrix | track-engine lanes + accessible matrix (Graphite/GitHub-merge-box interaction model) |
+| Execution topology (PR17) | lanes, rails, heat cells | track engine (Perfetto track hierarchy for worktree/stack grouping) |
+| Agent/session traces (Loom, Agents) | span waterfall; spawn = nested collapsible track, handoff = span-link arc | track engine (Honeycomb depth-collapse, Datadog hover-re-root) |
+| Causality across lanes (Loom) | swimlane timeline + cross-lane arcs; Sigma ego-lens for pure topology | track engine + Sigma; W&B-style cluster-collapse ≥N with expansion cursor |
+| LCM lineage | SVG icicle (d3-flame-graph, Apache-2.0); speedscope-style eval-free canvas as scale escalation; Sandwich-style raw↔summary drill-down | d3-flame-graph / bespoke |
+| LCM token flow | Sankey, band = tokens, layoutIterations 0 (pinned order) | ECharts |
+| Compaction epochs | boundary rules on the shared playback axis + token-per-epoch strip | playback controller + ECharts |
+| Transcripts (Sessions) | virtualized stream with measured-height cache, data-model minimap (roles, boundaries, search-hit ticks), ARIA treeview turns, n/N hit navigation | TanStack Virtual + bespoke minimap |
+| Fact embeddings (Knowledge) | WebGL scatter, spatial-index lasso → stable IDs, zoom-hierarchical cluster labels (Nomic pattern), projection provenance always visible (UMAP axes labeled relative-only) | regl-scatterplot (MIT) gated on a CSP/eval audit of regl; fallback: eval-free bespoke point layer; embedding-atlas as design reference |
+| Conflict/proximity matrix | split-cell canvas: two independent color ramps + dual legend (never blended); table exposes both channels as separate columns | bespoke canvas + D3 scales |
+| Distributions over time (scores, latency) | Honeycomb-style column-histogram heatmap, log color scale, region-select → comparison | bespoke canvas + D3 |
+| Calibration (estimates vs outcomes) | reliability diagram: y=x diagonal, adaptive equal-count bins, per-bin n + CIs visible, low-n bins greyed | ECharts |
+| Storage/cost hierarchies | treemap (area = actual; color = budget utilization ONLY when budget known); icicle when depth > 3 | ECharts |
+| Time series (Observatory/Costs) | streaming append + sliding window, LTTB sampling; visible truncation labels | ECharts; uPlot (MIT, ~50 KB) as the bounded escalation for the hottest always-live panels |
+| Row micro-viz | SVG-per-cell sparkline/coverage/freshness/score-kind glyph with mandatory text equivalents; shared-canvas escalation if profiling demands | bespoke (D3 scales) |
+
+Disqualifications and gates (from license/size research): elkjs (EPL-2.0,
+~500 KB) is banned from the default path; Cosmograph the product is
+CC BY-NC and disqualified — the optional GPU overflow adapter targets
+**cosmos.gl (MIT, OpenJS)** instead, under plan 11's existing gate. Any
+WebGL dependency must pass an eval/CSP audit before adoption.
+
 ## Implementation notes for foundation lanes
 
 - `dashboard/src/theme/tokens.css` holds the raw scopes + `@theme` mapping;
