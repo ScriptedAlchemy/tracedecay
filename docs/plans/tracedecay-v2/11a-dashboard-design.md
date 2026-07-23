@@ -142,6 +142,11 @@ Motion:
 - Charts (ECharts, lazy): one categorical palette derived from the token
   ramp, direct labeling over legends where ≤4 series, axis units mandatory,
   uncertainty bands rendered when the read model provides intervals.
+- Graph canvases: Sigma.js + Graphology behind the ProjectionView adapter
+  boundary (WebGL, node/edge reducers fed only by semantic tokens);
+  d3-force physics for small ego-views; bespoke dense surfaces (Loom
+  temporal trace, conflict/proximity heatmap) are Canvas + D3 scales with
+  the synchronized accessible table as the semantic source of truth.
 
 ## Implementation notes for foundation lanes
 

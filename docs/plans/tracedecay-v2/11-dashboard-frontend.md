@@ -171,13 +171,18 @@ Styling system (design-owned; foundation lanes do not restyle or restructure):
 Visualization:
 
 - The renderer-neutral `ProjectionView` model is the only semantic source for
-  graph/timeline views. `d3-force` ships as the default connected-graph
-  renderer adapter (permissive license, offline). ECharts is the single
+  graph/timeline views. Sigma.js + Graphology (MIT, WebGL, offline) is the
+  default connected-graph renderer adapter — it is the only permissive
+  renderer that honors the representative/large graph tiers below;
+  `d3-force`/d3 scales remain as layout physics for small ego-views and as
+  the scale/axis toolkit for bespoke canvas surfaces (Loom temporal traces,
+  conflict heatmaps), which are hand-rolled Canvas/WebGL over D3 scales
+  rather than forced through a charting library. ECharts is the single
   quantitative charting library, imported modularly and lazy-loaded per
   route within each route's bundle budget; the earlier Observable Plot
-  admission is withdrawn — one charting library, one graph adapter, plus the
-  gated optional GPU adapter path below. No renderer becomes graph, query,
-  health, readiness, ranking, or action authority.
+  admission is withdrawn. Cosmograph remains the gated optional GPU adapter
+  for overflow tiers per the fallback contract below. No renderer becomes
+  graph, query, health, readiness, ranking, or action authority.
 
 Legacy-surface dispositions (from the 2026-07-23 inventory):
 
