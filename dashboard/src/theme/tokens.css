@@ -1,0 +1,106 @@
+/* TraceDecay design tokens (plan 11a "Visual system").
+ *
+ * Two-stage architecture: raw channel values live on :root and theme scopes;
+ * the non-inline @theme in tailwind.css maps semantic tokens onto these
+ * variables so runtime theme switching works (values are never baked at
+ * build time). Components consume ONLY semantic tokens.
+ */
+
+:root {
+  /* ---- raw scales: dark is the default theme ---- */
+  --raw-surface-0: oklch(0.145 0.008 260);
+  --raw-surface-1: oklch(0.185 0.009 260);
+  --raw-surface-2: oklch(0.225 0.01 260);
+  --raw-surface-3: oklch(0.27 0.011 260);
+  --raw-text-primary: oklch(0.93 0.005 260);
+  --raw-text-secondary: oklch(0.75 0.008 260);
+  --raw-text-muted: oklch(0.58 0.008 260);
+  --raw-edge-subtle: oklch(0.32 0.01 260);
+  --raw-edge-strong: oklch(0.45 0.012 260);
+  --raw-accent: oklch(0.72 0.14 250);
+  --raw-accent-emphasis: oklch(0.62 0.16 250);
+
+  /* ---- domain-state hues (plan 11 sixteen-state taxonomy) ---- */
+  --raw-state-loading: oklch(0.65 0.02 260);
+  --raw-state-ready: oklch(0.7 0.12 155);
+  --raw-state-complete-zero: oklch(0.7 0.12 155);
+  --raw-state-partial: oklch(0.75 0.12 85);
+  --raw-state-stale: oklch(0.72 0.1 85);
+  --raw-state-locked: oklch(0.68 0.1 300);
+  --raw-state-denied: oklch(0.62 0.14 25);
+  --raw-state-unauthorized: oklch(0.62 0.14 25);
+  --raw-state-redacted: oklch(0.6 0.04 300);
+  --raw-state-conflicting: oklch(0.68 0.13 55);
+  --raw-state-offline: oklch(0.6 0.02 260);
+  --raw-state-unknown: oklch(0.6 0.02 260);
+  --raw-state-cancelled: oklch(0.62 0.05 260);
+  --raw-state-timed-out: oklch(0.68 0.1 55);
+  --raw-state-error: oklch(0.6 0.16 25);
+  --raw-state-unsupported-schema: oklch(0.65 0.1 320);
+
+  /* ---- severity ramp (single hue, five ordered steps) ---- */
+  --raw-sev-info: oklch(0.68 0.06 250);
+  --raw-sev-low: oklch(0.7 0.1 85);
+  --raw-sev-medium: oklch(0.7 0.13 55);
+  --raw-sev-high: oklch(0.64 0.16 35);
+  --raw-sev-critical: oklch(0.58 0.19 25);
+
+  /* Evidence quality is a PATTERN axis (solid/hatched/dotted/dashed),
+   * not a color axis — see ui pattern utilities. One neutral ink: */
+  --raw-ev-ink: currentColor;
+
+  /* ---- rhythm ---- */
+  --row-height-data: 36px;
+  --touch-target-min: 44px;
+  --radius-standard: 6px;
+  --radius-chip: 4px;
+  --dur-state: 120ms;
+  --dur-panel: 180ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+[data-theme='light'] {
+  --raw-surface-0: oklch(0.985 0.002 260);
+  --raw-surface-1: oklch(0.965 0.003 260);
+  --raw-surface-2: oklch(0.94 0.004 260);
+  --raw-surface-3: oklch(0.91 0.005 260);
+  --raw-text-primary: oklch(0.22 0.01 260);
+  --raw-text-secondary: oklch(0.4 0.01 260);
+  --raw-text-muted: oklch(0.55 0.01 260);
+  --raw-edge-subtle: oklch(0.88 0.005 260);
+  --raw-edge-strong: oklch(0.75 0.008 260);
+  --raw-accent: oklch(0.55 0.16 250);
+  --raw-accent-emphasis: oklch(0.48 0.17 250);
+  --raw-state-ready: oklch(0.55 0.14 155);
+  --raw-state-complete-zero: oklch(0.55 0.14 155);
+  --raw-state-partial: oklch(0.6 0.13 85);
+  --raw-state-stale: oklch(0.58 0.11 85);
+  --raw-state-denied: oklch(0.52 0.17 25);
+  --raw-state-unauthorized: oklch(0.52 0.17 25);
+  --raw-state-error: oklch(0.5 0.19 25);
+  --raw-sev-info: oklch(0.55 0.08 250);
+  --raw-sev-low: oklch(0.58 0.12 85);
+  --raw-sev-medium: oklch(0.56 0.14 55);
+  --raw-sev-high: oklch(0.52 0.17 35);
+  --raw-sev-critical: oklch(0.47 0.2 25);
+}
+
+[data-contrast='more'] {
+  --raw-text-secondary: var(--raw-text-primary);
+  --raw-text-muted: var(--raw-text-secondary);
+  --raw-edge-subtle: var(--raw-edge-strong);
+}
+
+@media (forced-colors: active) {
+  /* Defer to system colors; state chips keep meaning via icon + label. */
+  :root {
+    forced-color-adjust: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-state: 0ms;
+    --dur-panel: 0ms;
+  }
+}

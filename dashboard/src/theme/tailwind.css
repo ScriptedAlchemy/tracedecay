@@ -1,0 +1,73 @@
+@import 'tailwindcss';
+@import './tokens.css';
+
+/* Non-inline @theme: semantic tokens reference the runtime CSS variables so
+ * data-theme / data-contrast switching works without a rebuild. Components
+ * use these utilities only (lint-enforced); raw palette classes are banned.
+ */
+@theme {
+  --color-surface-0: var(--raw-surface-0);
+  --color-surface-1: var(--raw-surface-1);
+  --color-surface-2: var(--raw-surface-2);
+  --color-surface-3: var(--raw-surface-3);
+  --color-text-primary: var(--raw-text-primary);
+  --color-text-secondary: var(--raw-text-secondary);
+  --color-text-muted: var(--raw-text-muted);
+  --color-edge-subtle: var(--raw-edge-subtle);
+  --color-edge-strong: var(--raw-edge-strong);
+  --color-accent: var(--raw-accent);
+  --color-accent-emphasis: var(--raw-accent-emphasis);
+
+  --color-state-loading: var(--raw-state-loading);
+  --color-state-ready: var(--raw-state-ready);
+  --color-state-complete-zero: var(--raw-state-complete-zero);
+  --color-state-partial: var(--raw-state-partial);
+  --color-state-stale: var(--raw-state-stale);
+  --color-state-locked: var(--raw-state-locked);
+  --color-state-denied: var(--raw-state-denied);
+  --color-state-unauthorized: var(--raw-state-unauthorized);
+  --color-state-redacted: var(--raw-state-redacted);
+  --color-state-conflicting: var(--raw-state-conflicting);
+  --color-state-offline: var(--raw-state-offline);
+  --color-state-unknown: var(--raw-state-unknown);
+  --color-state-cancelled: var(--raw-state-cancelled);
+  --color-state-timed-out: var(--raw-state-timed-out);
+  --color-state-error: var(--raw-state-error);
+  --color-state-unsupported-schema: var(--raw-state-unsupported-schema);
+
+  --color-sev-info: var(--raw-sev-info);
+  --color-sev-low: var(--raw-sev-low);
+  --color-sev-medium: var(--raw-sev-medium);
+  --color-sev-high: var(--raw-sev-high);
+  --color-sev-critical: var(--raw-sev-critical);
+
+  --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
+
+  --text-2xs: 12px;
+  --text-xs: 13px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 24px;
+
+  --radius-standard: var(--radius-standard);
+  --radius-chip: var(--radius-chip);
+}
+
+@layer base {
+  html {
+    background: var(--raw-surface-0);
+    color: var(--raw-text-primary);
+    font-family: var(--font-sans);
+    font-size: 14px;
+  }
+  [data-cell='numeric'],
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  :focus-visible {
+    outline: 2px solid var(--raw-accent);
+    outline-offset: 1px;
+  }
+}
