@@ -3,6 +3,7 @@ import { Outlet } from 'react-router';
 import { CommandPalette, usePaletteHotkey } from './CommandPalette';
 import { NavRail } from './NavRail';
 import { ScopeBar } from './ScopeBar';
+import { ScopeUrlSync } from '../../data/scope/UrlSync.tsx';
 import { StatusStrip } from './StatusStrip';
 
 /** Shell layout per plan 11a: nav rail | (scope bar / content / status strip).
@@ -22,6 +23,7 @@ export function Shell() {
       <NavRail />
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       <div className="flex min-w-0 flex-1 flex-col">
+        <ScopeUrlSync />
         <ScopeBar onOpenPalette={() => setPaletteOpen(true)} />
         <main id="td-main" className="min-h-0 flex-1 overflow-auto">
           <Outlet />
