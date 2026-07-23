@@ -3537,12 +3537,17 @@ mod tests {
                 },
             )
             .await;
-        assert_eq!(
-            response.outcome,
-            DaemonInvocationOutcome::Problem {
-                problem: DaemonInvocationProblem::Unavailable,
-            }
-        );
+        // With no feedback owner registered the read service itself is absent,
+        // so the daemon fails closed as an application-level Unavailable problem
+        // (not concealment — that only applies once the service exists and a
+        // caller names an unknown handle). See `execute_feedback`.
+        let DaemonInvocationOutcome::ApplicationProblem { problem } = response.outcome else {
+            panic!(
+                "absent feedback owner must fail closed as an application problem: {:?}",
+                response.outcome
+            );
+        };
+        assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
     }
 
     #[test]
