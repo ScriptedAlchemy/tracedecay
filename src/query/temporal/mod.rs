@@ -270,8 +270,18 @@ pub async fn execute_temporal_kernel(
     visible_anchors.extend(summary_eligibility.eligible_anchor_ids.clone());
     check_control(snapshot)?;
     let all_candidates = candidates;
+    // Span/Burst candidates are derived-evidence group containers; their member
+    // occurrences are enumerated (and counted) individually, so admitting the
+    // group anchor into the coverage denominator would double-count every
+    // grouped message as an extra hidden omission.
     let all_candidate_anchors = all_candidates
         .iter()
+        .filter(|candidate| {
+            !matches!(
+                candidate.channel,
+                candidates::CandidateChannel::Span | candidates::CandidateChannel::Burst
+            )
+        })
         .map(|candidate| candidate.anchor_id.clone())
         .collect::<BTreeSet<_>>();
     let visible_candidates = all_candidates
