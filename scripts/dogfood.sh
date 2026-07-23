@@ -433,7 +433,14 @@ unset TRACEDECAY_DATA_DIR TRACEDECAY_DISABLE_GLOBAL_DB
 
 boundary_reached=1
 record_boundary_outcome post-update-starting reached forbidden inactivity-pending
-run_new_binary post-update --strict --mode dogfood-forward-only
+post_update_args=(post-update --strict --mode dogfood-forward-only)
+if [[ "${TRACEDECAY_DOGFOOD_NO_HEAL:-0}" == 1 ]]; then
+  post_update_args+=(--no-heal)
+fi
+if [[ "${TRACEDECAY_DOGFOOD_NO_REINSTALL:-0}" == 1 ]]; then
+  post_update_args+=(--no-reinstall)
+fi
+run_new_binary "${post_update_args[@]}"
 
 record_boundary_outcome validated reached forbidden verified-new-version
 committed=1
