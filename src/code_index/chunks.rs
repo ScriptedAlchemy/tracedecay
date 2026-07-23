@@ -25,7 +25,7 @@ use tracedecay_domain::{
 use super::{
     extract::ExtractionCancellation, intake::ReceiptBoundCodeFileV1, lineage::LineageSymbolRecordV1,
 };
-use crate::types::{Edge, EdgeKind, Node, NodeKind};
+use crate::types::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef};
 
 /// Chunker failures. Partial coverage is evidence, not an error; errors are
 /// reserved for contract violations.
@@ -1203,7 +1203,12 @@ impl DeterministicCodeChunker {
             cancellation,
         )?;
         let symbols = self.lineage_symbols(source, &file_identity, &symbol_rows)?;
-        let (edges, edge_abstentions) = canonical_relation_edges(&result.edges, &symbol_rows);
+        let mut relation_edges = result.edges.clone();
+        relation_edges.extend(resolve_same_file_references(
+            &result.unresolved_refs,
+            &symbol_rows,
+        ));
+        let (edges, edge_abstentions) = canonical_relation_edges(&relation_edges, &symbol_rows);
 
         let eligibility = if partial_reason.is_empty() {
             CodeSearchEligibilityV1::Eligible
@@ -1634,6 +1639,37 @@ impl DeterministicCodeChunker {
         }
         Ok(chunks)
     }
+}
+
+/// Resolve same-file symbol references (calls and other extractor
+/// reference kinds) into relation edges. Only an UNAMBIGUOUS name match
+/// against this file's own symbol table resolves; ambiguous or unmatched
+/// references stay unresolved rather than guessing. Cross-file resolution
+/// requires the dependency closure and is deliberately not attempted here.
+fn resolve_same_file_references(unresolved: &[UnresolvedRef], symbols: &[SymbolRow]) -> Vec<Edge> {
+    let mut by_name: BTreeMap<&str, Vec<&SymbolRow>> = BTreeMap::new();
+    for symbol in symbols {
+        by_name
+            .entry(symbol.name.as_str())
+            .or_default()
+            .push(symbol);
+    }
+    let mut resolved = Vec::new();
+    for reference in unresolved {
+        let Some(candidates) = by_name.get(reference.reference_name.as_str()) else {
+            continue;
+        };
+        let [target] = candidates.as_slice() else {
+            continue;
+        };
+        resolved.push(Edge {
+            source: reference.from_node_id.clone(),
+            target: target.node_id.clone(),
+            kind: reference.reference_kind,
+            line: Some(reference.line),
+        });
+    }
+    resolved
 }
 
 fn canonical_relation_edges(
