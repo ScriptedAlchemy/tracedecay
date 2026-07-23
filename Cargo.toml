@@ -45,10 +45,10 @@ readme = "README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "claude"]
 categories = ["development-tools", "command-line-utilities"]
 # Explicit whitelist so `cargo package`/`cargo publish` ship everything the
-# build needs — including the PREBUILT dashboard dist bundles, which are
-# gitignored (an `exclude`-style package can never pick them up). Run
-# `cd dashboard && npm ci && npm run build` before packaging; build.rs fails
-# fast (or auto-builds from a git checkout) when they are missing.
+# build needs — including the dashboard dist bundles. The dashboard frontend is
+# being rewritten; until it lands these ship committed placeholder bundles
+# (dashboard/*/dist/**, a minimal "rebuild in progress" shell). build.rs no
+# longer runs npm; it verifies the committed placeholders exist and hashes them.
 include = [
     "/CHANGELOG.md",
     "/LICENSE",
