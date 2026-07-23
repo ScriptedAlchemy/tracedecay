@@ -6,10 +6,13 @@
 //! save-without-change, or a dropped watcher event can never fabricate work or
 //! hide a real change.
 //!
-//! Committed, staged, unstaged, untracked, deleted, and renamed paths are kept
-//! *distinct*. Deletions become tombstone candidates; renames carry explicit
-//! source→destination lineage. The scheduler consumes the derived candidate and
-//! changed sets to build an incremental batch.
+//! Committed, staged, unstaged, untracked, and deleted paths are kept
+//! *distinct*. Deletions become tombstone candidates. Renames are deliberately
+//! not tracked as a distinct class: for indexing a rename is just a deletion of
+//! the source plus an addition of the destination, so rename detection is
+//! disabled and gix reports the two halves independently. The scheduler
+//! consumes the derived candidate and changed sets to build an incremental
+//! batch.
 
 use std::collections::BTreeSet;
 
@@ -31,16 +34,12 @@ pub(crate) enum WorktreeChangeClassV1 {
     StagedModified,
     /// Present in HEAD tree, removed from the index (staged deletion).
     StagedDeleted,
-    /// Index rename versus HEAD tree.
-    StagedRenamed,
     /// Worktree content differs from the index (unstaged modification).
     UnstagedModified,
     /// Tracked file missing from the worktree (unstaged deletion).
     UnstagedDeleted,
     /// Present on disk with no index relation (untracked, incl. intent-to-add).
     Untracked,
-    /// Worktree rename detected versus the index.
-    UnstagedRenamed,
     /// Merge conflict; content is not a single truthful revision.
     Conflicted,
 }
@@ -59,13 +58,11 @@ impl WorktreeChangeClassV1 {
     }
 }
 
-/// One classified path and, for renames, its prior location.
+/// One classified path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClassifiedChangeV1 {
     pub path: String,
     pub class: WorktreeChangeClassV1,
-    /// For rename classes, the prior repository-relative path.
-    pub rename_source: Option<String>,
 }
 
 /// A complete, truthful classification of one worktree snapshot.
@@ -114,12 +111,9 @@ impl WorktreeChangeClassificationV1 {
         for item in status {
             let item = item.map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
             let path = item.location().to_str_lossy().into_owned();
-            let (class, rename_source) = classify_item(&item);
-            changes.push(ClassifiedChangeV1 {
-                path,
-                class,
-                rename_source,
-            });
+            if let Some(class) = classify_item(&item) {
+                changes.push(ClassifiedChangeV1 { path, class });
+            }
         }
 
         Ok(Self {
@@ -144,18 +138,14 @@ impl WorktreeChangeClassificationV1 {
     }
 
     /// Paths whose indexing evidence changed relative to the last generation:
-    /// every staged, unstaged, untracked, or renamed path (deletions included so
+    /// every staged, unstaged, or untracked path (deletions included so
     /// tombstones flow through). This is a hint to narrow work, not the identity
     /// authority; the generation planner still compares content digests.
     pub(crate) fn changed_paths(&self) -> BTreeSet<String> {
-        let mut changed = BTreeSet::new();
-        for change in &self.changes {
-            changed.insert(change.path.clone());
-            if let Some(source) = &change.rename_source {
-                changed.insert(source.clone());
-            }
-        }
-        changed
+        self.changes
+            .iter()
+            .map(|change| change.path.clone())
+            .collect()
     }
 
     /// Paths removed from the present snapshot (staged or unstaged deletions).
@@ -164,19 +154,6 @@ impl WorktreeChangeClassificationV1 {
             .iter()
             .filter(|change| change.class.is_deletion())
             .map(|change| change.path.clone())
-            .collect()
-    }
-
-    /// Explicit rename lineage as `(source, destination)` pairs.
-    pub(crate) fn renames(&self) -> Vec<(String, String)> {
-        self.changes
-            .iter()
-            .filter_map(|change| {
-                change
-                    .rename_source
-                    .clone()
-                    .map(|source| (source, change.path.clone()))
-            })
             .collect()
     }
 
@@ -194,45 +171,46 @@ impl WorktreeChangeClassificationV1 {
     }
 }
 
-/// Map one gix status item to a truthful class and optional rename source.
-fn classify_item(item: &gix::status::Item) -> (WorktreeChangeClassV1, Option<String>) {
+/// Map one gix status item to a truthful class, or `None` for items that carry
+/// no indexing signal on their own.
+///
+/// Rename detection is disabled on both status axes (see [`classify`]), so gix
+/// reports a move as an independent deletion of the source plus an addition of
+/// the destination. The `Rewrite` variants therefore cannot occur here; they
+/// are mapped to `None` defensively rather than fabricating a rename class.
+fn classify_item(item: &gix::status::Item) -> Option<WorktreeChangeClassV1> {
     use gix::diff::index::ChangeRef;
     use gix::status::Item;
     use gix::status::index_worktree::Item as IndexWorktreeItem;
     use gix::status::plumbing::index_as_worktree::{Change as WorktreeChange, EntryStatus};
 
-    match item {
+    Some(match item {
         // HEAD tree ↔ index: staged changes.
         Item::TreeIndex(change) => match change {
-            ChangeRef::Addition { .. } => (WorktreeChangeClassV1::StagedAdded, None),
-            ChangeRef::Deletion { .. } => (WorktreeChangeClassV1::StagedDeleted, None),
-            ChangeRef::Modification { .. } => (WorktreeChangeClassV1::StagedModified, None),
-            ChangeRef::Rewrite {
-                source_location, ..
-            } => (
-                WorktreeChangeClassV1::StagedRenamed,
-                Some(source_location.to_str_lossy().into_owned()),
-            ),
+            ChangeRef::Addition { .. } => WorktreeChangeClassV1::StagedAdded,
+            ChangeRef::Deletion { .. } => WorktreeChangeClassV1::StagedDeleted,
+            ChangeRef::Modification { .. } => WorktreeChangeClassV1::StagedModified,
+            // Unreachable with rename detection disabled; skip rather than
+            // classify a move as anything other than delete + add.
+            ChangeRef::Rewrite { .. } => return None,
         },
         // Index ↔ worktree: unstaged / untracked changes.
         Item::IndexWorktree(worktree) => match worktree {
             IndexWorktreeItem::Modification { status, .. } => match status {
                 EntryStatus::Change(WorktreeChange::Removed) => {
-                    (WorktreeChangeClassV1::UnstagedDeleted, None)
+                    WorktreeChangeClassV1::UnstagedDeleted
                 }
-                EntryStatus::Conflict { .. } => (WorktreeChangeClassV1::Conflicted, None),
-                EntryStatus::IntentToAdd => (WorktreeChangeClassV1::Untracked, None),
+                EntryStatus::Conflict { .. } => WorktreeChangeClassV1::Conflicted,
+                EntryStatus::IntentToAdd => WorktreeChangeClassV1::Untracked,
                 // Any other worktree change (content, type, submodule) is an
                 // unstaged modification of present content.
                 EntryStatus::Change(_) | EntryStatus::NeedsUpdate(_) => {
-                    (WorktreeChangeClassV1::UnstagedModified, None)
+                    WorktreeChangeClassV1::UnstagedModified
                 }
             },
-            IndexWorktreeItem::DirectoryContents { .. } => (WorktreeChangeClassV1::Untracked, None),
-            IndexWorktreeItem::Rewrite { source, .. } => (
-                WorktreeChangeClassV1::UnstagedRenamed,
-                Some(source.rela_path().to_str_lossy().into_owned()),
-            ),
+            IndexWorktreeItem::DirectoryContents { .. } => WorktreeChangeClassV1::Untracked,
+            // Unreachable with rewrite tracking disabled; skip defensively.
+            IndexWorktreeItem::Rewrite { .. } => return None,
         },
-    }
+    })
 }
