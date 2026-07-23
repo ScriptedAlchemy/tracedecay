@@ -23,7 +23,8 @@ use super::ports::{
     FeedbackCompletedPublicationV1, FeedbackCycleDedupePort, FeedbackCycleDedupePublicationState,
     FeedbackCycleDedupeState, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest,
     FeedbackImpactPort, FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
+    FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
+    FeedbackRuntimeStateV1,
 };
 
 /// Explicit accounting supplied by the caller/runtime that owns clock, token,
@@ -158,7 +159,7 @@ impl FeedbackCycleExecutionRequest {
 
 /// Accumulated state carried between typed feedback-cycle stages.
 struct FeedbackCycleProgress {
-    admission: AuthorityReceipt,
+    admission: FeedbackRouteAdmission,
     runtime: Option<FeedbackRuntimeStateV1>,
     completed_stages: Vec<FeedbackEvaluationStageV1>,
     baselines: Vec<FeedbackDiagnosticBaselineV1>,
@@ -1072,7 +1073,7 @@ where
         &self,
         context: &RequestContext,
         request: &FeedbackCycleExecutionRequest,
-        admission: &AuthorityReceipt,
+        admission: &FeedbackRouteAdmission,
         initial_runtime: Option<&FeedbackRuntimeStateV1>,
         dedupe_key: Option<FeedbackDedupeKeyV1>,
         termination: FeedbackCycleTerminationV1,
@@ -1139,7 +1140,7 @@ where
         &self,
         context: &RequestContext,
         request: &FeedbackCycleExecutionRequest,
-        admission: &AuthorityReceipt,
+        admission: &FeedbackRouteAdmission,
         initial_runtime: Option<&FeedbackRuntimeStateV1>,
         dedupe_key: Option<FeedbackDedupeKeyV1>,
         termination: FeedbackCycleTerminationV1,
@@ -1150,10 +1151,35 @@ where
         findings: Vec<FeedbackFindingV1>,
         completed_stages: &[FeedbackEvaluationStageV1],
     ) -> Result<FeedbackCycleExecutionResult, ApplicationContractError> {
+        let authority = match self.authorization.recheck_publication(
+            context,
+            &self.operation,
+            admission,
+            request.usage.completed_at,
+        ) {
+            Ok(authority) => authority,
+            Err(problem) => {
+                let (termination, states) = terminal_for_problem(&problem);
+                return self.finish(
+                    request,
+                    None,
+                    termination,
+                    states,
+                    Vec::new(),
+                    None,
+                    None,
+                    Vec::new(),
+                    None,
+                );
+            }
+        };
+        self.emit_trigger(&request.input);
+        for stage in completed_stages {
+            self.emit_stage(&request.input, *stage);
+        }
         let runtime_override = self
             .runtime_override(context, request, initial_runtime)
             .await;
-        let authority = admission.clone();
         if let Some((termination, states)) = runtime_override {
             return self.finish(
                 request,
@@ -1184,12 +1210,6 @@ where
             .record_completed_publication(context, request, initial_runtime, result, authority)
             .await?;
 
-        if !completed_stages.is_empty() {
-            self.emit_trigger(&request.input);
-            for stage in completed_stages {
-                self.emit_stage(&request.input, *stage);
-            }
-        }
         if result.cycle.termination == FeedbackCycleTerminationV1::DuplicateNoop
             && let Some(key) = result.dedupe_key.clone()
         {

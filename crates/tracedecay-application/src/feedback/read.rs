@@ -288,7 +288,16 @@ where
         {
             return invalid_port_evidence(context, operation);
         }
-        evidence_envelope(context, operation, admission, outcome, observed_at)
+        let authority = match self.authorization.recheck_publication(
+            context,
+            operation,
+            &admission,
+            outcome.evidence().finished_at,
+        ) {
+            Ok(authority) => authority,
+            Err(problem) => return problem_envelope(context, operation, problem),
+        };
+        evidence_envelope(context, operation, authority, outcome, observed_at)
     }
 
     pub async fn get(
@@ -323,7 +332,16 @@ where
         {
             return invalid_port_evidence(context, operation);
         }
-        evidence_envelope(context, operation, admission, outcome, observed_at)
+        let authority = match self.authorization.recheck_publication(
+            context,
+            operation,
+            &admission,
+            outcome.evidence().finished_at,
+        ) {
+            Ok(authority) => authority,
+            Err(problem) => return problem_envelope(context, operation, problem),
+        };
+        evidence_envelope(context, operation, authority, outcome, observed_at)
     }
 
     pub async fn expand(
@@ -362,7 +380,16 @@ where
         {
             return invalid_port_evidence(context, operation);
         }
-        evidence_envelope(context, operation, admission, outcome, observed_at)
+        let authority = match self.authorization.recheck_publication(
+            context,
+            operation,
+            &admission,
+            outcome.evidence().finished_at,
+        ) {
+            Ok(authority) => authority,
+            Err(problem) => return problem_envelope(context, operation, problem),
+        };
+        evidence_envelope(context, operation, authority, outcome, observed_at)
     }
 
     pub async fn list(
@@ -397,7 +424,16 @@ where
         {
             return invalid_port_evidence(context, operation);
         }
-        evidence_envelope(context, operation, admission, outcome, observed_at)
+        let authority = match self.authorization.recheck_publication(
+            context,
+            operation,
+            &admission,
+            outcome.evidence().finished_at,
+        ) {
+            Ok(authority) => authority,
+            Err(problem) => return problem_envelope(context, operation, problem),
+        };
+        evidence_envelope(context, operation, authority, outcome, observed_at)
     }
 }
 

@@ -10,7 +10,7 @@ use tracedecay_domain::feedback::{
 use tracedecay_domain::{CodeGenerationId, UtcMicros};
 use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
 
-use crate::authorization::{AuthorizationPort, AuthorizationService};
+use crate::authorization::{AuthorizationAdmission, AuthorizationPort, AuthorizationService};
 use crate::context::{RequestContext, ResolvedScope};
 use crate::diagnostics::{DiagnosticProviderIdentity, DiagnosticProviderResult};
 use crate::error::ApplicationContractError;
@@ -20,14 +20,37 @@ use crate::result::{ApplicationProblem, AuthorityReceipt};
 pub type FeedbackPortFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// One daemon-route authorization decision shared by feedback reads and the
-/// one-shot cycle. The route owner returns exactly one admission receipt; the
-/// feedback application never reloads source policy or invents a publication
-/// proof.
+/// one-shot cycle. The route owner retains the opaque admission proof and
+/// reloads current authority immediately before publication; the feedback
+/// service never invents or reconstructs that proof.
+#[derive(Clone, Debug)]
+pub enum FeedbackRouteAdmission {
+    Source(AuthorizationAdmission),
+    Routed(AuthorityReceipt),
+}
+
+impl FeedbackRouteAdmission {
+    pub fn receipt(&self) -> &AuthorityReceipt {
+        match self {
+            Self::Source(admission) => admission.receipt(),
+            Self::Routed(receipt) => receipt,
+        }
+    }
+}
+
 pub trait FeedbackRouteAuthorizationPort {
     fn admit(
         &self,
         context: &RequestContext,
         operation: &ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> Result<FeedbackRouteAdmission, ApplicationProblem>;
+
+    fn recheck_publication(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        admission: &FeedbackRouteAdmission,
         observed_at: UtcMicros,
     ) -> Result<AuthorityReceipt, ApplicationProblem>;
 }
@@ -42,9 +65,24 @@ where
         context: &RequestContext,
         operation: &ApplicationOperation,
         observed_at: UtcMicros,
-    ) -> Result<AuthorityReceipt, ApplicationProblem> {
+    ) -> Result<FeedbackRouteAdmission, ApplicationProblem> {
         AuthorizationService::admit(self, context, operation, observed_at)
-            .map(|admission| admission.into_receipt())
+            .map(FeedbackRouteAdmission::Source)
+    }
+
+    fn recheck_publication(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        admission: &FeedbackRouteAdmission,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorityReceipt, ApplicationProblem> {
+        let FeedbackRouteAdmission::Source(admission) = admission else {
+            return Err(ApplicationProblem::not_found_or_not_authorized(
+                crate::RetryDirective::Never,
+            ));
+        };
+        AuthorizationService::recheck_publication(self, context, operation, admission, observed_at)
     }
 }
 

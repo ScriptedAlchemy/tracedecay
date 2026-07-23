@@ -30,8 +30,8 @@ pub use ports::{
     FeedbackCompletedPublicationV1, FeedbackCycleDedupePort, FeedbackCycleDedupePublicationState,
     FeedbackCycleDedupeState, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest,
     FeedbackImpactPort, FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackPortFuture, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
-    FeedbackRuntimeStateV1,
+    FeedbackPortFuture, FeedbackRouteAdmission, FeedbackRouteAuthorizationPort,
+    FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
 };
 pub use read::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,

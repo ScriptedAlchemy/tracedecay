@@ -2004,11 +2004,38 @@ fn every_post_port_runtime_drift_suppresses_evidence_and_later_reads() {
             assert!(result.cycle.findings.is_empty());
             assert!(result.cycle.impact.is_none());
             assert!(result.dedupe_key.is_none());
-            assert!(observations.0.borrow().iter().all(|observation| {
-                matches!(
-                    observation.kind,
-                    FeedbackObservationKindV1::Terminal | FeedbackObservationKindV1::Latency
-                )
+            let observations = observations.0.borrow();
+            assert_eq!(
+                observations
+                    .iter()
+                    .filter(|observation| {
+                        observation.kind == FeedbackObservationKindV1::Trigger
+                    })
+                    .count(),
+                1
+            );
+            assert_eq!(
+                observations
+                    .iter()
+                    .filter(|observation| {
+                        observation.kind == FeedbackObservationKindV1::Terminal
+                            && observation.termination
+                                == Some(FeedbackCycleTerminationV1::StaleReplanRequired)
+                    })
+                    .count(),
+                1
+            );
+            assert_eq!(
+                observations
+                    .iter()
+                    .filter(|observation| {
+                        observation.kind == FeedbackObservationKindV1::Latency
+                    })
+                    .count(),
+                1
+            );
+            assert!(observations.iter().all(|observation| {
+                observation.kind != FeedbackObservationKindV1::DedupeSuppressed
             }));
         }
     }
