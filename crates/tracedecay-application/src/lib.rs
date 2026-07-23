@@ -47,10 +47,19 @@ pub use diagnostics::{
     ProviderSourceIdentity, RevisionDigest,
 };
 pub use doctor::{
-    DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
-    DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
-    DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
-    DoctorStorageFindingKindV1, DoctorStorageFindingV1,
+    CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
+    ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
+    DoctorConfirmationRequirementV1, DoctorCoverageCompletenessV1, DoctorCoverageStatementV1,
+    DoctorEvidenceRefV1, DoctorEvidenceReferenceV1, DoctorEvidenceStateV1,
+    DoctorFamilyConsultationV1, DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1,
+    DoctorFindingFamilyV1, DoctorFindingV1, DoctorOwningOperationRefV1, DoctorOwningSurfaceV1,
+    DoctorRemediationDescriptorV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
+    DoctorRemediationRegistryV1, DoctorRemediationResolutionErrorV1, DoctorReportComposerV1,
+    DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture,
+    DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
+    HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1, RuntimeHealthDoctorPort,
+    RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort, code_index_finding,
+    configuration_finding, host_integration_finding, runtime_health_finding,
 };
 pub use error::ApplicationContractError;
 pub use external_source::{
