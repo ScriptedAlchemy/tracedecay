@@ -7,13 +7,18 @@ use tracedecay_application::doctor::{
     DoctorStorageFindingKindV1, DoctorStorageFindingV1,
 };
 
-use crate::retention::orphan_stores::{OrphanStoreFinding, StoreDisposition};
+use crate::retention::orphan_stores::{
+    OrphanStoreFinding, StoreDisposition, UnregisteredStoreFinding,
+};
 
 /// Owning operation Doctor names for collecting a dead-identity orphan store.
 const ORPHAN_COLLECT_OP: &str = "retention.orphan_store_sweep";
 /// Owning operation Doctor names for re-linking a moved-repository store —
 /// this reconciliation path (`doctor::registry_drift`), per Plan 38 §2.
 const ORPHAN_RELINK_OP: &str = "doctor.registry_drift.relink";
+/// Owning operation Doctor name for collecting a directory with no registry
+/// trace at all (plan 38 §2's disjoint "unregistered store" audit class).
+const UNREGISTERED_COLLECT_OP: &str = "retention.unregistered_store_sweep";
 /// Coverage/evidence identifier byte ceiling shared by the kernel constructors.
 const DOCTOR_TEXT_LIMIT: usize = 512;
 
@@ -82,6 +87,43 @@ pub(crate) fn orphan_store_doctor_finding(
     let core = DoctorFindingV1::new(
         DoctorFindingFamilyV1::Storage,
         state,
+        vec![evidence],
+        coverage,
+        Some(remediation),
+    )
+    .ok()?;
+    DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OrphanStore, core).ok()
+}
+
+/// Maps one unregistered-store-directory finding (plan 38 §2's disjoint
+/// on-disk-only audit class) onto the typed Doctor [`DoctorStorageFindingV1`].
+/// Reported under the same [`DoctorStorageFindingKindV1::OrphanStore`] kind as
+/// [`orphan_store_doctor_finding`] — both describe payload the registry no
+/// longer resolves to a live root — the evidence text distinguishes the two:
+/// this class never had a registry row to begin with, rather than one whose
+/// root vanished. Returns `None` only when the identifier cannot form a valid
+/// evidence reference.
+pub(crate) fn unregistered_store_doctor_finding(
+    finding: &UnregisteredStoreFinding,
+) -> Option<DoctorStorageFindingV1> {
+    let statement = format!(
+        "unregistered store directory '{}' has no registry row at all: {} bytes, idle {}s",
+        finding.project_dir_name, finding.size_bytes, finding.age_secs
+    );
+    let reference = DoctorEvidenceReferenceV1::new(finding.project_dir_name.clone()).ok()?;
+    let evidence = DoctorEvidenceRefV1::new(DoctorFindingFamilyV1::Storage, reference);
+    let coverage = DoctorCoverageStatementV1::new(
+        DoctorCoverageCompletenessV1::Complete,
+        bounded_statement(&statement),
+    )
+    .ok()?;
+    let remediation = DoctorRemediationRefV1::new(
+        DoctorOwningOperationRefV1::new(UNREGISTERED_COLLECT_OP).ok()?,
+        DoctorRemediationKindV1::Action,
+    );
+    let core = DoctorFindingV1::new(
+        DoctorFindingFamilyV1::Storage,
+        DoctorEvidenceStateV1::Degraded,
         vec![evidence],
         coverage,
         Some(remediation),
@@ -330,6 +372,20 @@ mod tests {
             live_root: PathBuf::from("/live/moved/root"),
         }))
         .expect("relinkable store produces a typed finding");
+        assert_eq!(typed.kind(), DoctorStorageFindingKindV1::OrphanStore);
+    }
+
+    #[test]
+    fn unregistered_store_maps_to_orphan_store_finding() {
+        let finding = UnregisteredStoreFinding {
+            project_dir_name: "proj_ghost".to_string(),
+            data_root: PathBuf::from("/tmp/does-not-exist/proj_ghost"),
+            age_secs: 1_000_000,
+            size_bytes: 4096,
+            expected_payload_mtime_secs: 0,
+        };
+        let typed = unregistered_store_doctor_finding(&finding)
+            .expect("unregistered directory produces a typed finding");
         assert_eq!(typed.kind(), DoctorStorageFindingKindV1::OrphanStore);
     }
 

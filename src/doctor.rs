@@ -28,6 +28,14 @@ impl DoctorTestRuntime {
 
         static NONCE: AtomicU64 = AtomicU64::new(1);
 
+        std::fs::create_dir_all(profile_root).expect("create Doctor test profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700))
+                .expect("secure Doctor test profile root");
+        }
         let identity = crate::daemon::profile_identity::load_or_create(profile_root)
             .expect("load Doctor test profile identity");
         let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
