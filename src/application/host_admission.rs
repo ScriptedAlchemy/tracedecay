@@ -4887,11 +4887,13 @@ impl HostAdmissionTestRuntimeV1 {
 fn prepare_host_admission_test_profile_root(profile_root: &Path) -> crate::errors::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    std::fs::create_dir_all(profile_root).map_err(|error| crate::errors::TraceDecayError::Config {
-        message: format!(
-            "failed to create host-admission test profile '{}': {error}",
-            profile_root.display()
-        ),
+    std::fs::create_dir_all(profile_root).map_err(|error| {
+        crate::errors::TraceDecayError::Config {
+            message: format!(
+                "failed to create host-admission test profile '{}': {error}",
+                profile_root.display()
+            ),
+        }
     })?;
     let metadata = std::fs::symlink_metadata(profile_root).map_err(|error| {
         crate::errors::TraceDecayError::Config {
