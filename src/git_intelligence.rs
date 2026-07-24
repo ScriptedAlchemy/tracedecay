@@ -64,6 +64,9 @@ const READ_ONLY_SUBCOMMANDS: &[&str] = &[
 /// Upper bound for bounded history requests.
 pub const GIT_HISTORY_MAX_COUNT_LIMIT: u32 = 1_000;
 
+/// Hard ceiling for one historical blob materialized by the native adapter.
+pub const GIT_HISTORICAL_BLOB_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 
@@ -101,6 +104,12 @@ pub enum GitIntelligenceError {
     /// cannot produce an applicable `HunkRefV1` (Plan 36 capability rule).
     #[error("cannot mint HunkRef for {path}: {reason}")]
     UnmintableHunkKind { path: String, reason: &'static str },
+    /// Historical reads accept only one canonical repository-relative path.
+    #[error("invalid historical repository-relative path: {0}")]
+    InvalidHistoricalPath(String),
+    /// The object exists but exceeds the caller's bounded read profile.
+    #[error("historical blob exceeds byte bound: {actual} bytes > bound {bound}")]
+    HistoricalBlobBoundExceeded { bound: u64, actual: u64 },
     /// Domain validation failed for an assembled value.
     #[error("domain validation failed: {0}")]
     Domain(#[from] DomainError),
@@ -138,6 +147,26 @@ pub struct GitBlameRequest {
     pub follow_renames: bool,
 }
 
+/// One exact, bounded historical blob read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitHistoricalBlobRequestV1 {
+    pub commit: GitOidV1,
+    pub path: String,
+    pub max_bytes: u64,
+    pub include_bytes: bool,
+}
+
+/// Historical blob content, or an explicit absent-path result.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct GitHistoricalBlobV1 {
+    pub repository: RepositoryId,
+    pub worktree: WorktreeId,
+    pub commit: GitOidV1,
+    pub path: String,
+    pub blob_oid: Option<GitOidV1>,
+    pub bytes: Option<Vec<u8>>,
+}
+
 /// Typed application port for Plan 36 PR9 read-only Git intelligence.
 ///
 /// Implementations accept only closed request/value types. No method exposes
@@ -150,6 +179,11 @@ pub trait GitReadPort {
     fn history(&self, request: &GitHistoryRequest) -> Result<GitHistoryV1, GitIntelligenceError>;
 
     fn blame(&self, request: &GitBlameRequest) -> Result<GitBlameV1, GitIntelligenceError>;
+
+    fn historical_blob(
+        &self,
+        request: &GitHistoricalBlobRequestV1,
+    ) -> Result<GitHistoricalBlobV1, GitIntelligenceError>;
 
     fn hunk_refs(
         &self,
@@ -282,6 +316,119 @@ impl NativeGitIntelligence {
 
     pub fn worktree(&self) -> &WorktreeId {
         &self.worktree
+    }
+
+    /// Read one exact commit/path blob through the mounted Plan 36 authority.
+    ///
+    /// This path is native `gix`: it opens no subprocess and exposes no
+    /// revision expression, traversal, ref mutation, or object write surface.
+    pub fn historical_blob(
+        &self,
+        request: &GitHistoricalBlobRequestV1,
+    ) -> Result<GitHistoricalBlobV1, GitIntelligenceError> {
+        if request.max_bytes == 0 || request.max_bytes > GIT_HISTORICAL_BLOB_MAX_BYTES {
+            return Err(GitIntelligenceError::HistoricalBlobBoundExceeded {
+                bound: GIT_HISTORICAL_BLOB_MAX_BYTES,
+                actual: request.max_bytes,
+            });
+        }
+        validate_historical_path(&request.path)?;
+        let repo = gix::open(&self.repo_root).map_err(|error| {
+            GitIntelligenceError::NotARepository(format!("{}: {error}", self.repo_root.display()))
+        })?;
+        let oid =
+            gix::hash::ObjectId::from_hex(request.commit.as_str().as_bytes()).map_err(|error| {
+                GitIntelligenceError::MalformedOutput {
+                    operation: "historical_blob",
+                    detail: error.to_string(),
+                }
+            })?;
+        let commit = repo
+            .find_object(oid)
+            .map_err(|error| GitIntelligenceError::MalformedOutput {
+                operation: "historical_blob",
+                detail: error.to_string(),
+            })?
+            .try_into_commit()
+            .map_err(|error| GitIntelligenceError::MalformedOutput {
+                operation: "historical_blob",
+                detail: error.to_string(),
+            })?;
+        let tree = commit
+            .tree()
+            .map_err(|error| GitIntelligenceError::MalformedOutput {
+                operation: "historical_blob",
+                detail: error.to_string(),
+            })?;
+        let Some(entry) = tree
+            .lookup_entry_by_path(Path::new(&request.path))
+            .map_err(|error| GitIntelligenceError::MalformedOutput {
+                operation: "historical_blob",
+                detail: error.to_string(),
+            })?
+        else {
+            return Ok(GitHistoricalBlobV1 {
+                repository: self.repository.clone(),
+                worktree: self.worktree.clone(),
+                commit: request.commit.clone(),
+                path: request.path.clone(),
+                blob_oid: None,
+                bytes: None,
+            });
+        };
+        if !entry.mode().is_blob_or_symlink() {
+            return Ok(GitHistoricalBlobV1 {
+                repository: self.repository.clone(),
+                worktree: self.worktree.clone(),
+                commit: request.commit.clone(),
+                path: request.path.clone(),
+                blob_oid: None,
+                bytes: None,
+            });
+        }
+        let size = repo
+            .find_header(entry.object_id())
+            .map_err(|error| GitIntelligenceError::MalformedOutput {
+                operation: "historical_blob",
+                detail: error.to_string(),
+            })?
+            .size();
+        if request.include_bytes && size > request.max_bytes {
+            return Err(GitIntelligenceError::HistoricalBlobBoundExceeded {
+                bound: request.max_bytes,
+                actual: size,
+            });
+        }
+        let blob_oid = GitOidV1::new(entry.object_id().to_hex().to_string())?;
+        if !request.include_bytes {
+            return Ok(GitHistoricalBlobV1 {
+                repository: self.repository.clone(),
+                worktree: self.worktree.clone(),
+                commit: request.commit.clone(),
+                path: request.path.clone(),
+                blob_oid: Some(blob_oid),
+                bytes: None,
+            });
+        }
+        let mut blob = entry
+            .object()
+            .map_err(|error| GitIntelligenceError::MalformedOutput {
+                operation: "historical_blob",
+                detail: error.to_string(),
+            })?
+            .try_into_blob()
+            .map_err(|error| GitIntelligenceError::MalformedOutput {
+                operation: "historical_blob",
+                detail: error.to_string(),
+            })?;
+        Ok(GitHistoricalBlobV1 {
+            repository: self.repository.clone(),
+            worktree: self.worktree.clone(),
+            commit: request.commit.clone(),
+            path: request.path.clone(),
+            blob_oid: Some(blob_oid),
+            bytes: Some(blob.take_data()),
+        })
     }
 
     /// Spawn `git <args>` under the structural read-only guard.
@@ -1110,6 +1257,13 @@ impl GitReadPort for NativeGitIntelligence {
         NativeGitIntelligence::blame(self, request)
     }
 
+    fn historical_blob(
+        &self,
+        request: &GitHistoricalBlobRequestV1,
+    ) -> Result<GitHistoricalBlobV1, GitIntelligenceError> {
+        NativeGitIntelligence::historical_blob(self, request)
+    }
+
     fn hunk_refs(
         &self,
         scope: &GitDiffScopeV1,
@@ -1622,6 +1776,19 @@ fn looks_binary(path: &Path) -> bool {
     let mut buffer = [0u8; 8192];
     let read = file.take(8192).read(&mut buffer).unwrap_or(0);
     buffer[..read].contains(&0)
+}
+
+fn validate_historical_path(path: &str) -> Result<(), GitIntelligenceError> {
+    if path.is_empty()
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(GitIntelligenceError::InvalidHistoricalPath(path.to_owned()));
+    }
+    Ok(())
 }
 
 /// Worktree file mode evidence (read-only metadata).
