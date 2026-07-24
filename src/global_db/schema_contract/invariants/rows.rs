@@ -75,8 +75,16 @@ pub(super) async fn query_has_rows(
     conn: &impl QueryExecutor,
     query: &str,
 ) -> crate::errors::Result<bool> {
+    // Existence only — but the migration SQL channel materializes a whole
+    // result set before handing back the first row, and caps that at
+    // MAX_QUERY_ROWS. An audit query matching more violations than the cap
+    // therefore failed the entire invariant pass with a materialization-limit
+    // error instead of reporting the violation it had just found. Bounding the
+    // query to a single row keeps the cost O(1) in violations and makes the
+    // answer independent of how large the offending set is.
+    let bounded = format!("SELECT 1 FROM ({query}) LIMIT 1");
     let mut rows = conn
-        .query(query, ())
+        .query(&bounded, ())
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     rows.next()
