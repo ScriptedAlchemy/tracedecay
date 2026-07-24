@@ -96,6 +96,11 @@ impl McpServer {
             pre_cancelled,
         ));
         tokio::pin!(handling);
+        // One-shot clients (the CLI and the stdio proxy) shut down their write
+        // half once the request is on the wire, so end-of-input means "no more
+        // requests", not "peer is gone". Stop watching for cancellations and
+        // keep serving the in-flight response.
+        let mut peer_input_closed = false;
         loop {
             tokio::select! {
                 response = &mut handling => return Ok((response, false)),
@@ -105,14 +110,12 @@ impl McpServer {
                     }
                     return Ok((None, true));
                 }
-                incoming = transport.read_line() => {
+                incoming = transport.read_line(), if !peer_input_closed => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
-                            if let Some(id) = request.id.as_ref() {
-                                let _ = self.cancel_application_surface_request(id, &connection_scope);
-                            }
-                            return Ok((None, true));
+                            peer_input_closed = true;
+                            continue;
                         }
                         Err(error) => return Err(error.into()),
                     };

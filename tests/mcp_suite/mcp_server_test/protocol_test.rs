@@ -437,6 +437,7 @@ async fn test_tools_call_semantic_failure_sets_is_error() {
                     "path": "src/main.rs",
                     "old_str": "fn missing() {}",
                     "new_str": "fn replaced() {}",
+                    "dry_run": true,
                     "format": "json"
                 }
             }),
@@ -551,6 +552,58 @@ async fn test_tools_call_timings_can_be_disabled() {
         resp["result"]["_meta"]["duration_us"].is_null(),
         "duration_us must NOT be present when timings are disabled — got {}",
         resp["result"]["_meta"]
+    );
+}
+
+/// The CLI and the stdio proxy shut down their write half as soon as the
+/// request is on the wire, so a live-cancellable tool must still be answered
+/// after end-of-input rather than being cancelled with no response.
+#[tokio::test]
+async fn cancellable_tool_call_is_answered_after_client_half_close() {
+    struct HalfClosedTransport {
+        request: Option<String>,
+        written: Vec<String>,
+    }
+
+    impl tracedecay::mcp::transport::McpTransport for HalfClosedTransport {
+        async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+            Ok(self.request.take())
+        }
+
+        async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+            self.written.push(line.to_string());
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let (server, _dir) = setup_server().await;
+    let mut transport = HalfClosedTransport {
+        request: Some(jsonrpc_request(
+            json!(41),
+            "tools/call",
+            json!({"name": "tracedecay_search", "arguments": {"query": "helper"}}),
+        )),
+        written: Vec::new(),
+    };
+
+    server
+        .run_connection(&mut transport)
+        .await
+        .expect("half-closed connection should end cleanly");
+
+    let resp = transport
+        .written
+        .iter()
+        .map(|line| parse_response(line.trim()))
+        .find(|resp| resp["id"] == 41)
+        .expect("half-closed client must still receive its response");
+    assert!(
+        extract_tool_text(&resp["result"]).contains("helper"),
+        "expected search results, got: {resp}"
     );
 }
 
