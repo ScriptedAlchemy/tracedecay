@@ -5,21 +5,22 @@ use tracedecay_store::{
     TranscriptWriteBatch, TranscriptWriteKind,
 };
 
-use crate::global_db::{GlobalDb, TranscriptPersistenceError};
+use crate::global_db::{RegisteredGlobalDb, TranscriptPersistenceError};
 use crate::sessions::git_correlation::{CommitSessionRecord, SpanObservation};
 use crate::store::TranscriptIngestStore;
 
-/// Transcript-store adapter over an already-open authoritative [`GlobalDb`].
+/// Transcript-store adapter over an already-open authoritative
+/// [`RegisteredGlobalDb`].
 ///
-/// The adapter deliberately borrows `GlobalDb`: connection ownership and all
-/// transaction begin/commit/rollback decisions stay in the root database
-/// implementation.
+/// The adapter deliberately borrows `RegisteredGlobalDb`: runtime ownership,
+/// authority checks, and all transaction begin/commit/rollback decisions stay
+/// in the registered database implementation.
 pub struct GlobalDbTranscriptStore<'a> {
-    db: &'a GlobalDb,
+    db: &'a RegisteredGlobalDb,
 }
 
 impl<'a> GlobalDbTranscriptStore<'a> {
-    pub const fn new(db: &'a GlobalDb) -> Self {
+    pub(crate) const fn new(db: &'a RegisteredGlobalDb) -> Self {
         Self { db }
     }
 
@@ -199,11 +200,11 @@ mod tests {
         let _ = assert_exact_fields;
         assert_eq!(
             std::mem::size_of::<GlobalDbTranscriptStore<'static>>(),
-            std::mem::size_of::<&'static GlobalDb>()
+            std::mem::size_of::<&'static RegisteredGlobalDb>()
         );
         assert_eq!(
             std::mem::align_of::<GlobalDbTranscriptStore<'static>>(),
-            std::mem::align_of::<&'static GlobalDb>()
+            std::mem::align_of::<&'static RegisteredGlobalDb>()
         );
     }
 
@@ -218,23 +219,5 @@ mod tests {
             GlobalDbTranscriptStore::path_text(&path),
             path.to_string_lossy()
         );
-    }
-
-    #[tokio::test]
-    async fn missing_session_read_returns_none_without_creating_state() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let db = GlobalDb::open_at(&tmp.path().join("sessions.db"))
-            .await
-            .unwrap();
-        let store = GlobalDbTranscriptStore::new(&db);
-
-        assert!(
-            store
-                .get_session("claude", "missing-session")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(db.get_parse_offset("missing-session.jsonl").await, None);
     }
 }

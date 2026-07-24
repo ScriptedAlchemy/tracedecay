@@ -1,12 +1,15 @@
 use tempfile::TempDir;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::global_db::ParseOffset;
-use tracedecay::store::GlobalDbTranscriptStore;
 use tracedecay_store::{TranscriptStore, TranscriptStoreError, TranscriptWriteBatch};
 
-use crate::common::{
-    global_message as sample_message, global_session as sample_session, isolated_lcm_db_path,
-    open_lcm_db,
-};
+use crate::common::{global_message as sample_message, global_session as sample_session};
+
+async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .unwrap()
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct StoreCounts {
@@ -20,51 +23,28 @@ struct StoreCounts {
 }
 
 async fn store_counts(
-    tmp: &TempDir,
+    runtime: &HostAdmissionTestRuntimeV1,
     provider: &str,
     session_id: &str,
     transcript_path: &std::path::Path,
 ) -> StoreCounts {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT
-                (SELECT COUNT(*) FROM sessions
-                 WHERE provider = ?1 AND session_id = ?2),
-                (SELECT COUNT(*) FROM session_messages
-                 WHERE provider = ?1 AND session_id = ?2),
-                (SELECT COUNT(*) FROM lcm_raw_messages
-                 WHERE provider = ?1 AND session_id = ?2),
-                (SELECT COUNT(*) FROM lcm_raw_messages_fts
-                 JOIN lcm_raw_messages raw
-                   ON raw.store_id = lcm_raw_messages_fts.rowid
-                 WHERE raw.provider = ?1 AND raw.session_id = ?2),
-                (SELECT COUNT(*) FROM lcm_raw_messages_fts),
-                (SELECT COUNT(*) FROM lcm_summary_nodes
-                 WHERE provider = ?1 AND session_id = ?2),
-                (SELECT COUNT(*) FROM parse_offsets
-                 WHERE file_path = ?3)",
-            libsql::params![
-                provider,
-                session_id,
-                transcript_path.to_string_lossy().as_ref(),
-            ],
+    let counts = runtime
+        .transcript_store_counts_for_test(
+            HostAdmissionScope::Profile,
+            provider,
+            session_id,
+            transcript_path,
         )
         .await
         .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
     StoreCounts {
-        sessions: row.get(0).unwrap(),
-        projections: row.get(1).unwrap(),
-        raw_messages: row.get(2).unwrap(),
-        raw_fts: row.get(3).unwrap(),
-        all_raw_fts: row.get(4).unwrap(),
-        summaries: row.get(5).unwrap(),
-        cursors: row.get(6).unwrap(),
+        sessions: counts.0,
+        projections: counts.1,
+        raw_messages: counts.2,
+        raw_fts: counts.3,
+        all_raw_fts: counts.4,
+        summaries: counts.5,
+        cursors: counts.6,
     }
 }
 
@@ -120,8 +100,9 @@ async fn transcript_batch_survives_restart_and_replay_is_idempotent() {
         file_id: 42,
     };
 
-    let db = open_lcm_db(&tmp).await;
-    GlobalDbTranscriptStore::new(&db)
+    let db = profile_runtime(&tmp).await;
+    db.transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap()
         .persist_transcript_batch(
             TranscriptWriteBatch::upsert(
                 session.clone(),
@@ -135,23 +116,28 @@ async fn transcript_batch_survives_restart_and_replay_is_idempotent() {
         .unwrap();
     drop(db);
 
-    let reopened = open_lcm_db(&tmp).await;
+    let reopened = profile_runtime(&tmp).await;
     assert_eq!(
         reopened
-            .get_parse_offset(transcript_path.to_string_lossy().as_ref())
-            .await,
+            .parse_offset_for_test(
+                HostAdmissionScope::Profile,
+                transcript_path.to_string_lossy().as_ref(),
+            )
+            .await
+            .unwrap(),
         Some(offset)
     );
-    GlobalDbTranscriptStore::new(&reopened)
+    reopened
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap()
         .persist_transcript_batch(
             TranscriptWriteBatch::upsert(session, messages, offset, offset).unwrap(),
         )
         .await
         .unwrap();
-    drop(reopened);
 
     assert_eq!(
-        store_counts(&tmp, "cursor", "restart-session", &transcript_path).await,
+        store_counts(&reopened, "cursor", "restart-session", &transcript_path).await,
         StoreCounts {
             sessions: 1,
             projections: 2,
@@ -211,34 +197,27 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
     )
     .unwrap();
 
-    let db = open_lcm_db(&tmp).await;
-    let trigger_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let trigger_conn = trigger_db.connect().unwrap();
-    trigger_conn
-        .execute_batch(
-            "CREATE TRIGGER fail_parse_offset_insert
-             BEFORE INSERT ON parse_offsets
-             BEGIN
-                SELECT RAISE(ABORT, 'late parse offset failure');
-             END;",
-        )
+    let db = profile_runtime(&tmp).await;
+    db.set_parse_offset_insert_failure_for_test(HostAdmissionScope::Profile, true)
         .await
         .unwrap();
 
-    let error = GlobalDbTranscriptStore::new(&db)
+    let error = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap()
         .persist_transcript_batch(batch.clone())
         .await
         .expect_err("the late cursor write must fail the batch");
     assert!(matches!(error, TranscriptStoreError::Storage { .. }));
     assert_eq!(
-        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
-            .await,
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            transcript_path.to_string_lossy().as_ref(),
+        )
+        .await
+        .unwrap(),
         None
     );
-    drop(db);
 
     assert_eq!(
         std::fs::read_to_string(&sentinel_path).unwrap(),
@@ -254,7 +233,7 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
     );
 
     assert_eq!(
-        store_counts(&tmp, "codex", "atomic-session", &transcript_path).await,
+        store_counts(&db, "codex", "atomic-session", &transcript_path).await,
         StoreCounts {
             sessions: 0,
             projections: 0,
@@ -266,20 +245,20 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
         }
     );
 
-    trigger_conn
-        .execute("DROP TRIGGER fail_parse_offset_insert", ())
+    db.set_parse_offset_insert_failure_for_test(HostAdmissionScope::Profile, false)
         .await
         .unwrap();
-    drop(trigger_conn);
-    drop(trigger_db);
+    drop(db);
 
-    let reopened = open_lcm_db(&tmp).await;
-    GlobalDbTranscriptStore::new(&reopened)
+    let reopened = profile_runtime(&tmp).await;
+    reopened
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap()
         .persist_transcript_batch(batch)
         .await
         .unwrap();
     let raw = reopened
-        .lcm_load_raw_message("codex", "source-message")
+        .lcm_load_raw_message_for_test("codex", "source-message")
         .await
         .expect("oversized message must persist on retry");
     let payload_ref = raw.payload_ref.expect("oversized message must externalize");
@@ -288,10 +267,8 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
         std::fs::read_to_string(&sentinel_path).unwrap(),
         "must survive rollback"
     );
-    drop(reopened);
-
     assert_eq!(
-        store_counts(&tmp, "codex", "atomic-session", &transcript_path).await,
+        store_counts(&reopened, "codex", "atomic-session", &transcript_path).await,
         StoreCounts {
             sessions: 1,
             projections: 2,
@@ -308,7 +285,7 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
 async fn invalid_batch_mutates_no_transcript_state() {
     let tmp = TempDir::new().unwrap();
     let transcript_path = tmp.path().join("invalid-batch.jsonl");
-    drop(open_lcm_db(&tmp).await);
+    let db = profile_runtime(&tmp).await;
     let mut session = sample_session("cursor", "expected-session", "project-a");
     session.transcript_path = Some(transcript_path.to_string_lossy().to_string());
     let error = TranscriptWriteBatch::upsert(
@@ -333,7 +310,7 @@ async fn invalid_batch_mutates_no_transcript_state() {
         TranscriptStoreError::MessageIdentityMismatch { .. }
     ));
     assert_eq!(
-        store_counts(&tmp, "cursor", "expected-session", &transcript_path).await,
+        store_counts(&db, "cursor", "expected-session", &transcript_path).await,
         StoreCounts {
             sessions: 0,
             projections: 0,
@@ -350,8 +327,10 @@ async fn invalid_batch_mutates_no_transcript_state() {
 async fn stale_higher_batch_is_rejected_until_reparsed_from_durable_cursor() {
     let tmp = TempDir::new().unwrap();
     let transcript_path = tmp.path().join("concurrent.jsonl");
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbTranscriptStore::new(&db);
+    let db = profile_runtime(&tmp).await;
+    let store = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap();
     let mut session = sample_session("cursor", "concurrent-session", "project-a");
     session.transcript_path = Some(transcript_path.to_string_lossy().to_string());
     let first_message = sample_message(
@@ -418,14 +397,23 @@ async fn stale_higher_batch_is_rejected_until_reparsed_from_durable_cursor() {
     ));
 
     assert_eq!(
-        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
-            .await,
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            transcript_path.to_string_lossy().as_ref(),
+        )
+        .await
+        .unwrap(),
         Some(first_offset)
     );
     assert!(
-        db.get_session_message("cursor", "concurrent-second-message")
-            .await
-            .is_none(),
+        db.session_message_for_test(
+            HostAdmissionScope::Profile,
+            "cursor",
+            "concurrent-second-message",
+        )
+        .await
+        .unwrap()
+        .is_none(),
         "the stale parse products must roll back with the cursor conflict"
     );
 
@@ -470,9 +458,8 @@ async fn stale_higher_batch_is_rejected_until_reparsed_from_durable_cursor() {
             ..
         } if actual == second_offset
     ));
-    drop(db);
     assert_eq!(
-        store_counts(&tmp, "cursor", "concurrent-session", &transcript_path).await,
+        store_counts(&db, "cursor", "concurrent-session", &transcript_path).await,
         StoreCounts {
             sessions: 1,
             projections: 3,
@@ -489,9 +476,13 @@ async fn stale_higher_batch_is_rejected_until_reparsed_from_durable_cursor() {
 async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes() {
     let tmp = TempDir::new().unwrap();
     let transcript_path = tmp.path().join("concurrent-full-batches.jsonl");
-    let db = open_lcm_db(&tmp).await;
-    let first_store = GlobalDbTranscriptStore::new(&db);
-    let second_store = GlobalDbTranscriptStore::new(&db);
+    let db = profile_runtime(&tmp).await;
+    let first_store = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap();
+    let second_store = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap();
     let mut session = sample_session("cursor", "concurrent-full-session", "project-a");
     session.transcript_path = Some(transcript_path.to_string_lossy().to_string());
     let first_message = sample_message(
@@ -550,12 +541,16 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
     };
     assert_eq!(conflict_actual, first_offset);
     assert_eq!(
-        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
-            .await,
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            transcript_path.to_string_lossy().as_ref(),
+        )
+        .await
+        .unwrap(),
         Some(first_offset)
     );
     assert_eq!(
-        store_counts(&tmp, "cursor", "concurrent-full-session", &transcript_path,).await,
+        store_counts(&db, "cursor", "concurrent-full-session", &transcript_path,).await,
         StoreCounts {
             sessions: 1,
             projections: 1,
@@ -580,8 +575,12 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
         .await
         .expect("a freshly parsed batch must advance from the returned durable cursor");
     assert_eq!(
-        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
-            .await,
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            transcript_path.to_string_lossy().as_ref(),
+        )
+        .await
+        .unwrap(),
         Some(higher_offset)
     );
 
@@ -637,9 +636,8 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
         TranscriptStoreError::Conflict { actual, .. } if actual == higher_offset
     ));
 
-    drop(db);
     assert_eq!(
-        store_counts(&tmp, "cursor", "concurrent-full-session", &transcript_path,).await,
+        store_counts(&db, "cursor", "concurrent-full-session", &transcript_path,).await,
         StoreCounts {
             sessions: 1,
             projections: 3,
@@ -655,8 +653,10 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
 #[tokio::test]
 async fn concurrent_empty_advances_converge_to_highest_compatible_offset_without_rows() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbTranscriptStore::new(&db);
+    let db = profile_runtime(&tmp).await;
+    let store = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap();
     let transcript_path = tmp.path().join("parsed-but-empty.jsonl");
     let first_offset = ParseOffset {
         byte_offset: 80,
@@ -694,8 +694,12 @@ async fn concurrent_empty_advances_converge_to_highest_compatible_offset_without
     }
 
     assert_eq!(
-        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
-            .await,
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            transcript_path.to_string_lossy().as_ref(),
+        )
+        .await
+        .unwrap(),
         Some(second_offset)
     );
     let incompatible_error = store
@@ -739,9 +743,8 @@ async fn concurrent_empty_advances_converge_to_highest_compatible_offset_without
         regressing_mtime_error,
         TranscriptStoreError::Conflict { actual, .. } if actual == second_offset
     ));
-    drop(db);
     assert_eq!(
-        store_counts(&tmp, "cursor", "parsed-but-empty", &transcript_path).await,
+        store_counts(&db, "cursor", "parsed-but-empty", &transcript_path).await,
         StoreCounts {
             sessions: 0,
             projections: 0,
@@ -757,9 +760,13 @@ async fn concurrent_empty_advances_converge_to_highest_compatible_offset_without
 #[tokio::test]
 async fn duplicate_empty_advances_are_idempotent_under_concurrency() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let first_store = GlobalDbTranscriptStore::new(&db);
-    let second_store = GlobalDbTranscriptStore::new(&db);
+    let db = profile_runtime(&tmp).await;
+    let first_store = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap();
+    let second_store = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap();
     let transcript_path = tmp.path().join("duplicate-empty.jsonl");
     let next_offset = ParseOffset {
         byte_offset: 96,
@@ -789,13 +796,16 @@ async fn duplicate_empty_advances_are_idempotent_under_concurrency() {
     assert!(first_result.is_ok(), "first duplicate: {first_result:?}");
     assert!(second_result.is_ok(), "second duplicate: {second_result:?}");
     assert_eq!(
-        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
-            .await,
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            transcript_path.to_string_lossy().as_ref(),
+        )
+        .await
+        .unwrap(),
         Some(next_offset)
     );
-    drop(db);
     assert_eq!(
-        store_counts(&tmp, "cursor", "duplicate-empty", &transcript_path).await,
+        store_counts(&db, "cursor", "duplicate-empty", &transcript_path).await,
         StoreCounts {
             sessions: 0,
             projections: 0,
@@ -811,8 +821,10 @@ async fn duplicate_empty_advances_are_idempotent_under_concurrency() {
 #[tokio::test]
 async fn content_hash_offsets_never_retry_by_numeric_order() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbTranscriptStore::new(&db);
+    let db = profile_runtime(&tmp).await;
+    let store = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap();
     let transcript_path = tmp.path().join("content-hash.json");
     let durable_hash = ParseOffset {
         byte_offset: 900,
@@ -855,8 +867,12 @@ async fn content_hash_offsets_never_retry_by_numeric_order() {
         } if actual == durable_hash
     ));
     assert_eq!(
-        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
-            .await,
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            transcript_path.to_string_lossy().as_ref(),
+        )
+        .await
+        .unwrap(),
         Some(durable_hash)
     );
 }
