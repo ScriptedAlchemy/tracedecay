@@ -5,7 +5,9 @@
 //! install Unavailable stub owners.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -15,14 +17,16 @@ use tracedecay_application::diagnostics::{
     ProviderProvenance, ProviderSourceIdentity, RevisionDigest,
 };
 use tracedecay_application::feedback::{
-    FeedbackBudgetUsage, FeedbackCycleControl, FeedbackCycleExecutionRequest,
-    FeedbackRuntimeStatePort, feedback_surface_operation,
+    FeedbackBudgetUsage, FeedbackCycleAdvisoryV1, FeedbackCycleControl,
+    FeedbackCycleExecutionRequest, FeedbackPortFuture, FeedbackRuntimeStatePort,
+    ProximityEvaluationRequestV1, feedback_surface_operation,
 };
 use tracedecay_application::{
-    ApplicationContractError, ApplicationOperation, CancellationContext, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, PolicyDecisionRef,
-    PolicyEvaluationContextV1, PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1,
-    PolicyEvidenceHorizonV1, RequestContext, RequestId, ResolvedScope,
+    AdvisoryFindingContributorV1, AdvisoryFindingValidityWindowV1, ApplicationContractError,
+    ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
+    Deadline, DisclosureClass, PolicyDecisionRef, PolicyEvaluationContextV1,
+    PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1, RequestContext,
+    RequestId, ResolvedScope,
 };
 use tracedecay_domain::configuration::{
     AnalyzerExecutableId, AnalyzerExecutableReferenceV1, AnalyzerLanguageId,
@@ -46,25 +50,68 @@ use tracedecay_policy::analyzer::{
 };
 use tracedecay_tool_catalog::CapabilityId;
 
+use super::cycle_runtime::Pr12FeedbackCycleRuntime;
 use super::cycle_runtime::{Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput};
-use crate::daemon::lsp_gateway::{DiagnosticTrigger, FeedbackCycleRequest, LspRuntimeFailure};
+use crate::application::advisory::{
+    ConcretePr13ProximityRuntimeOwnerV1, Pr13ProximityRuntimeOutcomeV1,
+    SharedCanonicalProximityEvidenceAuthorityV1, open_pr13_proximity_runtime,
+};
+use crate::application::configuration::ConfigurationCurrentStateV1;
+use crate::daemon::lsp_gateway::{
+    DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
+    LspRuntimeFuture,
+};
+use crate::diagnostics::lsp::broker::MountedLspProvider;
+use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::tracedecay::TraceDecay;
 
 const POLICY_REVISION_V1: u64 = 1;
-const MANAGED_ANALYZER_LANGUAGE: &str = "rust";
-const MANAGED_ANALYZER_EXECUTABLE: &str = "analyzer.rust-analyzer.builtin";
 const MANAGED_CAPABILITY: &str = "capability.diagnostics.current";
 
 /// Inputs required to open one production feedback-cycle registration.
 pub struct ProductionFeedbackCycleOpenV1 {
     pub project_root: PathBuf,
     pub scope: ResolvedScope,
-    pub access_configuration_digest: ManifestDigest,
-    pub access_configuration_revision: ConfigurationRevisionId,
+    pub access_configuration: ConfigurationCurrentStateV1,
     pub requester: ActorId,
     pub grant_expires_at: UtcMicros,
     pub graph: Arc<TraceDecay>,
+    pub project_runtime_db: Arc<RegisteredGlobalDb>,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
+    pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
+    pub mounted_providers: Vec<MountedLspProvider>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProductionFeedbackDocumentIdentityV1 {
+    pub generation_id: CodeGenerationId,
+    pub generation_digest: ManifestDigest,
+    pub file: FileOccurrenceId,
+    pub content_digest: ContentDigest,
+}
+
+impl ProductionFeedbackDocumentIdentityV1 {
+    fn file_digest(&self) -> Result<ManifestDigest, LspRuntimeFailure> {
+        ManifestDigest::new(self.content_digest.as_str().to_owned())
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-file-digest"))
+    }
+}
+
+pub type ProductionFeedbackDocumentIdentityFuture = Pin<
+    Box<
+        dyn Future<Output = Result<ProductionFeedbackDocumentIdentityV1, LspRuntimeFailure>> + Send,
+    >,
+>;
+
+/// Current, mounted code-index authority for saved LSP document identity.
+/// Implementations must reconcile freshness before returning a generation.
+pub trait ProductionFeedbackDocumentIdentityPort {
+    fn resolve(
+        &self,
+        project_root: PathBuf,
+        document_uri: Option<String>,
+    ) -> ProductionFeedbackDocumentIdentityFuture;
 }
 
 /// Resolved production cycle open parts for the daemon registrar.
@@ -80,22 +127,218 @@ pub struct ProductionFeedbackCyclePartsV1 {
     pub graph_operation: ApplicationOperation,
     pub tests_operation: ApplicationOperation,
     pub lsp_input: Pr12FeedbackCycleLspInput,
+    pub proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1>,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
 }
 
-/// Build production cycle registration parts when a managed analyzer can admit.
-pub fn resolve_production_feedback_cycle_parts(
+/// Exact saved-generation proximity contribution mounted into the canonical
+/// Plan 09 cycle. Implementations return no durable artifact; publication and
+/// dedupe remain owned by `Pr12FeedbackCycleRuntime::run_once_with_advisory`.
+pub trait ProductionFeedbackCycleProximityPortV1: Send + Sync {
+    fn advisory<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        input: &'a FeedbackEvaluationInputV1,
+    ) -> FeedbackPortFuture<'a, Result<FeedbackCycleAdvisoryV1, LspRuntimeFailure>>;
+}
+
+type ProductionProximityOwnerV1 = ConcretePr13ProximityRuntimeOwnerV1<
+    SharedCanonicalProximityEvidenceAuthorityV1,
+    OwnedGlobalDbConfigurationControlStore,
+>;
+
+struct ProductionFeedbackCycleProximityV1 {
+    project_root: PathBuf,
+    document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
+    owner: ProductionProximityOwnerV1,
+}
+
+impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximityV1 {
+    fn advisory<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        input: &'a FeedbackEvaluationInputV1,
+    ) -> FeedbackPortFuture<'a, Result<FeedbackCycleAdvisoryV1, LspRuntimeFailure>> {
+        Box::pin(async move {
+            let current = self
+                .document_identity
+                .resolve(self.project_root.clone(), None)
+                .await?;
+            require_current_saved_identity(input, &current)?;
+            let request = ProximityEvaluationRequestV1 {
+                scope: input.request.scope.clone(),
+                observed_at: input.observed_at,
+            };
+            match self.owner.evaluate(context, &request).await {
+                Pr13ProximityRuntimeOutcomeV1::Completed(contributor) => {
+                    let expires_at =
+                        UtcMicros(input.observed_at.0.checked_add(1).ok_or_else(|| {
+                            LspRuntimeFailure::new("feedback-cycle-proximity-validity")
+                        })?);
+                    let batch = contributor
+                        .advisory_findings(AdvisoryFindingValidityWindowV1 {
+                            valid_at: input.observed_at,
+                            expires_at,
+                        })
+                        .map_err(|_| {
+                            LspRuntimeFailure::new("feedback-cycle-proximity-contribution")
+                        })?;
+                    let advisory = FeedbackCycleAdvisoryV1 {
+                        // Provider order is the PR13 canonical order:
+                        // GitHub, CI, proximity. The LSP/Hook fallback has no
+                        // authenticated remote provider target, so it records
+                        // those providers as explicitly unavailable rather
+                        // than silently omitting them.
+                        provider_states: vec![
+                            tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                            tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                            batch.provider_state,
+                        ],
+                        findings: batch.findings,
+                    };
+                    advisory
+                        .validate()
+                        .map_err(|_| LspRuntimeFailure::new("feedback-cycle-proximity-advisory"))?;
+                    Ok(advisory)
+                }
+                Pr13ProximityRuntimeOutcomeV1::Denied => {
+                    Err(LspRuntimeFailure::new("feedback-cycle-proximity-denied"))
+                }
+                Pr13ProximityRuntimeOutcomeV1::Unavailable => Ok(FeedbackCycleAdvisoryV1 {
+                    provider_states: vec![
+                        tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                        tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                        tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                    ],
+                    findings: Vec::new(),
+                }),
+                Pr13ProximityRuntimeOutcomeV1::Cancelled => {
+                    Err(LspRuntimeFailure::new("feedback-cycle-proximity-cancelled"))
+                }
+                Pr13ProximityRuntimeOutcomeV1::TimedOut => {
+                    Err(LspRuntimeFailure::new("feedback-cycle-proximity-timed-out"))
+                }
+            }
+        })
+    }
+}
+
+fn require_current_saved_identity(
+    input: &FeedbackEvaluationInputV1,
+    current: &ProductionFeedbackDocumentIdentityV1,
+) -> Result<(), LspRuntimeFailure> {
+    input
+        .validate()
+        .map_err(|_| LspRuntimeFailure::new("feedback-cycle-proximity-input"))?;
+    let FeedbackContentIdentityV1::SavedContent {
+        generation_digest,
+        file_digest,
+    } = &input.request.content
+    else {
+        return Err(LspRuntimeFailure::new("feedback-cycle-proximity-overlay"));
+    };
+    let Some(generation_id) = input.target.generation_id.as_ref() else {
+        return Err(LspRuntimeFailure::new(
+            "feedback-cycle-proximity-generation",
+        ));
+    };
+    if generation_id != &current.generation_id
+        || generation_digest != &current.generation_digest
+        || input.target.file != current.file
+        || file_digest != &current.file_digest()?
+    {
+        return Err(LspRuntimeFailure::new(
+            "feedback-cycle-proximity-generation-drift",
+        ));
+    }
+    Ok(())
+}
+
+struct ProductionProximityFeedbackCycleRuntimeV1 {
+    feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,
+    lsp_input: Pr12FeedbackCycleLspInput,
+    proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1>,
+}
+
+impl FeedbackCycleRuntimePort for ProductionProximityFeedbackCycleRuntimeV1 {
+    fn execute(
+        &self,
+        request: FeedbackCycleRequest,
+    ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
+        let feedback_cycle = Arc::clone(&self.feedback_cycle);
+        let lsp_input = Arc::clone(&self.lsp_input);
+        let proximity = Arc::clone(&self.proximity);
+        Box::pin(async move {
+            let invocation = lsp_input(request).await?;
+            let advisory = proximity
+                .advisory(&invocation.context, &invocation.request.input)
+                .await?;
+            feedback_cycle
+                .run_once_with_advisory(&invocation.context, invocation.request, advisory)
+                .await
+                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-proximity-execution"))?;
+            Ok(())
+        })
+    }
+}
+
+/// LSP-facing production port for the same canonical cycle. It introduces no
+/// publication path: the wrapped PR12 owner atomically records the combined
+/// result through its existing store.
+pub fn production_proximity_feedback_cycle_input(
+    feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,
+    lsp_input: Pr12FeedbackCycleLspInput,
+    proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1>,
+) -> Arc<dyn FeedbackCycleRuntimePort> {
+    Arc::new(ProductionProximityFeedbackCycleRuntimeV1 {
+        feedback_cycle,
+        lsp_input,
+        proximity,
+    })
+}
+
+/// Build production cycle registration parts from the providers mounted by
+/// the project diagnostics broker. An empty provider set remains a valid
+/// cycle: provider-backed diagnostics are typed unavailable while the retained
+/// project feedback/LSP owner continues to serve its other projections.
+pub async fn resolve_production_feedback_cycle_parts(
     input: ProductionFeedbackCycleOpenV1,
 ) -> Result<ProductionFeedbackCyclePartsV1, ApplicationContractError> {
-    if !project_admits_managed_rust_analyzer(&input.project_root) {
-        return Err(ApplicationContractError::Inconsistent {
-            field: "project-open managed diagnostic provider",
-        });
-    }
     let feedback_scope = feedback_scope_for_project(&input.project_root, &input.scope)?;
+    let proximity_evidence =
+        crate::application::advisory::proximity_runtime::production_proximity_evidence_authority_v1(
+            Arc::clone(&input.project_runtime_db),
+            Arc::clone(&input.graph),
+            feedback_scope.clone(),
+            input.project_root.clone(),
+        )
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "project-open proximity authority",
+        })?;
+    let proximity_owner = open_pr13_proximity_runtime(
+        feedback_scope.clone(),
+        proximity_evidence,
+        OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(Arc::clone(
+            &input.project_runtime_db,
+        )),
+    )
+    .ok_or(ApplicationContractError::Inconsistent {
+        field: "project-open proximity runtime",
+    })?;
+    let proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1> =
+        Arc::new(ProductionFeedbackCycleProximityV1 {
+            project_root: input.project_root.clone(),
+            document_identity: Arc::clone(&input.document_identity),
+            owner: proximity_owner,
+        });
+    let access_configuration_digest = input
+        .access_configuration
+        .snapshot
+        .effective_behavior_digest
+        .clone();
     let policy_digest = canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
-        &input.access_configuration_digest,
+        &access_configuration_digest,
         POLICY_REVISION_V1,
     ))
     .map_err(|_| ApplicationContractError::Inconsistent {
@@ -108,23 +351,44 @@ pub fn resolve_production_feedback_cycle_parts(
         input.grant_expires_at,
         evaluated_at,
     )?;
-    let policy_context = PolicyEvaluationContextV1::new(
+    let policy_context = project_open_policy_context(
         request_context.clone(),
-        input.access_configuration_revision.clone(),
-        ConfigurationSnapshotV1::new(BTreeMap::new(), BTreeMap::new()).map_err(|_| {
-            ApplicationContractError::Inconsistent {
-                field: "project-open configuration snapshot",
-            }
-        })?,
-        POLICY_REVISION_V1,
+        input.access_configuration.revision_id,
+        input.access_configuration.snapshot,
         policy_digest.clone(),
     )?;
-    let provider_candidates = vec![managed_rust_analyzer_candidate(
-        &input.scope,
-        &input.access_configuration_digest,
-        &policy_digest,
-        evaluated_at,
-    )?];
+    let provider_seed = input
+        .document_identity
+        .resolve(input.project_root.clone(), None)
+        .await
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open provider code-index identity",
+        })?;
+    let provider_candidates = if input.mounted_providers.is_empty() {
+        vec![unavailable_lsp_candidate(
+            &input.scope,
+            &access_configuration_digest,
+            &policy_digest,
+            evaluated_at,
+            &provider_seed,
+        )?]
+    } else {
+        input
+            .mounted_providers
+            .iter()
+            .map(|provider| {
+                managed_lsp_candidate(
+                    provider,
+                    AnalyzerAvailabilityV1::Available,
+                    &input.scope,
+                    &access_configuration_digest,
+                    &policy_digest,
+                    evaluated_at,
+                    &provider_seed,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
     let operation = required_surface_operation("feedback_diagnostics")?;
     let graph_operation = required_surface_operation("feedback_impact")?;
     let tests_operation = required_surface_operation("affected_tests")?;
@@ -133,12 +397,14 @@ pub fn resolve_production_feedback_cycle_parts(
         input.scope.clone(),
         input.requester.clone(),
         input.grant_expires_at,
-        input.access_configuration_digest.clone(),
+        access_configuration_digest,
         policy_digest.clone(),
         provider_candidates
             .iter()
             .map(|(identity, _)| identity.clone())
             .collect(),
+        input.project_root,
+        input.document_identity,
     )?;
     Ok(ProductionFeedbackCyclePartsV1 {
         feedback_scope,
@@ -148,24 +414,33 @@ pub fn resolve_production_feedback_cycle_parts(
         evaluated_at,
         provider_candidates,
         affected_tests: Arc::new(
-            crate::application::primitives::TraceDecayAffectedTestsPortV1::new(Arc::clone(
-                &input.graph,
-            )),
+            crate::application::primitives::TraceDecayAffectedTestsPortV1::new(
+                Arc::clone(&input.graph),
+                provider_seed.generation_id.clone(),
+            ),
         ),
         operation,
         graph_operation,
         tests_operation,
         lsp_input,
+        proximity,
         runtime_state: input.runtime_state,
     })
 }
 
-fn project_admits_managed_rust_analyzer(project_root: &Path) -> bool {
-    project_root.join("Cargo.toml").is_file()
-        && Command::new("rust-analyzer")
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
+fn project_open_policy_context(
+    request_context: RequestContext,
+    configuration_revision: ConfigurationRevisionId,
+    configuration: ConfigurationSnapshotV1,
+    policy_digest: ManifestDigest,
+) -> Result<PolicyEvaluationContextV1, ApplicationContractError> {
+    PolicyEvaluationContextV1::new(
+        request_context,
+        configuration_revision,
+        configuration,
+        POLICY_REVISION_V1,
+        policy_digest,
+    )
 }
 
 fn feedback_scope_for_project(
@@ -208,26 +483,37 @@ fn feedback_scope_for_project(
     Ok(feedback)
 }
 
-fn managed_rust_analyzer_candidate(
+fn managed_lsp_candidate(
+    provider: &MountedLspProvider,
+    availability: AnalyzerAvailabilityV1,
     scope: &ResolvedScope,
     configuration_digest: &ManifestDigest,
     policy_digest: &ManifestDigest,
     evaluated_at: UtcMicros,
+    document: &ProductionFeedbackDocumentIdentityV1,
 ) -> Result<(DiagnosticProviderIdentity, AnalyzerAdmissionInputV1), ApplicationContractError> {
-    let language = LanguageId::new(MANAGED_ANALYZER_LANGUAGE).map_err(|_| {
+    let language = LanguageId::new(provider.language.clone()).map_err(|_| {
         ApplicationContractError::Inconsistent {
             field: "project-open analyzer language",
         }
     })?;
-    let analyzer_language = AnalyzerLanguageId::new(MANAGED_ANALYZER_LANGUAGE).map_err(|_| {
+    let analyzer_language = AnalyzerLanguageId::new(provider.language.clone()).map_err(|_| {
         ApplicationContractError::Inconsistent {
             field: "project-open analyzer language id",
         }
     })?;
-    let executable = AnalyzerExecutableId::new(MANAGED_ANALYZER_EXECUTABLE).map_err(|_| {
-        ApplicationContractError::Inconsistent {
-            field: "project-open analyzer executable",
-        }
+    let provider_digest = canonical_sha256(&(
+        "tracedecay.project-open.mounted-lsp-provider.v1",
+        &provider.language,
+        &provider.command,
+    ))
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "project-open analyzer provider digest",
+    })?;
+    let provider_suffix = provider_digest.as_str().trim_start_matches("sha256:");
+    let executable = AnalyzerExecutableId::new(format!("analyzer.lsp.{provider_suffix}.mounted"))
+        .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "project-open analyzer executable",
     })?;
     let capability = CapabilityId::new(MANAGED_CAPABILITY.to_owned()).map_err(|_| {
         ApplicationContractError::Inconsistent {
@@ -237,24 +523,6 @@ fn managed_rust_analyzer_candidate(
     let domain_capability = tracedecay_domain::CapabilityId::new(MANAGED_CAPABILITY.to_owned())
         .map_err(|_| ApplicationContractError::Inconsistent {
             field: "project-open analyzer capability",
-        })?;
-    let generation = CodeGenerationId::new(format!(
-        "generation.project-open.{}",
-        configuration_digest.as_str().trim_start_matches("sha256:")
-    ))
-    .map_err(|_| ApplicationContractError::Inconsistent {
-        field: "project-open provider generation",
-    })?;
-    let file = FileOccurrenceId::new("file.project-open.managed-root").map_err(|_| {
-        ApplicationContractError::Inconsistent {
-            field: "project-open provider file",
-        }
-    })?;
-    let content_digest =
-        ContentDigest::new(configuration_digest.as_str().to_owned()).map_err(|_| {
-            ApplicationContractError::Inconsistent {
-                field: "project-open provider content digest",
-            }
         })?;
     let policy = PolicyDecisionRef::new(
         "policy.decision.project-open.analyzer",
@@ -269,28 +537,27 @@ fn managed_rust_analyzer_candidate(
     let identity = DiagnosticProviderIdentity::new(DiagnosticProviderIdentityParts {
         scope: scope.clone(),
         source: ProviderSourceIdentity::CleanGeneration {
-            generation: generation.clone(),
+            generation: document.generation_id.clone(),
         },
         document: ProviderDocumentIdentity {
-            file,
-            content_digest,
+            file: document.file.clone(),
+            content_digest: document.content_digest.clone(),
             document_version: None,
         },
         producer: DiagnosticProviderDescriptor {
-            provider: ProviderId::new("provider.rust-analyzer").map_err(|_| {
+            provider: ProviderId::new(format!("provider.lsp.{provider_suffix}")).map_err(|_| {
                 ApplicationContractError::Inconsistent {
                     field: "project-open analyzer provider",
                 }
             })?,
-            analyzer_revision: ComponentVersion::new("analyzer.rust-analyzer.v1").map_err(
-                |_| ApplicationContractError::Inconsistent {
+            analyzer_revision: ComponentVersion::new(format!("analyzer.lsp.{provider_suffix}.v1"))
+                .map_err(|_| ApplicationContractError::Inconsistent {
                     field: "project-open analyzer revision",
-                },
-            )?,
+                })?,
             language: language.clone(),
-            language_descriptor_revision: LanguageDescriptorRevision::new(
-                "language.rust.project-open.v1",
-            )
+            language_descriptor_revision: LanguageDescriptorRevision::new(format!(
+                "language.lsp.{provider_suffix}.v1"
+            ))
             .map_err(|_| ApplicationContractError::Inconsistent {
                 field: "project-open language descriptor",
             })?,
@@ -301,7 +568,7 @@ fn managed_rust_analyzer_candidate(
         provenance: ProviderProvenance {
             origin: ProviderOrigin::ConfiguredAnalyzer,
             anchor: Some(
-                RetrievalAnchorId::new("anchor.provider.rust-analyzer.project-open").map_err(
+                RetrievalAnchorId::new(format!("anchor.provider.lsp.{provider_suffix}")).map_err(
                     |_| ApplicationContractError::Inconsistent {
                         field: "project-open analyzer anchor",
                     },
@@ -345,13 +612,13 @@ fn managed_rust_analyzer_candidate(
         candidates: vec![AnalyzerCandidateV1 {
             executable_id: executable,
             approved_external_digest: None,
-            language_id: AnalyzerLanguageId::new(MANAGED_ANALYZER_LANGUAGE).map_err(|_| {
+            language_id: AnalyzerLanguageId::new(provider.language.clone()).map_err(|_| {
                 ApplicationContractError::Inconsistent {
                     field: "project-open candidate language",
                 }
             })?,
             capability_id: domain_capability,
-            availability: AnalyzerAvailabilityV1::Available,
+            availability,
             execution_location: AnalyzerExecutionLocationV1::Local,
             scope_authorized: true,
             available_memory_mib: 2_048,
@@ -363,11 +630,31 @@ fn managed_rust_analyzer_candidate(
         policy_digest: policy_digest.clone(),
         evaluated_at,
     };
-    let _ = generation;
     let _ = language;
     let _ = capability;
     let _ = policy;
     Ok((identity, admission_input))
+}
+
+fn unavailable_lsp_candidate(
+    scope: &ResolvedScope,
+    configuration_digest: &ManifestDigest,
+    policy_digest: &ManifestDigest,
+    evaluated_at: UtcMicros,
+    document: &ProductionFeedbackDocumentIdentityV1,
+) -> Result<(DiagnosticProviderIdentity, AnalyzerAdmissionInputV1), ApplicationContractError> {
+    managed_lsp_candidate(
+        &MountedLspProvider {
+            language: "unavailable".to_owned(),
+            command: "unavailable".to_owned(),
+        },
+        AnalyzerAvailabilityV1::Unavailable,
+        scope,
+        configuration_digest,
+        policy_digest,
+        evaluated_at,
+        document,
+    )
 }
 
 fn production_lsp_input(
@@ -378,7 +665,17 @@ fn production_lsp_input(
     configuration_digest: ManifestDigest,
     policy_digest: ManifestDigest,
     providers: Vec<DiagnosticProviderIdentity>,
+    project_root: PathBuf,
+    document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
 ) -> Result<Pr12FeedbackCycleLspInput, ApplicationContractError> {
+    let root_uri = url::Url::from_directory_path(
+        project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.clone()),
+    )
+    .map_err(|()| ApplicationContractError::Inconsistent {
+        field: "project-open feedback root URI",
+    })?;
     Ok(Arc::new(move |request: FeedbackCycleRequest| {
         let feedback_scope = feedback_scope.clone();
         let scope = scope.clone();
@@ -386,7 +683,13 @@ fn production_lsp_input(
         let configuration_digest = configuration_digest.clone();
         let policy_digest = policy_digest.clone();
         let providers = providers.clone();
+        let project_root = project_root.clone();
+        let root_uri = root_uri.clone();
+        let document_identity = Arc::clone(&document_identity);
         Box::pin(async move {
+            if url::Url::parse(&request.root_uri).ok().as_ref() != Some(&root_uri) {
+                return Err(LspRuntimeFailure::new("feedback-cycle-root-mismatch"));
+            }
             let trigger = match request.trigger {
                 DiagnosticTrigger::DocumentSave => FeedbackTriggerV1::DocumentSave,
                 DiagnosticTrigger::ExplicitDocumentDiagnostics => {
@@ -396,15 +699,27 @@ fn production_lsp_input(
             let observed_at = now_micros();
             let context = daemon_request_context(&scope, &requester, grant_expires_at, observed_at)
                 .map_err(|_| LspRuntimeFailure::new("feedback-cycle-request-context"))?;
-            let file_digest = canonical_sha256(&(
-                "tracedecay.project-open.feedback-file.v1",
-                &request.document_uri,
+            let document = document_identity
+                .resolve(project_root, Some(request.document_uri))
+                .await?;
+            let file_digest = document.file_digest()?;
+            let generation_digest = document.generation_digest.clone();
+            let providers = providers
+                .iter()
+                .map(|provider| provider_for_document(provider, &document, observed_at))
+                .collect::<Result<Vec<_>, _>>()?;
+            let cycle_digest = canonical_sha256(&(
+                "tracedecay.project-open.feedback-cycle.v2",
+                &feedback_scope,
+                &document.generation_id,
+                &document.file,
+                &document.content_digest,
+                trigger,
             ))
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-file-digest"))?;
-            let generation_digest = configuration_digest.clone();
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-id"))?;
             let cycle_id = FeedbackCycleId::new(format!(
                 "cycle.project-open.{}",
-                file_digest.as_str().trim_start_matches("sha256:")
+                cycle_digest.as_str().trim_start_matches("sha256:")
             ))
             .map_err(|_| LspRuntimeFailure::new("feedback-cycle-id"))?;
             let cycle_request = FeedbackCycleRequestV1::new(
@@ -423,23 +738,13 @@ fn production_lsp_input(
             if cycle_request.durability() != FeedbackDurabilityV1::Durable {
                 return Err(LspRuntimeFailure::new("feedback-cycle-non-durable"));
             }
-            let generation_id = CodeGenerationId::new(format!(
-                "generation.project-open.{}",
-                generation_digest.as_str().trim_start_matches("sha256:")
-            ))
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-generation"))?;
-            let file = FileOccurrenceId::new(format!(
-                "file.project-open.{}",
-                file_digest.as_str().trim_start_matches("sha256:")
-            ))
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-file"))?;
             let input = FeedbackEvaluationInputV1 {
                 request: cycle_request,
                 target: FeedbackTargetV1 {
-                    file,
+                    file: document.file,
                     span: None,
                     symbol: None,
-                    generation_id: Some(generation_id),
+                    generation_id: Some(document.generation_id),
                 },
                 actor: FeedbackActorContextV1::default(),
                 observed_at,
@@ -449,9 +754,9 @@ fn production_lsp_input(
                 providers,
                 maximum_returned_findings: 64,
                 usage: FeedbackBudgetUsage {
-                    completed_at: observed_at,
-                    tokens_consumed: 1,
-                    cost_microunits: 1,
+                    completed_at: now_micros(),
+                    tokens_consumed: 0,
+                    cost_microunits: 0,
                 },
                 control: FeedbackCycleControl::Continue,
             };
@@ -459,6 +764,35 @@ fn production_lsp_input(
                 .map_err(|_| LspRuntimeFailure::new("feedback-cycle-invocation"))
         })
     }))
+}
+
+fn provider_for_document(
+    provider: &DiagnosticProviderIdentity,
+    document: &ProductionFeedbackDocumentIdentityV1,
+    observed_at: UtcMicros,
+) -> Result<DiagnosticProviderIdentity, LspRuntimeFailure> {
+    DiagnosticProviderIdentity::new(DiagnosticProviderIdentityParts {
+        scope: provider.scope.clone(),
+        source: ProviderSourceIdentity::CleanGeneration {
+            generation: document.generation_id.clone(),
+        },
+        document: ProviderDocumentIdentity {
+            file: document.file.clone(),
+            content_digest: document.content_digest.clone(),
+            document_version: None,
+        },
+        producer: provider.producer.clone(),
+        requested_capability: provider.requested_capability.clone(),
+        freshness: ProviderFreshness {
+            state: provider.freshness.state,
+            observed_at,
+        },
+        coverage: provider.coverage.clone(),
+        provenance: provider.provenance.clone(),
+        configuration: provider.configuration.clone(),
+        policy: provider.policy.clone(),
+    })
+    .map_err(|_| LspRuntimeFailure::new("feedback-cycle-provider-identity"))
 }
 
 fn required_surface_operation(
@@ -528,6 +862,10 @@ fn daemon_request_context(
             "capability.application.feedback.affected-tests",
             "use-case.application.feedback.affected-tests",
         ),
+        (
+            tracedecay_application::feedback::PROXIMITY_CAPABILITY_ID_V1,
+            tracedecay_application::feedback::PROXIMITY_USE_CASE_ID_V1,
+        ),
     ] {
         capabilities.insert(CapabilityId::new(capability_id.to_owned())?);
         use_cases.insert(tracedecay_tool_catalog::UseCaseId::new(
@@ -570,4 +908,341 @@ fn now_micros() -> UtcMicros {
         )
         .unwrap_or(i64::MAX),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_application::diagnostics::AnalyzerAdmittedDiagnosticProviderV1;
+    use tracedecay_application::policy::PolicyEvaluatorCompositionV1;
+    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+
+    #[derive(Clone)]
+    struct Identity(ProductionFeedbackDocumentIdentityV1);
+
+    impl ProductionFeedbackDocumentIdentityPort for Identity {
+        fn resolve(
+            &self,
+            _project_root: PathBuf,
+            _document_uri: Option<String>,
+        ) -> ProductionFeedbackDocumentIdentityFuture {
+            let identity = self.0.clone();
+            Box::pin(async move { Ok(identity) })
+        }
+    }
+
+    fn digest(label: &str) -> ManifestDigest {
+        canonical_sha256(&("cycle-production-test", label)).expect("digest")
+    }
+
+    fn scope() -> ResolvedScope {
+        ResolvedScope::new(
+            ProjectId::new("project.cycle-production").expect("project"),
+            RepositoryId::new("repository.cycle-production").expect("repository"),
+            WorktreeId::new("worktree.cycle-production").expect("worktree"),
+            None,
+        )
+        .expect("scope")
+    }
+
+    fn feedback_scope(scope: &ResolvedScope) -> FeedbackScopeV1 {
+        FeedbackScopeV1 {
+            project_id: scope.project_id.clone(),
+            repository_id: scope.repository_id.clone(),
+            worktree_id: scope.worktree_id.clone(),
+            branch_ref: "refs/heads/main".to_owned(),
+            head_commit_id: CommitId::new("0123456789abcdef0123456789abcdef01234567")
+                .expect("commit"),
+        }
+    }
+
+    fn document_identity() -> ProductionFeedbackDocumentIdentityV1 {
+        ProductionFeedbackDocumentIdentityV1 {
+            generation_id: CodeGenerationId::new("generation.test.current").expect("generation"),
+            generation_digest: digest("generation"),
+            file: FileOccurrenceId::new("file.test.src-lib").expect("file"),
+            content_digest: ContentDigest::new(digest("file").as_str().to_owned())
+                .expect("content"),
+        }
+    }
+
+    fn mounted_provider(language: &str) -> MountedLspProvider {
+        MountedLspProvider {
+            language: language.to_owned(),
+            command: format!("{language}-language-server"),
+        }
+    }
+
+    #[test]
+    fn non_rust_provider_admits_against_the_authoritative_configuration_snapshot() {
+        let scope = scope();
+        let snapshot = crate::config::resolver::resolve_configuration(
+            &crate::config::registry::ConfigurationRegistry::core().expect("registry"),
+            &[],
+        )
+        .expect("configuration resolution")
+        .snapshot;
+        let configuration_digest = snapshot.effective_behavior_digest.clone();
+        let policy_digest = canonical_sha256(&(
+            "tracedecay.project-open.policy.v1",
+            &configuration_digest,
+            POLICY_REVISION_V1,
+        ))
+        .expect("policy digest");
+        let context = project_open_policy_context(
+            daemon_request_context(
+                &scope,
+                &ActorId::new("actor.cycle-production").expect("actor"),
+                UtcMicros(3),
+                UtcMicros(1),
+            )
+            .expect("request context"),
+            ConfigurationRevisionId::new("configuration.test.current").expect("revision"),
+            snapshot,
+            policy_digest.clone(),
+        )
+        .expect("policy context");
+        let (identity, input) = managed_lsp_candidate(
+            &mounted_provider("python"),
+            AnalyzerAvailabilityV1::Available,
+            &scope,
+            &configuration_digest,
+            &policy_digest,
+            UtcMicros(1),
+            &document_identity(),
+        )
+        .expect("provider");
+        assert_eq!(identity.producer.language.as_str(), "python");
+
+        AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_plan20_snapshot(
+            &PolicyEvaluatorCompositionV1::from_application_catalog().expect("policy"),
+            &context,
+            identity,
+            input,
+        )
+        .expect("the production registration path must admit its current snapshot");
+    }
+
+    #[tokio::test]
+    async fn production_lsp_input_builds_a_provider_identity_for_the_requested_document() {
+        let scope = scope();
+        let configuration = digest("configuration");
+        let policy = digest("policy");
+        let document = document_identity();
+        let (provider, _) = managed_lsp_candidate(
+            &mounted_provider("typescript"),
+            AnalyzerAvailabilityV1::Available,
+            &scope,
+            &configuration,
+            &policy,
+            UtcMicros(1),
+            &document,
+        )
+        .expect("provider");
+        let input = production_lsp_input(
+            feedback_scope(&scope),
+            scope,
+            ActorId::new("actor.cycle-production").expect("actor"),
+            UtcMicros(i64::MAX),
+            configuration,
+            policy,
+            vec![provider],
+            PathBuf::from("/workspace"),
+            Arc::new(Identity(document)),
+        )
+        .expect("input");
+
+        let invocation = input(FeedbackCycleRequest {
+            root_uri: "file:///workspace/".to_owned(),
+            trigger: DiagnosticTrigger::DocumentSave,
+            document_uri: "file:///workspace/src/lib.rs".to_owned(),
+        })
+        .await;
+
+        assert!(
+            invocation.is_ok(),
+            "a saved document must resolve to an exact provider/input identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn proximity_mount_accepts_only_the_exact_current_saved_identity() {
+        let scope = scope();
+        let configuration = digest("configuration");
+        let policy = digest("policy");
+        let document = document_identity();
+        let (provider, _) = managed_lsp_candidate(
+            &mounted_provider("typescript"),
+            AnalyzerAvailabilityV1::Available,
+            &scope,
+            &configuration,
+            &policy,
+            UtcMicros(1),
+            &document,
+        )
+        .expect("provider");
+        let input = production_lsp_input(
+            feedback_scope(&scope),
+            scope,
+            ActorId::new("actor.cycle-production").expect("actor"),
+            UtcMicros(i64::MAX),
+            configuration,
+            policy,
+            vec![provider],
+            PathBuf::from("/workspace"),
+            Arc::new(Identity(document.clone())),
+        )
+        .expect("input");
+        let invocation = input(FeedbackCycleRequest {
+            root_uri: "file:///workspace/".to_owned(),
+            trigger: DiagnosticTrigger::DocumentSave,
+            document_uri: "file:///workspace/src/lib.rs".to_owned(),
+        })
+        .await
+        .expect("invocation");
+
+        assert!(require_current_saved_identity(&invocation.request.input, &document).is_ok());
+
+        let mut drifted = document;
+        drifted.generation_id =
+            CodeGenerationId::new("generation.test.replaced").expect("generation");
+        assert!(require_current_saved_identity(&invocation.request.input, &drifted).is_err());
+    }
+
+    #[tokio::test]
+    async fn proximity_mount_rejects_dirty_overlay_identity() {
+        let scope = scope();
+        let configuration = digest("configuration");
+        let policy = digest("policy");
+        let document = document_identity();
+        let (provider, _) = managed_lsp_candidate(
+            &mounted_provider("typescript"),
+            AnalyzerAvailabilityV1::Available,
+            &scope,
+            &configuration,
+            &policy,
+            UtcMicros(1),
+            &document,
+        )
+        .expect("provider");
+        let input = production_lsp_input(
+            feedback_scope(&scope),
+            scope,
+            ActorId::new("actor.cycle-production").expect("actor"),
+            UtcMicros(i64::MAX),
+            configuration,
+            policy,
+            vec![provider],
+            PathBuf::from("/workspace"),
+            Arc::new(Identity(document.clone())),
+        )
+        .expect("input");
+        let mut invocation = input(FeedbackCycleRequest {
+            root_uri: "file:///workspace/".to_owned(),
+            trigger: DiagnosticTrigger::DocumentSave,
+            document_uri: "file:///workspace/src/lib.rs".to_owned(),
+        })
+        .await
+        .expect("invocation");
+        invocation.request.input.request.content = FeedbackContentIdentityV1::EphemeralOverlay {
+            session_id: tracedecay_domain::SessionId::new("session.overlay").expect("session"),
+            owner_client_id: tracedecay_domain::HostInstanceId::new("host.overlay").expect("host"),
+            agent_id: None,
+            document_version: 1,
+            overlay_digest: digest("overlay"),
+        };
+        invocation.request.input.target.generation_id = None;
+
+        assert!(
+            require_current_saved_identity(&invocation.request.input, &document).is_err(),
+            "session-local overlays must never enter the durable proximity cycle"
+        );
+    }
+
+    #[test]
+    fn daemon_cycle_grant_authorizes_the_exact_proximity_scope() {
+        let scope = scope();
+        let feedback_scope = feedback_scope(&scope);
+        let context = daemon_request_context(
+            &scope,
+            &ActorId::new("actor.cycle-production").expect("actor"),
+            UtcMicros(3),
+            UtcMicros(1),
+        )
+        .expect("request context");
+
+        assert!(
+            crate::application::advisory::context_allows_feedback_operation(
+                &context,
+                &feedback_scope,
+                tracedecay_application::feedback::PROXIMITY_CAPABILITY_ID_V1,
+                tracedecay_application::feedback::PROXIMITY_USE_CASE_ID_V1,
+            ),
+            "the daemon grant must authorize only the already-admitted proximity scope"
+        );
+        let mut unauthorized_scope = feedback_scope;
+        unauthorized_scope.worktree_id =
+            WorktreeId::new("worktree.cycle-production.other").expect("worktree");
+        assert!(
+            !crate::application::advisory::context_allows_feedback_operation(
+                &context,
+                &unauthorized_scope,
+                tracedecay_application::feedback::PROXIMITY_CAPABILITY_ID_V1,
+                tracedecay_application::feedback::PROXIMITY_USE_CASE_ID_V1,
+            ),
+            "cross-worktree proximity must fail closed"
+        );
+    }
+
+    #[test]
+    fn missing_mounted_provider_contributes_typed_unavailable() {
+        let scope = scope();
+        let snapshot = crate::config::resolver::resolve_configuration(
+            &crate::config::registry::ConfigurationRegistry::core().expect("registry"),
+            &[],
+        )
+        .expect("configuration resolution")
+        .snapshot;
+        let configuration = snapshot.effective_behavior_digest.clone();
+        let policy = canonical_sha256(&(
+            "tracedecay.project-open.policy.v1",
+            &configuration,
+            POLICY_REVISION_V1,
+        ))
+        .expect("policy digest");
+        let (identity, input) = unavailable_lsp_candidate(
+            &scope,
+            &configuration,
+            &policy,
+            UtcMicros(1),
+            &document_identity(),
+        )
+        .expect("unavailable provider");
+        let context = project_open_policy_context(
+            daemon_request_context(
+                &scope,
+                &ActorId::new("actor.cycle-production").expect("actor"),
+                UtcMicros(3),
+                UtcMicros(1),
+            )
+            .expect("request context"),
+            ConfigurationRevisionId::new("configuration.test.current").expect("revision"),
+            snapshot,
+            policy,
+        )
+        .expect("policy context");
+
+        let admitted = AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_plan20_snapshot(
+            &PolicyEvaluatorCompositionV1::from_application_catalog().expect("policy"),
+            &context,
+            identity,
+            input,
+        )
+        .expect("typed unavailable provider");
+
+        assert_eq!(
+            admitted.state(),
+            tracedecay_application::diagnostics::DiagnosticProviderState::Unavailable
+        );
+    }
 }

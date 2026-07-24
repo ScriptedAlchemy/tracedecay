@@ -3,14 +3,18 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::*;
-use crate::db::{Database, DatabaseAuthority};
+use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
 async fn database() -> (TempDir, Database) {
     let temporary = tempfile::tempdir().expect("temporary project database");
     let path = temporary.path().join("graph.db");
     let authority =
         DatabaseAuthority::acquire_test(&path, "context scout durable store test").unwrap();
-    let database = Database::initialize(&path, &authority).await.unwrap().0;
+    let database =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap()
+            .0;
     (temporary, database)
 }
 
@@ -36,6 +40,7 @@ fn entry(project_id: [u8; 16], generation: u64) -> ContextScoutDurableQueueEntry
             input_watermark: [14; 32],
         },
         route: ContextScoutRouteV1::Deterministic,
+        model_outcome: ContextScoutModelRunOutcomeV1::NotRequested,
         model_receipt: None,
         envelope: ContextScoutSuggestionEnvelopeV1 {
             envelope_id: [17; 16],

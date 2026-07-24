@@ -8,6 +8,8 @@ pub(crate) struct RestCommitRefV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct RestPullRequestV1 {
     pub(crate) id: u64,
+    #[serde(default)]
+    pub(crate) number: Option<u64>,
     pub(crate) base: RestCommitRefV1,
     pub(crate) head: RestCommitRefV1,
 }

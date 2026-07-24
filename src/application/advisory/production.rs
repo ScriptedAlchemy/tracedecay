@@ -7,10 +7,11 @@ use thiserror::Error;
 use tracedecay_hooks::HookFeedbackDeliveryPortV1;
 
 use crate::db::Database;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::tracedecay::TraceDecay;
 
+use super::proximity_runtime::production_proximity_evidence_authority_v1;
 use super::{
     CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1,
     Pr13AdvisoryDaemonStartupRegistrationV1, Pr13AdvisoryHookLookupNoticeV1,
@@ -18,7 +19,7 @@ use super::{
     ProductionCiExactEvidenceHandleV1, ProductionCiProviderConfigV1,
     ProjectGitHubAnchorAuthorityV1, SharedCanonicalProximityEvidenceAuthorityV1,
     github_anchor_authorities_arc_v1, new_pr13_advisory_hook_delivery_port,
-    open_production_ci_provider_authorities_v1, production_proximity_evidence_authority_v1,
+    open_production_ci_provider_authorities_v1, unavailable_production_ci_provider_authorities_v1,
 };
 use tracedecay_domain::feedback::FeedbackScopeV1;
 
@@ -65,11 +66,11 @@ impl Pr13AdvisoryProductionAuthoritiesV1 {
 #[derive(Clone)]
 pub struct Pr13AdvisoryProductionOpenV1 {
     pub database: Database,
-    pub project_runtime_db: Arc<GlobalDb>,
+    pub(crate) project_runtime_db: Arc<RegisteredGlobalDb>,
     pub graph: Arc<TraceDecay>,
     pub project_root: PathBuf,
     pub feedback_scope: FeedbackScopeV1,
-    pub ci_config: ProductionCiProviderConfigV1,
+    pub ci_config: Option<ProductionCiProviderConfigV1>,
     pub ci_retained: Arc<dyn CiRetainedProviderObservationAuthorityV1>,
     pub ci_code_anchors: Arc<dyn CiCodeAnchorStoreV1>,
     pub hook_v2: Arc<Pr13AdvisoryHookNoticeSinkV1>,
@@ -113,10 +114,16 @@ pub fn open_pr13_advisory_production_authorities(
         project_root,
     )
     .ok_or(Pr13AdvisoryProductionOpenErrorV1::ProximityAuthorityUnavailable)?;
-    let configuration =
-        OwnedGlobalDbConfigurationControlStore::from_project_runtime_db(Some(project_runtime_db));
-    let ci = open_production_ci_provider_authorities_v1(ci_config, ci_retained, ci_code_anchors)
-        .map_err(|_| Pr13AdvisoryProductionOpenErrorV1::CiAuthorityUnavailable)?;
+    let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
+        project_runtime_db,
+    );
+    let ci = match ci_config {
+        Some(config) => {
+            open_production_ci_provider_authorities_v1(config, ci_retained, ci_code_anchors)
+                .map_err(|_| Pr13AdvisoryProductionOpenErrorV1::CiAuthorityUnavailable)?
+        }
+        None => unavailable_production_ci_provider_authorities_v1(),
+    };
     let (ci_source, ci_exact_evidence) = ci.into_registrar_parts();
     let hook_delivery_port =
         new_pr13_advisory_hook_delivery_port(feedback_scope, hook_v2, legacy_hook);

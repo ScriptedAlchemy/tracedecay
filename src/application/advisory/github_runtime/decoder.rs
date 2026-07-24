@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,9 @@ use super::{GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1, GitHubReadRe
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitHubReviewProviderIdentityV1 {
     pub provider: ProviderId,
+    pub repository_owner: String,
+    pub repository_name: String,
+    pub pull_request_number: u64,
     pub base_commit_id: CommitId,
     pub head_commit_id: CommitId,
     pub merge_base_commit_id: CommitId,
@@ -29,9 +33,34 @@ pub struct GitHubReviewProviderIdentityV1 {
 impl GitHubReviewProviderIdentityV1 {
     pub fn validate(&self) -> bool {
         self.provider.validate().is_ok()
+            && valid_repository_segment(&self.repository_owner)
+            && valid_repository_segment(&self.repository_name)
+            && self.pull_request_number > 0
             && self.base_commit_id.validate().is_ok()
             && self.head_commit_id.validate().is_ok()
             && self.merge_base_commit_id.validate().is_ok()
+    }
+
+    fn admits_review_url(&self, value: &str) -> bool {
+        let Ok(url) = url::Url::parse(value) else {
+            return false;
+        };
+        let mut segments = match url.path_segments() {
+            Some(segments) => segments,
+            None => return false,
+        };
+        let pull_request_number = self.pull_request_number.to_string();
+        url.scheme() == "https"
+            && url.host_str() == Some("github.com")
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && segments.next() == Some(self.repository_owner.as_str())
+            && segments.next() == Some(self.repository_name.as_str())
+            && segments.next() == Some("pull")
+            && segments.next() == Some(pull_request_number.as_str())
+            && segments.next().is_none()
     }
 }
 
@@ -178,10 +207,12 @@ where
 
     fn decode_reviews(&self, body: &[u8]) -> Option<()> {
         let reviews = serde_json::from_slice::<Vec<RestReviewV1>>(body).ok()?;
+        let mut review_ids = BTreeSet::new();
         reviews
             .iter()
             .all(|review| {
                 review.id > 0
+                    && review_ids.insert(review.id)
                     && review
                         .node_id
                         .as_ref()
@@ -203,7 +234,11 @@ where
     ) -> Option<Vec<GitHubReviewItemV1>> {
         let comments = serde_json::from_slice::<Vec<RestReviewCommentV1>>(body).ok()?;
         let mut items = Vec::with_capacity(comments.len());
+        let mut comment_ids = BTreeSet::new();
         for comment in comments {
+            if !comment_ids.insert(comment.id) {
+                return None;
+            }
             items.push(
                 self.rest_comment_item(request, comment, outcome, observed_at)
                     .await?,
@@ -229,6 +264,15 @@ where
         let original_commit_id = CommitId::new(comment.original_commit_id).ok()?;
         let observed_commit_id = CommitId::new(comment.commit_id).ok()?;
         let body_digest = body_digest(comment.body.as_deref()?)?;
+        let version_digest = review_version_digest(
+            &comment_id,
+            &comment.updated_at,
+            &body_digest,
+            &observed_commit_id,
+        )?;
+        self.identity
+            .admits_review_url(&comment.html_url)
+            .then_some(())?;
         let user = comment.user.as_ref()?;
         let user_node_id = user.node_id.clone();
         let user_kind = user.kind.clone();
@@ -270,6 +314,7 @@ where
                 .map(|id| GitHubReviewCommentIdV1::new(id.to_string()))
                 .transpose()
                 .ok()?,
+            version_digest,
             author_anchor: anchors.author_anchor,
             author_class: author_class(&user_kind, &association),
             review_state: GitHubReviewStateV1::Unknown,
@@ -301,12 +346,17 @@ where
             return None;
         }
         let mut items = Vec::new();
+        let mut thread_ids = BTreeSet::new();
+        let mut comment_ids = BTreeSet::new();
         for mut thread in pull_request.review_threads.nodes {
-            if thread.comments.page_info.has_next_page {
+            if !thread_ids.insert(thread.id.clone()) || thread.comments.page_info.has_next_page {
                 return None;
             }
             let comments = std::mem::take(&mut thread.comments.nodes);
             for comment in comments {
+                if !comment_ids.insert(comment.database_id) {
+                    return None;
+                }
                 items.push(
                     self.graphql_comment_item(request, &thread, comment, outcome, observed_at)
                         .await?,
@@ -345,6 +395,15 @@ where
         )
         .ok()?;
         let body_digest = body_digest(comment.body_text.as_deref()?)?;
+        let version_digest = review_version_digest(
+            &comment_id,
+            &comment.updated_at,
+            &body_digest,
+            &observed_commit_id,
+        )?;
+        self.identity
+            .admits_review_url(&comment.url)
+            .then_some(())?;
         let seed = GitHubReviewAnchorSeedV1 {
             comment_id: comment_id.clone(),
             author_node_id: comment.author.as_ref()?.id.clone(),
@@ -380,6 +439,7 @@ where
                 .map(|id| GitHubReviewCommentIdV1::new(id.to_string()))
                 .transpose()
                 .ok()?,
+            version_digest,
             author_anchor: anchors.author_anchor,
             author_class: author_class(
                 comment
@@ -433,6 +493,24 @@ fn provider_state(
 fn body_digest(body: &str) -> Option<ManifestDigest> {
     let digest = Sha256::digest(body.as_bytes());
     ManifestDigest::new(format!("sha256:{}", hex::encode(digest))).ok()
+}
+
+fn review_version_digest(
+    comment_id: &GitHubReviewCommentIdV1,
+    updated_at: &str,
+    body_digest: &ManifestDigest,
+    observed_commit_id: &CommitId,
+) -> Option<ManifestDigest> {
+    (!updated_at.is_empty() && updated_at.len() <= 64 && !updated_at.chars().any(char::is_control))
+        .then_some(())?;
+    tracedecay_domain::canonical_sha256(&(
+        "tracedecay.pr13.github.review-version.v1",
+        comment_id,
+        updated_at,
+        body_digest,
+        observed_commit_id,
+    ))
+    .ok()
 }
 
 fn now_micros() -> Option<UtcMicros> {
@@ -500,4 +578,14 @@ fn canonical_lifecycle(
     } else {
         lifecycle
     }
+}
+
+fn valid_repository_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }

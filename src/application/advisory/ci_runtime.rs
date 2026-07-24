@@ -14,7 +14,7 @@ pub use production::{
     CiRetainedProviderObservationV1, CiRetainedProviderRecordV1, ProductionCiArchiveHandleV1,
     ProductionCiExactEvidenceHandleV1, ProductionCiProviderAuthoritiesV1,
     ProductionCiProviderConfigV1, ProductionCiProviderOpenErrorV1,
-    open_production_ci_provider_authorities_v1,
+    open_production_ci_provider_authorities_v1, unavailable_production_ci_provider_authorities_v1,
 };
 pub use stores::{ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1};
 

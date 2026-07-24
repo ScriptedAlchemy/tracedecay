@@ -1,0 +1,113 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tracedecay_application::feedback::{
+    FeedbackPortFuture, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GitHubReviewReadRequestV1,
+    feedback_surface_operation,
+};
+use tracedecay_application::{AuthorizationPhase, AuthorizationRequest, ResolvedScope};
+use tracedecay_domain::configuration::SourceKindV1;
+use tracedecay_domain::{LocatorDigest, UtcMicros, canonical_sha256};
+
+use super::{GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1};
+use crate::application::configuration::ConfigurationControlStore;
+use crate::application::source_authorization::{
+    ProjectSourceAccessOutcome, project_source_access_snapshot_for_request,
+};
+
+pub(crate) struct ConfiguredGitHubSourceAccessAuthorityV1<C> {
+    configuration: C,
+    scope: ResolvedScope,
+    expected_locator: LocatorDigest,
+}
+
+impl<C> ConfiguredGitHubSourceAccessAuthorityV1<C> {
+    pub(crate) fn new(
+        configuration: C,
+        scope: ResolvedScope,
+        repository_owner: &str,
+        repository_name: &str,
+    ) -> Option<Self> {
+        let expected_locator = github_source_locator(repository_owner, repository_name)?;
+        scope.validate().ok().map(|()| Self {
+            configuration,
+            scope,
+            expected_locator,
+        })
+    }
+}
+
+impl<C> GitHubSourceAccessAuthorityV1 for ConfiguredGitHubSourceAccessAuthorityV1<C>
+where
+    C: ConfigurationControlStore + Send + Sync,
+{
+    fn authorize<'a>(
+        &'a self,
+        context: &'a tracedecay_application::RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+    ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
+        Box::pin(async move {
+            if request.validate().is_err()
+                || context.scope() != &self.scope
+                || request.scope.project_id != self.scope.project_id
+                || request.scope.repository_id != self.scope.repository_id
+                || request.scope.worktree_id != self.scope.worktree_id
+                || self.scope.reference.as_ref().map(|value| value.as_str())
+                    != Some(request.scope.branch_ref.as_str())
+            {
+                return GitHubProviderLifecycleV1::Denied;
+            }
+            let Ok(Some(operation)) = feedback_surface_operation("github_review_ingest") else {
+                return GitHubProviderLifecycleV1::Unavailable;
+            };
+            if operation.capability_id().as_str() != GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1 {
+                return GitHubProviderLifecycleV1::Unavailable;
+            }
+            let observed_at = now_micros();
+            let authorization = AuthorizationRequest {
+                context,
+                operation: &operation,
+                phase: AuthorizationPhase::Admission,
+                observed_at,
+            };
+            match project_source_access_snapshot_for_request(
+                &self.configuration,
+                &authorization,
+                SourceKindV1::GitHub,
+            )
+            .await
+            {
+                ProjectSourceAccessOutcome::Allowed(snapshot)
+                    if snapshot.scope == self.scope
+                        && snapshot.binding.source_locator_digest == self.expected_locator
+                        && snapshot.allows(context, &operation, observed_at) =>
+                {
+                    GitHubProviderLifecycleV1::Ready
+                }
+                ProjectSourceAccessOutcome::Allowed(_) | ProjectSourceAccessOutcome::Denied(_) => {
+                    GitHubProviderLifecycleV1::Denied
+                }
+            }
+        })
+    }
+}
+
+fn github_source_locator(repository_owner: &str, repository_name: &str) -> Option<LocatorDigest> {
+    if repository_owner.is_empty() || repository_name.is_empty() {
+        return None;
+    }
+    let digest = canonical_sha256(&(
+        "tracedecay.pr13.github.source-locator.v1",
+        repository_owner,
+        repository_name,
+    ))
+    .ok()?;
+    LocatorDigest::new(digest.as_str()).ok()
+}
+
+fn now_micros() -> UtcMicros {
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros())
+        .unwrap_or_default();
+    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
+}

@@ -4,7 +4,9 @@
 //! queries. It owns no provider lifecycle, source write, or second feedback
 //! store.
 
+use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Instant;
 
 use thiserror::Error;
 use tokio::runtime::Handle;
@@ -13,13 +15,13 @@ use tracedecay_application::diagnostics::{
 };
 use tracedecay_application::feedback::{
     FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest, FeedbackCycleExecutionResult,
-    FeedbackCycleService, FeedbackImpactPort, FeedbackImpactPortOutcome, FeedbackImpactRequest,
-    FeedbackObservationPort, FeedbackPortFuture, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
-    GenerationBoundFeedbackDiagnosticsAdapter,
+    FeedbackCycleService, FeedbackExpandRequestV1, FeedbackImpactPort, FeedbackImpactPortOutcome,
+    FeedbackImpactRequest, FeedbackObservationPort, FeedbackPortFuture, FeedbackRuntimeStatePort,
+    FeedbackRuntimeStateV1, GenerationBoundFeedbackDiagnosticsAdapter,
 };
 use tracedecay_application::retrieval::{
-    AffectedTestsRequest, AffectedTestsResult, AffectedTestsRetrievalPort, PageRequest,
-    ResultProjection, RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome,
+    AffectedTestsRequest, AffectedTestsResult, AffectedTestsRetrievalPort, AnchorExpandRequest,
+    PageRequest, ResultProjection, RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome,
     RetrievalRequestMeta,
 };
 use tracedecay_application::{
@@ -27,9 +29,12 @@ use tracedecay_application::{
     PolicyEvaluationV1, RequestAdmission, RequestContext,
 };
 use tracedecay_domain::feedback::{
-    FeedbackDurabilityV1, FeedbackImpactStateV1, FeedbackImpactV1, FeedbackTriggerV1,
+    FeedbackDurabilityV1, FeedbackFindingId, FeedbackFindingV1, FeedbackImpactStateV1,
+    FeedbackImpactV1, FeedbackTriggerV1,
 };
-use tracedecay_domain::{FileOccurrenceId, SymbolOccurrenceId};
+use tracedecay_domain::{
+    FileOccurrenceId, RetrievalAnchorId, SymbolOccurrenceId, canonical_sha256,
+};
 use tracedecay_policy::CapabilityRoutingDecisionV1;
 
 use crate::daemon::lsp_gateway::{
@@ -45,7 +50,7 @@ use super::concrete::{
 use super::diagnostics::{DatabaseDiagnosticStore, DiagnosticStoreFeedbackProvider};
 use super::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
-    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
+    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1, Plan26LspMethodClassV1, Plan26LspStateV1,
 };
 
 /// Resolves one LSP lifecycle request to the already-authorized, bounded
@@ -84,13 +89,104 @@ impl Pr12FeedbackCycleInvocation {
             FeedbackTriggerV1::PostEditHook
                 | FeedbackTriggerV1::DocumentSave
                 | FeedbackTriggerV1::ExplicitDiagnostics
+                | FeedbackTriggerV1::AgentStopGate
         ) {
             return Err(Pr12FeedbackCycleRuntimeError::UnsupportedTrigger);
         }
-        if self.request.input.request.durability() != FeedbackDurabilityV1::Durable {
-            return Err(Pr12FeedbackCycleRuntimeError::NonDurableRequest);
+        Ok(())
+    }
+}
+
+/// Short-lived canonical-read handles for one stable finding identity.
+///
+/// The handles grant no authority by possession. Resolving either handle
+/// re-enters the existing feedback read owner, which rechecks route authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pr12FeedbackFindingHandlesV1 {
+    pub finding_id: FeedbackFindingId,
+    pub retrieval_anchor_id: Option<RetrievalAnchorId>,
+    pub get_handle: String,
+    pub expansion_handle: Option<String>,
+}
+
+/// One transport-neutral Plan 09 result shared by Hook, MCP, HTTP, LSP, CLI,
+/// and later dashboard projections. Evidence remains reference-only in the
+/// underlying result; this layer adds only authorized, short-lived handles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pr12CanonicalFeedbackResultV1 {
+    pub execution: FeedbackCycleExecutionResult,
+    pub finding_handles: Vec<Pr12FeedbackFindingHandlesV1>,
+}
+
+impl Pr12CanonicalFeedbackResultV1 {
+    fn new(
+        execution: FeedbackCycleExecutionResult,
+        finding_handles: Vec<Pr12FeedbackFindingHandlesV1>,
+    ) -> Result<Self, ApplicationContractError> {
+        let result = Self {
+            execution,
+            finding_handles,
+        };
+        result.validate()?;
+        Ok(result)
+    }
+
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.execution.cycle.validate()?;
+        if let Some(publication) = &self.execution.publication {
+            publication.validate()?;
+            if publication.result != self.execution.cycle
+                || self.execution.dedupe_key.as_ref() != Some(&publication.dedupe_key)
+                || self.execution.authority.as_ref() != Some(&publication.authority)
+            {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "canonical feedback publication",
+                });
+            }
+        }
+        let durable = self.execution.cycle.durability == FeedbackDurabilityV1::Durable;
+        if !durable
+            && (self.execution.dedupe_key.is_some()
+                || self.execution.authority.is_some()
+                || self.execution.publication.is_some()
+                || !self.finding_handles.is_empty())
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "overlay feedback durable output",
+            });
+        }
+        if self.execution.publication.is_none() && !self.finding_handles.is_empty() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "unpublished feedback expansion handles",
+            });
+        }
+        if self.execution.publication.is_some()
+            && (self.finding_handles.len() != self.execution.cycle.findings.len()
+                || self
+                    .finding_handles
+                    .iter()
+                    .zip(&self.execution.cycle.findings)
+                    .any(|(handles, finding)| {
+                        handles.finding_id != finding.finding_id
+                            || handles.retrieval_anchor_id != finding.retrieval_anchor_id
+                            || handles.get_handle.is_empty()
+                            || handles.expansion_handle.is_some()
+                                != finding.retrieval_anchor_id.is_some()
+                    }))
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "feedback expansion handles",
+            });
         }
         Ok(())
+    }
+}
+
+impl Deref for Pr12CanonicalFeedbackResultV1 {
+    type Target = FeedbackCycleExecutionResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.execution
     }
 }
 
@@ -104,6 +200,8 @@ pub enum Pr12FeedbackCycleRuntimeError {
     ProviderSetMismatch,
     #[error("feedback cycle trigger is not supported by PR12")]
     UnsupportedTrigger,
+    /// Retained for compatibility with callers that classify older rejection
+    /// results. Session-only overlays now execute through the isolated path.
     #[error("PR12 feedback cycles require durable saved content")]
     NonDurableRequest,
 }
@@ -131,9 +229,10 @@ type Pr12FeedbackCycleService = FeedbackCycleService<
     ProjectFeedbackRouteAuthorization,
 >;
 
-/// Concrete Plan 09 runtime for PR12 saved-edit and explicit-diagnostic
-/// cycles. Every invocation delegates once to [`FeedbackCycleService`], whose
-/// existing durable compare-and-record boundary publishes the terminal result.
+/// Concrete Plan 09 runtime for saved-edit, explicit-diagnostic, stop-gate,
+/// and session-overlay cycles. Every invocation delegates once to
+/// [`FeedbackCycleService`]; only its durable compare-and-record boundary can
+/// publish a terminal result.
 #[derive(Clone)]
 pub struct Pr12FeedbackCycleRuntime {
     feedback: Arc<Pr12FeedbackRuntime>,
@@ -141,6 +240,7 @@ pub struct Pr12FeedbackCycleRuntime {
     service: Arc<Pr12FeedbackCycleService>,
     lsp_input: Pr12FeedbackCycleLspInput,
     providers: Vec<DiagnosticProviderIdentity>,
+    provider_admissions: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
     source_observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
 }
@@ -176,7 +276,7 @@ pub fn open_pr12_feedback_cycle_runtime(
         .collect::<Vec<_>>();
     let diagnostics = GenerationBoundFeedbackDiagnosticsAdapter::new(
         DiagnosticStoreFeedbackProvider::new(DatabaseDiagnosticStore::new(database)),
-        provider_admissions,
+        provider_admissions.clone(),
     )?;
     let route_authorization = feedback.route_authorization();
     let impact = DirectFeedbackImpactAdapter::new(
@@ -202,6 +302,7 @@ pub fn open_pr12_feedback_cycle_runtime(
         service: Arc::new(service),
         lsp_input,
         providers,
+        provider_admissions,
         correlation_policy,
         source_observations,
     }))
@@ -242,13 +343,15 @@ impl Pr12FeedbackCycleRuntime {
     pub async fn run_once(
         &self,
         invocation: Pr12FeedbackCycleInvocation,
-    ) -> Result<FeedbackCycleExecutionResult, Pr12FeedbackCycleRuntimeError> {
+    ) -> Result<Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleRuntimeError> {
         invocation.validate()?;
-        if invocation.request.providers.as_slice() != self.providers.as_slice() {
+        if !self.admits_provider_set(&invocation.request.providers) {
             return Err(Pr12FeedbackCycleRuntimeError::ProviderSetMismatch);
         }
         let Pr12FeedbackCycleInvocation { context, request } = invocation;
-        Ok(self.service.execute(&context, request).await?)
+        let requested_durability = request.input.request.durability();
+        let execution = self.service.execute(&context, request).await?;
+        Ok(self.compose_canonical_result(execution, requested_durability)?)
     }
 
     /// Runs one canonical Plan 09 cycle with source-backed advisory findings.
@@ -259,15 +362,83 @@ impl Pr12FeedbackCycleRuntime {
         context: &RequestContext,
         request: FeedbackCycleExecutionRequest,
         advisory: FeedbackCycleAdvisoryV1,
-    ) -> Result<FeedbackCycleExecutionResult, ApplicationContractError> {
-        if request.providers.as_slice() != self.providers.as_slice() {
+    ) -> Result<Pr12CanonicalFeedbackResultV1, ApplicationContractError> {
+        if !self.admits_provider_set(&request.providers) {
             return Err(ApplicationContractError::Inconsistent {
                 field: "feedback cycle provider set",
             });
         }
-        self.service
+        let requested_durability = request.input.request.durability();
+        let execution = self
+            .service
             .execute_with_advisory(context, request, advisory)
-            .await
+            .await?;
+        self.compose_canonical_result(execution, requested_durability)
+    }
+
+    fn compose_canonical_result(
+        &self,
+        execution: FeedbackCycleExecutionResult,
+        requested_durability: FeedbackDurabilityV1,
+    ) -> Result<Pr12CanonicalFeedbackResultV1, ApplicationContractError> {
+        if execution.cycle.durability != requested_durability {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "feedback result durability",
+            });
+        }
+        if execution.cycle.durability != FeedbackDurabilityV1::Durable
+            || execution.publication.is_none()
+        {
+            return Pr12CanonicalFeedbackResultV1::new(execution, Vec::new());
+        }
+
+        let observed_at = execution.usage.completed_at;
+        let mut finding_handles = Vec::with_capacity(execution.cycle.findings.len());
+        for finding in &execution.cycle.findings {
+            let get_handle = self
+                .feedback
+                .mint_get(
+                    feedback_handle_request_id("get", &execution, finding)?,
+                    finding.finding_id.clone(),
+                    observed_at,
+                )
+                .map_err(|_| ApplicationContractError::Inconsistent {
+                    field: "feedback get handle authority",
+                })?;
+            let expansion_handle = if let Some(request) = feedback_expansion_request(finding)? {
+                Some(
+                    self.feedback
+                        .mint_expand(
+                            feedback_handle_request_id("expand", &execution, finding)?,
+                            request,
+                            observed_at,
+                        )
+                        .map_err(|_| ApplicationContractError::Inconsistent {
+                            field: "feedback expansion handle authority",
+                        })?,
+                )
+            } else {
+                None
+            };
+            finding_handles.push(Pr12FeedbackFindingHandlesV1 {
+                finding_id: finding.finding_id.clone(),
+                retrieval_anchor_id: finding.retrieval_anchor_id.clone(),
+                get_handle,
+                expansion_handle,
+            });
+        }
+        Pr12CanonicalFeedbackResultV1::new(execution, finding_handles)
+    }
+
+    fn admits_provider_set(&self, providers: &[DiagnosticProviderIdentity]) -> bool {
+        providers.len() == self.provider_admissions.len()
+            && providers.iter().all(|identity| {
+                self.provider_admissions
+                    .iter()
+                    .filter(|admission| admission.admits_identity(identity))
+                    .count()
+                    == 1
+            })
     }
 
     /// Builds the LSP-facing trigger port and the runtime input used by the
@@ -285,6 +456,39 @@ impl Pr12FeedbackCycleRuntime {
     }
 }
 
+fn feedback_handle_request_id(
+    operation: &'static str,
+    execution: &FeedbackCycleExecutionResult,
+    finding: &FeedbackFindingV1,
+) -> Result<String, ApplicationContractError> {
+    let digest = canonical_sha256(&(
+        "tracedecay.feedback.canonical-handle-request.v1",
+        operation,
+        &execution.cycle.result_id,
+        &finding.finding_id,
+    ))?;
+    Ok(format!("feedback.{operation}.{}", digest.as_str()))
+}
+
+fn feedback_expansion_request(
+    finding: &FeedbackFindingV1,
+) -> Result<Option<FeedbackExpandRequestV1>, ApplicationContractError> {
+    let Some(anchor) = finding.retrieval_anchor_id.clone() else {
+        return Ok(None);
+    };
+    Ok(Some(FeedbackExpandRequestV1 {
+        finding_id: finding.finding_id.clone(),
+        expansion: AnchorExpandRequest {
+            anchor,
+            meta: RetrievalRequestMeta::current(
+                PageRequest::first(100)?,
+                ResultProjection::ReferencesOnly,
+                RetrievalOrder::StableIdentity,
+            ),
+        },
+    }))
+}
+
 impl FeedbackCycleRuntimePort for Pr12FeedbackCycleRuntime {
     fn execute(
         &self,
@@ -292,9 +496,12 @@ impl FeedbackCycleRuntimePort for Pr12FeedbackCycleRuntime {
     ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
         let runtime = self.clone();
         Box::pin(async move {
+            let started_at = Instant::now();
             let trigger = request.trigger;
             let invocation = (runtime.lsp_input)(request).await?;
             if !lsp_trigger_matches_invocation(trigger, &invocation) {
+                let duration_micros =
+                    u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
                 runtime.source_observations.observe_source_event(
                     &invocation.request.input,
                     Plan26FeedbackSourceEventV1::ArgumentRejected {
@@ -302,22 +509,54 @@ impl FeedbackCycleRuntimePort for Pr12FeedbackCycleRuntime {
                         outcome: Plan26FeedbackOutcomeV1::Rejected,
                     },
                 );
+                runtime.source_observations.observe_source_event(
+                    &invocation.request.input,
+                    lsp_method_state_event(
+                        Plan26LspStateV1::MethodRejected,
+                        Plan26FeedbackOutcomeV1::Rejected,
+                        0,
+                        duration_micros,
+                    ),
+                );
                 return Err(LspRuntimeFailure::new("feedback-cycle-trigger-mismatch"));
             }
             let input = invocation.request.input.clone();
+            let admission_duration_micros =
+                u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+            runtime.source_observations.observe_source_event(
+                &input,
+                lsp_method_state_event(
+                    Plan26LspStateV1::MethodAdmitted,
+                    Plan26FeedbackOutcomeV1::Admitted,
+                    1,
+                    admission_duration_micros,
+                ),
+            );
             let result = Box::pin(runtime.run_once(invocation)).await;
+            let duration_micros =
+                u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+            let outcome = if result.is_ok() {
+                Plan26FeedbackOutcomeV1::Completed
+            } else {
+                Plan26FeedbackOutcomeV1::Failed
+            };
+            runtime.source_observations.observe_source_event(
+                &input,
+                lsp_method_state_event(
+                    Plan26LspStateV1::MethodCompleted,
+                    outcome,
+                    u32::from(result.is_ok()),
+                    duration_micros,
+                ),
+            );
             runtime.source_observations.observe_source_event(
                 &input,
                 Plan26FeedbackSourceEventV1::Delivery {
                     operation: Plan26FeedbackOperationV1::FeedbackCycle,
                     route: Plan26DeliveryRouteV1::Lsp,
-                    outcome: if result.is_ok() {
-                        Plan26FeedbackOutcomeV1::Completed
-                    } else {
-                        Plan26FeedbackOutcomeV1::Failed
-                    },
+                    outcome,
                     item_count: u32::from(result.is_ok()),
-                    duration_micros: None,
+                    duration_micros: Some(duration_micros),
                 },
             );
             result
@@ -412,6 +651,9 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
             let Some(symbol) = request.input.target.symbol.clone() else {
                 return FeedbackImpactPortOutcome::Unavailable;
             };
+            let Some(generation) = request.input.target.generation_id.clone() else {
+                return FeedbackImpactPortOutcome::Unavailable;
+            };
             let Ok(subgraph) = self.graph.get_impact_radius(symbol.as_str(), 3).await else {
                 return FeedbackImpactPortOutcome::Unavailable;
             };
@@ -454,7 +696,11 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                     request: context,
                     operation: &self.tests_operation,
                 },
-                &AffectedTestsRequest { symbol, meta },
+                &AffectedTestsRequest {
+                    symbol,
+                    generation,
+                    meta,
+                },
             );
             let (affected_tests, affected_tests_state) = match affected_tests_outcome(tests) {
                 DirectAffectedTestsOutcome::Evidence { tests, state } => (tests, state),
@@ -579,4 +825,182 @@ fn lsp_trigger_matches_invocation(
             FeedbackTriggerV1::ExplicitDiagnostics
         )
     )
+}
+
+fn lsp_method_state_event(
+    state: Plan26LspStateV1,
+    outcome: Plan26FeedbackOutcomeV1,
+    item_count: u32,
+    duration_micros: u64,
+) -> Plan26FeedbackSourceEventV1 {
+    Plan26FeedbackSourceEventV1::LspState {
+        state,
+        method: Some(Plan26LspMethodClassV1::Diagnostics),
+        outcome,
+        item_count,
+        duration_micros: Some(duration_micros),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_application::feedback::FeedbackBudgetUsage;
+    use tracedecay_domain::feedback::{
+        FeedbackBudgetV1, FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleRequestV1,
+        FeedbackCycleResultV1, FeedbackCycleTerminationV1, FeedbackDiagnosticClassificationV1,
+        FeedbackFindingLifecycleV1, FeedbackScopeV1, ProviderEvaluationStateV1,
+    };
+    use tracedecay_domain::{
+        CommitId, HostInstanceId, ManifestDigest, ProjectId, RepositoryId, SessionId, UtcMicros,
+        WorktreeId,
+    };
+
+    const SHA_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SHA_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn digest(value: &str) -> ManifestDigest {
+        ManifestDigest::new(value).expect("digest")
+    }
+
+    fn scope() -> FeedbackScopeV1 {
+        FeedbackScopeV1 {
+            project_id: ProjectId::new("project.canonical-feedback").unwrap(),
+            repository_id: RepositoryId::new("repository.canonical-feedback").unwrap(),
+            worktree_id: WorktreeId::new("worktree.canonical-feedback").unwrap(),
+            branch_ref: "refs/heads/canonical-feedback".to_owned(),
+            head_commit_id: CommitId::new("commit.canonical-feedback").unwrap(),
+        }
+    }
+
+    fn request(content: FeedbackContentIdentityV1) -> FeedbackCycleRequestV1 {
+        FeedbackCycleRequestV1::new(
+            FeedbackCycleId::new("cycle.canonical-feedback").unwrap(),
+            scope(),
+            content,
+            FeedbackTriggerV1::ExplicitDiagnostics,
+            digest(SHA_A),
+            digest(SHA_B),
+            FeedbackBudgetV1::bounded(100, 100, 1_024, 100),
+        )
+        .unwrap()
+    }
+
+    fn execution(cycle: FeedbackCycleResultV1) -> FeedbackCycleExecutionResult {
+        FeedbackCycleExecutionResult {
+            cycle,
+            dedupe_key: None,
+            authority: None,
+            usage: FeedbackBudgetUsage {
+                completed_at: UtcMicros(10),
+                tokens_consumed: 0,
+                cost_microunits: 0,
+            },
+            publication: None,
+        }
+    }
+
+    #[test]
+    fn lsp_method_state_event_is_bounded_and_measured() {
+        assert_eq!(
+            lsp_method_state_event(
+                Plan26LspStateV1::MethodCompleted,
+                Plan26FeedbackOutcomeV1::Completed,
+                1,
+                42,
+            ),
+            Plan26FeedbackSourceEventV1::LspState {
+                state: Plan26LspStateV1::MethodCompleted,
+                method: Some(Plan26LspMethodClassV1::Diagnostics),
+                outcome: Plan26FeedbackOutcomeV1::Completed,
+                item_count: 1,
+                duration_micros: Some(42),
+            }
+        );
+    }
+
+    #[test]
+    fn dirty_overlay_result_cannot_gain_durable_outputs_or_handles() {
+        let request = request(FeedbackContentIdentityV1::EphemeralOverlay {
+            session_id: SessionId::new("session.overlay").unwrap(),
+            owner_client_id: HostInstanceId::new("host.overlay").unwrap(),
+            agent_id: None,
+            document_version: 1,
+            overlay_digest: digest(SHA_A),
+        });
+        let cycle = FeedbackCycleResultV1::new(
+            &request,
+            FeedbackCycleTerminationV1::UserStop,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            Vec::new(),
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        let execution = execution(cycle);
+        assert!(
+            Pr12CanonicalFeedbackResultV1::new(execution.clone(), Vec::new()).is_ok(),
+            "session-only results remain usable in their owner session"
+        );
+
+        let mut leaked = execution;
+        leaked.dedupe_key =
+            Some(tracedecay_domain::feedback::FeedbackDedupeKeyV1::new("dedupe.overlay").unwrap());
+        assert!(Pr12CanonicalFeedbackResultV1::new(leaked, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn durable_finding_expansion_preserves_identity_and_exact_anchor() {
+        let request = request(FeedbackContentIdentityV1::SavedContent {
+            generation_digest: digest(SHA_A),
+            file_digest: digest(SHA_B),
+        });
+        let anchor = RetrievalAnchorId::new("anchor.canonical-feedback").unwrap();
+        let finding = FeedbackFindingV1 {
+            finding_id: FeedbackFindingId::new("finding.canonical-feedback").unwrap(),
+            classification: FeedbackDiagnosticClassificationV1::New,
+            lifecycle: FeedbackFindingLifecycleV1::Active,
+            retrieval_anchor_id: Some(anchor.clone()),
+            provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
+            safe_bounded_preview: None,
+        };
+        let cycle = FeedbackCycleResultV1::new(
+            &request,
+            FeedbackCycleTerminationV1::Blocked,
+            vec![ProviderEvaluationStateV1::SupportedCompletedComplete],
+            Vec::new(),
+            None,
+            None,
+            None,
+            vec![finding.clone()],
+            1,
+            1,
+            0,
+        )
+        .unwrap();
+        let execution = execution(cycle);
+        let expansion = feedback_expansion_request(&finding)
+            .unwrap()
+            .expect("anchored finding expands");
+
+        assert_eq!(expansion.finding_id, finding.finding_id);
+        assert_eq!(expansion.expansion.anchor, anchor);
+        assert_eq!(
+            expansion.expansion.meta.projection,
+            ResultProjection::ReferencesOnly
+        );
+        assert_eq!(
+            feedback_handle_request_id("get", &execution, &finding).unwrap(),
+            feedback_handle_request_id("get", &execution, &finding).unwrap()
+        );
+        assert_ne!(
+            feedback_handle_request_id("get", &execution, &finding).unwrap(),
+            feedback_handle_request_id("expand", &execution, &finding).unwrap()
+        );
+    }
 }

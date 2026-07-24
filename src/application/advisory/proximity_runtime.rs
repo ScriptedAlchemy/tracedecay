@@ -34,9 +34,9 @@ use super::context_allows_feedback_operation;
 
 mod authority;
 
+pub(crate) use authority::production_proximity_evidence_authority_v1;
 pub use authority::{
     ProductionProximityEvidenceAuthorityV1, SharedCanonicalProximityEvidenceAuthorityV1,
-    production_proximity_evidence_authority_v1,
 };
 
 const PROXIMITY_CONTRIBUTION_ID_DOMAIN_V1: &str = "tracedecay.pr13.proximity.contribution-id.v1";

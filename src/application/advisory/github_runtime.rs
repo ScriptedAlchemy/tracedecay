@@ -3,12 +3,13 @@
 //! The concrete owner admits exact scope and source access before invoking a
 //! client that exposes only fixed REST GETs and one static GraphQL query.
 
+mod access;
 mod anchors;
 mod decoder;
+mod discovery;
 mod dto;
 mod network;
 mod owner;
-mod source;
 mod store;
 
 use std::collections::BTreeMap;
@@ -29,6 +30,7 @@ use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 use super::{GitHubReadOnlyTransport, GitHubRestDescriptorV1, context_allows_feedback_operation};
 
+pub(crate) use access::ConfiguredGitHubSourceAccessAuthorityV1;
 pub use anchors::{
     ProjectGitHubAnchorAuthorityV1, ProjectGitHubRegistrarAuthoritiesV1,
     github_anchor_authorities_arc_v1, github_anchor_authorities_v1,
@@ -36,6 +38,10 @@ pub use anchors::{
 pub use decoder::{
     GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1,
     GitHubOfficialResponseDecoderV1, GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
+};
+pub(crate) use discovery::{
+    GitHubExactCommitDiscoveryOutcomeV1, GitHubExactCommitPullRequestV1,
+    discover_exact_commit_pull_request_v1,
 };
 pub use dto::{
     GitHubActionsCheckRunOutputV1, GitHubActionsCheckRunV1, GitHubActionsCheckSuiteRefV1,
@@ -50,9 +56,8 @@ pub use network::{
     GitHubRepositoryTargetV1,
 };
 pub use owner::{
-    GitHubProviderLifecycleV1, GitHubReviewRuntimeOwnerBuildErrorV1,
-    GitHubReviewRuntimeOwnerConfigV1, GitHubReviewRuntimeOwnerV1,
-    build_github_review_runtime_owner_v1,
+    GitHubReviewRuntimeOwnerBuildErrorV1, GitHubReviewRuntimeOwnerConfigV1,
+    GitHubReviewRuntimeOwnerV1, build_github_review_runtime_owner_v1,
 };
 pub use store::ProjectGitHubReviewStoreV1;
 
@@ -552,14 +557,25 @@ fn normalize_refresh_attempt(
     previous: Option<&GitHubReviewRefreshStateV1>,
     mut latest: GitHubReviewReadResponseV1,
 ) -> Option<GitHubReviewReadResponseV1> {
+    if latest.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Stale {
+        let revalidated_at = latest.ingress.fetched_at;
+        let checkpoint = latest.checkpoint;
+        let previous_complete = previous?.last_complete.as_ref()?;
+        latest = previous_complete.response.clone();
+        latest.ingress.fetched_at = revalidated_at;
+        latest.checkpoint = checkpoint;
+        for item in &mut latest.ingress.items {
+            item.provider_outcome = GitHubReviewIngressProviderOutcomeV1::Complete;
+        }
+    }
     let mut items = BTreeMap::new();
-    if let Some(previous_partial) = previous
+    let previous_partial = previous
         .map(|state| &state.latest_attempt)
         .filter(|response| {
             response.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Partial
                 && response.ingress.operation == latest.ingress.operation
-        })
-    {
+        });
+    if let Some(previous_partial) = previous_partial {
         for mut item in previous_partial.ingress.items.clone() {
             item.provider_outcome = latest.ingress.outcome;
             items.insert(item.comment_id.as_str().to_owned(), item);
@@ -580,7 +596,7 @@ fn normalize_refresh_attempt(
                 Some(current)
                     if current.lifecycle
                         != tracedecay_domain::feedback::GitHubReviewLifecycleV1::Resolved
-                        && current.body_digest != prior.body_digest =>
+                        && current.version_digest != prior.version_digest =>
                 {
                     current.lifecycle =
                         tracedecay_domain::feedback::GitHubReviewLifecycleV1::Edited;
@@ -598,6 +614,12 @@ fn normalize_refresh_attempt(
         }
     }
     latest.ingress.items = items.into_values().collect();
+    if previous_partial.is_some() {
+        // A collection ETag is specific to the page URL that emitted it.
+        // Never retain a continuation-page ETag as authority for page one of
+        // the next refresh.
+        latest.checkpoint.etag = None;
+    }
     latest.validate_for(request).is_ok().then_some(latest)
 }
 
@@ -649,24 +671,57 @@ pub enum GitHubReviewRefreshOutcomeV1 {
     Unavailable,
 }
 
-/// One explicit, non-repeating refresh. A compare conflict is surfaced as
-/// stale rather than retried, so this coordinator cannot become a polling or
-/// autonomous ingestion loop.
-pub struct GitHubReviewRefreshCoordinatorV1<P, S> {
-    port: P,
-    store: S,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitHubProviderLifecycleV1 {
+    Ready,
+    Denied,
+    Stale,
+    Ambiguous,
+    Unavailable,
 }
 
-impl<P, S> GitHubReviewRefreshCoordinatorV1<P, S> {
-    pub fn new(port: P, store: S) -> Self {
-        Self { port, store }
+pub trait GitHubSourceAccessAuthorityV1: Send + Sync {
+    fn authorize<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+    ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1>;
+}
+
+impl GitHubSourceAccessAuthorityV1 for std::sync::Arc<dyn GitHubSourceAccessAuthorityV1> {
+    fn authorize<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+    ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
+        self.as_ref().authorize(context, request)
     }
 }
 
-impl<P, S> GitHubReviewRefreshCoordinatorV1<P, S>
+/// One explicit, non-repeating refresh. A compare conflict is surfaced as
+/// stale rather than retried, so this coordinator cannot become a polling or
+/// autonomous ingestion loop.
+pub struct GitHubReviewRefreshCoordinatorV1<P, S, A> {
+    port: P,
+    store: S,
+    source_access: A,
+}
+
+impl<P, S, A> GitHubReviewRefreshCoordinatorV1<P, S, A> {
+    pub fn new(port: P, store: S, source_access: A) -> Self {
+        Self {
+            port,
+            store,
+            source_access,
+        }
+    }
+}
+
+impl<P, S, A> GitHubReviewRefreshCoordinatorV1<P, S, A>
 where
     P: GitHubReviewReadPort + Sync,
     S: GitHubReviewAtomicRefreshStoreV1 + Sync,
+    A: GitHubSourceAccessAuthorityV1,
 {
     pub fn refresh<'a>(
         &'a self,
@@ -684,6 +739,11 @@ where
                 GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
             ) {
                 return GitHubReviewRefreshOutcomeV1::Denied;
+            }
+            if let Some(outcome) =
+                blocked_refresh_outcome(self.source_access.authorize(context, request).await)
+            {
+                return outcome;
             }
             let previous = match self.store.load(context, request).await {
                 GitHubReviewRefreshStoreReadOutcomeV1::State(state) => {
@@ -714,6 +774,11 @@ where
             ) {
                 return GitHubReviewRefreshOutcomeV1::Denied;
             }
+            if let Some(outcome) =
+                blocked_refresh_outcome(self.source_access.authorize(context, request).await)
+            {
+                return outcome;
+            }
             let GitHubReviewReadPortOutcomeV1::Read(response) = read else {
                 return match read {
                     GitHubReviewReadPortOutcomeV1::Denied => GitHubReviewRefreshOutcomeV1::Denied,
@@ -729,6 +794,11 @@ where
                 return GitHubReviewRefreshOutcomeV1::Unavailable;
             };
             let expected = previous.as_ref().map(|state| &state.revision);
+            if let Some(outcome) =
+                blocked_refresh_outcome(self.source_access.authorize(context, request).await)
+            {
+                return outcome;
+            }
             let outcome = self
                 .store
                 .compare_and_record(context, request, expected, &next)
@@ -772,6 +842,19 @@ where
     }
 }
 
+fn blocked_refresh_outcome(
+    lifecycle: GitHubProviderLifecycleV1,
+) -> Option<GitHubReviewRefreshOutcomeV1> {
+    match lifecycle {
+        GitHubProviderLifecycleV1::Ready => None,
+        GitHubProviderLifecycleV1::Denied => Some(GitHubReviewRefreshOutcomeV1::Denied),
+        GitHubProviderLifecycleV1::Stale | GitHubProviderLifecycleV1::Ambiguous => {
+            Some(GitHubReviewRefreshOutcomeV1::Stale)
+        }
+        GitHubProviderLifecycleV1::Unavailable => Some(GitHubReviewRefreshOutcomeV1::Unavailable),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -779,7 +862,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::db::{Database, DatabaseAuthority};
+    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use tracedecay_application::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId, ResolvedScope,
@@ -912,7 +995,7 @@ mod tests {
             ManifestDigest::new(SHA).unwrap(),
             ActorId::new("actor.github.runtime.issuer").unwrap(),
             UtcMicros(1),
-            UtcMicros(1_000),
+            UtcMicros(i64::MAX),
             resolved_scope.clone(),
             BTreeSet::from([CapabilityId::new(
                 "capability.application.feedback.github-review-ingest",
@@ -929,7 +1012,7 @@ mod tests {
             resolved_scope,
             grant,
             RequestId::new("request.github.runtime").unwrap(),
-            Deadline::new(UtcMicros(900)).unwrap(),
+            Deadline::new(UtcMicros(i64::MAX - 1)).unwrap(),
             CancellationContext::active("cancel.github.runtime").unwrap(),
         )
         .unwrap();
@@ -987,6 +1070,35 @@ mod tests {
                 rate_limit: None,
             },
         }
+    }
+
+    #[test]
+    fn not_modified_revalidates_the_last_complete_generation() {
+        let (_, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviews);
+        let previous =
+            GitHubReviewRefreshStateV1::transition(&request, None, complete_response(&request))
+                .unwrap();
+        let mut not_modified = complete_response(&request);
+        not_modified.ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Stale;
+        not_modified.ingress.coverage = GitHubReviewCoverageV1::Stale;
+        not_modified.ingress.items.clear();
+        not_modified.ingress.fetched_at = UtcMicros(12);
+        not_modified.checkpoint.etag = Some(GitHubReviewEtagV1::new("W/\"revalidated\"").unwrap());
+
+        let next = GitHubReviewRefreshStateV1::transition(&request, Some(&previous), not_modified)
+            .unwrap();
+        let complete = &next.last_complete.unwrap().response;
+        assert_eq!(
+            complete.ingress.outcome,
+            GitHubReviewIngressProviderOutcomeV1::Complete
+        );
+        assert_eq!(complete.ingress.coverage, GitHubReviewCoverageV1::Complete);
+        assert_eq!(complete.ingress.fetched_at, UtcMicros(12));
+        assert_eq!(
+            complete.checkpoint.etag.as_ref().unwrap().as_str(),
+            "W/\"revalidated\""
+        );
     }
 
     #[tokio::test]
@@ -1099,7 +1211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_store_restarts_and_replays_the_github_source_commit() {
+    async fn project_store_restarts_and_replays_the_github_refresh() {
         let (context, request) =
             context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
         let next =
@@ -1108,7 +1220,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("github-review.db");
         let authority = DatabaseAuthority::acquire_test(&path, "github-source-restart").unwrap();
-        let (database, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
         let store =
             ProjectGitHubReviewStoreV1::new(database.clone(), request.scope.clone()).unwrap();
 
@@ -1118,13 +1233,14 @@ mod tests {
                 .await,
             GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
         );
-        assert!(store.source_state_for_test(&request).await.is_some());
         drop(store);
         database.close();
 
-        let (database, _) = Database::open(&path, &authority).await.unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
+                .await
+                .unwrap();
         let store = ProjectGitHubReviewStoreV1::new(database, request.scope.clone()).unwrap();
-        assert!(store.source_state_for_test(&request).await.is_some());
         assert_eq!(
             store
                 .compare_and_record(&context, &request, Some(&next.revision), &next)

@@ -302,7 +302,7 @@ mod tests {
             ManifestDigest::new(SHA).unwrap(),
             ActorId::new("actor.github-advisory-issuer").unwrap(),
             UtcMicros(1),
-            UtcMicros(1_000),
+            UtcMicros(i64::MAX),
             resolved_scope.clone(),
             BTreeSet::from([CapabilityId::new(capability).unwrap()]),
             BTreeSet::from([UseCaseId::new(use_case).unwrap()]),
@@ -314,7 +314,7 @@ mod tests {
             resolved_scope,
             grant,
             RequestId::new("request.github-advisory").unwrap(),
-            Deadline::new(UtcMicros(900)).unwrap(),
+            Deadline::new(UtcMicros(i64::MAX - 1)).unwrap(),
             CancellationContext::active("cancel.github-advisory").unwrap(),
         )
         .unwrap();

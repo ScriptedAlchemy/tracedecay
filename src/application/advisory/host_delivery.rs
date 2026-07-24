@@ -5,7 +5,8 @@
 //! owner/store and LSP factory, then emits only a content-free Hook V2 notice
 //! that directs a host back to those canonical read surfaces.
 
-use std::sync::Arc;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use thiserror::Error;
 use tracedecay_application::{ApplicationContractError, RequestContext, ResolvedScope};
@@ -48,9 +49,105 @@ pub struct Pr13AdvisoryHookLookupNoticeV1 {
 pub type Pr13AdvisoryHookNoticeSinkV1 =
     dyn Fn(&Pr13AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 + Send + Sync;
 
-/// Concrete Hook V2 delivery port. It owns no queue or publication store: both
-/// routes delegate to the existing host response sinks after exact scope
-/// validation, so later feedback lookup still reads the canonical PR12 store.
+const MAX_PENDING_ADVISORY_HOOK_NOTICES_V1: usize = 32;
+
+/// Bounded daemon-owned handoff between asynchronous advisory publication and
+/// the next synchronous Hook V2 lookup. The queue stores only content-free
+/// publication identities and rejects scope drift instead of acknowledging a
+/// notice that no host can consume.
+pub struct Pr13AdvisoryHookNoticeQueueV1 {
+    scope: FeedbackScopeV1,
+    pending: Mutex<VecDeque<Pr13AdvisoryHookLookupNoticeV1>>,
+    recent_results: Mutex<VecDeque<String>>,
+}
+
+impl Pr13AdvisoryHookNoticeQueueV1 {
+    pub fn new(scope: FeedbackScopeV1) -> Arc<Self> {
+        Arc::new(Self {
+            scope,
+            pending: Mutex::new(VecDeque::new()),
+            recent_results: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    pub fn sink(self: &Arc<Self>) -> Arc<Pr13AdvisoryHookNoticeSinkV1> {
+        let queue = Arc::clone(self);
+        Arc::new(move |notice| queue.enqueue(notice))
+    }
+
+    fn enqueue(&self, notice: &Pr13AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 {
+        if !feedback_scope_matches(&self.scope, &notice.scope) {
+            return HookFeedbackDeliveryOutcomeV1::Unavailable;
+        }
+        let key = notice.result_id.as_str().to_owned();
+        let Ok(mut recent_results) = self.recent_results.lock() else {
+            return HookFeedbackDeliveryOutcomeV1::Unavailable;
+        };
+        if recent_results.contains(&key) {
+            return HookFeedbackDeliveryOutcomeV1::Duplicate;
+        }
+        let Ok(mut pending) = self.pending.lock() else {
+            return HookFeedbackDeliveryOutcomeV1::Unavailable;
+        };
+        if pending.len() >= MAX_PENDING_ADVISORY_HOOK_NOTICES_V1 {
+            return HookFeedbackDeliveryOutcomeV1::Unavailable;
+        }
+        if recent_results.len() >= MAX_PENDING_ADVISORY_HOOK_NOTICES_V1 {
+            recent_results.pop_front();
+        }
+        recent_results.push_back(key);
+        pending.push_back(notice.clone());
+        HookFeedbackDeliveryOutcomeV1::Delivered
+    }
+
+    pub fn claim(&self) -> Option<Pr13AdvisoryHookLookupNoticeV1> {
+        self.pending.lock().ok()?.pop_front()
+    }
+}
+
+fn registered_hook_notice_queues()
+-> &'static Mutex<BTreeMap<([u8; 16], [u8; 16]), Weak<Pr13AdvisoryHookNoticeQueueV1>>> {
+    static QUEUES: OnceLock<
+        Mutex<BTreeMap<([u8; 16], [u8; 16]), Weak<Pr13AdvisoryHookNoticeQueueV1>>>,
+    > = OnceLock::new();
+    QUEUES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub(crate) fn register_pr13_advisory_hook_notice_queue(
+    project_id: [u8; 16],
+    worktree_id: [u8; 16],
+    queue: &Arc<Pr13AdvisoryHookNoticeQueueV1>,
+) -> bool {
+    if project_id == [0; 16] || worktree_id == [0; 16] {
+        return false;
+    }
+    let Ok(mut queues) = registered_hook_notice_queues().lock() else {
+        return false;
+    };
+    let key = (project_id, worktree_id);
+    if let Some(existing) = queues.get(&key).and_then(Weak::upgrade) {
+        return Arc::ptr_eq(&existing, queue);
+    }
+    queues.retain(|_, queue| queue.strong_count() > 0);
+    queues.insert(key, Arc::downgrade(queue));
+    true
+}
+
+pub(crate) fn claim_pr13_advisory_hook_notice(
+    project_id: [u8; 16],
+    worktree_id: [u8; 16],
+) -> Option<Pr13AdvisoryHookLookupNoticeV1> {
+    let queue = registered_hook_notice_queues()
+        .lock()
+        .ok()?
+        .get(&(project_id, worktree_id))?
+        .upgrade()?;
+    queue.claim()
+}
+
+/// Concrete Hook V2 delivery port. Both routes delegate to the registered host
+/// response sinks after exact scope validation; finding content remains in the
+/// canonical PR12 store.
 pub struct Pr13AdvisoryHookDeliveryPortV1 {
     scope: FeedbackScopeV1,
     hook_v2: Arc<Pr13AdvisoryHookNoticeSinkV1>,
@@ -130,6 +227,7 @@ pub enum Pr13AdvisoryHookDeliveryV1 {
         state: HostCapabilityStateV1,
         outcome: HookFeedbackDeliveryOutcomeV1,
     },
+    SinkUnavailable,
     Unavailable(HostCapabilityUnavailableReasonV1),
 }
 
@@ -197,7 +295,7 @@ where
     CS: super::CiReadOnlyProviderArchiveV1 + Sync,
     CE: super::CiExactEvidenceAuthorityV1<CS::Record> + Sync,
     PE: super::CanonicalProximityEvidenceAuthorityV1 + Sync,
-    PC: crate::application::configuration::ConfigurationControlStore,
+    PC: crate::application::configuration::ConfigurationControlStore + Clone + Send + 'static,
 {
     pub fn runtime(&self) -> &super::Pr13AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
         &self.advisory.advisory
@@ -398,10 +496,17 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
             rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
             1,
         );
-        Ok(Pr13AdvisoryHookDeliveryV1::Delivered {
-            state: route.state,
-            outcome,
-        })
+        match outcome {
+            HookFeedbackDeliveryOutcomeV1::Delivered | HookFeedbackDeliveryOutcomeV1::Duplicate => {
+                Ok(Pr13AdvisoryHookDeliveryV1::Delivered {
+                    state: route.state,
+                    outcome,
+                })
+            }
+            HookFeedbackDeliveryOutcomeV1::Unavailable => {
+                Ok(Pr13AdvisoryHookDeliveryV1::SinkUnavailable)
+            }
+        }
     }
 
     fn observe_hook_delivery(
@@ -504,7 +609,7 @@ where
     CS: super::CiReadOnlyProviderArchiveV1 + Sync,
     CE: super::CiExactEvidenceAuthorityV1<CS::Record> + Sync,
     PE: super::CanonicalProximityEvidenceAuthorityV1 + Sync,
-    PC: crate::application::configuration::ConfigurationControlStore,
+    PC: crate::application::configuration::ConfigurationControlStore + Clone + Send + 'static,
 {
     let scope = input.resolved_scope.clone();
     let advisory = open_pr13_advisory_daemon_registration(input, providers)?;
@@ -606,4 +711,115 @@ fn feedback_scope_matches(left: &FeedbackScopeV1, right: &FeedbackScopeV1) -> bo
         && left.repository_id == right.repository_id
         && left.worktree_id == right.worktree_id
         && left.branch_ref == right.branch_ref
+        && left.head_commit_id == right.head_commit_id
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::{CommitId, ProjectId, RepositoryId, WorktreeId};
+
+    use super::*;
+
+    fn scope(branch: &str) -> FeedbackScopeV1 {
+        FeedbackScopeV1 {
+            project_id: ProjectId::new("project.notice-queue").unwrap(),
+            repository_id: RepositoryId::new("repository.notice-queue").unwrap(),
+            worktree_id: WorktreeId::new("worktree.notice-queue").unwrap(),
+            branch_ref: branch.to_owned(),
+            head_commit_id: CommitId::new("a".repeat(40)).unwrap(),
+        }
+    }
+
+    fn notice(scope: FeedbackScopeV1, suffix: &str) -> Pr13AdvisoryHookLookupNoticeV1 {
+        Pr13AdvisoryHookLookupNoticeV1 {
+            scope,
+            result_id: FeedbackResultId::new(format!("result.{suffix}")).unwrap(),
+            cycle_id: FeedbackCycleId::new(format!("cycle.{suffix}")).unwrap(),
+            returned_findings: 1,
+            omitted_findings: 0,
+        }
+    }
+
+    #[test]
+    fn notice_queue_acknowledges_only_a_real_bounded_handoff() {
+        let expected = scope("refs/heads/main");
+        let queue = Pr13AdvisoryHookNoticeQueueV1::new(expected.clone());
+        let sink = queue.sink();
+        let accepted = notice(expected, "accepted");
+
+        assert_eq!(sink(&accepted), HookFeedbackDeliveryOutcomeV1::Delivered);
+        assert_eq!(sink(&accepted), HookFeedbackDeliveryOutcomeV1::Duplicate);
+        assert_eq!(queue.claim(), Some(accepted));
+        assert_eq!(queue.claim(), None);
+
+        let wrong_scope = notice(scope("refs/heads/other"), "wrong-scope");
+        assert_eq!(
+            sink(&wrong_scope),
+            HookFeedbackDeliveryOutcomeV1::Unavailable
+        );
+
+        for index in 0..MAX_PENDING_ADVISORY_HOOK_NOTICES_V1 {
+            assert_eq!(
+                sink(&notice(
+                    scope("refs/heads/main"),
+                    &format!("bounded-{index}")
+                )),
+                HookFeedbackDeliveryOutcomeV1::Delivered
+            );
+        }
+        assert_eq!(
+            sink(&notice(scope("refs/heads/main"), "over-capacity")),
+            HookFeedbackDeliveryOutcomeV1::Unavailable
+        );
+    }
+
+    #[test]
+    fn notice_registry_is_exact_per_worktree_and_rejects_live_rebinding() {
+        let project = [1; 16];
+        let first_worktree = [2; 16];
+        let second_worktree = [3; 16];
+        let first = Pr13AdvisoryHookNoticeQueueV1::new(scope("refs/heads/main"));
+        let conflicting = Pr13AdvisoryHookNoticeQueueV1::new(scope("refs/heads/main"));
+        let second = Pr13AdvisoryHookNoticeQueueV1::new(scope("refs/heads/other"));
+
+        assert!(register_pr13_advisory_hook_notice_queue(
+            project,
+            first_worktree,
+            &first
+        ));
+        assert!(register_pr13_advisory_hook_notice_queue(
+            project,
+            first_worktree,
+            &first
+        ));
+        assert!(!register_pr13_advisory_hook_notice_queue(
+            project,
+            first_worktree,
+            &conflicting
+        ));
+        assert!(register_pr13_advisory_hook_notice_queue(
+            project,
+            second_worktree,
+            &second
+        ));
+
+        let first_notice = notice(scope("refs/heads/main"), "first-worktree");
+        let second_notice = notice(scope("refs/heads/other"), "second-worktree");
+        assert_eq!(
+            first.sink()(&first_notice),
+            HookFeedbackDeliveryOutcomeV1::Delivered
+        );
+        assert_eq!(
+            second.sink()(&second_notice),
+            HookFeedbackDeliveryOutcomeV1::Delivered
+        );
+        assert_eq!(
+            claim_pr13_advisory_hook_notice(project, first_worktree),
+            Some(first_notice)
+        );
+        assert_eq!(
+            claim_pr13_advisory_hook_notice(project, second_worktree),
+            Some(second_notice)
+        );
+    }
 }

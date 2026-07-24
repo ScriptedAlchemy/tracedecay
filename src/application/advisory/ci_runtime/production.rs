@@ -186,6 +186,54 @@ pub fn open_production_ci_provider_authorities_v1(
     })
 }
 
+pub fn unavailable_production_ci_provider_authorities_v1() -> ProductionCiProviderAuthoritiesV1 {
+    ProductionCiProviderAuthoritiesV1 {
+        archive: Arc::new(UnavailableProductionCiArchiveV1),
+        exact_evidence: Arc::new(UnavailableProductionCiExactEvidenceV1),
+    }
+}
+
+struct UnavailableProductionCiArchiveV1;
+
+impl CiReadOnlyProviderArchiveV1 for UnavailableProductionCiArchiveV1 {
+    type Record = CiRetainedProviderRecordV1;
+
+    fn read_record<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        request: &'a CiFailureLocalizationRequestV1,
+    ) -> FeedbackPortFuture<'a, CiProviderReadResultV1<Self::Record>> {
+        Box::pin(async move {
+            CiProviderReadResultV1 {
+                provider: ProviderId::new("provider.unavailable").expect("static provider id"),
+                run: request.run.clone(),
+                state: CiFailureLocalizationStateV1::Unavailable,
+                coverage: CiFailureCoverageV1::Unavailable,
+                failures: 0,
+                checks: 0,
+                annotations: 0,
+                record: None,
+            }
+        })
+    }
+}
+
+struct UnavailableProductionCiExactEvidenceV1;
+
+impl CiExactEvidenceAuthorityV1<CiRetainedProviderRecordV1>
+    for UnavailableProductionCiExactEvidenceV1
+{
+    fn map_exact_evidence<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a CiFailureLocalizationRequestV1,
+        _read: &'a CiProviderReadResultV1<CiRetainedProviderRecordV1>,
+        _record: &'a CiRetainedProviderRecordV1,
+    ) -> FeedbackPortFuture<'a, Option<CiFailureLocalizationResultV1>> {
+        Box::pin(async { None })
+    }
+}
+
 struct ProductionGitHubCiArchiveV1 {
     provider: ProviderId,
     client: GitHubReadOnlyClientV1,

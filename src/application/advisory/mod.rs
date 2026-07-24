@@ -3,7 +3,10 @@
 //! These adapters own no daemon trigger, host transport, GitHub write client,
 //! CI runner, scheduler, lock, or agent continuation.
 
-use tracedecay_application::RequestContext;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tracedecay_application::{RequestAdmission, RequestContext};
+use tracedecay_domain::UtcMicros;
 use tracedecay_domain::feedback::FeedbackScopeV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -30,7 +33,7 @@ pub use ci_runtime::{
     ProductionCiExactEvidenceHandleV1, ProductionCiProviderAuthoritiesV1,
     ProductionCiProviderConfigV1, ProductionCiProviderOpenErrorV1, ProjectCiCodeAnchorStoreV1,
     ProjectCiRetainedObservationStoreV1, concrete_ci_failure_localization_owner_v1,
-    open_production_ci_provider_authorities_v1,
+    open_production_ci_provider_authorities_v1, unavailable_production_ci_provider_authorities_v1,
 };
 pub use fixtures::{
     PR13_CHECK_ANNOTATIONS_FIXTURE_V1, PR13_CHECK_RUN_FIXTURE_V1, PR13_FIXTURE_ROOT_V1,
@@ -67,11 +70,14 @@ pub use github_runtime::{
 pub use host_delivery::{
     Pr13AdvisoryCompletedDeliveryV1, Pr13AdvisoryDaemonStartupErrorV1,
     Pr13AdvisoryDaemonStartupRegistrationV1, Pr13AdvisoryHookDeliveryPortV1,
-    Pr13AdvisoryHookDeliveryV1, Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHookNoticeSinkV1,
-    Pr13AdvisoryHostDeliveryErrorV1, Pr13AdvisoryHostDeliveryPathV1,
+    Pr13AdvisoryHookDeliveryV1, Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHookNoticeQueueV1,
+    Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryHostDeliveryErrorV1, Pr13AdvisoryHostDeliveryPathV1,
     Pr13AdvisoryHostDeliveryRegistrationV1, Pr13AdvisoryHostDeliveryRouteV1,
     Pr13AdvisoryRunErrorV1, Pr13AdvisoryRunResultV1, mount_pr13_advisory_host_delivery,
     new_pr13_advisory_hook_delivery_port, register_pr13_advisory_daemon_startup,
+};
+pub(crate) use host_delivery::{
+    claim_pr13_advisory_hook_notice, register_pr13_advisory_hook_notice_queue,
 };
 pub use production::{
     Pr13AdvisoryProductionAuthoritiesV1, Pr13AdvisoryProductionHookDeliveryPortV1,
@@ -85,7 +91,6 @@ pub use proximity_runtime::{
     Pr13ProximityFindingContributorV1, Pr13ProximityRuntimeOutcomeV1, Pr13ProximityRuntimeOwnerV1,
     ProductionProximityEvidenceAuthorityV1, ProximityThresholdPinV1,
     SharedCanonicalProximityEvidenceAuthorityV1, open_pr13_proximity_runtime,
-    production_proximity_evidence_authority_v1,
 };
 pub use runtime::{
     Pr13AdvisoryContributionsV1, Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleOutcomeV1,
@@ -120,5 +125,15 @@ pub(crate) fn context_allows_feedback_operation(
     else {
         return false;
     };
-    context_matches_scope(context, scope) && context.allows(&capability, &use_case)
+    context_matches_scope(context, scope)
+        && context.admission_at(now_micros()) == RequestAdmission::Admitted
+        && context.allows(&capability, &use_case)
+}
+
+fn now_micros() -> UtcMicros {
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros())
+        .unwrap_or_default();
+    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }

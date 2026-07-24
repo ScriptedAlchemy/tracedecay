@@ -22,7 +22,7 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CommitId, ManifestDigest, ProviderId, RetrievalAnchorId,
-    SessionId, UtcMicros,
+    SessionId, UtcMicros, canonical_sha256,
 };
 
 use super::ci_runtime::{GitHubCiOfficialResponseDecoderV1, GitHubCiProviderRecordV1};
@@ -79,6 +79,7 @@ pub struct Pr13GitHubReviewFixtureV1 {
     pub review_id: GitHubReviewIdV1,
     pub thread_id: GitHubReviewThreadIdV1,
     pub comment_id: GitHubReviewCommentIdV1,
+    pub version_digest: ManifestDigest,
     pub lifecycle: GitHubReviewLifecycleV1,
     pub author_class: GitHubReviewAuthorClassV1,
     pub review_state: GitHubReviewStateV1,
@@ -195,6 +196,7 @@ impl Pr13SourceBackedCompositeFixtureV1 {
             thread_id: Some(self.github.thread_id.clone()),
             comment_id: self.github.comment_id.clone(),
             reply_to_comment_id: None,
+            version_digest: self.github.version_digest.clone(),
             author_anchor: anchors.author_anchor,
             author_class: self.github.author_class,
             review_state: self.github.review_state,
@@ -522,6 +524,16 @@ pub fn load_pr13_source_backed_composite_fixture_v1()
             .map_err(|_| inconsistent("review thread id"))?,
             comment_id: GitHubReviewCommentIdV1::new(comment_id.to_string())
                 .map_err(|_| inconsistent("review comment id"))?,
+            version_digest: canonical_sha256(&(
+                "tracedecay.pr13.github.review-version.v1",
+                GitHubReviewCommentIdV1::new(comment_id.to_string())
+                    .map_err(|_| inconsistent("review comment version id"))?,
+                str_at(&comment, "/response/updated_at")?,
+                digest_at(&comment, "/redacted/body/sha256")?,
+                CommitId::new(str_at(&comment, "/response/commit_id")?)
+                    .map_err(|_| inconsistent("review comment version commit"))?,
+            ))
+            .map_err(|_| inconsistent("review comment version"))?,
             lifecycle: GitHubReviewLifecycleV1::Outdated,
             author_class: GitHubReviewAuthorClassV1::Bot,
             review_state: GitHubReviewStateV1::Commented,

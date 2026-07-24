@@ -6,11 +6,7 @@ use tracedecay_application::feedback::{
 use tracedecay_domain::ManifestDigest;
 use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::feedback::FeedbackScopeV1;
-use tracedecay_store::{
-    SourceCommitApplyOutcomeV1, SourceStoreErrorV1, SourceStoreStateV1, apply_source_commit,
-};
 
-use super::source::source_commit_for_refresh;
 use super::{
     GitHubReadCheckpointAuthorityV1, GitHubReadCheckpointLoadOutcomeV1,
     GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshStateV1,
@@ -22,9 +18,6 @@ use crate::db::Database;
 const STORE_KEY_DOMAIN_V1: &str = "tracedecay.pr13.github.store-key.v1";
 const STORE_KEY_PREFIX_V1: &str = "feedback.github-review.refresh.v1.";
 const MAX_STORED_REFRESH_BYTES_V1: usize = 4 * 1024 * 1024;
-const SOURCE_STATE_KEY_DOMAIN_V1: &str = "tracedecay.pr13.github.source-state-key.v1";
-const SOURCE_STATE_KEY_PREFIX_V1: &str = "feedback.github-review.source-state.v1.";
-const MAX_STORED_SOURCE_STATE_BYTES_V1: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct ProjectGitHubReviewStoreV1 {
@@ -63,27 +56,6 @@ impl ProjectGitHubReviewStoreV1 {
         state.validate_for(request).then_some(state)
     }
 
-    fn source_key(&self, request: &GitHubReviewReadRequestV1) -> Option<String> {
-        if request.scope != self.scope {
-            return None;
-        }
-        canonical_sha256(&(
-            SOURCE_STATE_KEY_DOMAIN_V1,
-            &request.scope,
-            &request.pull_request_id,
-        ))
-        .ok()
-        .map(|digest| format!("{SOURCE_STATE_KEY_PREFIX_V1}{}", digest.as_str()))
-    }
-
-    fn decode_source_state(encoded: &str) -> Option<SourceStoreStateV1> {
-        if encoded.len() > MAX_STORED_SOURCE_STATE_BYTES_V1 {
-            return None;
-        }
-        let state = serde_json::from_str::<SourceStoreStateV1>(encoded).ok()?;
-        state.validate().ok().map(|()| state)
-    }
-
     async fn load_state(
         &self,
         request: &GitHubReviewReadRequestV1,
@@ -93,16 +65,6 @@ impl ProjectGitHubReviewStoreV1 {
             Some(encoded) => Some(Some(Self::decode(request, &encoded)?)),
             None => Some(None),
         }
-    }
-
-    #[cfg(test)]
-    pub(super) async fn source_state_for_test(
-        &self,
-        request: &GitHubReviewReadRequestV1,
-    ) -> Option<SourceStoreStateV1> {
-        let key = self.source_key(request)?;
-        let encoded = self.database.get_metadata(&key).await.ok()??;
-        Self::decode_source_state(&encoded)
     }
 }
 
@@ -218,79 +180,16 @@ impl GitHubReviewAtomicRefreshStoreV1 for ProjectGitHubReviewStoreV1 {
                 let _ = transaction.rollback().await;
                 return GitHubReviewRefreshStoreCommitOutcomeV1::Conflict;
             }
-            let Some(source_key) = self.source_key(request) else {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            let Ok(encoded_source) = self
+            if !context_allows_feedback_operation(
+                context,
+                &self.scope,
+                GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+                GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
+            ) || self
                 .database
-                .get_metadata_unguarded(&transaction, &source_key)
-                .await
-            else {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            let current_source = match encoded_source {
-                Some(encoded) => {
-                    let Some(state) = Self::decode_source_state(&encoded) else {
-                        let _ = transaction.rollback().await;
-                        return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                    };
-                    Some(state)
-                }
-                None => None,
-            };
-            let Some(source_commit) = source_commit_for_refresh(
-                request,
-                next,
-                current_source
-                    .as_ref()
-                    .map(SourceStoreStateV1::source_frontier),
-            ) else {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            let source_state = match apply_source_commit(current_source.as_ref(), source_commit) {
-                Ok(SourceCommitApplyOutcomeV1::Committed(state)) => *state,
-                Ok(SourceCommitApplyOutcomeV1::ExactDuplicate(_)) => {
-                    let Some(state) = current_source else {
-                        let _ = transaction.rollback().await;
-                        return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                    };
-                    state
-                }
-                Err(
-                    SourceStoreErrorV1::DefinitionConflict
-                    | SourceStoreErrorV1::BindingConflict
-                    | SourceStoreErrorV1::FrontierConflict
-                    | SourceStoreErrorV1::IdempotencyConflict,
-                ) => {
-                    let _ = transaction.rollback().await;
-                    return GitHubReviewRefreshStoreCommitOutcomeV1::Conflict;
-                }
-                Err(_) => {
-                    let _ = transaction.rollback().await;
-                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                }
-            };
-            let Ok(encoded_source_state) = serde_json::to_string(&source_state) else {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            if encoded_source_state.len() > MAX_STORED_SOURCE_STATE_BYTES_V1 {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            }
-            if self
-                .database
-                .set_metadata_unguarded(&transaction, &source_key, &encoded_source_state)
+                .set_metadata_unguarded(&transaction, &key, &encoded_next)
                 .await
                 .is_err()
-                || self
-                    .database
-                    .set_metadata_unguarded(&transaction, &key, &encoded_next)
-                    .await
-                    .is_err()
                 || transaction.commit().await.is_err()
             {
                 return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;

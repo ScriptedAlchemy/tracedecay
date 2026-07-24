@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use libsql::params;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
@@ -15,6 +14,7 @@ use super::{
     validate_context_scout_feedback, validate_receipt_shape,
 };
 use crate::db::Database;
+use crate::db::engine::params;
 
 const STORE_KEY_V1: &str = "agents.context-scout.durable.v1";
 const MAX_STORED_STATE_BYTES_V1: usize = 512 * 1024;
@@ -180,7 +180,7 @@ impl ProjectContextScoutDurableStoreV1 {
             .await
             .ok()?;
         let mut rows = transaction
-            .query(
+            .query_engine(
                 "SELECT value FROM metadata WHERE key = ?1",
                 params![STORE_KEY_V1],
             )

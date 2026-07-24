@@ -13,7 +13,7 @@ use thiserror::Error;
 use tracedecay_application::feedback::{
     CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, CiFailureLocalizationRequestV1,
     FeedbackCompletedPublicationV1, FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest,
-    FeedbackCycleExecutionResult, GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
+    GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
 };
 use tracedecay_application::{
     AdvisoryFindingContributionBatchV1, AdvisoryFindingContributorV1,
@@ -29,11 +29,14 @@ use tracedecay_domain::feedback::{
 use crate::application::configuration::ConfigurationControlStore;
 use crate::application::context::MonotonicDeadline;
 use crate::application::feedback::concrete::{ConcretePr12FeedbackOwner, ProjectFeedbackStore};
-use crate::application::feedback::cycle_runtime::Pr12FeedbackCycleRuntime;
+use crate::application::feedback::cycle_runtime::{
+    Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleRuntime,
+};
 use crate::application::feedback::observations::{
-    Plan26CiProviderV1, Plan26CoverageV1, Plan26FeedbackObservationEmitterV1,
-    Plan26FeedbackOperationV1, Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
-    Plan26GitHubLifecycleV1, Plan26ProximityRiskV1, Plan26ProximityTransitionV1,
+    Plan26AdvisoryProviderV1, Plan26CiProviderV1, Plan26CoverageV1,
+    Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1, Plan26FeedbackOutcomeV1,
+    Plan26FeedbackSourceEventV1, Plan26GitHubLifecycleV1, Plan26ProximityRiskV1,
+    Plan26ProximityTransitionV1,
 };
 use crate::application::operation_stream::OperationEmitter;
 use crate::db::Database;
@@ -41,6 +44,7 @@ use crate::db::Database;
 use super::ci_runtime::{
     CiExactEvidenceAuthorityV1, CiReadOnlyProviderArchiveV1, ConcreteCiFailureLocalizationOwnerV1,
 };
+use super::github_runtime::ConfiguredGitHubSourceAccessAuthorityV1;
 use super::proximity_runtime::{
     ConcretePr13ProximityRuntimeOwnerV1, Pr13ProximityRuntimeOutcomeV1,
 };
@@ -68,7 +72,7 @@ pub struct Pr13AdvisoryRuntimeOpenV1 {
     pub project_root: PathBuf,
     pub resolved_scope: ResolvedScope,
     pub feedback_scope: FeedbackScopeV1,
-    pub github: GitHubReviewRuntimeOwnerConfigV1,
+    pub github: Option<GitHubReviewRuntimeOwnerConfigV1>,
     /// The already-open PR12 Plan 09 owner. PR13 uses its exact authorization,
     /// diagnostics/impact ports, publication store, and durable dedupe path.
     pub feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,
@@ -258,7 +262,7 @@ pub struct Pr13AdvisoryCycleControlV1 {
 #[allow(clippy::large_enum_variant)]
 pub enum Pr13AdvisoryCycleOutcomeV1 {
     Completed {
-        cycle: FeedbackCycleExecutionResult,
+        cycle: Pr12CanonicalFeedbackResultV1,
         contributions: Pr13AdvisoryContributionsV1,
         observation_input: tracedecay_domain::feedback::FeedbackEvaluationInputV1,
     },
@@ -285,7 +289,7 @@ impl Pr13AdvisoryCycleOutcomeV1 {
 pub struct Pr13AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
     feedback_scope: FeedbackScopeV1,
     feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,
-    github: GitHubReviewRuntimeOwnerV1<GR, GA>,
+    github: Option<GitHubReviewRuntimeOwnerV1<GR, GA>>,
     ci: ConcreteCiFailureLocalizationOwnerV1<CS, CE>,
     proximity: ConcretePr13ProximityRuntimeOwnerV1<PE, PC>,
     observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
@@ -298,7 +302,7 @@ where
     CS: CiReadOnlyProviderArchiveV1 + Sync,
     CE: CiExactEvidenceAuthorityV1<CS::Record> + Sync,
     PE: CanonicalProximityEvidenceAuthorityV1 + Sync,
-    PC: ConfigurationControlStore,
+    PC: ConfigurationControlStore + Clone + Send + 'static,
 {
     pub fn open(
         input: Pr13AdvisoryRuntimeOpenV1,
@@ -309,7 +313,7 @@ where
             project_root,
             resolved_scope,
             feedback_scope,
-            mut github,
+            github,
             feedback_cycle,
         } = input;
         let feedback = feedback_cycle.feedback_runtime();
@@ -321,15 +325,32 @@ where
         {
             return Err(Pr13AdvisoryRuntimeOpenErrorV1::ScopeMismatch);
         }
-        github.database = database;
-        github.resolved_scope = resolved_scope;
-        github.feedback_scope = feedback_scope.clone();
-        let github = build_github_review_runtime_owner_v1(
-            github,
-            providers.github_remapper,
-            providers.github_anchors,
-        )
-        .map_err(|_| Pr13AdvisoryRuntimeOpenErrorV1::GitHubRuntimeUnavailable)?;
+        let github = match github {
+            Some(mut github) => {
+                let github_source_access = Arc::new(
+                    ConfiguredGitHubSourceAccessAuthorityV1::new(
+                        providers.configuration.clone(),
+                        resolved_scope.clone(),
+                        &github.target.owner,
+                        &github.target.repository,
+                    )
+                    .ok_or(Pr13AdvisoryRuntimeOpenErrorV1::GitHubRuntimeUnavailable)?,
+                );
+                github.database = database;
+                github.resolved_scope = resolved_scope;
+                github.feedback_scope = feedback_scope.clone();
+                Some(
+                    build_github_review_runtime_owner_v1(
+                        github,
+                        providers.github_remapper,
+                        providers.github_anchors,
+                        github_source_access,
+                    )
+                    .map_err(|_| Pr13AdvisoryRuntimeOpenErrorV1::GitHubRuntimeUnavailable)?,
+                )
+            }
+            None => None,
+        };
         let ci = concrete_ci_failure_localization_owner_v1(
             providers.ci_source,
             providers.ci_exact_evidence,
@@ -382,6 +403,11 @@ where
             return Err(error);
         }
         let mut contributions = Pr13AdvisoryContributionsV1::absent();
+        mark_unrequested_remote_providers(
+            &mut contributions,
+            request.github.is_some(),
+            request.ci.is_some(),
+        );
 
         if !context_matches_scope(context, &self.feedback_scope) {
             self.observations.observe_source_event(
@@ -413,57 +439,68 @@ where
         }
 
         if let Some(provider_request) = request.github.as_ref() {
-            let outcome =
-                await_provider(&mut control, self.github.refresh(context, provider_request)).await;
-            let outcome = match outcome {
-                Ok(outcome) => outcome,
-                Err(interruption) => {
-                    return Ok(self.finish_interruption(
-                        &request.feedback.input,
-                        interruption,
-                        contributions,
-                    ));
+            if let Some(github) = self.github.as_ref() {
+                let outcome =
+                    await_provider(&mut control, github.refresh(context, provider_request)).await;
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(interruption) => {
+                        return Ok(self.finish_interruption(
+                            &request.feedback.input,
+                            interruption,
+                            contributions,
+                        ));
+                    }
+                };
+                match outcome {
+                    GitHubReviewRefreshOutcomeV1::Stored(state) => {
+                        let ingress = &state.state.latest_attempt.ingress;
+                        self.observe_github(&request.feedback.input, ingress);
+                        contributions.capture(
+                            Pr13AdvisoryProviderV1::GitHub,
+                            ingress.advisory_findings(request.validity),
+                        );
+                    }
+                    GitHubReviewRefreshOutcomeV1::Denied => {
+                        self.observe_github_terminal(
+                            &request.feedback.input,
+                            Plan26FeedbackOutcomeV1::Denied,
+                        );
+                        contributions.set_state(
+                            Pr13AdvisoryProviderV1::GitHub,
+                            ProviderEvaluationStateV1::Unavailable,
+                        );
+                    }
+                    GitHubReviewRefreshOutcomeV1::Unavailable => {
+                        self.observe_github_terminal(
+                            &request.feedback.input,
+                            Plan26FeedbackOutcomeV1::Unavailable,
+                        );
+                        contributions.set_state(
+                            Pr13AdvisoryProviderV1::GitHub,
+                            ProviderEvaluationStateV1::Unavailable,
+                        );
+                    }
+                    GitHubReviewRefreshOutcomeV1::Stale => {
+                        self.observations.observe_source_event(
+                            &request.feedback.input,
+                            Plan26FeedbackSourceEventV1::GitHubStale { item_count: 0 },
+                        );
+                        contributions.set_state(
+                            Pr13AdvisoryProviderV1::GitHub,
+                            ProviderEvaluationStateV1::Stale,
+                        );
+                    }
                 }
-            };
-            match outcome {
-                GitHubReviewRefreshOutcomeV1::Stored(state) => {
-                    let ingress = &state.state.latest_attempt.ingress;
-                    self.observe_github(&request.feedback.input, ingress);
-                    contributions.capture(
-                        Pr13AdvisoryProviderV1::GitHub,
-                        ingress.advisory_findings(request.validity),
-                    );
-                }
-                GitHubReviewRefreshOutcomeV1::Denied => {
-                    self.observe_github_terminal(
-                        &request.feedback.input,
-                        Plan26FeedbackOutcomeV1::Denied,
-                    );
-                    contributions.set_state(
-                        Pr13AdvisoryProviderV1::GitHub,
-                        ProviderEvaluationStateV1::Unavailable,
-                    );
-                }
-                GitHubReviewRefreshOutcomeV1::Unavailable => {
-                    self.observe_github_terminal(
-                        &request.feedback.input,
-                        Plan26FeedbackOutcomeV1::Unavailable,
-                    );
-                    contributions.set_state(
-                        Pr13AdvisoryProviderV1::GitHub,
-                        ProviderEvaluationStateV1::Unavailable,
-                    );
-                }
-                GitHubReviewRefreshOutcomeV1::Stale => {
-                    self.observations.observe_source_event(
-                        &request.feedback.input,
-                        Plan26FeedbackSourceEventV1::GitHubStale { item_count: 0 },
-                    );
-                    contributions.set_state(
-                        Pr13AdvisoryProviderV1::GitHub,
-                        ProviderEvaluationStateV1::Stale,
-                    );
-                }
+            } else {
+                self.observe_github_terminal(
+                    &request.feedback.input,
+                    Plan26FeedbackOutcomeV1::Unavailable,
+                );
+                contributions.set_state(
+                    Pr13AdvisoryProviderV1::GitHub,
+                    ProviderEvaluationStateV1::Unavailable,
+                );
             }
         }
 
@@ -599,7 +636,26 @@ where
                 },
             },
         );
-        interruption.finish(contributions)
+        let outcome = interruption.finish(contributions);
+        match &outcome {
+            Pr13AdvisoryCycleOutcomeV1::Cancelled { contributions }
+            | Pr13AdvisoryCycleOutcomeV1::TimedOut { contributions } => {
+                self.observe_provider_states(input, contributions);
+            }
+            Pr13AdvisoryCycleOutcomeV1::Completed { .. } => {}
+        }
+        outcome
+    }
+
+    fn observe_provider_states(
+        &self,
+        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
+        contributions: &Pr13AdvisoryContributionsV1,
+    ) {
+        for provider in &contributions.providers {
+            self.observations
+                .observe_source_event(input, provider_state_event(provider));
+        }
     }
 
     fn observe_github(
@@ -816,6 +872,7 @@ where
     ) -> Result<Pr13AdvisoryCycleOutcomeV1, ApplicationContractError> {
         let observation_input = request.input.clone();
         let advisory = contributions.as_plan09()?;
+        self.observe_provider_states(&observation_input, &contributions);
         let cycle = self
             .feedback_cycle
             .run_once_with_advisory(context, request, advisory)
@@ -845,7 +902,7 @@ where
     CS: CiReadOnlyProviderArchiveV1 + Sync,
     CE: CiExactEvidenceAuthorityV1<CS::Record> + Sync,
     PE: CanonicalProximityEvidenceAuthorityV1 + Sync,
-    PC: ConfigurationControlStore,
+    PC: ConfigurationControlStore + Clone + Send + 'static,
 {
     let advisory = Pr13AdvisoryRuntime::open(input, providers)?;
     let feedback_owner = advisory.feedback_owner();
@@ -931,6 +988,37 @@ fn saturating_u32(value: u64) -> u32 {
     value.try_into().unwrap_or(u32::MAX)
 }
 
+fn provider_state_event(provider: &Pr13AdvisoryProviderStateV1) -> Plan26FeedbackSourceEventV1 {
+    let provider_kind = match provider.provider {
+        Pr13AdvisoryProviderV1::GitHub => Plan26AdvisoryProviderV1::GitHubReview,
+        Pr13AdvisoryProviderV1::Ci => Plan26AdvisoryProviderV1::CiLocalization,
+        Pr13AdvisoryProviderV1::Proximity => Plan26AdvisoryProviderV1::Proximity,
+    };
+    Plan26FeedbackSourceEventV1::ProviderState {
+        provider: provider_kind,
+        state: provider.state,
+    }
+}
+
+fn mark_unrequested_remote_providers(
+    contributions: &mut Pr13AdvisoryContributionsV1,
+    github_requested: bool,
+    ci_requested: bool,
+) {
+    if !github_requested {
+        contributions.set_state(
+            Pr13AdvisoryProviderV1::GitHub,
+            ProviderEvaluationStateV1::Unavailable,
+        );
+    }
+    if !ci_requested {
+        contributions.set_state(
+            Pr13AdvisoryProviderV1::Ci,
+            ProviderEvaluationStateV1::Unavailable,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,5 +1045,67 @@ mod tests {
             contributions: Pr13AdvisoryContributionsV1::absent(),
         };
         assert!(outcome.publication().is_none());
+    }
+
+    #[test]
+    fn provider_state_events_preserve_each_closed_provider_identity() {
+        let events = Pr13AdvisoryContributionsV1::absent()
+            .providers
+            .iter()
+            .map(provider_state_event)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events,
+            vec![
+                Plan26FeedbackSourceEventV1::ProviderState {
+                    provider: Plan26AdvisoryProviderV1::GitHubReview,
+                    state: ProviderEvaluationStateV1::Absent,
+                },
+                Plan26FeedbackSourceEventV1::ProviderState {
+                    provider: Plan26AdvisoryProviderV1::CiLocalization,
+                    state: ProviderEvaluationStateV1::Absent,
+                },
+                Plan26FeedbackSourceEventV1::ProviderState {
+                    provider: Plan26AdvisoryProviderV1::Proximity,
+                    state: ProviderEvaluationStateV1::Absent,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unrequested_remote_providers_are_typed_unavailable_not_omitted() {
+        let mut contributions = Pr13AdvisoryContributionsV1::absent();
+        mark_unrequested_remote_providers(&mut contributions, false, false);
+        assert_eq!(
+            contributions
+                .providers
+                .iter()
+                .map(|provider| provider.state)
+                .collect::<Vec<_>>(),
+            vec![
+                ProviderEvaluationStateV1::Unavailable,
+                ProviderEvaluationStateV1::Unavailable,
+                ProviderEvaluationStateV1::Absent,
+            ]
+        );
+        assert_eq!(
+            contributions
+                .providers
+                .iter()
+                .take(2)
+                .map(provider_state_event)
+                .collect::<Vec<_>>(),
+            vec![
+                Plan26FeedbackSourceEventV1::ProviderState {
+                    provider: Plan26AdvisoryProviderV1::GitHubReview,
+                    state: ProviderEvaluationStateV1::Unavailable,
+                },
+                Plan26FeedbackSourceEventV1::ProviderState {
+                    provider: Plan26AdvisoryProviderV1::CiLocalization,
+                    state: ProviderEvaluationStateV1::Unavailable,
+                },
+            ]
+        );
     }
 }

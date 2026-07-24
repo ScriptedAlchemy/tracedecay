@@ -259,6 +259,8 @@ pub enum ContextScoutRouteV1 {
 pub struct ContextScoutSelectionV1 {
     pub route: ContextScoutRouteV1,
     pub decision: ContextScoutDecisionV1,
+    #[serde(default)]
+    pub model_outcome: ContextScoutModelRunOutcomeV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_receipt: Option<ContextScoutModelReceiptV1>,
 }
@@ -273,6 +275,8 @@ pub enum ContextScoutErrorV1 {
     InvalidCandidate,
     #[error("Context Scout limits are invalid")]
     InvalidLimits,
+    #[error("Context Scout typed configuration is unavailable")]
+    ConfigurationUnavailable,
     #[error("Context Scout durable boundary received dirty-overlay evidence")]
     DirtyOverlayDurabilityViolation,
     #[error("Context Scout receipt or feedback does not match its envelope")]
@@ -402,6 +406,33 @@ pub enum ContextScoutModelErrorV1 {
     TokenBudgetExceeded,
     #[error("configured Context Scout model route returned invalid structured output")]
     InvalidOutput,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutModelRunOutcomeV1 {
+    #[default]
+    NotRequested,
+    Succeeded,
+    Disabled,
+    Unavailable,
+    Cancelled,
+    DeadlineExceeded,
+    TokenBudgetExceeded,
+    InvalidOutput,
+}
+
+impl From<ContextScoutModelErrorV1> for ContextScoutModelRunOutcomeV1 {
+    fn from(error: ContextScoutModelErrorV1) -> Self {
+        match error {
+            ContextScoutModelErrorV1::Disabled => Self::Disabled,
+            ContextScoutModelErrorV1::Unavailable => Self::Unavailable,
+            ContextScoutModelErrorV1::Cancelled => Self::Cancelled,
+            ContextScoutModelErrorV1::DeadlineExceeded => Self::DeadlineExceeded,
+            ContextScoutModelErrorV1::TokenBudgetExceeded => Self::TokenBudgetExceeded,
+            ContextScoutModelErrorV1::InvalidOutput => Self::InvalidOutput,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -556,6 +587,7 @@ pub async fn select_model_assisted_context_scout(
             return Ok(ContextScoutSelectionV1 {
                 route: ContextScoutRouteV1::Deterministic,
                 decision: deterministic,
+                model_outcome: ContextScoutModelRunOutcomeV1::NotRequested,
                 model_receipt: None,
             });
         }
@@ -564,16 +596,46 @@ pub async fn select_model_assisted_context_scout(
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
             decision: deterministic,
+            model_outcome: ContextScoutModelRunOutcomeV1::TokenBudgetExceeded,
             model_receipt: None,
         });
     };
-    let Ok(proposal) = model.propose(request, execution).await else {
+    let requested_backend = model.backend();
+    let max_input_tokens = execution.max_input_tokens;
+    let max_output_tokens = execution.max_output_tokens;
+    let post_execution = execution.clone();
+    let proposal = match model.propose(request, execution).await {
+        Ok(proposal) => proposal,
+        Err(error) => {
+            return Ok(ContextScoutSelectionV1 {
+                route: ContextScoutRouteV1::DeterministicFallback,
+                decision: deterministic,
+                model_outcome: error.into(),
+                model_receipt: None,
+            });
+        }
+    };
+    if let Err(error) = post_execution.checkpoint() {
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
             decision: deterministic,
+            model_outcome: error.into(),
             model_receipt: None,
         });
-    };
+    }
+    if !valid_model_receipt(
+        &proposal.receipt,
+        requested_backend,
+        max_input_tokens,
+        max_output_tokens,
+    ) {
+        return Ok(ContextScoutSelectionV1 {
+            route: ContextScoutRouteV1::DeterministicFallback,
+            decision: deterministic,
+            model_outcome: ContextScoutModelRunOutcomeV1::InvalidOutput,
+            model_receipt: None,
+        });
+    }
     let Some(candidate) = validated_model_candidate(
         selected_candidate,
         limits,
@@ -583,6 +645,7 @@ pub async fn select_model_assisted_context_scout(
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
             decision: deterministic,
+            model_outcome: ContextScoutModelRunOutcomeV1::InvalidOutput,
             model_receipt: None,
         });
     };
@@ -591,8 +654,29 @@ pub async fn select_model_assisted_context_scout(
     Ok(ContextScoutSelectionV1 {
         route: ContextScoutRouteV1::ModelAssisted,
         decision: select_deterministic_context_scout(&model_input, limits)?,
+        model_outcome: ContextScoutModelRunOutcomeV1::Succeeded,
         model_receipt: Some(proposal.receipt),
     })
+}
+
+fn valid_model_receipt(
+    receipt: &ContextScoutModelReceiptV1,
+    requested_backend: ContextScoutModelBackendV1,
+    max_input_tokens: usize,
+    max_output_tokens: usize,
+) -> bool {
+    requested_backend == ContextScoutModelBackendV1::CodexAppServer
+        && receipt.requested_backend == requested_backend
+        && receipt
+            .actual_model
+            .as_ref()
+            .is_none_or(|model| !model.trim().is_empty() && model.len() <= MAX_SCOUT_TEXT_BYTES)
+        && receipt
+            .input_tokens
+            .is_none_or(|tokens| tokens <= max_input_tokens as u64)
+        && receipt
+            .output_tokens
+            .is_none_or(|tokens| tokens <= max_output_tokens as u64)
 }
 
 fn model_request(
@@ -1025,6 +1109,8 @@ fn validate_durable_envelope(
 pub struct ContextScoutDurableQueueEntryV1 {
     pub work: ContextScoutWorkV1,
     pub route: ContextScoutRouteV1,
+    #[serde(default)]
+    pub model_outcome: ContextScoutModelRunOutcomeV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_receipt: Option<ContextScoutModelReceiptV1>,
     pub envelope: ContextScoutSuggestionEnvelopeV1,
@@ -1036,11 +1122,24 @@ impl ContextScoutDurableQueueEntryV1 {
         if self.work.generation == 0 || self.work.input_watermark == [0; 32] {
             return Err(ContextScoutErrorV1::StaleWork);
         }
-        match (self.route, self.model_receipt.as_ref()) {
-            (ContextScoutRouteV1::ModelAssisted, Some(receipt))
-                if receipt.requested_backend == ContextScoutModelBackendV1::CodexAppServer => {}
+        match (self.route, self.model_outcome, self.model_receipt.as_ref()) {
+            (
+                ContextScoutRouteV1::ModelAssisted,
+                ContextScoutModelRunOutcomeV1::Succeeded,
+                Some(receipt),
+            ) if receipt.requested_backend == ContextScoutModelBackendV1::CodexAppServer => {}
             (
                 ContextScoutRouteV1::Deterministic | ContextScoutRouteV1::DeterministicFallback,
+                ContextScoutModelRunOutcomeV1::NotRequested,
+                None,
+            ) => {}
+            (
+                ContextScoutRouteV1::DeterministicFallback,
+                ContextScoutModelRunOutcomeV1::Disabled
+                | ContextScoutModelRunOutcomeV1::Unavailable
+                | ContextScoutModelRunOutcomeV1::DeadlineExceeded
+                | ContextScoutModelRunOutcomeV1::TokenBudgetExceeded
+                | ContextScoutModelRunOutcomeV1::InvalidOutput,
                 None,
             ) => {}
             _ => return Err(ContextScoutErrorV1::InvalidCandidate),
@@ -1247,12 +1346,20 @@ pub struct ContextScoutControlV1 {
     pub configuration_revision: [u8; 32],
     pub state: ContextScoutServiceStateV1,
     pub mode: ContextScoutRuntimeModeV1,
+    pub model_path: Option<ContextScoutModelBackendV1>,
     pub limits: ContextScoutLimitsV1,
 }
 
 impl ContextScoutControlV1 {
     fn validate(self) -> Result<(), ContextScoutErrorV1> {
-        if self.configuration_revision == [0; 32] {
+        if self.configuration_revision == [0; 32]
+            || matches!(
+                (self.mode, self.model_path),
+                (ContextScoutRuntimeModeV1::Deterministic, Some(_))
+                    | (ContextScoutRuntimeModeV1::ConfiguredModel, None)
+            )
+            || self.model_path == Some(ContextScoutModelBackendV1::Disabled)
+        {
             return Err(ContextScoutErrorV1::InvalidLimits);
         }
         self.limits.validate()
@@ -1261,12 +1368,20 @@ impl ContextScoutControlV1 {
 
 /// Read-only status for host/dashboard projection. Internal Scout work is
 /// suggestion coalescing only and never creates a task or work-graph node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextScoutStatusV1 {
     pub configuration_revision: [u8; 32],
     pub state: ContextScoutServiceStateV1,
     pub mode: ContextScoutRuntimeModeV1,
+    pub model_path: Option<ContextScoutModelBackendV1>,
+    pub limits: ContextScoutLimitsV1,
     pub active_suggestions: usize,
+    pub last_route: Option<ContextScoutRouteV1>,
+    pub last_suppression: Option<ContextScoutSuppressionV1>,
+    pub last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
+    pub last_model_receipt: Option<ContextScoutModelReceiptV1>,
+    pub last_delivery_outcome: Option<ContextScoutOutcomeV1>,
+    pub last_feedback: Option<ContextScoutFeedbackKindV1>,
 }
 
 /// Result of preparing one suggestion. Silence is a successful, normal output
@@ -1290,6 +1405,12 @@ pub struct ContextScoutDurableRuntimeV1<S, M> {
     store: S,
     model: M,
     coalescer: ContextScoutCoalescerV1,
+    last_route: Option<ContextScoutRouteV1>,
+    last_suppression: Option<ContextScoutSuppressionV1>,
+    last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
+    last_model_receipt: Option<ContextScoutModelReceiptV1>,
+    last_delivery_outcome: Option<ContextScoutOutcomeV1>,
+    last_feedback: Option<ContextScoutFeedbackKindV1>,
 }
 
 impl<S, M> ContextScoutDurableRuntimeV1<S, M> {
@@ -1298,11 +1419,21 @@ impl<S, M> ContextScoutDurableRuntimeV1<S, M> {
             store,
             model,
             coalescer: ContextScoutCoalescerV1::default(),
+            last_route: None,
+            last_suppression: None,
+            last_model_outcome: None,
+            last_model_receipt: None,
+            last_delivery_outcome: None,
+            last_feedback: None,
         }
     }
 
     pub fn is_current(&self, work: ContextScoutWorkV1) -> bool {
         self.coalescer.is_current(work)
+    }
+
+    pub(crate) fn replace_model(&mut self, model: M) {
+        self.model = model;
     }
 
     pub fn status(
@@ -1314,7 +1445,15 @@ impl<S, M> ContextScoutDurableRuntimeV1<S, M> {
             configuration_revision: control.configuration_revision,
             state: control.state,
             mode: control.mode,
+            model_path: control.model_path,
+            limits: control.limits,
             active_suggestions: self.coalescer.active.len(),
+            last_route: self.last_route,
+            last_suppression: self.last_suppression,
+            last_model_outcome: self.last_model_outcome,
+            last_model_receipt: self.last_model_receipt.clone(),
+            last_delivery_outcome: self.last_delivery_outcome,
+            last_feedback: self.last_feedback,
         })
     }
 }
@@ -1326,7 +1465,7 @@ where
 {
     /// Obey daemon-owned enable/pause/model configuration before creating
     /// process-local work or invoking the configured model adapter.
-    pub async fn prepare_controlled(
+    pub(crate) async fn prepare_controlled(
         &mut self,
         input: &ContextScoutSelectionInputV1,
         control: ContextScoutControlV1,
@@ -1337,12 +1476,18 @@ where
             return Err(ContextScoutErrorV1::InvalidCandidate);
         }
         match control.state {
-            ContextScoutServiceStateV1::Paused => Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
-                reason: ContextScoutSuppressionV1::Paused,
-            }),
-            ContextScoutServiceStateV1::Disabled => Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
-                reason: ContextScoutSuppressionV1::Disabled,
-            }),
+            ContextScoutServiceStateV1::Paused => {
+                self.last_suppression = Some(ContextScoutSuppressionV1::Paused);
+                Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
+                    reason: ContextScoutSuppressionV1::Paused,
+                })
+            }
+            ContextScoutServiceStateV1::Disabled => {
+                self.last_suppression = Some(ContextScoutSuppressionV1::Disabled);
+                Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
+                    reason: ContextScoutSuppressionV1::Disabled,
+                })
+            }
             ContextScoutServiceStateV1::Active => {
                 if control.mode == ContextScoutRuntimeModeV1::ConfiguredModel
                     && !model_execution.matches_limits(control.limits)
@@ -1357,7 +1502,7 @@ where
 
     /// Select, bind, and durably enqueue at most one suggestion. Privacy and
     /// dirty-overlay suppression run before model invocation or persistence.
-    pub async fn prepare(
+    async fn prepare(
         &mut self,
         input: &ContextScoutSelectionInputV1,
         limits: ContextScoutLimitsV1,
@@ -1368,6 +1513,7 @@ where
             ContextScoutRuntimeModeV1::Deterministic => ContextScoutSelectionV1 {
                 route: ContextScoutRouteV1::Deterministic,
                 decision: select_deterministic_context_scout(input, limits)?,
+                model_outcome: ContextScoutModelRunOutcomeV1::NotRequested,
                 model_receipt: None,
             },
             ContextScoutRuntimeModeV1::ConfiguredModel => {
@@ -1375,11 +1521,21 @@ where
                     .await?
             }
         };
+        self.last_route = Some(selection.route);
+        self.last_model_outcome = Some(selection.model_outcome);
+        self.last_model_receipt = selection.model_receipt.clone();
+        if selection.model_outcome == ContextScoutModelRunOutcomeV1::Cancelled {
+            self.last_suppression = Some(ContextScoutSuppressionV1::Cancelled);
+            return Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
+                reason: ContextScoutSuppressionV1::Cancelled,
+            });
+        }
         let model_receipt = selection.model_receipt.clone();
         let envelope = match selection.decision {
             ContextScoutDecisionV1::Ready { envelope }
             | ContextScoutDecisionV1::Delayed { envelope } => envelope,
             ContextScoutDecisionV1::Suppressed { reason } => {
+                self.last_suppression = Some(reason);
                 return Ok(ContextScoutRuntimeOutcomeV1::Suppressed { reason });
             }
         };
@@ -1392,6 +1548,7 @@ where
         let entry = ContextScoutDurableQueueEntryV1 {
             work,
             route: selection.route,
+            model_outcome: selection.model_outcome,
             model_receipt,
             envelope,
         };
@@ -1401,6 +1558,7 @@ where
             let _ = self.coalescer.cancel(work);
             return Ok(ContextScoutRuntimeOutcomeV1::Unavailable);
         }
+        self.last_suppression = None;
         Ok(ContextScoutRuntimeOutcomeV1::Enqueued {
             entry: Box::new(entry),
             store_outcome,
@@ -1414,6 +1572,7 @@ where
         work: ContextScoutWorkV1,
     ) -> Result<ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1> {
         self.coalescer.cancel(work)?;
+        self.last_suppression = Some(ContextScoutSuppressionV1::Cancelled);
         Ok(self.store.cancel_work(work).await)
     }
 
@@ -1433,6 +1592,7 @@ where
         ) && self.coalescer.is_current(entry.work)
         {
             self.coalescer.cancel(entry.work)?;
+            self.last_delivery_outcome = Some(receipt.outcome);
         }
         Ok(outcome)
     }
@@ -1440,12 +1600,20 @@ where
     /// Feedback remains explicit and bound to the receipt; adjacency never
     /// becomes acceptance or correction.
     pub async fn record_feedback(
-        &self,
+        &mut self,
         receipt: &ContextScoutDeliveryReceiptV1,
         feedback: ContextScoutFeedbackV1,
     ) -> Result<ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1> {
         validate_context_scout_feedback(receipt, feedback)?;
-        Ok(self.store.record_feedback(receipt, feedback).await)
+        let outcome = self.store.record_feedback(receipt, feedback).await;
+        if matches!(
+            outcome,
+            ContextScoutDurableStoreOutcomeV1::Stored
+                | ContextScoutDurableStoreOutcomeV1::Duplicate
+        ) {
+            self.last_feedback = Some(feedback.kind);
+        }
+        Ok(outcome)
     }
 }
 
@@ -1612,6 +1780,68 @@ mod tests {
         }
     }
 
+    struct MismatchedReceiptModel;
+
+    impl ContextScoutModelAssistantV1 for MismatchedReceiptModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            request: ContextScoutModelRequestV1,
+            _execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            Box::pin(async move {
+                let candidate = request
+                    .candidates
+                    .first()
+                    .ok_or(ContextScoutModelErrorV1::InvalidOutput)?;
+                Ok(ContextScoutModelProposalV1 {
+                    candidate: ContextScoutModelCandidateV1 {
+                        selected_dedupe_key: candidate.dedupe_key,
+                        suggestion_text: candidate.suggestion_text.clone(),
+                        cited_anchor_ids: candidate.citation_anchor_ids.clone(),
+                    },
+                    receipt: ContextScoutModelReceiptV1 {
+                        requested_backend: ContextScoutModelBackendV1::Unsupported,
+                        ..model_receipt()
+                    },
+                })
+            })
+        }
+    }
+
+    struct CancellationIgnoringModel;
+
+    impl ContextScoutModelAssistantV1 for CancellationIgnoringModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            request: ContextScoutModelRequestV1,
+            execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            Box::pin(async move {
+                execution.cancellation.cancel();
+                let candidate = request
+                    .candidates
+                    .first()
+                    .ok_or(ContextScoutModelErrorV1::InvalidOutput)?;
+                Ok(ContextScoutModelProposalV1 {
+                    candidate: ContextScoutModelCandidateV1 {
+                        selected_dedupe_key: candidate.dedupe_key,
+                        suggestion_text: candidate.suggestion_text.clone(),
+                        cited_anchor_ids: candidate.citation_anchor_ids.clone(),
+                    },
+                    receipt: model_receipt(),
+                })
+            })
+        }
+    }
+
     struct DuplicateCitationModel;
 
     impl ContextScoutModelAssistantV1 for DuplicateCitationModel {
@@ -1637,6 +1867,23 @@ mod tests {
         }
     }
 
+    struct FailingModel(ContextScoutModelErrorV1);
+
+    impl ContextScoutModelAssistantV1 for FailingModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            _request: ContextScoutModelRequestV1,
+            _execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            let error = self.0;
+            Box::pin(async move { Err(error) })
+        }
+    }
+
     #[tokio::test]
     async fn malformed_model_output_falls_back_to_evidence_bound_determinism() {
         let selection = select_model_assisted_context_scout(
@@ -1648,10 +1895,90 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+        assert_eq!(
+            selection.model_outcome,
+            ContextScoutModelRunOutcomeV1::InvalidOutput
+        );
         assert!(matches!(
             selection.decision,
             ContextScoutDecisionV1::Ready { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn model_failures_are_typed_while_deterministic_fallback_survives() {
+        for (error, expected) in [
+            (
+                ContextScoutModelErrorV1::Disabled,
+                ContextScoutModelRunOutcomeV1::Disabled,
+            ),
+            (
+                ContextScoutModelErrorV1::Unavailable,
+                ContextScoutModelRunOutcomeV1::Unavailable,
+            ),
+            (
+                ContextScoutModelErrorV1::DeadlineExceeded,
+                ContextScoutModelRunOutcomeV1::DeadlineExceeded,
+            ),
+            (
+                ContextScoutModelErrorV1::TokenBudgetExceeded,
+                ContextScoutModelRunOutcomeV1::TokenBudgetExceeded,
+            ),
+        ] {
+            let selection = select_model_assisted_context_scout(
+                &input(vec![candidate(1, 10)]),
+                ContextScoutLimitsV1::bounded_defaults(),
+                &FailingModel(error),
+                model_execution(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+            assert_eq!(selection.model_outcome, expected);
+            assert!(matches!(
+                selection.decision,
+                ContextScoutDecisionV1::Ready { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_model_receipt_is_typed_invalid_output() {
+        let selection = select_model_assisted_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &MismatchedReceiptModel,
+            model_execution(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+        assert_eq!(
+            selection.model_outcome,
+            ContextScoutModelRunOutcomeV1::InvalidOutput
+        );
+        assert!(selection.model_receipt.is_none());
+    }
+
+    #[tokio::test]
+    async fn model_adapter_cannot_ignore_cancellation_before_durable_selection() {
+        let selection = select_model_assisted_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &CancellationIgnoringModel,
+            model_execution(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+        assert_eq!(
+            selection.model_outcome,
+            ContextScoutModelRunOutcomeV1::Cancelled
+        );
+        assert!(selection.model_receipt.is_none());
     }
 
     #[tokio::test]
@@ -1949,6 +2276,28 @@ mod tests {
         assert_eq!(store_outcome, ContextScoutDurableStoreOutcomeV1::Stored);
         assert_eq!(entry.route, ContextScoutRouteV1::ModelAssisted);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let status = runtime
+            .status(ContextScoutControlV1 {
+                configuration_revision: [16; 32],
+                state: ContextScoutServiceStateV1::Active,
+                mode: ContextScoutRuntimeModeV1::ConfiguredModel,
+                model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
+                limits: ContextScoutLimitsV1::bounded_defaults(),
+            })
+            .unwrap();
+        assert_eq!(
+            status.last_model_outcome,
+            Some(ContextScoutModelRunOutcomeV1::Succeeded)
+        );
+        assert_eq!(status.last_model_receipt, Some(model_receipt()));
+        let mut forged_cancelled_entry = (*entry).clone();
+        forged_cancelled_entry.route = ContextScoutRouteV1::DeterministicFallback;
+        forged_cancelled_entry.model_outcome = ContextScoutModelRunOutcomeV1::Cancelled;
+        forged_cancelled_entry.model_receipt = None;
+        assert_eq!(
+            forged_cancelled_entry.validate(),
+            Err(ContextScoutErrorV1::InvalidCandidate)
+        );
         let mut restarted = ContextScoutDurableRuntimeV1::new(store.clone(), model);
         let replay = restarted
             .prepare(
@@ -1994,6 +2343,7 @@ mod tests {
             configuration_revision: [16; 32],
             state: ContextScoutServiceStateV1::Active,
             mode: ContextScoutRuntimeModeV1::ConfiguredModel,
+            model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
             limits,
         };
         let widened_execution = ContextScoutModelExecutionV1 {
@@ -2011,6 +2361,109 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(store.0.lock().unwrap().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_model_run_never_reaches_the_durable_queue() {
+        let store = DurableStore::default();
+        let mut runtime = ContextScoutDurableRuntimeV1::new(
+            store.clone(),
+            FailingModel(ContextScoutModelErrorV1::Cancelled),
+        );
+        let outcome = runtime
+            .prepare(
+                &input(vec![candidate(1, 10)]),
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::ConfiguredModel,
+                model_execution(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            ContextScoutRuntimeOutcomeV1::Suppressed {
+                reason: ContextScoutSuppressionV1::Cancelled,
+            }
+        );
+        assert!(store.0.lock().unwrap().entries.is_empty());
+        let status = runtime
+            .status(ContextScoutControlV1 {
+                configuration_revision: [16; 32],
+                state: ContextScoutServiceStateV1::Active,
+                mode: ContextScoutRuntimeModeV1::ConfiguredModel,
+                model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
+                limits: ContextScoutLimitsV1::bounded_defaults(),
+            })
+            .unwrap();
+        assert_eq!(
+            status.last_model_outcome,
+            Some(ContextScoutModelRunOutcomeV1::Cancelled)
+        );
+        assert_eq!(
+            status.last_suppression,
+            Some(ContextScoutSuppressionV1::Cancelled)
+        );
+        assert_eq!(
+            status.last_route,
+            Some(ContextScoutRouteV1::DeterministicFallback)
+        );
+        assert!(status.last_model_receipt.is_none());
+    }
+
+    #[tokio::test]
+    async fn delivery_and_explicit_feedback_are_visible_in_status() {
+        let store = DurableStore::default();
+        let mut runtime = ContextScoutDurableRuntimeV1::new(store, BadModel);
+        let ContextScoutRuntimeOutcomeV1::Enqueued { entry, .. } = runtime
+            .prepare(
+                &input(vec![candidate(1, 10)]),
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::Deterministic,
+                model_execution(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("deterministic candidate should enqueue");
+        };
+        let receipt = ContextScoutDeliveryReceiptV1 {
+            receipt_id: [31; 16],
+            envelope_id: entry.envelope.envelope_id,
+            delivered_at: UtcMicros(20),
+            outcome: ContextScoutOutcomeV1::Displayed,
+        };
+        runtime.complete_delivery(&entry, &receipt).await.unwrap();
+        runtime
+            .record_feedback(
+                &receipt,
+                ContextScoutFeedbackV1 {
+                    receipt_id: receipt.receipt_id,
+                    kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
+                },
+            )
+            .await
+            .unwrap();
+        let status = runtime
+            .status(ContextScoutControlV1 {
+                configuration_revision: [16; 32],
+                state: ContextScoutServiceStateV1::Active,
+                mode: ContextScoutRuntimeModeV1::Deterministic,
+                model_path: None,
+                limits: ContextScoutLimitsV1::bounded_defaults(),
+            })
+            .unwrap();
+        assert_eq!(
+            status.last_delivery_outcome,
+            Some(ContextScoutOutcomeV1::Displayed)
+        );
+        assert_eq!(
+            status.last_feedback,
+            Some(ContextScoutFeedbackKindV1::ExplicitlyAccepted)
+        );
+        assert_eq!(status.limits, ContextScoutLimitsV1::bounded_defaults());
+        assert_eq!(status.last_route, Some(ContextScoutRouteV1::Deterministic));
+        assert!(status.last_suppression.is_none());
     }
 
     #[tokio::test]

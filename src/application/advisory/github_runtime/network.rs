@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
@@ -102,38 +101,15 @@ impl GitHubReadPermissionV1 {
 }
 
 #[derive(Clone)]
-pub struct GitHubReadOnlyCredentialV1 {
-    token: Option<String>,
-    permissions: BTreeSet<GitHubReadPermissionV1>,
-}
+pub struct GitHubReadOnlyCredentialV1;
 
 impl GitHubReadOnlyCredentialV1 {
     pub fn anonymous() -> Self {
-        Self {
-            token: None,
-            permissions: BTreeSet::new(),
-        }
+        Self
     }
 
-    pub fn from_declared_scopes(
-        token: String,
-        declared_scopes: impl IntoIterator<Item = String>,
-    ) -> Option<Self> {
-        if token.trim().is_empty() {
-            return None;
-        }
-        let permissions = declared_scopes
-            .into_iter()
-            .map(|scope| GitHubReadPermissionV1::parse(scope.trim()))
-            .collect::<Option<BTreeSet<_>>>()?;
-        (!permissions.is_empty()).then_some(Self {
-            token: Some(token),
-            permissions,
-        })
-    }
-
-    fn permits(&self, permission: GitHubReadPermissionV1) -> bool {
-        self.token.is_none() || self.permissions.contains(&permission)
+    fn permits(&self, _permission: GitHubReadPermissionV1) -> bool {
+        true
     }
 }
 
@@ -280,7 +256,12 @@ impl GitHubReadOnlyClientV1 {
             self.target.pull_request_number,
             suffix
         );
-        let response = self.get(&url, request.resume.etag.as_ref());
+        let response = self.get(
+            &url,
+            (page == 1)
+                .then_some(request.resume.etag.as_ref())
+                .flatten(),
+        );
         Self::decode_rest_response(response, request.descriptor.operation)
     }
 
@@ -304,14 +285,21 @@ impl GitHubReadOnlyClientV1 {
             "loadThreads": true,
             "loadComments": false,
         });
-        let mut envelope = match self.graphql(&variables) {
-            Ok(envelope) => envelope,
+        let (mut envelope, mut rate_limit) = match self.graphql(&variables) {
+            Ok(page) => page,
             Err(failure) => return network_failure(failure),
         };
         if !envelope.errors.is_empty() {
+            if let Some(checkpoint) = rate_limit
+                .as_ref()
+                .filter(|checkpoint| checkpoint.remaining == 0)
+                .cloned()
+            {
+                return network_failure(HttpResponseV1::RateLimited(checkpoint));
+            }
             return GitHubReadNetworkOutcomeV1::Unavailable;
         }
-        if let Err(failure) = self.complete_nested_comment_pages(&mut envelope) {
+        if let Err(failure) = self.complete_nested_comment_pages(&mut envelope, &mut rate_limit) {
             return network_failure(failure);
         }
         let next_cursor = envelope
@@ -339,7 +327,7 @@ impl GitHubReadOnlyClientV1 {
                 status: GitHubReadNetworkStatusV1::Ok,
                 etag: None,
                 next_cursor,
-                rate_limit: None,
+                rate_limit,
             },
             body,
         })
@@ -348,6 +336,7 @@ impl GitHubReadOnlyClientV1 {
     fn complete_nested_comment_pages(
         &self,
         envelope: &mut GraphQlResponseV1,
+        rate_limit: &mut Option<GitHubReviewRateLimitCheckpointV1>,
     ) -> Result<(), HttpResponseV1> {
         let Some(threads) = envelope
             .data
@@ -358,10 +347,16 @@ impl GitHubReadOnlyClientV1 {
         else {
             return Err(HttpResponseV1::Unavailable);
         };
+        if threads.len() > 100 {
+            return Err(HttpResponseV1::Unavailable);
+        }
         let mut total = threads
             .iter()
             .map(|thread| thread.comments.nodes.len())
             .sum::<usize>();
+        if total > MAX_REVIEW_ITEMS_V1 {
+            return Err(HttpResponseV1::Unavailable);
+        }
         for thread in threads {
             let mut pages = 0_usize;
             while thread.comments.page_info.has_next_page {
@@ -382,8 +377,16 @@ impl GitHubReadOnlyClientV1 {
                     "loadThreads": false,
                     "loadComments": true,
                 });
-                let page = self.graphql(&variables)?;
+                let (page, page_rate_limit) = self.graphql(&variables)?;
+                merge_rate_limit(rate_limit, page_rate_limit);
                 if !page.errors.is_empty() {
+                    if let Some(checkpoint) = rate_limit
+                        .as_ref()
+                        .filter(|checkpoint| checkpoint.remaining == 0)
+                        .cloned()
+                    {
+                        return Err(HttpResponseV1::RateLimited(checkpoint));
+                    }
                     return Err(HttpResponseV1::Unavailable);
                 }
                 let Some(GraphQlCommentPageNodeV1 { id, comments }) =
@@ -405,16 +408,22 @@ impl GitHubReadOnlyClientV1 {
         Ok(())
     }
 
-    fn graphql(&self, variables: &serde_json::Value) -> Result<GraphQlResponseV1, HttpResponseV1> {
+    fn graphql(
+        &self,
+        variables: &serde_json::Value,
+    ) -> Result<(GraphQlResponseV1, Option<GitHubReviewRateLimitCheckpointV1>), HttpResponseV1>
+    {
         let payload = json!({
             "query": GITHUB_REVIEW_THREADS_QUERY_V1,
             "variables": variables,
         });
         let response = self.post_static_graphql(&payload);
         match response {
-            HttpResponseV1::Ok { body, .. } => {
-                serde_json::from_slice(&body).map_err(|_| HttpResponseV1::Unavailable)
-            }
+            HttpResponseV1::Ok {
+                body, rate_limit, ..
+            } => serde_json::from_slice(&body)
+                .map(|envelope| (envelope, rate_limit))
+                .map_err(|_| HttpResponseV1::Unavailable),
             failure => Err(failure),
         }
     }
@@ -493,9 +502,6 @@ impl GitHubReadOnlyClientV1 {
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "tracedecay-github-read");
-        if let Some(token) = self.credential.token.as_ref() {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
         if let Some(etag) = etag {
             request = request.header("If-None-Match", etag.as_str());
         }
@@ -503,15 +509,12 @@ impl GitHubReadOnlyClientV1 {
     }
 
     fn post_static_graphql(&self, payload: &serde_json::Value) -> HttpResponseV1 {
-        let mut request = self
+        let request = self
             .agent
             .post(&self.config.graphql_uri)
             .header("Accept", "application/json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "tracedecay-github-read");
-        if let Some(token) = self.credential.token.as_ref() {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
         decode_ureq_response(
             request.send_json(payload),
             MAX_GITHUB_READ_RESPONSE_BYTES_V1,
@@ -742,9 +745,12 @@ fn decode_ureq_response(
             rate_limit,
         },
         401 => HttpResponseV1::Denied,
-        403 | 429 => rate_limit
-            .filter(|limit| limit.remaining == 0)
-            .map_or(HttpResponseV1::Denied, HttpResponseV1::RateLimited),
+        403 | 429 => {
+            let retry_after = retry_after_checkpoint(response.headers(), rate_limit.as_ref());
+            retry_after
+                .or_else(|| rate_limit.filter(|limit| limit.remaining == 0))
+                .map_or(HttpResponseV1::Denied, HttpResponseV1::RateLimited)
+        }
         _ => HttpResponseV1::Unavailable,
     }
 }
@@ -810,6 +816,41 @@ fn rate_limit_checkpoint(
     checkpoint.validate().is_ok().then_some(checkpoint)
 }
 
+fn retry_after_checkpoint(
+    headers: &ureq::http::HeaderMap,
+    primary: Option<&GitHubReviewRateLimitCheckpointV1>,
+) -> Option<GitHubReviewRateLimitCheckpointV1> {
+    let primary = primary?;
+    let delay_seconds = header(headers, "retry-after")?.parse::<i64>().ok()?;
+    let reset_at = UtcMicros(
+        now_micros()
+            .0
+            .checked_add(delay_seconds.checked_mul(1_000_000)?)?,
+    );
+    let checkpoint = GitHubReviewRateLimitCheckpointV1 {
+        limit: primary.limit,
+        remaining: primary.remaining,
+        reset_at,
+    };
+    checkpoint.validate().is_ok().then_some(checkpoint)
+}
+
+fn merge_rate_limit(
+    current: &mut Option<GitHubReviewRateLimitCheckpointV1>,
+    next: Option<GitHubReviewRateLimitCheckpointV1>,
+) {
+    let Some(next) = next else {
+        return;
+    };
+    match current {
+        Some(current)
+            if current.limit == next.limit
+                && current.reset_at == next.reset_at
+                && current.remaining <= next.remaining => {}
+        _ => *current = Some(next),
+    }
+}
+
 fn parse_bounded<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     (bytes.len() <= MAX_GITHUB_READ_RESPONSE_BYTES_V1)
         .then(|| serde_json::from_slice(bytes).ok())
@@ -868,7 +909,7 @@ mod tests {
         GitHubReviewRefreshStateV1, GitHubReviewRefreshStoreCommitOutcomeV1,
     };
     use super::*;
-    use crate::db::{Database, DatabaseAuthority};
+    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
     const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const THREAD_CAPTURE: &str =
@@ -985,7 +1026,7 @@ mod tests {
         let body = serde_json::to_vec(value).unwrap();
         write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 4999\r\nX-RateLimit-Reset: 2000000000\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         )
         .unwrap();
@@ -1067,6 +1108,14 @@ mod tests {
         let GitHubReadNetworkOutcomeV1::Response(response) = outcome else {
             panic!("production GraphQL client must complete nested pagination");
         };
+        assert_eq!(
+            response.metadata.rate_limit,
+            Some(GitHubReviewRateLimitCheckpointV1 {
+                limit: 5_000,
+                remaining: 4_999,
+                reset_at: UtcMicros(2_000_000_000_000_000),
+            })
+        );
         let envelope: GraphQlResponseV1 = serde_json::from_slice(&response.body).unwrap();
         let comments = &envelope
             .data
@@ -1095,7 +1144,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("github-owner-bound.db");
         let authority = DatabaseAuthority::acquire_test(&path, "github owner-bound CAS").unwrap();
-        let (database, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
         let store =
             ProjectGitHubReviewStoreV1::new(database, owner_scope.clone()).expect("owner store");
         let context = context(&owner_scope);

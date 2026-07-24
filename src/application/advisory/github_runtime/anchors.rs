@@ -2,7 +2,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use libsql::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::RequestContext;
@@ -22,6 +21,7 @@ use super::{
 };
 use crate::application::advisory::{GitHubCurrentBranchRemapper, context_matches_scope};
 use crate::db::Database;
+use crate::db::engine::params;
 
 const ANCHOR_KEY_PREFIX_V1: &str = "feedback.github-review.anchor.v1.";
 const ANCHOR_ID_DOMAIN_V1: &str = "tracedecay.pr13.github.code-anchor.v1";
@@ -68,7 +68,10 @@ impl ProjectGitHubAnchorAuthorityV1 {
         request: &GitHubReviewReadRequestV1,
         seed: &GitHubReviewAnchorSeedV1,
     ) -> Option<GitHubCanonicalReviewAnchorsV1> {
-        if request.scope != self.scope || !valid_relative_path(&seed.path) {
+        if request.scope != self.scope
+            || !valid_relative_path(&seed.path)
+            || !safe_github_review_url(&seed.safe_url)
+        {
             return None;
         }
         let existing_id = original_anchor_id(&self.scope, seed).ok()?;
@@ -169,7 +172,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
             return false;
         };
         let Ok(mut rows) = transaction
-            .query(
+            .query_engine(
                 "SELECT value FROM metadata WHERE key = ?1",
                 params![key.as_str()],
             )
@@ -317,6 +320,28 @@ fn immutable_anchor(
     };
     anchor.validate().ok()?;
     Some(anchor)
+}
+
+fn safe_github_review_url(value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    let segments = url
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && segments.len() == 4
+        && segments[2] == "pull"
+        && segments[3].parse::<u64>().is_ok_and(|number| number > 0)
 }
 
 fn file_occurrence_id(
