@@ -35,6 +35,8 @@ export interface LoomWindow {
 
 /** One packed sub-lane inside a track. */
 export const LANE_HEIGHT = 16;
+/** Lanes stretch to fill a tall pane, but never become slabs. */
+export const MAX_LANE_HEIGHT = 46;
 export const LANE_GAP = 3;
 /** Breathing room above/below a track's stack of lanes. */
 export const TRACK_PAD = 7;
@@ -54,6 +56,8 @@ export interface TrackLayout {
   /** Top edge of the track band, relative to the top of the axis. */
   top: number;
   height: number;
+  /** Resolved lane height — lanes stretch to fill a tall viewport. */
+  laneHeight: number;
 }
 
 /* -------------------------------------------------------------------------
@@ -175,23 +179,36 @@ export function packTrack(spans: LoomSpan[], minGapSeconds = 0): LoomSpan[][] {
   return lanes;
 }
 
+/** Lane height that spends whatever vertical room the viewport can spare,
+ * within a legible band. A three-track weave in a tall pane should breathe;
+ * a thirty-lane weave should stay thin and scroll. */
+export function laneHeightFor(totalLanes: number, availableHeight: number): number {
+  if (totalLanes <= 0 || availableHeight <= 0) return LANE_HEIGHT;
+  const free = availableHeight - AXIS_HEIGHT - totalLanes * LANE_GAP;
+  return Math.min(Math.max(free / totalLanes, LANE_HEIGHT), MAX_LANE_HEIGHT);
+}
+
 /** Lay every track out vertically, packing each one against the current
  * viewport so lane count reflects what actually collides on screen. */
 export function layoutTracks(
   tracks: LoomTrack[],
   view: LoomWindow,
   width: number,
+  availableHeight = 0,
 ): TrackLayout[] {
   const minGap = width > 0 ? ((view.end - view.start) / width) * MIN_MARK_PX : 0;
+  const packed = tracks.map((track) => packTrack(track.spans, minGap));
+  const totalLanes = packed.reduce((sum, lanes) => sum + Math.max(lanes.length, 1), 0);
+  const laneHeight = laneHeightFor(totalLanes, availableHeight);
   const layouts: TrackLayout[] = [];
   let top = 0;
-  for (const track of tracks) {
-    const lanes = packTrack(track.spans, minGap);
+  tracks.forEach((track, index) => {
+    const lanes = packed[index] ?? [];
     const laneCount = Math.max(lanes.length, 1);
-    const height = TRACK_PAD * 2 + laneCount * LANE_HEIGHT + (laneCount - 1) * LANE_GAP;
-    layouts.push({ track, lanes, top, height });
+    const height = TRACK_PAD * 2 + laneCount * laneHeight + (laneCount - 1) * LANE_GAP;
+    layouts.push({ track, lanes, top, height, laneHeight });
     top += height;
-  }
+  });
   return layouts;
 }
 
@@ -215,7 +232,7 @@ export function pick(
   );
   if (!layout) return null;
   const laneY = localY - layout.top - TRACK_PAD;
-  const lane = Math.floor(laneY / (LANE_HEIGHT + LANE_GAP));
+  const lane = Math.floor(laneY / (layout.laneHeight + LANE_GAP));
   const spans = layout.lanes[lane];
   if (!spans) return null;
   let best: LoomSpan | null = null;
@@ -251,7 +268,38 @@ const TICK_STEPS = [
 export function tickStepFor(spanSeconds: number, width: number): number {
   const maxTicks = Math.min(Math.max(Math.floor(width / 96), 2), 14);
   const target = spanSeconds / maxTicks;
-  return TICK_STEPS.find((step) => step >= target) ?? TICK_STEPS[TICK_STEPS.length - 1]!;
+  const step =
+    TICK_STEPS.find((candidate) => candidate >= target) ??
+    TICK_STEPS[TICK_STEPS.length - 1]!;
+  // The two axis tiers must never say the same thing twice: the fine row wants
+  // to sit below whatever the calendar band row is showing. That preference
+  // never outranks legibility, though — dropping under the band unit can cost
+  // several rungs, and a bare "one rung below the band" rule prints 64 ticks
+  // across a two-year window. Take the LARGEST rung under the band (fewest
+  // ticks), and only if it still keeps ticks no closer than a ~48px pitch;
+  // otherwise the tiers share a unit and the band row carries the coarser one.
+  const ceiling = bandCeiling(spanSeconds);
+  if (step < ceiling) return step;
+  const denseLimit = Math.max(maxTicks, Math.floor(width / 48));
+  const finer = [...TICK_STEPS]
+    .reverse()
+    .find((candidate) => candidate < ceiling && spanSeconds / candidate <= denseLimit);
+  return finer ?? step;
+}
+
+/** Largest fine step allowed under the current calendar band scale. */
+function bandCeiling(spanSeconds: number): number {
+  const scale = bandScale(spanSeconds);
+  if (scale === 'hour') return 3600;
+  if (scale === 'day') return 86_400;
+  return 30 * 86_400;
+}
+
+/** Which calendar unit the upper axis tier bands by. */
+export function bandScale(spanSeconds: number): 'hour' | 'day' | 'month' {
+  if (spanSeconds <= 36 * 3600) return 'hour';
+  if (spanSeconds <= 70 * 86_400) return 'day';
+  return 'month';
 }
 
 /** Fine ticks: clock time inside a day, calendar dates above it. */
@@ -295,48 +343,55 @@ export interface DayBand {
   odd: boolean;
 }
 
-/** Calendar bands behind the ticks. Below a day of span the bands become the
- * hour scaffolding instead, so the upper axis tier is never empty. */
+/** Calendar bands behind the ticks: hours inside a day, days inside a season,
+ * months beyond that. The bands are the weave's warp — the eye reads their
+ * rhythm before it reads any single mark. */
 export function dayBands(view: LoomWindow, width: number): DayBand[] {
   if (width <= 0) return [];
   const spanSeconds = view.end - view.start;
+  const scale = bandScale(spanSeconds);
   const bands: DayBand[] = [];
-  const subDay = spanSeconds <= 36 * 3600;
   const cursor = new Date(view.start * 1000);
-  if (subDay) {
-    cursor.setMinutes(0, 0, 0);
-  } else {
-    cursor.setHours(0, 0, 0, 0);
-  }
+  if (scale === 'hour') cursor.setMinutes(0, 0, 0);
+  else if (scale === 'day') cursor.setHours(0, 0, 0, 0);
+  else cursor.setDate(1), cursor.setHours(0, 0, 0, 0);
+  const hourStride = Math.max(1, Math.round(spanSeconds / 3600 / 8));
   let guard = 0;
   while (cursor.getTime() / 1000 < view.end && guard < 400) {
     guard += 1;
     const time = cursor.getTime() / 1000;
     const next = new Date(cursor);
-    if (subDay) next.setHours(next.getHours() + Math.max(1, Math.round(spanSeconds / 3600 / 8)));
-    else next.setDate(next.getDate() + 1);
+    if (scale === 'hour') next.setHours(next.getHours() + hourStride);
+    else if (scale === 'day') next.setDate(next.getDate() + 1);
+    else next.setMonth(next.getMonth() + 1);
     const nextTime = next.getTime() / 1000;
     if (nextTime > view.start) {
       bands.push({
         x0: xFor(Math.max(time, view.start), view, width),
         x1: xFor(Math.min(nextTime, view.end), view, width),
         time,
-        label: subDay
-          ? new Date(time * 1000).toLocaleTimeString(undefined, {
-              hour: '2-digit',
-              minute: '2-digit',
-            })
-          : new Date(time * 1000).toLocaleDateString(undefined, {
-              weekday: 'short',
-              month: 'short',
-              day: 'numeric',
-            }),
+        label: bandLabel(time, scale),
         odd: bands.length % 2 === 1,
       });
     }
     cursor.setTime(next.getTime());
   }
   return bands;
+}
+
+function bandLabel(epochSeconds: number, scale: 'hour' | 'day' | 'month'): string {
+  const date = new Date(epochSeconds * 1000);
+  if (scale === 'hour') {
+    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+  if (scale === 'day') {
+    return date.toLocaleDateString(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+    });
+  }
+  return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 }
 
 /* -------------------------------------------------------------------------
