@@ -60,6 +60,23 @@ export const HrrCoverageRowSchema = z
   .passthrough();
 export type HrrCoverageRow = z.infer<typeof HrrCoverageRowSchema>;
 
+/** One `categories` row from overview_payload in facts.rs. */
+export const CategoryCountSchema = z
+  .object({ category: z.string(), count: z.number() })
+  .passthrough();
+export type CategoryCount = z.infer<typeof CategoryCountSchema>;
+
+/** One `growth` point from overview_payload in facts.rs (period bucket, facts
+ * added in that bucket, and the running total at that point). */
+export const GrowthPointSchema = z
+  .object({
+    date: z.string(),
+    facts: z.number(),
+    cumulative_facts: z.number(),
+  })
+  .passthrough();
+export type GrowthPoint = z.infer<typeof GrowthPointSchema>;
+
 export const MemoryOverviewPayloadSchema = z
   .object({
     query: z.string().optional(),
@@ -73,8 +90,10 @@ export const MemoryOverviewPayloadSchema = z
             facts: z.number().optional(),
             entities: z.number().optional(),
             banks: z.number().optional(),
+            categories: z.array(CategoryCountSchema).optional(),
             hrr_coverage: z.array(HrrCoverageRowSchema).optional(),
             trust_histogram: z.array(TrustBucketSchema).optional(),
+            growth: z.array(GrowthPointSchema).optional(),
           })
           .passthrough()
           .nullable()
