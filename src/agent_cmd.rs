@@ -2070,13 +2070,17 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
             agents.join(", ")
         );
         let results = reinstall_agent_integrations(&agents, &home, &tracedecay_bin).await;
+        // Keep the reason with the name — a bare id list left "failed for:
+        // claude, cursor, hermes, kimi" undiagnosable from the output.
         let failed: Vec<String> = results
             .iter()
-            .filter_map(|(id, result)| result.as_ref().err().map(|_| id.clone()))
+            .filter_map(|(id, result)| {
+                result.as_ref().err().map(|error| format!("{id}: {error}"))
+            })
             .collect();
         if !failed.is_empty() {
             return Err(tracedecay::errors::TraceDecayError::Config {
-                message: format!("failed to reinstall agent(s): {}", failed.join(", ")),
+                message: format!("failed to reinstall agent(s): {}", failed.join("; ")),
             });
         }
         eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");

@@ -685,9 +685,13 @@ pub(crate) enum ReinstallOutcome {
 pub(crate) fn partition_reinstall_results(
     results: Vec<(String, tracedecay::errors::Result<()>)>,
 ) -> ReinstallOutcome {
+    // Carry the reason, not just the name: a swallowed error here left
+    // `dogfood` reporting "failed for: claude, cursor, hermes, kimi" with no
+    // way to learn why short of reading the installer source. Matches the
+    // existing "<environment>: ..." entry format used below.
     let failed: Vec<String> = results
         .into_iter()
-        .filter_map(|(id, result)| result.err().map(|_| id))
+        .filter_map(|(id, result)| result.err().map(|error| format!("{id}: {error}")))
         .collect();
     if failed.is_empty() {
         ReinstallOutcome::AllOk
@@ -1133,7 +1137,13 @@ mod tests {
     fn partition_collects_only_failed_ids_in_order() {
         match partition_reinstall_results(vec![ok("claude"), err("cursor"), err("copilot")]) {
             ReinstallOutcome::PartialFailure { failed } => {
-                assert_eq!(failed, vec!["cursor".to_string(), "copilot".to_string()]);
+                assert_eq!(
+                    failed,
+                    vec![
+                        "cursor: config error: install failed".to_string(),
+                        "copilot: config error: install failed".to_string(),
+                    ],
+                );
             }
             ReinstallOutcome::AllOk => panic!("expected a partial failure"),
         }
@@ -1178,7 +1188,7 @@ mod tests {
     fn real_install_failure_yields_partial_failure() {
         match partition_reinstall_results(vec![ok("claude"), err("cursor")]) {
             ReinstallOutcome::PartialFailure { failed } => {
-                assert_eq!(failed, vec!["cursor".to_string()]);
+                assert_eq!(failed, vec!["cursor: config error: install failed".to_string()]);
             }
             ReinstallOutcome::AllOk => panic!("a real install() failure must gate markers"),
         }
