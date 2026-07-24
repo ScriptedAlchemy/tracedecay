@@ -5,7 +5,7 @@
 //! durable publication/dedupe authority used by the Plan 09 cycle; this module
 //! creates no feedback store, cache, cursor codec, or diagnostic authority.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -20,14 +20,19 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_application::feedback::{
-    FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1, FeedbackListResultV1,
+    FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1, FeedbackExpandRequestV1,
 };
-use tracedecay_application::{ApplicationOutcome, ApplicationResult, OperationTermination};
+use tracedecay_application::{
+    AnchorExpandRequest, ApplicationOutcome, ApplicationResult, OperationTermination, PageRequest,
+    ResultProjection, RetrievalOrder, RetrievalRequestMeta,
+};
 use tracedecay_domain::feedback::{
-    FeedbackCycleResultV1, FeedbackFindingV1, FeedbackImpactStateV1, ProviderEvaluationStateV1,
+    FeedbackCycleResultV1, FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackImpactStateV1,
+    ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, DiagnosticRecordStateV1, DiagnosticSeverityV1, UtcMicros,
+    CodeGenerationId, CommitId, ContentDigest, DiagnosticRecordStateV1, DiagnosticSeverityV1,
+    ManifestDigest, UtcMicros,
 };
 use tracedecay_store::DiagnosticStore as _;
 use url::Url;
@@ -45,12 +50,14 @@ use crate::daemon::lsp_gateway::LspAnalyzerCancellationAuthority;
 use crate::daemon::lsp_gateway::{
     AdmittedRoot, BrokerDiagnosticSnapshotAuthority, CanonicalContextProjectionAuthority,
     CanonicalDiagnosticRefreshRequest, ContextCoverage, ContextExpansionEnvelope,
-    ContextExpansionOutcome, ContextExpansionRequest, ContextExpansionScope,
-    ContextProjectionChange, ContextProjectionEnvelope, ContextProjectionItem,
-    ContextProjectionKind, ContextProjectionOutcome, ContextProjectionRegistration,
-    ContextProjectionRequest, DiagnosticSeverity, DiagnosticSource, FeedbackCycleRequest,
-    FeedbackCycleRuntimePort, GatewayCapabilities, GatewayDiagnostic, LspDiagnosticDocumentPort,
-    LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS,
+    ContextExpansionOutcome, ContextExpansionRequest, ContextExpansionScope, ContextFreshness,
+    ContextProducerState, ContextProjectionChange, ContextProjectionEnvelope,
+    ContextProjectionIdentity, ContextProjectionItem, ContextProjectionKind,
+    ContextProjectionOutcome, ContextProjectionRegistration, ContextProjectionRequest,
+    DiagnosticSeverity, DiagnosticSource, FeedbackCycleRequest, FeedbackCycleRuntimePort,
+    GatewayCapabilities, GatewayDiagnostic, GatewayDiagnosticCoverage, GatewayDiagnosticData,
+    GatewayDiagnosticIdentity, GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState,
+    LspDiagnosticDocumentPort, LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS,
     MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES, ManagedDiagnosticSnapshot,
     ManagedDiagnosticSnapshotPort, Pr12LspSessionFactory, SemanticProviderPort,
     TRACEDECAY_CONTEXT_REVISION, UpstreamCapabilities, byte_offset_to_utf16_position,
@@ -71,7 +78,27 @@ const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 pub struct LspFeedbackProjectionScope {
     pub head_commit_id: CommitId,
     pub code_generation_id: CodeGenerationId,
+    pub snapshot_digest: ManifestDigest,
+    pub invalidation_digest: ManifestDigest,
+    pub snapshot_content_digest: ContentDigest,
+    pub document_content_digest: Option<ContentDigest>,
     pub generation: u64,
+}
+
+impl LspFeedbackProjectionScope {
+    fn projection_identity(&self) -> ContextProjectionIdentity {
+        ContextProjectionIdentity {
+            head_commit_id: self.head_commit_id.as_str().to_owned(),
+            code_generation_id: self.code_generation_id.as_str().to_owned(),
+            snapshot_digest: self.snapshot_digest.as_str().to_owned(),
+            invalidation_digest: self.invalidation_digest.as_str().to_owned(),
+            snapshot_content_digest: self.snapshot_content_digest.as_str().to_owned(),
+            document_content_digest: self
+                .document_content_digest
+                .as_ref()
+                .map(|digest| digest.as_str().to_owned()),
+        }
+    }
 }
 
 struct CurrentFeedbackCycle {
@@ -91,13 +118,32 @@ struct StoredLspContextExpansionV1 {
     kind: ContextProjectionKind,
     stable_id: String,
     scope_digest: String,
-    head_commit_id: String,
-    code_generation_id: String,
+    identity: ContextProjectionIdentity,
     generation: u64,
     issued_at: UtcMicros,
     expires_at: UtcMicros,
     canonical_operation: FeedbackReadOperationV1,
     canonical_handle: String,
+}
+
+/// Exact current immutable code-index identity resolved by the daemon-owned
+/// mounted worktree scheduler. A mutable graph database or path-derived
+/// generation is not a legal implementation of this port.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LspCodeIndexProjectionIdentity {
+    pub code_generation_id: CodeGenerationId,
+    pub snapshot_digest: ManifestDigest,
+    pub invalidation_digest: ManifestDigest,
+    pub snapshot_content_digest: ContentDigest,
+    pub document_content_digest: Option<ContentDigest>,
+}
+
+pub trait LspCodeIndexProjectionIdentityPort: Send + Sync {
+    fn current_identity(
+        &self,
+        project_root: PathBuf,
+        document_relative_path: Option<String>,
+    ) -> LspRuntimeFuture<Result<LspCodeIndexProjectionIdentity, LspRuntimeFailure>>;
 }
 
 /// Resolves current scope through the existing admitted Git/graph owner.
@@ -122,12 +168,14 @@ pub struct RegisteredProjectLspAuthority {
     project_root: PathBuf,
     project_dir: Arc<Dir>,
     root_uri: Url,
+    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
 }
 
 impl RegisteredProjectLspAuthority {
     pub fn new(
         feedback: Arc<Pr12FeedbackRuntime>,
         database: Database,
+        code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     ) -> Result<Self, LspRuntimeFailure> {
         let project_root = feedback
             .project_root()
@@ -157,6 +205,7 @@ impl RegisteredProjectLspAuthority {
             project_root,
             project_dir: Arc::new(project_dir),
             root_uri,
+            code_index,
         })
     }
 
@@ -188,7 +237,7 @@ impl RegisteredProjectLspAuthority {
             .relative
             .to_str()
             .filter(|path| !path.is_empty())
-            .map(str::to_owned)
+            .map(|path| path.replace('\\', "/"))
             .ok_or_else(|| LspRuntimeFailure::new("document-path-invalid"))?;
         Ok((document.absolute, relative_path))
     }
@@ -218,7 +267,10 @@ impl RegisteredProjectLspAuthority {
         Ok(text)
     }
 
-    async fn current_scope(&self) -> Result<LspFeedbackProjectionScope, LspRuntimeFailure> {
+    async fn current_scope(
+        &self,
+        document_relative_path: Option<String>,
+    ) -> Result<LspFeedbackProjectionScope, LspRuntimeFailure> {
         self.feedback
             .scope()
             .validate()
@@ -232,26 +284,19 @@ impl RegisteredProjectLspAuthority {
                 .and_then(|commit| CommitId::new(commit.id().to_hex().to_string()).ok())
                 .ok_or_else(|| LspRuntimeFailure::new("registered-head-unavailable"))?
         };
-        if self
-            .database
-            .get_metadata("last_synced_commit")
-            .await
-            .map_err(|_| LspRuntimeFailure::new("registered-generation-watermark-failed"))?
-            .as_deref()
-            != Some(head_commit_id.as_str())
-        {
-            return Err(LspRuntimeFailure::new("registered-generation-not-current"));
-        }
-        let code_generation_id = DiagnosticsStore::new(self.database.conn())
-            .current_generation()
-            .await
-            .map_err(|_| LspRuntimeFailure::new("current-generation-read-failed"))?
-            .ok_or_else(|| LspRuntimeFailure::new("current-generation-unavailable"))?;
-        let generation = generation_sequence(&code_generation_id)
+        let identity = self
+            .code_index
+            .current_identity(self.project_root.clone(), document_relative_path)
+            .await?;
+        let generation = generation_sequence(&identity.code_generation_id)
             .ok_or_else(|| LspRuntimeFailure::new("current-generation-invalid"))?;
         Ok(LspFeedbackProjectionScope {
             head_commit_id,
-            code_generation_id,
+            code_generation_id: identity.code_generation_id,
+            snapshot_digest: identity.snapshot_digest,
+            invalidation_digest: identity.invalidation_digest,
+            snapshot_content_digest: identity.snapshot_content_digest,
+            document_content_digest: identity.document_content_digest,
             generation,
         })
     }
@@ -266,10 +311,11 @@ impl LspFeedbackProjectionScopePort for RegisteredProjectLspAuthority {
         let authority = self.clone();
         Box::pin(async move {
             authority.validate_root(&root)?;
-            if let Some(document_uri) = document_uri {
-                authority.document_path(&document_uri)?;
-            }
-            authority.current_scope().await
+            let document_relative_path = document_uri
+                .as_deref()
+                .map(|uri| authority.document_path(uri).map(|(_, relative)| relative))
+                .transpose()?;
+            authority.current_scope(document_relative_path).await
         })
     }
 }
@@ -344,6 +390,7 @@ pub trait LspFeedbackDiagnosticProjectionPort: Send + Sync {
         document_uri: String,
         scope: LspFeedbackProjectionScope,
         cycle: FeedbackCycleResultV1,
+        expansion_handles: BTreeMap<String, String>,
     ) -> LspRuntimeFuture<Result<Vec<GatewayDiagnostic>, LspRuntimeFailure>>;
 }
 
@@ -387,19 +434,24 @@ where
         document_uri: String,
         scope: LspFeedbackProjectionScope,
         cycle: FeedbackCycleResultV1,
+        expansion_handles: BTreeMap<String, String>,
     ) -> LspRuntimeFuture<Result<Vec<GatewayDiagnostic>, LspRuntimeFailure>> {
         let database = self.database.clone();
         let documents = Arc::clone(&self.documents);
         Box::pin(async move {
             let document = documents.snapshot(root, document_uri.clone()).await?;
             let store = DiagnosticsStore::new(database.conn());
+            let coverage = gateway_diagnostic_coverage(cycle_coverage(&cycle));
             let mut diagnostics = Vec::new();
             for finding in cycle.findings {
-                let Some(anchor) = finding.retrieval_anchor_id else {
+                if finding.lifecycle != FeedbackFindingLifecycleV1::Active {
+                    continue;
+                }
+                let Some(anchor) = finding.retrieval_anchor_id.as_ref() else {
                     continue;
                 };
                 let Some(record) = store
-                    .diagnostic_by_anchor(&anchor)
+                    .diagnostic_by_anchor(anchor)
                     .await
                     .map_err(|_| LspRuntimeFailure::new("diagnostic-anchor-read-failed"))?
                 else {
@@ -424,6 +476,44 @@ where
                     .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
                 let end = byte_offset_to_utf16_position(&document.text, end)
                     .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+                let data =
+                    scope
+                        .document_content_digest
+                        .as_ref()
+                        .and_then(|document_content_digest| {
+                            expansion_handles.get(finding.finding_id.as_str()).map(
+                                |expansion_handle| GatewayDiagnosticData {
+                                    identity: GatewayDiagnosticIdentity {
+                                        finding_id: finding.finding_id.as_str().to_owned(),
+                                        anchor_id: anchor.as_str().to_owned(),
+                                        generation: scope.generation,
+                                        head_commit_id: scope.head_commit_id.as_str().to_owned(),
+                                        code_generation_id: scope
+                                            .code_generation_id
+                                            .as_str()
+                                            .to_owned(),
+                                        snapshot_digest: scope.snapshot_digest.as_str().to_owned(),
+                                        invalidation_digest: scope
+                                            .invalidation_digest
+                                            .as_str()
+                                            .to_owned(),
+                                        snapshot_content_digest: scope
+                                            .snapshot_content_digest
+                                            .as_str()
+                                            .to_owned(),
+                                        document_content_digest: document_content_digest
+                                            .as_str()
+                                            .to_owned(),
+                                    },
+                                    lifecycle: gateway_diagnostic_lifecycle(finding.lifecycle),
+                                    provider_state: gateway_diagnostic_provider_state(
+                                        finding.provider_state,
+                                    ),
+                                    coverage,
+                                    expansion_handle: expansion_handle.clone(),
+                                },
+                            )
+                        });
                 diagnostics.push(GatewayDiagnostic {
                     uri: document_uri.clone(),
                     range: crate::daemon::lsp_gateway::LspRange { start, end },
@@ -436,6 +526,7 @@ where
                     code: Some(record.code),
                     message: record.message,
                     source: DiagnosticSource::TraceDecay,
+                    data,
                 });
             }
             Ok(diagnostics)
@@ -494,17 +585,20 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
     ) -> LspRuntimeFuture<ContextProjectionOutcome> {
         let projection = self.clone();
         Box::pin(async move {
-            if let Err(error) = projection
+            let scope = match projection
                 .project
-                .authorize_projection_root(root.clone(), document_uri.clone())
+                .resolve(root.clone(), document_uri.clone())
                 .await
             {
-                return ContextProjectionOutcome::Deferred {
-                    reason: error.class().to_owned(),
-                };
-            }
+                Ok(scope) => scope,
+                Err(error) => {
+                    return ContextProjectionOutcome::Deferred {
+                        reason: error.class().to_owned(),
+                    };
+                }
+            };
             match projection.events.latest_managed_test_run(root.uri()).await {
-                Ok(snapshot) => test_run_projection(root, document_uri, snapshot),
+                Ok(snapshot) => test_run_projection(root, document_uri, scope, snapshot),
                 Err(OperationEventError::FrontierExpired) => ContextProjectionOutcome::Deferred {
                     reason: "managed-test-run-frontier-expired".to_owned(),
                 },
@@ -612,72 +706,70 @@ impl ConcretePr12FeedbackLspSource {
         })
     }
 
-    async fn current_finding_items(
+    fn current_finding_items(
         &self,
         root: &AdmittedRoot,
         document_uri: Option<&str>,
         scope: &LspFeedbackProjectionScope,
+        findings: &[FeedbackFindingV1],
+        maximum_items: usize,
     ) -> Result<Vec<ContextProjectionItem>, LspRuntimeFailure> {
         let observed_at = now_micros();
         let expires_at = self
             .runtime
             .request_expiry_at(observed_at)
-            .map_err(|_| LspRuntimeFailure::new("feedback-list-expiry-unavailable"))?;
-        let sequence = self.next_request.fetch_add(1, Ordering::Relaxed);
-        let handle = self
-            .runtime
-            .mint_list(
-                format!("lsp-feedback-list-{sequence}"),
-                Some(scope.head_commit_id.clone()),
-                MAX_CONTEXT_PROJECTION_ITEMS as u32,
-                observed_at,
-            )
-            .map_err(|_| LspRuntimeFailure::new("feedback-list-mint-failed"))?;
-        let result = self
-            .owner
-            .invoke(FeedbackReadOperationV1::List, &handle, observed_at)
-            .await
-            .map_err(|_| LspRuntimeFailure::new("feedback-list-unavailable"))?;
-        let FeedbackReadInvocationResultV1::List(result) = result else {
-            return Err(LspRuntimeFailure::new("feedback-list-kind-mismatch"));
-        };
-        let envelope = result.map_err(|_| LspRuntimeFailure::new("feedback-list-failed"))?;
-        let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
-            return Err(LspRuntimeFailure::new("feedback-list-outcome-invalid"));
-        };
-        if evidence.execution.termination != OperationTermination::Completed {
-            return Err(LspRuntimeFailure::new("feedback-list-incomplete"));
-        }
-        let FeedbackListResultV1 { findings } = evidence
-            .payload
-            .ok_or_else(|| LspRuntimeFailure::new("feedback-list-result-unavailable"))?;
+            .map_err(|_| LspRuntimeFailure::new("feedback-finding-expiry-unavailable"))?;
         findings
-            .into_iter()
-            .filter_map(|finding| {
-                let canonical_operation = if finding.expand_handle.is_some() {
-                    FeedbackReadOperationV1::Expand
-                } else {
-                    FeedbackReadOperationV1::Get
-                };
-                let canonical_handle = finding
-                    .expand_handle
-                    .as_ref()
-                    .unwrap_or(&finding.get_handle)
-                    .as_str()
-                    .to_owned();
-                finding_item(&finding.finding).map(|item| {
-                    self.attach_context_handle(
-                        root,
-                        document_uri,
-                        ContextProjectionKind::diagnostics(),
-                        scope,
-                        observed_at,
-                        expires_at,
-                        canonical_operation,
-                        &canonical_handle,
-                        item,
-                    )
-                })
+            .iter()
+            .filter_map(|finding| finding_item(finding).map(|item| (finding, item)))
+            .take(maximum_items)
+            .map(|(finding, item)| {
+                let sequence = self.next_request.fetch_add(1, Ordering::Relaxed);
+                let (canonical_operation, canonical_handle) =
+                    if let Some(anchor) = finding.retrieval_anchor_id.as_ref() {
+                        let page = PageRequest::first(MAX_CONTEXT_PROJECTION_ITEMS as u32)
+                            .map_err(|_| LspRuntimeFailure::new("feedback-expand-page-invalid"))?;
+                        let handle = self
+                            .runtime
+                            .mint_expand(
+                                format!("lsp-feedback-expand-{sequence}"),
+                                FeedbackExpandRequestV1 {
+                                    finding_id: finding.finding_id.clone(),
+                                    expansion: AnchorExpandRequest {
+                                        anchor: anchor.clone(),
+                                        meta: RetrievalRequestMeta::current(
+                                            page,
+                                            ResultProjection::ReferencesOnly,
+                                            RetrievalOrder::StableIdentity,
+                                        ),
+                                    },
+                                },
+                                observed_at,
+                            )
+                            .map_err(|_| LspRuntimeFailure::new("feedback-expand-mint-failed"))?;
+                        (FeedbackReadOperationV1::Expand, handle)
+                    } else {
+                        let handle = self
+                            .runtime
+                            .mint_get(
+                                format!("lsp-feedback-get-{sequence}"),
+                                finding.finding_id.clone(),
+                                observed_at,
+                            )
+                            .map_err(|_| LspRuntimeFailure::new("feedback-get-mint-failed"))?;
+                        (FeedbackReadOperationV1::Get, handle)
+                    };
+                self.attach_context_handle(
+                    root,
+                    document_uri,
+                    ContextProjectionKind::diagnostics(),
+                    scope,
+                    observed_at,
+                    expires_at,
+                    canonical_operation,
+                    &canonical_handle,
+                    item,
+                )
             })
             .collect()
     }
@@ -702,8 +794,7 @@ impl ConcretePr12FeedbackLspSource {
             kind,
             stable_id: item.stable_id.clone(),
             scope_digest: self.runtime.scope().scope_digest.as_str().to_owned(),
-            head_commit_id: scope.head_commit_id.as_str().to_owned(),
-            code_generation_id: scope.code_generation_id.as_str().to_owned(),
+            identity: scope.projection_identity(),
             generation: scope.generation,
             issued_at: observed_at,
             expires_at,
@@ -850,13 +941,26 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
                 .current_cycle(request.root.clone(), Some(request.document_uri.clone()))
                 .await?;
             let scope = current.scope;
+            let cycle = current.result.cycle;
+            let expansion_handles = source
+                .current_finding_items(
+                    &request.root,
+                    Some(&request.document_uri),
+                    &scope,
+                    &cycle.findings,
+                    MAX_CONTEXT_PROJECTION_ITEMS,
+                )?
+                .into_iter()
+                .filter_map(|item| item.retrieval_handle.map(|handle| (item.stable_id, handle)))
+                .collect();
             let diagnostics = source
                 .diagnostic_projection
                 .project(
                     request.root,
                     request.document_uri,
                     scope.clone(),
-                    current.result.cycle,
+                    cycle,
+                    expansion_handles,
                 )
                 .await?;
             Ok(ManagedDiagnosticSnapshot {
@@ -916,10 +1020,13 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
             let kind = request.kind.clone();
             let (coverage, mut items, omitted_count) =
                 if request.kind == ContextProjectionKind::diagnostics() {
-                    let items = match source
-                        .current_finding_items(&root, request.document_uri.as_deref(), &scope)
-                        .await
-                    {
+                    let items = match source.current_finding_items(
+                        &root,
+                        request.document_uri.as_deref(),
+                        &scope,
+                        &cycle.findings,
+                        MAX_CONTEXT_PROJECTION_ITEMS,
+                    ) {
                         Ok(items) => items,
                         Err(error) => {
                             return ContextProjectionOutcome::Deferred {
@@ -927,9 +1034,19 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
                             };
                         }
                     };
-                    let omitted_count =
-                        cycle.total_findings.saturating_sub(items.len() as u64) as usize;
-                    (cycle_coverage(&cycle), items, omitted_count)
+                    let active_findings = cycle
+                        .findings
+                        .iter()
+                        .filter(|finding| finding.lifecycle == FeedbackFindingLifecycleV1::Active)
+                        .count();
+                    let omitted_count = usize::try_from(cycle.omitted_findings)
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(active_findings.saturating_sub(items.len()));
+                    let coverage = match (cycle_coverage(&cycle), omitted_count) {
+                        (ContextCoverage::Complete, 1..) => ContextCoverage::Partial,
+                        (coverage, _) => coverage,
+                    };
+                    (coverage, items, omitted_count)
                 } else if request.kind == ContextProjectionKind::post_edit_impact() {
                     impact_projection(&cycle)
                 } else if request.kind == ContextProjectionKind::affected_tests() {
@@ -985,15 +1102,22 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
                     };
                 }
             };
+            let producer_state = producer_state_for_cycle(&cycle);
+            let omission_reasons =
+                projection_omission_reasons(coverage, omitted_count, producer_state);
             ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
                 root_uri: root.uri().to_owned(),
                 document_uri: request.document_uri,
                 kind,
                 generation: scope.generation,
+                identity: scope.projection_identity(),
+                freshness: ContextFreshness::Current,
+                producer_state,
                 coverage,
                 revision: TRACEDECAY_CONTEXT_REVISION,
                 items,
                 omitted_count,
+                omission_reasons,
                 retrieval_handle,
             })
         })
@@ -1034,8 +1158,7 @@ fn valid_context_expansion_record(
         && !record.stable_id.is_empty()
         && record.stable_id.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
         && record.scope_digest == scope_digest
-        && !record.head_commit_id.is_empty()
-        && !record.code_generation_id.is_empty()
+        && valid_projection_identity(&record.identity)
         && record.issued_at < record.expires_at
         && record.issued_at <= observed_at
         && observed_at < record.expires_at
@@ -1057,9 +1180,7 @@ fn context_expansion_scope_is_current(
     record: &StoredLspContextExpansionV1,
     current: &LspFeedbackProjectionScope,
 ) -> bool {
-    current.head_commit_id.as_str() == record.head_commit_id
-        && current.code_generation_id.as_str() == record.code_generation_id
-        && current.generation == record.generation
+    current.projection_identity() == record.identity && current.generation == record.generation
 }
 
 fn context_expansion_envelope(
@@ -1076,8 +1197,7 @@ fn context_expansion_envelope(
         generation: record.generation,
         scope: ContextExpansionScope {
             scope_digest: record.scope_digest,
-            head_commit_id: record.head_commit_id,
-            code_generation_id: record.code_generation_id,
+            identity: record.identity,
         },
         expires_at: record.expires_at.0,
         coverage,
@@ -1085,6 +1205,18 @@ fn context_expansion_envelope(
         evidence,
         omission_reason,
     }
+}
+
+fn valid_projection_identity(identity: &ContextProjectionIdentity) -> bool {
+    CommitId::new(identity.head_commit_id.clone()).is_ok()
+        && CodeGenerationId::new(identity.code_generation_id.clone()).is_ok()
+        && ManifestDigest::new(identity.snapshot_digest.clone()).is_ok()
+        && ManifestDigest::new(identity.invalidation_digest.clone()).is_ok()
+        && ContentDigest::new(identity.snapshot_content_digest.clone()).is_ok()
+        && identity
+            .document_content_digest
+            .as_ref()
+            .is_none_or(|digest| ContentDigest::new(digest.clone()).is_ok())
 }
 
 fn canonical_feedback_value(
@@ -1122,6 +1254,7 @@ pub fn pr12_lsp_session_factory<F>(
     runtime: tokio::runtime::Handle,
     feedback_runtime: Arc<Pr12FeedbackRuntime>,
     database: Database,
+    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     feedback_cycle: F,
     semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
     diagnostic_broker: Arc<AsyncMutex<DiagnosticBroker>>,
@@ -1136,6 +1269,7 @@ where
     let project = Arc::new(RegisteredProjectLspAuthority::new(
         feedback_runtime.clone(),
         database.clone(),
+        code_index,
     )?);
     let test_runs = lsp_test_result_port(project.clone());
     let diagnostic_projection = Arc::new(DiagnosticsStoreLspFeedbackProjection::new(
@@ -1170,8 +1304,14 @@ where
 fn test_run_projection(
     root: AdmittedRoot,
     document_uri: Option<String>,
+    scope: LspFeedbackProjectionScope,
     snapshot: ManagedTestRunSnapshot,
 ) -> ContextProjectionOutcome {
+    if snapshot.generation != scope.generation {
+        return ContextProjectionOutcome::Deferred {
+            reason: "managed-test-run-generation-mismatch".to_owned(),
+        };
+    }
     let Some(termination) = snapshot.termination else {
         return ContextProjectionOutcome::Pending;
     };
@@ -1199,6 +1339,7 @@ fn test_run_projection(
             retrieval_handle: None,
         })
         .collect();
+    let producer_state = producer_state_for_termination(&termination);
     let coverage = match termination {
         OperationTermination::Completed
             if snapshot
@@ -1215,17 +1356,60 @@ fn test_run_projection(
         }
         OperationTermination::EffectUnknown => ContextCoverage::Unavailable,
     };
+    let omission_reasons = projection_omission_reasons(coverage, omitted_count, producer_state);
     ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
         root_uri: root.uri().to_owned(),
         document_uri,
         kind: ContextProjectionKind::test_run_results(),
-        generation: snapshot.generation,
+        generation: scope.generation,
+        identity: scope.projection_identity(),
+        freshness: ContextFreshness::Current,
+        producer_state,
         coverage,
         revision: TRACEDECAY_CONTEXT_REVISION,
         items,
         omitted_count,
+        omission_reasons,
         retrieval_handle: None,
     })
+}
+
+fn projection_omission_reasons(
+    coverage: ContextCoverage,
+    omitted_count: usize,
+    producer_state: ContextProducerState,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if omitted_count > 0 {
+        reasons.push("bounded-projection-items".to_owned());
+    }
+    if coverage != ContextCoverage::Complete {
+        reasons.push(
+            match producer_state {
+                ContextProducerState::Complete => "projection-incomplete",
+                ContextProducerState::Partial => "producer-partial",
+                ContextProducerState::Indexing => "producer-indexing",
+                ContextProducerState::Unavailable => "producer-unavailable",
+                ContextProducerState::Failed => "producer-failed",
+                ContextProducerState::Cancelled => "producer-cancelled",
+                ContextProducerState::TimedOut => "producer-timed-out",
+            }
+            .to_owned(),
+        );
+    }
+    reasons
+}
+
+fn producer_state_for_termination(termination: &OperationTermination) -> ContextProducerState {
+    match termination {
+        OperationTermination::Completed => ContextProducerState::Complete,
+        OperationTermination::Partial => ContextProducerState::Partial,
+        OperationTermination::Cancelled => ContextProducerState::Cancelled,
+        OperationTermination::TimedOut => ContextProducerState::TimedOut,
+        OperationTermination::Failed | OperationTermination::EffectUnknown => {
+            ContextProducerState::Failed
+        }
+    }
 }
 
 fn bounded_test_run_summary(test: &str, passed: bool) -> String {
@@ -1240,6 +1424,9 @@ fn bounded_test_run_summary(test: &str, passed: bool) -> String {
 }
 
 fn finding_item(finding: &FeedbackFindingV1) -> Option<ContextProjectionItem> {
+    if finding.lifecycle != FeedbackFindingLifecycleV1::Active {
+        return None;
+    }
     projection_item(
         finding.finding_id.as_str(),
         finding
@@ -1321,6 +1508,69 @@ fn cycle_coverage(cycle: &FeedbackCycleResultV1) -> ContextCoverage {
         ContextCoverage::Unavailable
     } else {
         ContextCoverage::Partial
+    }
+}
+
+fn producer_state_for_cycle(cycle: &FeedbackCycleResultV1) -> ContextProducerState {
+    use tracedecay_domain::feedback::FeedbackCycleTerminationV1;
+
+    match cycle.termination {
+        FeedbackCycleTerminationV1::Clean => {
+            if cycle_coverage(cycle) == ContextCoverage::Complete {
+                ContextProducerState::Complete
+            } else {
+                ContextProducerState::Partial
+            }
+        }
+        FeedbackCycleTerminationV1::DuplicateNoop => ContextProducerState::Complete,
+        FeedbackCycleTerminationV1::IncompleteCoverage
+        | FeedbackCycleTerminationV1::StaleReplanRequired => ContextProducerState::Partial,
+        FeedbackCycleTerminationV1::BudgetExceeded => ContextProducerState::TimedOut,
+        FeedbackCycleTerminationV1::Cancelled | FeedbackCycleTerminationV1::UserStop => {
+            ContextProducerState::Cancelled
+        }
+        FeedbackCycleTerminationV1::Blocked | FeedbackCycleTerminationV1::DaemonUnavailable => {
+            ContextProducerState::Unavailable
+        }
+    }
+}
+
+fn gateway_diagnostic_coverage(coverage: ContextCoverage) -> GatewayDiagnosticCoverage {
+    match coverage {
+        ContextCoverage::Complete => GatewayDiagnosticCoverage::Complete,
+        ContextCoverage::Partial => GatewayDiagnosticCoverage::Partial,
+        ContextCoverage::Unavailable => GatewayDiagnosticCoverage::Unavailable,
+        ContextCoverage::Failed => GatewayDiagnosticCoverage::Failed,
+    }
+}
+
+fn gateway_diagnostic_lifecycle(
+    lifecycle: FeedbackFindingLifecycleV1,
+) -> GatewayDiagnosticLifecycle {
+    match lifecycle {
+        FeedbackFindingLifecycleV1::Active => GatewayDiagnosticLifecycle::Active,
+        FeedbackFindingLifecycleV1::Superseded => GatewayDiagnosticLifecycle::Superseded,
+        FeedbackFindingLifecycleV1::Resolved => GatewayDiagnosticLifecycle::Resolved,
+        FeedbackFindingLifecycleV1::Cleared => GatewayDiagnosticLifecycle::Cleared,
+    }
+}
+
+fn gateway_diagnostic_provider_state(
+    state: ProviderEvaluationStateV1,
+) -> GatewayDiagnosticProviderState {
+    match state {
+        ProviderEvaluationStateV1::SupportedCompletedComplete => {
+            GatewayDiagnosticProviderState::SupportedCompletedComplete
+        }
+        ProviderEvaluationStateV1::Unsupported => GatewayDiagnosticProviderState::Unsupported,
+        ProviderEvaluationStateV1::Absent => GatewayDiagnosticProviderState::Absent,
+        ProviderEvaluationStateV1::Indexing => GatewayDiagnosticProviderState::Indexing,
+        ProviderEvaluationStateV1::Stale => GatewayDiagnosticProviderState::Stale,
+        ProviderEvaluationStateV1::Cancelled => GatewayDiagnosticProviderState::Cancelled,
+        ProviderEvaluationStateV1::TimedOut => GatewayDiagnosticProviderState::TimedOut,
+        ProviderEvaluationStateV1::Failed => GatewayDiagnosticProviderState::Failed,
+        ProviderEvaluationStateV1::Partial => GatewayDiagnosticProviderState::Partial,
+        ProviderEvaluationStateV1::Unavailable => GatewayDiagnosticProviderState::Unavailable,
     }
 }
 
@@ -1686,8 +1936,10 @@ mod context_expansion_tests {
         valid_context_expansion_record,
     };
     use crate::application::feedback::owner::FeedbackReadOperationV1;
-    use crate::daemon::lsp_gateway::{AdmittedRoot, ContextProjectionKind};
-    use tracedecay_domain::{CodeGenerationId, CommitId, UtcMicros};
+    use crate::daemon::lsp_gateway::{
+        AdmittedRoot, ContextProjectionIdentity, ContextProjectionKind,
+    };
+    use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest, UtcMicros};
 
     fn record() -> StoredLspContextExpansionV1 {
         StoredLspContextExpansionV1 {
@@ -1697,8 +1949,14 @@ mod context_expansion_tests {
             kind: ContextProjectionKind::diagnostics(),
             stable_id: "finding.1".to_owned(),
             scope_digest: "sha256:scope".to_owned(),
-            head_commit_id: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-            code_generation_id: "generation.v1.aaaaaaaa.00000001".to_owned(),
+            identity: ContextProjectionIdentity {
+                head_commit_id: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                code_generation_id: "generation.v1.aaaaaaaa.00000001".to_owned(),
+                snapshot_digest: format!("sha256:{}", "a".repeat(64)),
+                invalidation_digest: format!("sha256:{}", "b".repeat(64)),
+                snapshot_content_digest: format!("sha256:{}", "c".repeat(64)),
+                document_content_digest: Some(format!("sha256:{}", "d".repeat(64))),
+            },
             generation: 1,
             issued_at: UtcMicros(10),
             expires_at: UtcMicros(20),
@@ -1741,9 +1999,22 @@ mod context_expansion_tests {
     fn expansion_handles_become_stale_on_exact_generation_drift() {
         let record = record();
         let current = LspFeedbackProjectionScope {
-            head_commit_id: CommitId::new(record.head_commit_id.clone()).expect("commit"),
-            code_generation_id: CodeGenerationId::new(record.code_generation_id.clone())
+            head_commit_id: CommitId::new(record.identity.head_commit_id.clone()).expect("commit"),
+            code_generation_id: CodeGenerationId::new(record.identity.code_generation_id.clone())
                 .expect("generation"),
+            snapshot_digest: ManifestDigest::new(record.identity.snapshot_digest.clone())
+                .expect("snapshot digest"),
+            invalidation_digest: ManifestDigest::new(record.identity.invalidation_digest.clone())
+                .expect("invalidation digest"),
+            snapshot_content_digest: ContentDigest::new(
+                record.identity.snapshot_content_digest.clone(),
+            )
+            .expect("snapshot content digest"),
+            document_content_digest: record
+                .identity
+                .document_content_digest
+                .as_ref()
+                .map(|digest| ContentDigest::new(digest.clone()).expect("document content digest")),
             generation: record.generation,
         };
         assert!(context_expansion_scope_is_current(&record, &current));
@@ -1753,5 +2024,40 @@ mod context_expansion_tests {
             ..current
         };
         assert!(!context_expansion_scope_is_current(&record, &stale));
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::finding_item;
+    use tracedecay_domain::feedback::{
+        FeedbackDiagnosticClassificationV1, FeedbackFindingId, FeedbackFindingLifecycleV1,
+        FeedbackFindingV1, ProviderEvaluationStateV1,
+    };
+
+    fn finding(lifecycle: FeedbackFindingLifecycleV1) -> FeedbackFindingV1 {
+        FeedbackFindingV1 {
+            finding_id: FeedbackFindingId::new("finding.lifecycle").expect("finding"),
+            classification: FeedbackDiagnosticClassificationV1::New,
+            lifecycle,
+            retrieval_anchor_id: None,
+            provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
+            safe_bounded_preview: Some("bounded finding".to_owned()),
+        }
+    }
+
+    #[test]
+    fn context_projection_emits_only_active_findings() {
+        assert!(finding_item(&finding(FeedbackFindingLifecycleV1::Active)).is_some());
+        for lifecycle in [
+            FeedbackFindingLifecycleV1::Superseded,
+            FeedbackFindingLifecycleV1::Resolved,
+            FeedbackFindingLifecycleV1::Cleared,
+        ] {
+            assert!(
+                finding_item(&finding(lifecycle)).is_none(),
+                "{lifecycle:?} finding remained visible"
+            );
+        }
     }
 }

@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
 
 use super::capabilities::{
     CapabilityAvailability, CapabilityParseError, ClientCapabilities, EffectiveCapabilities,
@@ -20,13 +21,13 @@ use super::capabilities::{
 };
 use super::context::{
     ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
-    ContextProjectionChange, ContextProjectionEnvelope, ContextProjectionKind,
-    ContextProjectionOutcome, ContextProjectionPort, ContextProjectionRegistration,
-    ContextProjectionRequest, ContextSubscribeRequest, MAX_CONTEXT_CHANGES_PER_POLL,
-    MAX_CONTEXT_PROJECTION_BYTES, MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_PROJECTION_KINDS,
-    MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
-    TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD,
-    TRACEDECAY_SUBSCRIBE_METHOD,
+    ContextFreshness, ContextProducerState, ContextProjectionChange, ContextProjectionEnvelope,
+    ContextProjectionIdentity, ContextProjectionKind, ContextProjectionOutcome,
+    ContextProjectionPort, ContextProjectionRegistration, ContextProjectionRequest,
+    ContextSubscribeRequest, MAX_CONTEXT_CHANGES_PER_POLL, MAX_CONTEXT_PROJECTION_BYTES,
+    MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES,
+    MAX_CONTEXT_SUMMARY_BYTES, TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD,
+    TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_SUBSCRIBE_METHOD,
 };
 use super::diagnostics::{
     DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
@@ -68,6 +69,18 @@ pub const DEFAULT_LSP_REQUEST_DEADLINE_MS: u64 = 5_000;
 /// frame per direction while its peer is backpressured.
 pub const MAX_QUEUED_OUTBOUND_BYTES: usize = 1024 * 1024;
 pub const MAX_QUEUED_OUTBOUND_MESSAGES: usize = 64;
+
+fn valid_context_projection_identity(identity: &ContextProjectionIdentity) -> bool {
+    CommitId::new(identity.head_commit_id.clone()).is_ok()
+        && CodeGenerationId::new(identity.code_generation_id.clone()).is_ok()
+        && ManifestDigest::new(identity.snapshot_digest.clone()).is_ok()
+        && ManifestDigest::new(identity.invalidation_digest.clone()).is_ok()
+        && ContentDigest::new(identity.snapshot_content_digest.clone()).is_ok()
+        && identity
+            .document_content_digest
+            .as_ref()
+            .is_none_or(|digest| ContentDigest::new(digest.clone()).is_ok())
+}
 const MIN_CLIENT_FRAME_OUTBOUND_RESERVE: usize = MAX_PUBLICATION_BYTES;
 pub(super) const TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD: &str = "tracedecay/nativeDiagnostics";
 const MAX_NATIVE_DIAGNOSTIC_URI_BYTES: usize = 4 * 1024;
@@ -238,6 +251,7 @@ impl NativeDiagnostic {
             code,
             message: self.message,
             source: DiagnosticSource::Upstream,
+            data: None,
         })
     }
 }
@@ -1848,8 +1862,15 @@ where
                 .as_deref()
                 .is_none_or(|uri| self.gateway.root().contains_document(uri))
             && !envelope.scope.scope_digest.is_empty()
-            && !envelope.scope.head_commit_id.is_empty()
-            && !envelope.scope.code_generation_id.is_empty();
+            && valid_context_projection_identity(&envelope.scope.identity)
+            && match (
+                envelope.document_uri.is_some(),
+                envelope.scope.identity.document_content_digest.as_deref(),
+            ) {
+                (true, Some(digest)) => !digest.is_empty(),
+                (false, None) => true,
+                _ => false,
+            };
         let valid_payload = !envelope.stable_id.is_empty()
             && envelope.stable_id.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
             && envelope.expires_at > 0
@@ -1914,7 +1935,16 @@ where
             && envelope
                 .document_uri
                 .as_deref()
-                .is_none_or(|uri| self.gateway.root().contains_document(uri));
+                .is_none_or(|uri| self.gateway.root().contains_document(uri))
+            && valid_context_projection_identity(&envelope.identity)
+            && match (
+                envelope.document_uri.is_some(),
+                envelope.identity.document_content_digest.as_deref(),
+            ) {
+                (true, Some(digest)) => !digest.is_empty(),
+                (false, None) => true,
+                _ => false,
+            };
         let valid_items = envelope.items.len() <= MAX_CONTEXT_PROJECTION_ITEMS
             && envelope.items.iter().all(|item| {
                 !item.stable_id.is_empty()
@@ -1926,6 +1956,18 @@ where
             && envelope.kind == request.kind
             && envelope.revision == revision
             && valid_items
+            && match envelope.coverage {
+                ContextCoverage::Complete => {
+                    envelope.freshness == ContextFreshness::Current
+                        && envelope.producer_state == ContextProducerState::Complete
+                        && envelope.omitted_count == 0
+                        && envelope.omission_reasons.is_empty()
+                }
+                ContextCoverage::Partial => !envelope.omission_reasons.is_empty(),
+                ContextCoverage::Unavailable | ContextCoverage::Failed => {
+                    envelope.items.is_empty() && !envelope.omission_reasons.is_empty()
+                }
+            }
             && valid_retrieval_handle(envelope.retrieval_handle.as_deref())
         {
             Ok(())
@@ -2840,6 +2882,7 @@ mod tests {
                         code: Some("warning".into()),
                         message: "bounded diagnostic".into(),
                         source: DiagnosticSource::Upstream,
+                        data: None,
                     }],
                     tracedecay: Vec::new(),
                 },
