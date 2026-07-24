@@ -68,11 +68,16 @@ export function DeliveryPage() {
                   const branches = new Set<string>();
                   for (const group of tree) for (const branch of group.branches) branches.add(branch);
                   return (
-                    <div className="grid grid-cols-2 gap-2">
-                      <StatTile label="repositories" value={data.summary?.repo_count ?? tree.length} />
-                      <StatTile label="branches" value={branches.size} />
-                      <StatTile label="worktrees" value={worktrees} />
+                    <div className="grid grid-cols-1 gap-1.5">
                       <StatTile
+                        dense
+                        label="repositories"
+                        value={data.summary?.repo_count ?? tree.length}
+                      />
+                      <StatTile dense label="branches" value={branches.size} />
+                      <StatTile dense label="worktrees" value={worktrees} />
+                      <StatTile
+                        dense
                         label="checkouts"
                         value={data.summary?.project_count ?? entries.length}
                       />

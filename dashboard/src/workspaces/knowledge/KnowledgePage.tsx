@@ -69,9 +69,9 @@ export function KnowledgePage() {
                     className="h-8 w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
                   />
                 </form>
-                <div className="grid grid-cols-2 gap-2">
-                  <StatTile label="facts" value={stats?.facts ?? '—'} />
-                  <StatTile label="entities" value={stats?.entities ?? '—'} />
+                <div className="grid grid-cols-1 gap-1.5">
+                  <StatTile dense label="facts" value={stats?.facts ?? '—'} />
+                  <StatTile dense label="entities" value={stats?.entities ?? '—'} />
                 </div>
                 {histogram.length > 0 ? (
                   <figure className="flex flex-col gap-1">
@@ -233,7 +233,7 @@ function HrrCoverageBar({ row }: { row: HrrCoverageRow }) {
           style={{ width: `${clamped * 100}%` }}
         />
       </span>
-      <span className="tabular w-9 shrink-0 text-right text-2xs text-text-muted">
+      <span className="tabular w-14 shrink-0 whitespace-nowrap text-right text-2xs text-text-muted">
         {degraded && row.status !== 'missing_vectors'
           ? row.status === 'missing_bank'
             ? 'no bank'
