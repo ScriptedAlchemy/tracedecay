@@ -39,26 +39,84 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
             VALUES (NEW.store_id, NEW.index_text);
         END;";
 
-/// Returns whether the raw-message FTS table and triggers already use the
-/// v3 content-only structure. Pre-v3 objects mention `metadata_json` in
-/// their DDL; a missing table counts as current here because presence is
-/// checked separately (doctor) or guaranteed (migration runs the DDL).
+/// Returns whether the raw-message FTS table and all three synchronization
+/// triggers use the v3 content-only contracts.
 pub(crate) async fn raw_fts_structure_is_current(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Option<bool> {
-    let stale = fetch_i64(
-        conn,
-        "SELECT COUNT(*) FROM sqlite_master
-         WHERE name IN ('lcm_raw_messages_fts',
-                        'lcm_raw_messages_fts_insert',
-                        'lcm_raw_messages_fts_delete',
-                        'lcm_raw_messages_fts_update')
-           AND sql LIKE '%metadata_json%'",
-        "raw FTS structure query returned no rows",
-    )
-    .await
-    .ok()?;
-    Some(stale == 0)
+    let mut rows = conn
+        .query(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE name IN ('lcm_raw_messages_fts',
+                            'lcm_raw_messages_fts_insert',
+                            'lcm_raw_messages_fts_delete',
+                            'lcm_raw_messages_fts_update')",
+            (),
+        )
+        .await
+        .ok()?;
+    let mut table_current = false;
+    let mut insert_current = false;
+    let mut delete_current = false;
+    let mut update_current = false;
+    while let Some(row) = rows.next().await.ok()? {
+        let object_type: String = row.get(0).ok()?;
+        let name: String = row.get(1).ok()?;
+        let table_name: String = row.get(2).ok()?;
+        let sql: String = row.get(3).ok()?;
+        let sql = compact_sql(&sql);
+        match name.as_str() {
+            "lcm_raw_messages_fts" => {
+                table_current = object_type == "table"
+                    && sql.contains(
+                        "usingfts5(index_text,content='lcm_raw_messages',content_rowid='store_id')",
+                    );
+            }
+            "lcm_raw_messages_fts_insert" => {
+                insert_current = object_type == "trigger"
+                    && table_name == "lcm_raw_messages"
+                    && sql.contains("afterinsertonlcm_raw_messagesbegin")
+                    && sql.contains(
+                        "insertintolcm_raw_messages_fts(rowid,index_text)\
+                         values(new.store_id,new.index_text)",
+                    );
+            }
+            "lcm_raw_messages_fts_delete" => {
+                delete_current = object_type == "trigger"
+                    && table_name == "lcm_raw_messages"
+                    && sql.contains("afterdeleteonlcm_raw_messagesbegin")
+                    && sql.contains(
+                        "insertintolcm_raw_messages_fts\
+                         (lcm_raw_messages_fts,rowid,index_text)\
+                         values('delete',old.store_id,old.index_text)",
+                    );
+            }
+            "lcm_raw_messages_fts_update" => {
+                update_current = object_type == "trigger"
+                    && table_name == "lcm_raw_messages"
+                    && sql.contains("afterupdateonlcm_raw_messagesbegin")
+                    && sql.contains(
+                        "insertintolcm_raw_messages_fts\
+                         (lcm_raw_messages_fts,rowid,index_text)\
+                         values('delete',old.store_id,old.index_text)",
+                    )
+                    && sql.contains(
+                        "insertintolcm_raw_messages_fts(rowid,index_text)\
+                         values(new.store_id,new.index_text)",
+                    );
+            }
+            _ => {}
+        }
+    }
+    Some(table_current && insert_current && delete_current && update_current)
+}
+
+fn compact_sql(sql: &str) -> String {
+    sql.chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 /// Drops any existing raw-message FTS table/triggers (old or new shape),
@@ -307,23 +365,11 @@ pub(crate) async fn ensure_lcm_schema_in_transaction(
     // Schema v3: the raw-message FTS index dropped the role and
     // metadata_json columns (see RAW_FTS_DDL). The rebuild is gated on the
     // stored structure so later version bumps (e.g. the v4 index above)
-    // don't re-pay a full FTS rebuild; a retry after a partially applied
-    // earlier run still converges because the index is fully derived from
-    // lcm_raw_messages. A fresh store has no FTS objects at all (they are
-    // created by the rebuild, not the DDL batch above), so presence is
-    // checked too — `raw_fts_structure_is_current` deliberately counts a
-    // missing table as current.
-    let fts_exists = fetch_i64(
-        conn,
-        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'lcm_raw_messages_fts'",
-        "raw FTS presence query returned no rows",
-    )
-    .await?
-        > 0;
-    if !fts_exists
-        || !raw_fts_structure_is_current(conn)
-            .await
-            .ok_or_else(|| LcmError::Db("raw FTS structure check failed".to_string()))?
+    // don't re-pay a full FTS rebuild; missing or malformed synchronization
+    // objects are stale because they can silently desynchronize the index.
+    if !raw_fts_structure_is_current(conn)
+        .await
+        .ok_or_else(|| LcmError::Db("raw FTS structure check failed".to_string()))?
     {
         rebuild_raw_fts(conn)
             .await
@@ -331,14 +377,23 @@ pub(crate) async fn ensure_lcm_schema_in_transaction(
     }
 
     // Schema v2: lifecycle rows gained the compression-boundary cooldown
-    // marker. Databases created before the column existed need the ALTER;
-    // the error is ignored when the column is already present.
-    let _ = conn
-        .execute(
+    // marker. Probe first so the expected duplicate-column case is avoided,
+    // while every real ALTER failure aborts before the v7 marker is written.
+    let boundary_skip_at_exists = fetch_i64(
+        conn,
+        "SELECT COUNT(*) FROM pragma_table_xinfo('lcm_lifecycle_state')
+         WHERE name = 'boundary_skip_at'",
+        "boundary_skip_at column query returned no rows",
+    )
+    .await?
+        > 0;
+    if !boundary_skip_at_exists {
+        conn.execute(
             "ALTER TABLE lcm_lifecycle_state ADD COLUMN boundary_skip_at INTEGER",
             (),
         )
-        .await;
+        .await?;
+    }
 
     carry_forward_legacy_messages_in_transaction(conn).await?;
     conn.execute(
@@ -510,6 +565,138 @@ async fn fetch_i64(
 mod tests {
     use super::*;
     use crate::db::engine::TestConnection;
+
+    #[tokio::test]
+    async fn raw_fts_currency_requires_table_and_every_trigger_contract() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE lcm_raw_messages (
+                store_id INTEGER PRIMARY KEY,
+                index_text TEXT NOT NULL
+            );",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        rebuild_raw_fts(&*conn)
+            .await
+            .ok_or_else(|| "initial raw FTS rebuild failed".to_string())?;
+        assert_eq!(raw_fts_structure_is_current(&*conn).await, Some(true));
+
+        for trigger in [
+            "lcm_raw_messages_fts_insert",
+            "lcm_raw_messages_fts_delete",
+            "lcm_raw_messages_fts_update",
+        ] {
+            conn.execute_batch(&format!("DROP TRIGGER {trigger}"))
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                raw_fts_structure_is_current(&*conn).await,
+                Some(false),
+                "missing {trigger} was accepted as current"
+            );
+            rebuild_raw_fts(&*conn)
+                .await
+                .ok_or_else(|| format!("raw FTS rebuild failed after dropping {trigger}"))?;
+            assert_eq!(raw_fts_structure_is_current(&*conn).await, Some(true));
+        }
+
+        conn.execute_batch(
+            "DROP TRIGGER lcm_raw_messages_fts_update;
+             CREATE TRIGGER lcm_raw_messages_fts_update
+                 AFTER UPDATE ON lcm_raw_messages BEGIN
+                     SELECT 1;
+                 END;",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            raw_fts_structure_is_current(&*conn).await,
+            Some(false),
+            "malformed update trigger was accepted as current"
+        );
+
+        conn.execute_batch("DROP TABLE lcm_raw_messages_fts")
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            raw_fts_structure_is_current(&*conn).await,
+            Some(false),
+            "missing raw FTS table was accepted as current"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_boundary_skip_column_upgrade_does_not_publish_v7_marker() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+            );
+            CREATE TABLE session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                timestamp INTEGER,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, message_id)
+            );
+            CREATE TABLE session_schema_migrations (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            INSERT INTO session_schema_migrations(name, version, applied_at)
+            VALUES ('lcm', 6, 123);
+            CREATE VIRTUAL TABLE lcm_lifecycle_state USING fts5(
+                provider,
+                conversation_id,
+                current_session_id
+            );",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        let error = ensure_lcm_schema(&conn)
+            .await
+            .expect_err("unsupported lifecycle ALTER should fail the migration");
+        assert!(matches!(error, LcmError::Db(_)));
+        assert_eq!(
+            util::fetch_i64(
+                &*conn,
+                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                (),
+                "migration marker version",
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+            6
+        );
+        assert_eq!(
+            util::fetch_i64(
+                &*conn,
+                "SELECT COUNT(*) FROM pragma_table_xinfo('lcm_lifecycle_state')
+                 WHERE name = 'boundary_skip_at'",
+                (),
+                "boundary column count",
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+            0
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn ensure_lcm_schema_errors_and_rolls_back_failed_legacy_carry_forward()
