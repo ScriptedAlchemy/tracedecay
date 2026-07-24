@@ -321,20 +321,25 @@ impl DaemonSessionRuntimeRegistryV1 {
         database_authority: DatabaseAuthority,
         access: DatabaseAccessMode,
     ) -> Result<Database> {
-        let identity = crate::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
-            project_root,
-        )
-        .map_err(|error| {
-            session_registry_error("resolve code-shard identity", error.to_string())
-        })?;
+        // Mutable graph storage exists for non-Git projects too. Its structural
+        // shard identity needs only the stable repository/worktree components;
+        // resolving HEAD here would incorrectly make ordinary project open
+        // depend on a Git repository being present.
+        let repository_id =
+            crate::daemon::code_index_scheduler::identity::repository_id_for(project_root)
+                .map_err(|error| {
+                    session_registry_error("resolve code-shard repository", error.to_string())
+                })?;
+        let worktree_id =
+            crate::daemon::code_index_scheduler::identity::worktree_id_for(project_root).map_err(
+                |error| session_registry_error("resolve code-shard worktree", error.to_string()),
+            )?;
         let shard_id = StoreShardIdV1::code(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
             project_id,
-            identity.repository_id().clone(),
-            CodeShardScopeV1::Worktree {
-                worktree_id: identity.worktree_id().clone(),
-            },
+            repository_id,
+            CodeShardScopeV1::Worktree { worktree_id },
         );
         let runtime = self
             .code_graph_with_authority(
@@ -876,6 +881,42 @@ mod tests {
             error.to_string().contains("DuplicateProjectAuthority"),
             "unexpected authority error: {error}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worktree_graph_mount_does_not_require_git() {
+        let temporary = tempfile::tempdir().expect("temporary project parent");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).expect("non-git project root");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("durable profile identity");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        let database_path = profile_root.join("stores/non-git-worktree.db");
+        std::fs::create_dir_all(database_path.parent().expect("database parent"))
+            .expect("database directory");
+        let authority =
+            DatabaseAuthority::acquire_test(&database_path, "non-git worktree graph mount")
+                .expect("database authority");
+
+        let database = registry
+            .code_graph_worktree(
+                &project_root,
+                ProjectId::new("project.non-git-worktree").expect("project id"),
+                database_path.clone(),
+                authority,
+                DatabaseAccessMode::ReadWrite,
+            )
+            .await
+            .expect("non-git graph runtime");
+
+        assert_eq!(database.database_path(), database_path);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
