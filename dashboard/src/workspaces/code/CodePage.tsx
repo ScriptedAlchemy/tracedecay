@@ -113,7 +113,7 @@ export function CodePage() {
                 .map((k) => ({ label: k.kind, value: k.count, hint: 'nodes' }));
               return (
                 <div className="flex flex-col gap-3">
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-1 gap-1.5">
                     <StatTile dense label="nodes" value={formatCount(data.totals.nodes)} />
                     <StatTile dense label="edges" value={formatCount(data.totals.edges)} />
                     <StatTile dense label="files" value={formatCount(data.totals.files)} />
