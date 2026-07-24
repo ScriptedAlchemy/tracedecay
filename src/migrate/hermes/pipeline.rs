@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use tracedecay_domain::ProjectId;
 
 use super::candidates::{CandidateError, CandidateOutcome, LegacyStoreCandidate};
-use super::copy::{quote_identifier, table_columns};
+use super::copy::{MIGRATION_QUERY_PAGE_ROWS, quote_identifier, table_columns};
 use super::fingerprint::logical_source_fingerprint;
 use super::memory::merge_memory_snapshot;
 use super::resolution::{ResolvedTargetProject, resolve_target_project, same_path};
@@ -41,20 +41,39 @@ async fn source_lcm_schema_version<Q>(source: &Q) -> Result<i64, String>
 where
     Q: QueryExecutor + ?Sized,
 {
+    let mut present_lcm_tables = Vec::new();
+    let mut missing_lcm_tables = Vec::new();
+    for table in super::COPIED_TABLES
+        .iter()
+        .copied()
+        .filter(|table| table.starts_with("lcm_"))
+    {
+        if table_columns(source, table).await?.is_empty() {
+            missing_lcm_tables.push(table);
+        } else {
+            present_lcm_tables.push(table);
+        }
+    }
+    let has_lcm_tables = !present_lcm_tables.is_empty();
     if table_columns(source, "session_schema_migrations")
         .await?
         .is_empty()
     {
-        return Ok(0);
+        return if has_lcm_tables {
+            Err("source has LCM tables but no LCM schema metadata".to_string())
+        } else {
+            Ok(0)
+        };
     }
     let mut rows = source
         .query(
-            "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+            "SELECT version FROM session_schema_migrations
+             WHERE name = 'lcm' ORDER BY rowid LIMIT 2",
             (),
         )
         .await
         .map_err(|error| format!("could not inspect source schema: {error}"))?;
-    match rows
+    let version = match rows
         .next()
         .await
         .map_err(|error| format!("could not read source schema: {error}"))?
@@ -62,8 +81,77 @@ where
         Some(row) => row
             .get(0)
             .map_err(|error| format!("invalid source schema version: {error}")),
+        None if has_lcm_tables => {
+            Err("source has LCM tables but no LCM schema version".to_string())
+        }
         None => Ok(0),
+    }?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| format!("could not read source schema: {error}"))?
+        .is_some()
+    {
+        return Err("source has duplicate LCM schema versions".to_string());
     }
+    if version < 0 {
+        return Err(format!("source has negative LCM schema version {version}"));
+    }
+    if has_lcm_tables != (version > 0) {
+        return Err(format!(
+            "source LCM schema version {version} is inconsistent with its LCM tables"
+        ));
+    }
+    if version > 0 && !missing_lcm_tables.is_empty() {
+        return Err(format!(
+            "source LCM schema {version} is missing required tables: {}",
+            missing_lcm_tables.join(", ")
+        ));
+    }
+    Ok(version)
+}
+
+async fn require_source_columns<Q>(source: &Q, table: &str, required: &[&str]) -> Result<(), String>
+where
+    Q: QueryExecutor + ?Sized,
+{
+    let columns = table_columns(source, table).await?;
+    if columns.is_empty() {
+        return Err(format!("source is missing required table {table}"));
+    }
+    let missing = required
+        .iter()
+        .copied()
+        .filter(|column| !columns.iter().any(|candidate| candidate == column))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "source table {table} is missing required columns: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+async fn validate_session_source_schema<Q>(source: &Q) -> Result<(), String>
+where
+    Q: QueryExecutor + ?Sized,
+{
+    require_source_columns(source, "sessions", &["provider", "session_id"]).await?;
+    require_source_columns(
+        source,
+        "session_messages",
+        &[
+            "provider",
+            "message_id",
+            "session_id",
+            "role",
+            "ordinal",
+            "text",
+        ],
+    )
+    .await
 }
 
 struct ResolvedTargetLayout {
@@ -152,30 +240,44 @@ where
     }
     let table = quote_identifier(table);
     let content_column = quote_identifier(content_column);
-    let mut rows = source
-        .query(
-            &format!(
-                "SELECT provider, message_id, {content_column} FROM {table} ORDER BY provider, message_id"
-            ),
-            (),
-        )
-        .await
-        .map_err(|error| format!("could not inspect legacy message identities: {error}"))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| format!("could not read legacy message identity: {error}"))?
-    {
-        let provider = row
-            .get::<String>(0)
-            .map_err(|error| format!("invalid legacy message provider: {error}"))?;
-        let message_id = row
-            .get::<String>(1)
-            .map_err(|error| format!("invalid legacy message id: {error}"))?;
-        let source_content = row
-            .get::<String>(2)
-            .map_err(|error| format!("invalid legacy message content identity: {error}"))?;
-        let mut target_rows = target
+    let mut last_rowid = i64::MIN;
+    let mut first_page = true;
+    loop {
+        let mut rows = source
+            .query(
+                &format!(
+                    "SELECT rowid, provider, message_id, {content_column} FROM {table}
+                     WHERE rowid > ?1 OR (?3 = 1 AND rowid = ?1)
+                     ORDER BY rowid LIMIT ?2"
+                ),
+                params![last_rowid, MIGRATION_QUERY_PAGE_ROWS, i64::from(first_page)],
+            )
+            .await
+            .map_err(|error| format!("could not inspect legacy message identities: {error}"))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("could not read legacy message identity: {error}"))?
+        {
+            let rowid = row
+                .get::<i64>(0)
+                .map_err(|error| format!("invalid legacy message rowid: {error}"))?;
+            if rowid < last_rowid || (rowid == last_rowid && (!first_page || page_rows > 0)) {
+                return Err("legacy message identities returned an unstable row order".to_string());
+            }
+            last_rowid = rowid;
+            page_rows += 1;
+            let provider = row
+                .get::<String>(1)
+                .map_err(|error| format!("invalid legacy message provider: {error}"))?;
+            let message_id = row
+                .get::<String>(2)
+                .map_err(|error| format!("invalid legacy message id: {error}"))?;
+            let source_content = row
+                .get::<String>(3)
+                .map_err(|error| format!("invalid legacy message content identity: {error}"))?;
+            let mut target_rows = target
             .query(
                 &format!(
                     "SELECT {content_column} FROM {table} WHERE provider = ?1 AND message_id = ?2"
@@ -184,21 +286,26 @@ where
             )
             .await
             .map_err(|error| format!("could not inspect target message identity: {error}"))?;
-        let Some(target_row) = target_rows
-            .next()
-            .await
-            .map_err(|error| format!("could not read target message identity: {error}"))?
-        else {
-            continue;
-        };
-        let target_content = target_row
-            .get::<String>(0)
-            .map_err(|error| format!("invalid target message content identity: {error}"))?;
-        if target_content != source_content {
-            return Err(format!(
-                "legacy {table} identity ({provider}, {message_id}) conflicts with target content"
-            ));
+            let Some(target_row) = target_rows
+                .next()
+                .await
+                .map_err(|error| format!("could not read target message identity: {error}"))?
+            else {
+                continue;
+            };
+            let target_content = target_row
+                .get::<String>(0)
+                .map_err(|error| format!("invalid target message content identity: {error}"))?;
+            if target_content != source_content {
+                return Err(format!(
+                    "legacy {table} identity ({provider}, {message_id}) conflicts with target content"
+                ));
+            }
         }
+        if page_rows < MIGRATION_QUERY_PAGE_ROWS {
+            break;
+        }
+        first_page = false;
     }
     Ok(())
 }
@@ -215,6 +322,9 @@ async fn migrate_candidate_snapshot(
 ) -> Result<CandidateOutcome, CandidateError> {
     if let Some(source) = source {
         verify_source(source)
+            .await
+            .map_err(CandidateError::Failed)?;
+        validate_session_source_schema(source)
             .await
             .map_err(CandidateError::Failed)?;
     }
@@ -298,6 +408,11 @@ async fn migrate_candidate_snapshot(
         None => None,
     };
     let source_memory = source_memory_db.as_ref().map(SnapshotDatabase::connection);
+    if let Some(source_memory) = source_memory {
+        verify_source(source_memory)
+            .await
+            .map_err(CandidateError::Failed)?;
+    }
     let fingerprint = logical_source_fingerprint(
         source,
         candidate.primary_path(),
@@ -495,4 +610,80 @@ pub(crate) async fn migrate_candidate(
         fail_after_table,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn snapshot_for_schema(sql: &str) -> (tempfile::TempDir, SnapshotDatabase) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("source.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(sql).unwrap();
+        drop(connection);
+        let snapshot = crate::sqlite_read_snapshot::open(&path).await.unwrap();
+        (temp, snapshot)
+    }
+
+    #[tokio::test]
+    async fn rejects_lcm_tables_without_version_metadata() {
+        let (_temp, snapshot) =
+            snapshot_for_schema("CREATE TABLE lcm_raw_messages (store_id INTEGER PRIMARY KEY);")
+                .await;
+        let error = source_lcm_schema_version(snapshot.connection())
+            .await
+            .unwrap_err();
+        assert!(error.contains("no LCM schema metadata"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn rejects_negative_lcm_schema_versions() {
+        let (_temp, snapshot) = snapshot_for_schema(
+            "CREATE TABLE session_schema_migrations (name TEXT, version INTEGER);
+             CREATE TABLE lcm_raw_messages (store_id INTEGER PRIMARY KEY);
+             INSERT INTO session_schema_migrations(name, version) VALUES ('lcm', -1);",
+        )
+        .await;
+        let error = source_lcm_schema_version(snapshot.connection())
+            .await
+            .unwrap_err();
+        assert!(error.contains("negative LCM schema version"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn rejects_incomplete_versioned_lcm_schema() {
+        let (_temp, snapshot) = snapshot_for_schema(
+            "CREATE TABLE session_schema_migrations (name TEXT, version INTEGER);
+             CREATE TABLE lcm_raw_messages (store_id INTEGER PRIMARY KEY);
+             INSERT INTO session_schema_migrations(name, version) VALUES ('lcm', 1);",
+        )
+        .await;
+        let error = source_lcm_schema_version(snapshot.connection())
+            .await
+            .unwrap_err();
+        assert!(error.contains("missing required tables"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn accepts_pre_lcm_legacy_schema_as_version_zero() {
+        let (_temp, snapshot) =
+            snapshot_for_schema("CREATE TABLE sessions (provider TEXT, session_id TEXT);").await;
+        assert_eq!(
+            source_lcm_schema_version(snapshot.connection())
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_required_session_schema() {
+        let (_temp, snapshot) =
+            snapshot_for_schema("CREATE TABLE sessions (provider TEXT, session_id TEXT);").await;
+        let error = validate_session_source_schema(snapshot.connection())
+            .await
+            .unwrap_err();
+        assert!(error.contains("session_messages"), "{error}");
+    }
 }

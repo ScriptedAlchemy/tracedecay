@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use super::copy::table_columns;
-use crate::db::engine::QueryExecutor;
+use super::copy::{MIGRATION_QUERY_PAGE_ROWS, ensure_materialized_row_room, table_columns};
+use crate::db::engine::{QueryExecutor, params};
 use crate::global_db::RegisteredGlobalDb;
 
 pub(crate) struct ResolvedTargetProject {
@@ -217,78 +217,101 @@ where
     } else {
         "NULL"
     };
-    let sql = format!("SELECT {path_expr}, {key_expr}, {metadata_expr} FROM sessions");
-    let mut rows = source
-        .query(&sql, ())
-        .await
-        .map_err(|error| format!("could not read source project metadata: {error}"))?;
-    let mut candidate_rows = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| format!("could not read source project metadata row: {error}"))?
-    {
-        let mut candidates = BTreeSet::new();
-        for candidate in [row.get::<Option<String>>(0), row.get::<Option<String>>(1)]
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            candidates.insert(PathBuf::from(candidate));
-        }
-        let malformed_metadata = match row.get::<Option<String>>(2) {
-            Ok(Some(metadata)) => {
-                collect_metadata_project_candidates(&metadata, &mut candidates).is_err()
-            }
-            Ok(None) => false,
-            Err(_) => true,
-        };
-        candidate_rows.push((candidates, malformed_metadata));
-    }
-
     let mut targets: BTreeMap<String, ResolvedTargetProject> = BTreeMap::new();
     let mut has_projectless_evidence = false;
     let mut has_unresolved_project_evidence = false;
-    for (candidates, malformed_metadata) in candidate_rows {
-        let mut row_targets: BTreeMap<String, ResolvedTargetProject> = BTreeMap::new();
-        let mut row_has_unresolved_project_evidence = malformed_metadata;
-        for candidate in candidates {
-            if is_projectless_candidate(&candidate, user_home, hermes_homes) {
-                continue;
+    let mut last_rowid = i64::MIN;
+    let mut first_page = true;
+    loop {
+        let sql = format!(
+            "SELECT rowid, {path_expr}, {key_expr}, {metadata_expr} FROM sessions
+             WHERE rowid > ?1 OR (?3 = 1 AND rowid = ?1)
+             ORDER BY rowid LIMIT ?2"
+        );
+        let mut rows = source
+            .query(
+                &sql,
+                params![last_rowid, MIGRATION_QUERY_PAGE_ROWS, i64::from(first_page)],
+            )
+            .await
+            .map_err(|error| format!("could not read source project metadata: {error}"))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("could not read source project metadata row: {error}"))?
+        {
+            let rowid = row
+                .get::<i64>(0)
+                .map_err(|error| format!("invalid source session rowid: {error}"))?;
+            if rowid < last_rowid || (rowid == last_rowid && (!first_page || page_rows > 0)) {
+                return Err("source sessions returned an unstable row order".to_string());
             }
-            let resolved =
-                resolve_project_candidate(&candidate, user_home, hermes_homes, registry).await?;
-            let Some(target) = resolved else {
-                row_has_unresolved_project_evidence = true;
-                continue;
+            last_rowid = rowid;
+            page_rows += 1;
+            let mut candidates = BTreeSet::new();
+            for candidate in [row.get::<Option<String>>(1), row.get::<Option<String>>(2)]
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                candidates.insert(PathBuf::from(candidate));
+            }
+            let malformed_metadata = match row.get::<Option<String>>(3) {
+                Ok(Some(metadata)) => {
+                    collect_metadata_project_candidates(&metadata, &mut candidates).is_err()
+                }
+                Ok(None) => false,
+                Err(_) => true,
             };
-            let key = target_key(&target);
-            if let Some(existing) = row_targets.get(&key)
-                && !same_path(&existing.root, &target.root)
-            {
-                return Err(project_identity_collision(&key, existing, &target));
+            let mut row_targets: BTreeMap<String, ResolvedTargetProject> = BTreeMap::new();
+            let mut row_has_unresolved_project_evidence = malformed_metadata;
+            for candidate in candidates {
+                if is_projectless_candidate(&candidate, user_home, hermes_homes) {
+                    continue;
+                }
+                let resolved =
+                    resolve_project_candidate(&candidate, user_home, hermes_homes, registry)
+                        .await?;
+                let Some(target) = resolved else {
+                    row_has_unresolved_project_evidence = true;
+                    continue;
+                };
+                let key = target_key(&target);
+                if let Some(existing) = row_targets.get(&key)
+                    && !same_path(&existing.root, &target.root)
+                {
+                    return Err(project_identity_collision(&key, existing, &target));
+                }
+                row_targets.insert(key, target);
             }
-            row_targets.insert(key, target);
-        }
-        if row_targets.len() > 1 {
-            return Err(format!(
-                "one source session maps to {} projects; refusing an ambiguous migration",
-                row_targets.len()
-            ));
-        }
-        if row_has_unresolved_project_evidence {
-            has_unresolved_project_evidence = true;
-        }
-        if let Some((key, target)) = row_targets.into_iter().next() {
-            if let Some(existing) = targets.get(&key)
-                && !same_path(&existing.root, &target.root)
-            {
-                return Err(project_identity_collision(&key, existing, &target));
+            if row_targets.len() > 1 {
+                return Err(format!(
+                    "one source session maps to {} projects; refusing an ambiguous migration",
+                    row_targets.len()
+                ));
             }
-            targets.insert(key, target);
-        } else if !row_has_unresolved_project_evidence {
-            has_projectless_evidence = true;
+            if row_has_unresolved_project_evidence {
+                has_unresolved_project_evidence = true;
+            }
+            if let Some((key, target)) = row_targets.into_iter().next() {
+                if let Some(existing) = targets.get(&key)
+                    && !same_path(&existing.root, &target.root)
+                {
+                    return Err(project_identity_collision(&key, existing, &target));
+                }
+                if !targets.contains_key(&key) {
+                    ensure_materialized_row_room(targets.len(), "resolved project map")?;
+                }
+                targets.insert(key, target);
+            } else if !row_has_unresolved_project_evidence {
+                has_projectless_evidence = true;
+            }
         }
+        if page_rows < MIGRATION_QUERY_PAGE_ROWS {
+            break;
+        }
+        first_page = false;
     }
     match targets.len() {
         1 if !has_projectless_evidence && !has_unresolved_project_evidence => targets

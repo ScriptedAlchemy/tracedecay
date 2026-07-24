@@ -4,9 +4,9 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use super::copy::{quote_identifier, table_columns};
+use super::copy::{MIGRATION_QUERY_PAGE_ROWS, quote_identifier, table_columns};
 use super::{COPIED_MEMORY_TABLES, COPIED_TABLES};
-use crate::db::engine::{QueryExecutor, Value};
+use crate::db::engine::{QueryExecutor, Value, params};
 
 pub(crate) fn hash_sqlite_value(hash: &mut Sha256, value: Value) {
     match value {
@@ -56,26 +56,50 @@ where
             .map(|column| quote_identifier(column))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!(
-            "SELECT {select} FROM {} ORDER BY rowid",
-            quote_identifier(table)
-        );
-        let mut rows = source
-            .query(&sql, ())
-            .await
-            .map_err(|error| format!("could not fingerprint source table {table}: {error}"))?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| format!("could not fingerprint source row in {table}: {error}"))?
-        {
-            hash.update(b"\0row\0");
-            for index in 0..columns.len() {
-                let value = row.get::<Value>(index as i32).map_err(|error| {
-                    format!("could not fingerprint source value in {table}: {error}")
-                })?;
-                hash_sqlite_value(hash, value);
+        let mut last_rowid = i64::MIN;
+        let mut first_page = true;
+        loop {
+            let sql = format!(
+                "SELECT rowid, {select} FROM {}
+                 WHERE rowid > ?1 OR (?3 = 1 AND rowid = ?1)
+                 ORDER BY rowid LIMIT ?2",
+                quote_identifier(table)
+            );
+            let mut rows = source
+                .query(
+                    &sql,
+                    params![last_rowid, MIGRATION_QUERY_PAGE_ROWS, i64::from(first_page)],
+                )
+                .await
+                .map_err(|error| format!("could not fingerprint source table {table}: {error}"))?;
+            let mut page_rows = 0_i64;
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| format!("could not fingerprint source row in {table}: {error}"))?
+            {
+                let rowid = row
+                    .get::<i64>(0)
+                    .map_err(|error| format!("invalid source rowid in {table}: {error}"))?;
+                if rowid < last_rowid || (rowid == last_rowid && (!first_page || page_rows > 0)) {
+                    return Err(format!(
+                        "source table {table} returned an unstable row order"
+                    ));
+                }
+                last_rowid = rowid;
+                page_rows += 1;
+                hash.update(b"\0row\0");
+                for index in 0..columns.len() {
+                    let value = row.get::<Value>((index + 1) as i32).map_err(|error| {
+                        format!("could not fingerprint source value in {table}: {error}")
+                    })?;
+                    hash_sqlite_value(hash, value);
+                }
             }
+            if page_rows < MIGRATION_QUERY_PAGE_ROWS {
+                break;
+            }
+            first_page = false;
         }
     }
     Ok(())

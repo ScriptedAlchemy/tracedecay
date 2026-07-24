@@ -4,7 +4,10 @@ use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
 
-use super::copy::{count_exact_rows, insert_row_or_skip_exact, quote_identifier, table_columns};
+use super::copy::{
+    MIGRATION_QUERY_PAGE_ROWS, compatible_columns, count_exact_rows, ensure_materialized_row_room,
+    insert_row_or_skip_exact, quote_identifier, table_columns,
+};
 use super::fingerprint::hash_sqlite_value;
 use super::pipeline::verify_source;
 use crate::db::Database;
@@ -302,10 +305,15 @@ where
 {
     let source_columns = table_columns(source, "memory_facts").await?;
     let target_columns = table_columns(target, "memory_facts").await?;
-    let columns = source_columns
-        .into_iter()
-        .filter(|column| column != "fact_id" && target_columns.contains(column))
-        .collect::<Vec<_>>();
+    if target_columns.is_empty() {
+        return Err("target is missing required table memory_facts".to_string());
+    }
+    let columns = compatible_columns(
+        source_columns,
+        &target_columns,
+        &["fact_id"],
+        "memory_facts",
+    )?;
     let content_index = columns
         .iter()
         .position(|column| column == "content")
@@ -315,51 +323,77 @@ where
         .map(|column| quote_identifier(column))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut rows = source
-        .query(
-            &format!("SELECT fact_id, {quoted} FROM memory_facts ORDER BY fact_id"),
-            (),
-        )
-        .await
-        .map_err(|error| format!("could not read legacy memory facts: {error}"))?;
     let mut copied = 0;
     let mut fact_ids = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| format!("could not read legacy memory fact: {error}"))?
-    {
-        let source_id = row
-            .get::<i64>(0)
-            .map_err(|error| format!("invalid legacy memory fact id: {error}"))?;
-        let mut values = Vec::with_capacity(columns.len());
-        for index in 0..columns.len() {
-            values.push(
-                row.get::<Value>((index + 1) as i32)
-                    .map_err(|error| format!("could not decode legacy memory fact: {error}"))?,
-            );
-        }
-        let content = match &values[content_index] {
-            Value::Text(content) => content.clone(),
-            _ => return Err("legacy memory fact content is not text".to_string()),
-        };
-        let fingerprint = sqlite_row_fingerprint(&columns, &values);
-        let target_id = memory_fact_id_by_content(target, &content).await?;
-        let target_id = if let Some(target_id) = target_id {
-            copied +=
-                merge_memory_fact_collision(target, target_id, &columns, &values, &fingerprint)
+    let mut last_fact_id = i64::MIN;
+    let mut first_page = true;
+    loop {
+        let mut rows = source
+            .query(
+                &format!(
+                    "SELECT fact_id, {quoted} FROM memory_facts
+                     WHERE fact_id > ?1 OR (?3 = 1 AND fact_id = ?1)
+                     ORDER BY fact_id LIMIT ?2"
+                ),
+                params![
+                    last_fact_id,
+                    MIGRATION_QUERY_PAGE_ROWS,
+                    i64::from(first_page)
+                ],
+            )
+            .await
+            .map_err(|error| format!("could not read legacy memory facts: {error}"))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("could not read legacy memory fact: {error}"))?
+        {
+            let source_id = row
+                .get::<i64>(0)
+                .map_err(|error| format!("invalid legacy memory fact id: {error}"))?;
+            if source_id < last_fact_id
+                || (source_id == last_fact_id && (!first_page || page_rows > 0))
+            {
+                return Err("legacy memory facts returned an unstable fact_id order".to_string());
+            }
+            last_fact_id = source_id;
+            page_rows += 1;
+            let mut values = Vec::with_capacity(columns.len());
+            for index in 0..columns.len() {
+                values
+                    .push(row.get::<Value>((index + 1) as i32).map_err(|error| {
+                        format!("could not decode legacy memory fact: {error}")
+                    })?);
+            }
+            let content = match &values[content_index] {
+                Value::Text(content) => content.clone(),
+                _ => return Err("legacy memory fact content is not text".to_string()),
+            };
+            let fingerprint = sqlite_row_fingerprint(&columns, &values);
+            let target_id = memory_fact_id_by_content(target, &content).await?;
+            let target_id = if let Some(target_id) = target_id {
+                copied +=
+                    merge_memory_fact_collision(target, target_id, &columns, &values, &fingerprint)
+                        .await?;
+                target_id
+            } else {
+                copied +=
+                    insert_row_or_skip_exact(target, "memory_facts", &columns, &values).await?;
+                let target_id = memory_fact_id_by_content(target, &content)
+                    .await?
+                    .ok_or_else(|| "migrated memory fact is absent from target".to_string())?;
+                record_memory_fact_merge_marker(target, target_id, &columns, &values, &fingerprint)
                     .await?;
-            target_id
-        } else {
-            copied += insert_row_or_skip_exact(target, "memory_facts", &columns, &values).await?;
-            let target_id = memory_fact_id_by_content(target, &content)
-                .await?
-                .ok_or_else(|| "migrated memory fact is absent from target".to_string())?;
-            record_memory_fact_merge_marker(target, target_id, &columns, &values, &fingerprint)
-                .await?;
-            target_id
-        };
-        fact_ids.insert(source_id, target_id);
+                target_id
+            };
+            ensure_materialized_row_room(fact_ids.len(), "memory fact identity map")?;
+            fact_ids.insert(source_id, target_id);
+        }
+        if page_rows < MIGRATION_QUERY_PAGE_ROWS {
+            break;
+        }
+        first_page = false;
     }
     Ok((copied, fact_ids))
 }
@@ -377,10 +411,15 @@ where
         return Ok((0, HashMap::new()));
     }
     let target_columns = table_columns(target, "memory_entities").await?;
-    let columns = source_columns
-        .into_iter()
-        .filter(|column| column != "entity_id" && target_columns.contains(column))
-        .collect::<Vec<_>>();
+    if target_columns.is_empty() {
+        return Err("target is missing required table memory_entities".to_string());
+    }
+    let columns = compatible_columns(
+        source_columns,
+        &target_columns,
+        &["entity_id"],
+        "memory_entities",
+    )?;
     let normalized_index = columns
         .iter()
         .position(|column| column == "normalized_name")
@@ -390,50 +429,79 @@ where
         .map(|column| quote_identifier(column))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut rows = source
-        .query(
-            &format!("SELECT entity_id, {quoted} FROM memory_entities ORDER BY entity_id"),
-            (),
-        )
-        .await
-        .map_err(|error| format!("could not read legacy memory entities: {error}"))?;
     let mut inserted = 0;
     let mut entity_ids = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| format!("could not read legacy memory entity: {error}"))?
-    {
-        let source_id = row
-            .get::<i64>(0)
-            .map_err(|error| format!("invalid legacy memory entity id: {error}"))?;
-        let mut values = Vec::with_capacity(columns.len());
-        for index in 0..columns.len() {
-            values.push(
-                row.get::<Value>((index + 1) as i32)
-                    .map_err(|error| format!("could not decode legacy memory entity: {error}"))?,
-            );
-        }
-        let normalized_name = match &values[normalized_index] {
-            Value::Text(value) => value.clone(),
-            _ => return Err("legacy normalized entity name is not text".to_string()),
-        };
-        inserted += insert_row_or_skip_exact(target, "memory_entities", &columns, &values).await?;
-        let mut target_rows = target
+    let mut last_entity_id = i64::MIN;
+    let mut first_page = true;
+    loop {
+        let mut rows = source
             .query(
-                "SELECT entity_id FROM memory_entities WHERE normalized_name = ?1",
-                params![normalized_name],
+                &format!(
+                    "SELECT entity_id, {quoted} FROM memory_entities
+                     WHERE entity_id > ?1 OR (?3 = 1 AND entity_id = ?1)
+                     ORDER BY entity_id LIMIT ?2"
+                ),
+                params![
+                    last_entity_id,
+                    MIGRATION_QUERY_PAGE_ROWS,
+                    i64::from(first_page)
+                ],
             )
             .await
-            .map_err(|error| format!("could not resolve migrated memory entity: {error}"))?;
-        let target_id = target_rows
+            .map_err(|error| format!("could not read legacy memory entities: {error}"))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
             .next()
             .await
-            .map_err(|error| format!("could not read migrated memory entity: {error}"))?
-            .ok_or_else(|| "migrated memory entity is absent from target".to_string())?
-            .get(0)
-            .map_err(|error| format!("invalid migrated memory entity id: {error}"))?;
-        entity_ids.insert(source_id, target_id);
+            .map_err(|error| format!("could not read legacy memory entity: {error}"))?
+        {
+            let source_id = row
+                .get::<i64>(0)
+                .map_err(|error| format!("invalid legacy memory entity id: {error}"))?;
+            if source_id < last_entity_id
+                || (source_id == last_entity_id && (!first_page || page_rows > 0))
+            {
+                return Err(
+                    "legacy memory entities returned an unstable entity_id order".to_string(),
+                );
+            }
+            last_entity_id = source_id;
+            page_rows += 1;
+            let mut values = Vec::with_capacity(columns.len());
+            for index in 0..columns.len() {
+                values.push(
+                    row.get::<Value>((index + 1) as i32).map_err(|error| {
+                        format!("could not decode legacy memory entity: {error}")
+                    })?,
+                );
+            }
+            let normalized_name = match &values[normalized_index] {
+                Value::Text(value) => value.clone(),
+                _ => return Err("legacy normalized entity name is not text".to_string()),
+            };
+            inserted +=
+                insert_row_or_skip_exact(target, "memory_entities", &columns, &values).await?;
+            let mut target_rows = target
+                .query(
+                    "SELECT entity_id FROM memory_entities WHERE normalized_name = ?1",
+                    params![normalized_name],
+                )
+                .await
+                .map_err(|error| format!("could not resolve migrated memory entity: {error}"))?;
+            let target_id = target_rows
+                .next()
+                .await
+                .map_err(|error| format!("could not read migrated memory entity: {error}"))?
+                .ok_or_else(|| "migrated memory entity is absent from target".to_string())?
+                .get(0)
+                .map_err(|error| format!("invalid migrated memory entity id: {error}"))?;
+            ensure_materialized_row_room(entity_ids.len(), "memory entity identity map")?;
+            entity_ids.insert(source_id, target_id);
+        }
+        if page_rows < MIGRATION_QUERY_PAGE_ROWS {
+            break;
+        }
+        first_page = false;
     }
     Ok((inserted, entity_ids))
 }
@@ -448,47 +516,93 @@ where
     S: QueryExecutor + ?Sized,
     T: Executor + ?Sized,
 {
-    if table_columns(source, "memory_fact_entities")
-        .await?
-        .is_empty()
-    {
+    let source_columns = table_columns(source, "memory_fact_entities").await?;
+    if source_columns.is_empty() {
         return Ok(0);
     }
-    let mut rows = source
-        .query(
-            "SELECT fact_id, entity_id FROM memory_fact_entities ORDER BY fact_id, entity_id",
-            (),
-        )
-        .await
-        .map_err(|error| format!("could not read legacy memory associations: {error}"))?;
-    let mut inserted = 0;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| format!("could not read legacy memory association: {error}"))?
+    let expected_columns = ["fact_id", "entity_id"];
+    let unsupported = source_columns
+        .iter()
+        .filter(|column| !expected_columns.contains(&column.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unsupported.is_empty() {
+        return Err(format!(
+            "source table memory_fact_entities has unsupported columns that would be dropped: {}",
+            unsupported.join(", ")
+        ));
+    }
+    if !expected_columns
+        .iter()
+        .all(|required| source_columns.iter().any(|column| column == required))
     {
-        let source_fact_id = row
-            .get::<i64>(0)
-            .map_err(|error| format!("invalid legacy fact association: {error}"))?;
-        let source_entity_id = row
-            .get::<i64>(1)
-            .map_err(|error| format!("invalid legacy entity association: {error}"))?;
-        let target_fact_id = fact_ids.get(&source_fact_id).ok_or_else(|| {
-            format!("legacy association references missing fact {source_fact_id}")
-        })?;
-        let target_entity_id = entity_ids.get(&source_entity_id).ok_or_else(|| {
-            format!("legacy association references missing entity {source_entity_id}")
-        })?;
-        inserted += insert_row_or_skip_exact(
-            target,
-            "memory_fact_entities",
-            &["fact_id".to_string(), "entity_id".to_string()],
-            &[
-                Value::Integer(*target_fact_id),
-                Value::Integer(*target_entity_id),
-            ],
-        )
-        .await?;
+        return Err("source memory_fact_entities is missing required columns".to_string());
+    }
+    let mut inserted = 0;
+    let mut last_fact_id = i64::MIN;
+    let mut last_entity_id = i64::MIN;
+    let mut first_page = true;
+    loop {
+        let mut rows = source
+            .query(
+                "SELECT fact_id, entity_id FROM memory_fact_entities
+                 WHERE fact_id > ?1 OR (fact_id = ?1 AND entity_id > ?2)
+                    OR (?4 = 1 AND fact_id = ?1 AND entity_id = ?2)
+                 ORDER BY fact_id, entity_id LIMIT ?3",
+                params![
+                    last_fact_id,
+                    last_entity_id,
+                    MIGRATION_QUERY_PAGE_ROWS,
+                    i64::from(first_page)
+                ],
+            )
+            .await
+            .map_err(|error| format!("could not read legacy memory associations: {error}"))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("could not read legacy memory association: {error}"))?
+        {
+            let source_fact_id = row
+                .get::<i64>(0)
+                .map_err(|error| format!("invalid legacy fact association: {error}"))?;
+            let source_entity_id = row
+                .get::<i64>(1)
+                .map_err(|error| format!("invalid legacy entity association: {error}"))?;
+            if (source_fact_id, source_entity_id) < (last_fact_id, last_entity_id)
+                || (!first_page
+                    && (source_fact_id, source_entity_id) == (last_fact_id, last_entity_id))
+                || (first_page
+                    && page_rows > 0
+                    && (source_fact_id, source_entity_id) == (last_fact_id, last_entity_id))
+            {
+                return Err("legacy memory associations returned an unstable order".to_string());
+            }
+            last_fact_id = source_fact_id;
+            last_entity_id = source_entity_id;
+            page_rows += 1;
+            let target_fact_id = fact_ids.get(&source_fact_id).ok_or_else(|| {
+                format!("legacy association references missing fact {source_fact_id}")
+            })?;
+            let target_entity_id = entity_ids.get(&source_entity_id).ok_or_else(|| {
+                format!("legacy association references missing entity {source_entity_id}")
+            })?;
+            inserted += insert_row_or_skip_exact(
+                target,
+                "memory_fact_entities",
+                &["fact_id".to_string(), "entity_id".to_string()],
+                &[
+                    Value::Integer(*target_fact_id),
+                    Value::Integer(*target_entity_id),
+                ],
+            )
+            .await?;
+        }
+        if page_rows < MIGRATION_QUERY_PAGE_ROWS {
+            break;
+        }
+        first_page = false;
     }
     Ok(inserted)
 }
@@ -507,19 +621,25 @@ where
         return Ok(0);
     }
     let target_columns = table_columns(target, "memory_feedback_events").await?;
-    let columns = source_columns
-        .into_iter()
-        .filter(|column| {
-            column != "event_id" && column != "fact_id" && target_columns.contains(column)
-        })
-        .collect::<Vec<_>>();
+    if target_columns.is_empty() {
+        return Err("target is missing required table memory_feedback_events".to_string());
+    }
+    let columns = compatible_columns(
+        source_columns,
+        &target_columns,
+        &["event_id", "fact_id"],
+        "memory_feedback_events",
+    )?;
     let quoted = columns
         .iter()
         .map(|column| quote_identifier(column))
         .collect::<Vec<_>>()
         .join(", ");
-    let select_sql =
-        format!("SELECT fact_id, {quoted} FROM memory_feedback_events ORDER BY event_id");
+    let select_sql = format!(
+        "SELECT event_id, fact_id, {quoted} FROM memory_feedback_events
+         WHERE event_id > ?1 OR (?3 = 1 AND event_id = ?1)
+         ORDER BY event_id LIMIT ?2"
+    );
     let mut target_columns_with_fact = vec!["fact_id".to_string()];
     target_columns_with_fact.extend(columns.iter().cloned());
     let target_quoted = target_columns_with_fact
@@ -533,49 +653,82 @@ where
         .join(", ");
     let insert_sql =
         format!("INSERT INTO memory_feedback_events ({target_quoted}) VALUES ({placeholders})");
-    let mut rows = source
-        .query(&select_sql, ())
-        .await
-        .map_err(|error| format!("could not read legacy memory feedback: {error}"))?;
     let mut inserted = 0;
     let mut source_occurrences: HashMap<String, u64> = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| format!("could not read legacy memory feedback row: {error}"))?
-    {
-        let source_fact_id = row
-            .get::<i64>(0)
-            .map_err(|error| format!("invalid legacy feedback fact id: {error}"))?;
-        let target_fact_id = fact_ids
-            .get(&source_fact_id)
-            .ok_or_else(|| format!("legacy feedback references missing fact {source_fact_id}"))?;
-        let mut values = Vec::with_capacity(columns.len() + 1);
-        values.push(Value::Integer(*target_fact_id));
-        for index in 0..columns.len() {
-            values
-                .push(row.get::<Value>((index + 1) as i32).map_err(|error| {
+    let mut last_event_id = i64::MIN;
+    let mut first_page = true;
+    loop {
+        let mut rows = source
+            .query(
+                &select_sql,
+                params![
+                    last_event_id,
+                    MIGRATION_QUERY_PAGE_ROWS,
+                    i64::from(first_page)
+                ],
+            )
+            .await
+            .map_err(|error| format!("could not read legacy memory feedback: {error}"))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("could not read legacy memory feedback row: {error}"))?
+        {
+            let event_id = row
+                .get::<i64>(0)
+                .map_err(|error| format!("invalid legacy feedback event id: {error}"))?;
+            if event_id < last_event_id
+                || (event_id == last_event_id && (!first_page || page_rows > 0))
+            {
+                return Err(
+                    "legacy memory feedback returned an unstable event_id order".to_string()
+                );
+            }
+            last_event_id = event_id;
+            page_rows += 1;
+            let source_fact_id = row
+                .get::<i64>(1)
+                .map_err(|error| format!("invalid legacy feedback fact id: {error}"))?;
+            let target_fact_id = fact_ids.get(&source_fact_id).ok_or_else(|| {
+                format!("legacy feedback references missing fact {source_fact_id}")
+            })?;
+            let mut values = Vec::with_capacity(columns.len() + 1);
+            values.push(Value::Integer(*target_fact_id));
+            for index in 0..columns.len() {
+                values.push(row.get::<Value>((index + 2) as i32).map_err(|error| {
                     format!("could not decode legacy memory feedback: {error}")
                 })?);
+            }
+            let signature = sqlite_row_fingerprint(&target_columns_with_fact, &values);
+            if !source_occurrences.contains_key(&signature) {
+                ensure_materialized_row_room(
+                    source_occurrences.len(),
+                    "memory feedback occurrence map",
+                )?;
+            }
+            let occurrence = source_occurrences.entry(signature).or_default();
+            *occurrence = occurrence.saturating_add(1);
+            if count_exact_rows(
+                target,
+                "memory_feedback_events",
+                &target_columns_with_fact,
+                &values,
+            )
+            .await?
+                >= *occurrence
+            {
+                continue;
+            }
+            inserted += target
+                .execute(&insert_sql, params_from_iter(values.iter().cloned()))
+                .await
+                .map_err(|error| format!("could not copy legacy memory feedback: {error}"))?;
         }
-        let signature = sqlite_row_fingerprint(&target_columns_with_fact, &values);
-        let occurrence = source_occurrences.entry(signature).or_default();
-        *occurrence = occurrence.saturating_add(1);
-        if count_exact_rows(
-            target,
-            "memory_feedback_events",
-            &target_columns_with_fact,
-            &values,
-        )
-        .await?
-            >= *occurrence
-        {
-            continue;
+        if page_rows < MIGRATION_QUERY_PAGE_ROWS {
+            break;
         }
-        inserted += target
-            .execute(&insert_sql, params_from_iter(values.iter().cloned()))
-            .await
-            .map_err(|error| format!("could not copy legacy memory feedback: {error}"))?;
+        first_page = false;
     }
     Ok(inserted)
 }
