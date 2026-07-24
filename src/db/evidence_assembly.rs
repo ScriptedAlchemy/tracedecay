@@ -1,5 +1,4 @@
-use libsql::Connection;
-
+use crate::db::engine::Executor;
 use crate::errors::{Result, TraceDecayError};
 
 const EVIDENCE_ASSEMBLY_SCHEMA: &str = r"
@@ -188,7 +187,7 @@ const EVIDENCE_ASSEMBLY_IMMUTABILITY: &str = r"
 ";
 
 pub(crate) async fn install_evidence_assembly_schema(
-    conn: &Connection,
+    conn: &(impl Executor + Sync),
     operation: &str,
 ) -> Result<()> {
     super::retrieval_anchor_schema::install_retrieval_anchor_schema(conn, operation).await?;

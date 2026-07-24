@@ -1,10 +1,14 @@
 #![allow(clippy::drop_non_drop)] // explicit early drop in test
+use std::process::Command;
+
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::application::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};
-use tracedecay::store::GlobalDbObservationStore;
+use tracedecay::global_db::StoreInstanceUpsert;
 use tracedecay_domain::{
-    ClaudeSourceCursorV1, FactOwnerV1, ObservationScopeV1, ProjectId, RetrievalAnchorId,
+    AnchorLineageRefV2, AnchorProvenanceRelationV2, ClaudeSourceCursorV1, FactOwnerV1,
+    ObservationScopeV1, ProjectId, RetrievalAnchorId, RetrievalAnchorRecordV2,
+    RetrievalAnchorRecordV2Parts,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
@@ -12,17 +16,248 @@ use tracedecay_store::{
 };
 
 use super::{
-    GENERATION, ProviderObservationFixture, anchor_with_aliases, known_repository_provenance_write,
-    native_observation, observation, observation_in_scope, provider_observation, provider_write,
-    user_table_counts, write,
+    GENERATION, ProviderObservationFixture, anchor_with_aliases, cursor,
+    known_repository_provenance_write, native_observation, observation, observation_in_scope,
+    provider_observation, provider_write, user_table_counts, write,
 };
-use crate::common::open_lcm_db;
+
+fn anchor_with_sources(
+    anchor: &RetrievalAnchorRecordV2,
+    source_anchors: Vec<AnchorLineageRefV2>,
+) -> RetrievalAnchorRecordV2 {
+    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: anchor.target().clone(),
+        owner: anchor.owner().clone(),
+        aliases: anchor.aliases().to_vec(),
+        occurred_at: anchor.occurred_at(),
+        ingested_at: anchor.ingested_at(),
+        evidence_class: anchor.evidence_class(),
+        source_generation: anchor.source_generation().clone(),
+        projection_generation: anchor.projection_generation().clone(),
+        projection_watermark: anchor.projection_watermark().clone(),
+        coverage: anchor.coverage().clone(),
+        source_observations: anchor.source_observations().to_vec(),
+        source_anchors,
+        authorization: anchor.authorization().clone(),
+        payload_access: anchor.payload_access(),
+        retention_class: anchor.retention_class().clone(),
+        durability: anchor.durability().clone(),
+    })
+    .unwrap()
+}
+
+async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .unwrap()
+}
+
+async fn project_runtime(tmp: &TempDir, project_id: &ProjectId) -> HostAdmissionTestRuntimeV1 {
+    let project_root = tmp.path().join("project");
+    project_runtime_at(tmp, &project_root, project_id).await
+}
+
+async fn project_runtime_at(
+    tmp: &TempDir,
+    project_root: &std::path::Path,
+    project_id: &ProjectId,
+) -> HostAdmissionTestRuntimeV1 {
+    std::fs::create_dir_all(&project_root).unwrap();
+    if !project_root.join(".git").exists() {
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&project_root)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    assert!(
+        tracedecay::storage::write_repository_identity_marker(&project_root, project_id.as_str())
+            .unwrap()
+    );
+    tracedecay::storage::write_enrollment_marker(
+        &project_root,
+        &tracedecay::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    HostAdmissionTestRuntimeV1::project(
+        tmp.path().join(".tracedecay"),
+        project_root,
+        project_id.clone(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn pr7_copied_prompt_anchor_persists_exact_source_evidence_binding() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let source = match store
+        .persist_observation(write(
+            observation(0, 100, "receipt.copied-prompt.source", "source prompt"),
+            None,
+        ))
+        .await
+        .unwrap()
+    {
+        ObservationPersistOutcome::Committed(receipt) => receipt,
+        other => panic!("source prompt persistence must commit, got {other:?}"),
+    };
+    let source_anchor_id = source.retrieval_anchor().anchor_id().clone();
+
+    let copied = write(
+        observation(100, 200, "receipt.copied-prompt.copy", "copied prompt"),
+        Some(cursor(100)),
+    );
+    let (copied_write, copied_anchor, projection_generation, _) = copied.into_parts();
+    let copied_from = AnchorLineageRefV2::new(
+        AnchorProvenanceRelationV2::CopiedFrom,
+        source_anchor_id.clone(),
+        ObservationScopeV1::Profile,
+    )
+    .unwrap();
+    let copied_anchor = anchor_with_sources(&copied_anchor, vec![copied_from.clone()]);
+    let copied_anchor_id = copied_anchor.anchor_id().clone();
+    store
+        .persist_observation(
+            AnchoredObservationWrite::new(
+                copied_write,
+                copied_anchor.clone(),
+                projection_generation,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    drop(store);
+    drop(runtime);
+    let runtime = profile_runtime(&tmp).await;
+    let resolved = runtime
+        .facade()
+        .resolve_evidence_anchor(FactOwnerV1::Profile, copied_anchor_id)
+        .await
+        .unwrap();
+    assert_eq!(resolved.record(), &copied_anchor);
+    assert_eq!(resolved.record().source_anchors(), &[copied_from]);
+    assert_ne!(resolved.anchor_id(), &source_anchor_id);
+}
+
+#[tokio::test]
+async fn pr7_project_move_reresolves_retained_anchor_through_registered_identity() {
+    let tmp = TempDir::new().unwrap();
+    let profile_root = tmp.path().join(".tracedecay");
+    let old_root = tmp.path().join("old").join("project");
+    let moved_root = tmp.path().join("moved").join("project");
+    let project_id = ProjectId::new("project.anchor-move").unwrap();
+    let runtime = project_runtime_at(&tmp, &old_root, &project_id).await;
+    let old_git_common_dir = tracedecay::worktree::git_common_dir(&old_root).unwrap();
+    runtime
+        .upsert_code_project(
+            project_id.as_str(),
+            &old_root,
+            Some(&old_git_common_dir),
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    runtime
+        .upsert_store_instance(StoreInstanceUpsert {
+            store_id: "store_project_anchor_move".to_owned(),
+            project_id: project_id.as_str().to_owned(),
+            store_kind: "code_project".to_owned(),
+            storage_mode: "profile_sharded".to_owned(),
+            store_relpath: format!("projects/{}", project_id.as_str()),
+            manifest_relpath: Some(format!(
+                "projects/{}/store_manifest.json",
+                project_id.as_str()
+            )),
+            last_verified_at: Some(100),
+            last_write_at: Some(101),
+        })
+        .await
+        .unwrap();
+    let candidate = observation_in_scope(
+        GENERATION,
+        0,
+        100,
+        "receipt.anchor-project-move",
+        "retained project evidence",
+        ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        },
+    );
+    let anchor = {
+        let store = runtime
+            .observation_store(HostAdmissionScope::Project)
+            .unwrap();
+        match store
+            .persist_observation(write(candidate, None))
+            .await
+            .unwrap()
+        {
+            ObservationPersistOutcome::Committed(receipt) => receipt.retrieval_anchor().clone(),
+            other => panic!("project anchor persistence must commit, got {other:?}"),
+        }
+    };
+    drop(runtime);
+
+    std::fs::create_dir_all(moved_root.parent().unwrap()).unwrap();
+    std::fs::rename(&old_root, &moved_root).unwrap();
+    let moved_git_common_dir = tracedecay::worktree::git_common_dir(&moved_root).unwrap();
+    let profile_runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
+    let resolution = profile_runtime
+        .resolve_project_store_by_identity(&moved_root, Some(&moved_git_common_dir))
+        .await
+        .unwrap()
+        .expect("moved checkout must resolve to its retained project store");
+    assert_eq!(resolution.project.project_id, project_id.as_str());
+    let resolved_project_id = ProjectId::new(resolution.project.project_id).unwrap();
+    drop(profile_runtime);
+
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &moved_root,
+        resolved_project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let resolved = runtime
+        .facade()
+        .resolve_evidence_anchor(
+            FactOwnerV1::Project {
+                project_id: resolved_project_id,
+            },
+            anchor.anchor_id().clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.record(), &anchor);
+    assert_eq!(
+        resolved.record().owner(),
+        &ObservationScopeV1::Project { project_id }
+    );
+}
 
 #[tokio::test]
 async fn daemon_resolves_only_canonical_owner_bound_observation_anchors() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let candidate = observation(0, 100, "receipt.resolver", "stable sanitized payload");
     let receipt = match store
         .persist_observation(write(candidate, None))
@@ -32,7 +267,7 @@ async fn daemon_resolves_only_canonical_owner_bound_observation_anchors() {
         ObservationPersistOutcome::Committed(receipt) => receipt,
         other => panic!("first persistence must commit, got {other:?}"),
     };
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+    let facade = runtime.facade();
 
     let resolved = facade
         .resolve_evidence_anchor(
@@ -60,6 +295,7 @@ async fn daemon_resolves_only_canonical_owner_bound_observation_anchors() {
 async fn repository_provenance_survives_restart_rebuild_and_owner_checks() {
     let tmp = TempDir::new().unwrap();
     let project_a = ProjectId::new("project.provenance-a").unwrap();
+    let runtime = project_runtime(&tmp, &project_a).await;
     let candidate = observation_in_scope(
         GENERATION,
         0,
@@ -80,8 +316,9 @@ async fn repository_provenance_survives_restart_rebuild_and_owner_checks() {
     let write = ObservationWrite::new(candidate.clone(), None, next_cursor).unwrap();
 
     let (repository_anchor_id, expected_attachment, receipt_sequence) = {
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let store = runtime
+            .observation_store(HostAdmissionScope::Project)
+            .unwrap();
         let receipt = match store
             .persist_observation(known_repository_provenance_write(write))
             .await
@@ -101,8 +338,11 @@ async fn repository_provenance_survives_restart_rebuild_and_owner_checks() {
         (repository_anchor_id, expected_attachment, receipt_sequence)
     };
 
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    drop(runtime);
+    let runtime = project_runtime(&tmp, &project_a).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
     let restored = store
         .get_observation(candidate.observation_id())
         .await
@@ -135,9 +375,7 @@ async fn repository_provenance_survives_restart_rebuild_and_owner_checks() {
         &expected_attachment
     );
 
-    let facade = HostAdmissionFacade::new(
-        HostAdmissionAuthorities::for_project(&db, project_a.clone()).with_profile(&db),
-    );
+    let facade = runtime.facade();
     let resolved = facade
         .resolve_evidence_anchor(
             FactOwnerV1::Project {
@@ -176,8 +414,14 @@ async fn repository_provenance_survives_restart_rebuild_and_owner_checks() {
 #[tokio::test]
 async fn retrieval_anchor_alias_collision_is_typed_and_rolls_back_the_candidate() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let first = native_observation(
         1,
         1,
@@ -208,7 +452,7 @@ async fn retrieval_anchor_alias_collision_is_typed_and_rolls_back_the_candidate(
         )
         .await
         .unwrap();
-    let counts_before = user_table_counts(&tmp).await;
+    let counts_before = user_table_counts(&database_path);
 
     let error = store
         .persist_observation(second_write)
@@ -231,15 +475,17 @@ async fn retrieval_anchor_alias_collision_is_typed_and_rolls_back_the_candidate(
             .unwrap()
             .is_none()
     );
-    assert_eq!(user_table_counts(&tmp).await, counts_before);
+    assert_eq!(user_table_counts(&database_path), counts_before);
 }
 
 #[tokio::test]
 async fn unauthorized_anchor_resolution_is_indistinguishable_from_absence() {
     // Owner X persists a profile-scoped observation whose anchor genuinely exists.
     let owner_x = TempDir::new().unwrap();
-    let db_x = open_lcm_db(&owner_x).await;
-    let store_x = GlobalDbObservationStore::new(&db_x);
+    let runtime_x = profile_runtime(&owner_x).await;
+    let store_x = runtime_x
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let candidate = observation(
         0,
         100,
@@ -257,7 +503,7 @@ async fn unauthorized_anchor_resolution_is_indistinguishable_from_absence() {
     let existing_anchor_id = receipt.retrieval_anchor().anchor_id().clone();
 
     // Control: the authorized owner X still resolves its own anchor successfully.
-    let facade_x = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db_x));
+    let facade_x = runtime_x.facade();
     let authorized = facade_x
         .resolve_evidence_anchor(FactOwnerV1::Profile, existing_anchor_id.clone())
         .await
@@ -267,12 +513,9 @@ async fn unauthorized_anchor_resolution_is_indistinguishable_from_absence() {
     // Owner Y is a different, isolated authority. It must not be able to tell an
     // anchor that exists under owner X apart from one that never existed at all.
     let owner_y = TempDir::new().unwrap();
-    let db_y = open_lcm_db(&owner_y).await;
     let project_y = ProjectId::new("project.unauthorized-owner-y").unwrap();
-    let facade_y = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        &db_y,
-        project_y.clone(),
-    ));
+    let runtime_y = project_runtime(&owner_y, &project_y).await;
+    let facade_y = runtime_y.facade();
 
     let never_existed_anchor_id = RetrievalAnchorId::new("retrieval.never-existed").unwrap();
     assert_ne!(existing_anchor_id, never_existed_anchor_id);

@@ -20,10 +20,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::application::memory::EvidenceAnchorResolver;
-use tracedecay::global_db::GlobalDb;
-use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::research::{
     AttributionGap, GitTruthManifest, LogSafeText, ResearchAnchorSubjectV1,
     ResearchAnchorTombstoneV1, ResearchBundleEnvelopeV1, ResearchBundleManifestV1,
@@ -50,7 +48,7 @@ use tracedecay_store::{
     build_observation_retrieval_anchor_v2,
 };
 
-use crate::common::{git_program, open_lcm_db};
+use crate::common::git_program;
 
 #[allow(dead_code, clippy::duplicate_mod)]
 #[path = "research_anchors/support.rs"]
@@ -298,7 +296,7 @@ fn capture_head_state(
 }
 
 async fn persist_head_capture(
-    db: &GlobalDb,
+    store: &impl ObservationStore,
     project_id: &ProjectId,
     seed: &str,
     checkout: &GitCheckout,
@@ -373,7 +371,6 @@ async fn persist_head_capture(
             Some(repository_anchor.clone()),
         )
         .unwrap();
-    let store = GlobalDbObservationStore::new(db);
     match store.persist_observation(write).await.unwrap() {
         ObservationPersistOutcome::Committed(_) => {}
         other => panic!("provenance capture write must commit, got {other:?}"),
@@ -388,14 +385,11 @@ async fn persist_head_capture(
 }
 
 async fn resolve_capture_anchor(
-    db: &GlobalDb,
+    runtime: &HostAdmissionTestRuntimeV1,
     project_id: &ProjectId,
     anchor_id: &RetrievalAnchorId,
 ) -> RetrievalAnchorRecordV2 {
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        db,
-        project_id.clone(),
-    ));
+    let facade = runtime.facade();
     facade
         .resolve_evidence_anchor(
             FactOwnerV1::Project {
@@ -406,6 +400,46 @@ async fn resolve_capture_anchor(
         .await
         .unwrap()
         .into_record()
+}
+
+async fn project_runtime(
+    tmp: &TempDir,
+    project_root: &Path,
+    project_id: &ProjectId,
+) -> HostAdmissionTestRuntimeV1 {
+    assert!(
+        tracedecay::storage::write_repository_identity_marker(project_root, project_id.as_str())
+            .unwrap()
+    );
+    tracedecay::storage::write_enrollment_marker(
+        project_root,
+        &tracedecay::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        project_root,
+        project_id.clone(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn reopen_project_runtime(
+    tmp: &TempDir,
+    project_root: &Path,
+    project_id: &ProjectId,
+) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        project_root,
+        project_id.clone(),
+    )
+    .await
+    .unwrap()
 }
 
 fn assert_resolution_targets_original_capture(
@@ -429,7 +463,7 @@ fn assert_resolution_targets_original_capture(
 }
 
 async fn assert_retained_head_state(
-    store: &GlobalDbObservationStore<'_>,
+    store: &impl ObservationStore,
     persisted: &PersistedCapture,
     forbidden_commits: &[String],
 ) {
@@ -474,8 +508,11 @@ async fn moved_branch_ref_keeps_resolution_on_the_captured_commit() {
     let checkout = GitCheckout::init(tmp.path());
     let commit_a = checkout.commit("initial evidence");
     let project_id = ProjectId::new("project.anchor-retargeting.move").unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let persisted = persist_head_capture(&db, &project_id, "move", &checkout).await;
+    let runtime = project_runtime(&tmp, checkout.path(), &project_id).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
+    let persisted = persist_head_capture(&store, &project_id, "move", &checkout).await;
     assert_eq!(persisted.commit.as_str(), commit_a);
 
     // Move the branch ref to commit B after the anchor was retained.
@@ -484,11 +521,14 @@ async fn moved_branch_ref_keeps_resolution_on_the_captured_commit() {
     assert_eq!(checkout.git(&["rev-parse", "refs/heads/main"]), commit_b);
 
     // Restart the store so resolution runs against reopened retained state.
-    drop(db);
-    let db = open_lcm_db(&tmp).await;
-    let record = resolve_capture_anchor(&db, &project_id, &persisted.anchor_id).await;
+    drop(store);
+    drop(runtime);
+    let runtime = reopen_project_runtime(&tmp, checkout.path(), &project_id).await;
+    let record = resolve_capture_anchor(&runtime, &project_id, &persisted.anchor_id).await;
     assert_resolution_targets_original_capture(&record, &persisted);
-    let store = GlobalDbObservationStore::new(&db);
+    let store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
     assert_retained_head_state(&store, &persisted, &[commit_b]).await;
 }
 
@@ -498,8 +538,11 @@ async fn force_rewritten_branch_keeps_resolution_on_the_captured_commit() {
     let checkout = GitCheckout::init(tmp.path());
     let commit_a = checkout.commit("base evidence");
     let project_id = ProjectId::new("project.anchor-retargeting.rewrite").unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let persisted = persist_head_capture(&db, &project_id, "rewrite", &checkout).await;
+    let runtime = project_runtime(&tmp, checkout.path(), &project_id).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
+    let persisted = persist_head_capture(&store, &project_id, "rewrite", &checkout).await;
     assert_eq!(persisted.commit.as_str(), commit_a);
 
     // Force-update the branch: amend replaces the tip with a rewritten object.
@@ -509,11 +552,14 @@ async fn force_rewritten_branch_keeps_resolution_on_the_captured_commit() {
     let rewritten = checkout.git(&["rev-parse", "refs/heads/main"]);
     assert_ne!(commit_a, rewritten);
 
-    drop(db);
-    let db = open_lcm_db(&tmp).await;
-    let record = resolve_capture_anchor(&db, &project_id, &persisted.anchor_id).await;
+    drop(store);
+    drop(runtime);
+    let runtime = reopen_project_runtime(&tmp, checkout.path(), &project_id).await;
+    let record = resolve_capture_anchor(&runtime, &project_id, &persisted.anchor_id).await;
     assert_resolution_targets_original_capture(&record, &persisted);
-    let store = GlobalDbObservationStore::new(&db);
+    let store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
     assert_retained_head_state(&store, &persisted, &[rewritten]).await;
 }
 
@@ -524,8 +570,11 @@ async fn deleted_ref_and_removed_checkout_never_resolve_against_ambient_head() {
     let checkout = GitCheckout::init(&checkout_path);
     let commit_a = checkout.commit("retained evidence");
     let project_id = ProjectId::new("project.anchor-retargeting.delete").unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let persisted = persist_head_capture(&db, &project_id, "delete", &checkout).await;
+    let runtime = project_runtime(&tmp, checkout.path(), &project_id).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
+    let persisted = persist_head_capture(&store, &project_id, "delete", &checkout).await;
     assert_eq!(persisted.commit.as_str(), commit_a);
 
     // Delete the ref entirely, then remove the checkout.
@@ -538,11 +587,14 @@ async fn deleted_ref_and_removed_checkout_never_resolve_against_ambient_head() {
     let ambient_head = ambient.commit("ambient replacement");
     assert_ne!(commit_a, ambient_head);
 
-    drop(db);
-    let db = open_lcm_db(&tmp).await;
-    let record = resolve_capture_anchor(&db, &project_id, &persisted.anchor_id).await;
+    drop(store);
+    drop(runtime);
+    let runtime = reopen_project_runtime(&tmp, ambient.path(), &project_id).await;
+    let record = resolve_capture_anchor(&runtime, &project_id, &persisted.anchor_id).await;
     assert_resolution_targets_original_capture(&record, &persisted);
-    let store = GlobalDbObservationStore::new(&db);
+    let store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
     assert_retained_head_state(&store, &persisted, &[ambient_head]).await;
 }
 

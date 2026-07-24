@@ -8,6 +8,7 @@
 //! unit tests or mock authorities.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -58,6 +59,10 @@ where
     T: TryFrom<String, Error = DomainError>,
 {
     T::try_from(value.to_owned()).unwrap()
+}
+
+fn sqlite_text_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn application_identity(owner: &FactOwnerV1, operation: &str) -> FactIdentityMaterialV1 {
@@ -842,6 +847,116 @@ async fn contradictions_are_recorded_explicitly_in_lineage() {
         "missing curation target should fail as a storage error, got {error:?}"
     );
     assert_eq!(lineage(&store, &owner, &first.fact_id).await.len(), 2);
+}
+
+#[tokio::test]
+async fn failed_fact_batch_rolls_back_identity_assertion_anchor_and_lineage() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let identity = application_identity(&owner, "operation.fmh.atomic-rollback");
+    let fact_id = FactId::derive(&identity).unwrap();
+    let new_anchor = anchor(
+        ObservationScopeV1::Profile,
+        "entity.fmh.atomic-rollback",
+        "privacy.fmh.atomic-rollback",
+        PayloadAccessState::Eligible,
+        CoverageReportV1::default(),
+    );
+    let assertion = FactAssertionV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactAssertionKindV1::Initial,
+        payload(
+            "must not survive a failed batch",
+            "receipt.fmh.atomic-rollback",
+        ),
+        vec![evidence(
+            &fact_id,
+            new_anchor.anchor_id(),
+            FactEvidenceRelationV1::Supports,
+        )],
+        UtcMicros(1_000),
+        None,
+    )
+    .unwrap();
+    let assertion_id = assertion.assertion_id().clone();
+    let recorded = recorded_event(&fact_id, &owner, assertion.assertion_id(), 1_000);
+    let missing = FactId::derive(&application_identity(
+        &owner,
+        "operation.fmh.atomic-rollback.missing",
+    ))
+    .unwrap();
+    let rejected = FactLineageEventV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::ContradictedBy { fact_id: missing },
+            evidence_ids: Vec::new(),
+        },
+        UtcMicros(2_000),
+        None,
+    )
+    .unwrap();
+    let batch = FactWriteBatch::new(
+        fact_id.clone(),
+        owner.clone(),
+        Some(assertion),
+        vec![recorded, rejected],
+        vec![new_anchor.clone()],
+        Vec::new(),
+        None,
+        None,
+    )
+    .unwrap()
+    .with_identity_material(identity)
+    .unwrap();
+
+    let error = store.commit_fact(batch).await.unwrap_err();
+    assert!(
+        matches!(error, FactStoreError::Storage { .. }),
+        "missing curation target should fail after staged writes, got {error:?}"
+    );
+    assert!(current(&store, &owner, &fact_id).await.is_none());
+    assert!(lineage(&store, &owner, &fact_id).await.is_empty());
+    assert!(
+        store
+            .get_retrieval_anchor(
+                RetrievalAnchorQuery::new(owner.clone(), new_anchor.anchor_id().clone()).unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for (table, sql, id) in [
+        (
+            "memory_v2_facts",
+            "SELECT COUNT(*) FROM memory_v2_facts WHERE fact_id = ?1",
+            fact_id.as_str(),
+        ),
+        (
+            "memory_v2_assertions",
+            "SELECT COUNT(*) FROM memory_v2_assertions WHERE assertion_id = ?1",
+            assertion_id.as_str(),
+        ),
+        (
+            "retrieval_anchors",
+            "SELECT COUNT(*) FROM retrieval_anchors WHERE anchor_id = ?1",
+            new_anchor.anchor_id().as_str(),
+        ),
+        (
+            "memory_v2_lineage_events",
+            "SELECT COUNT(*) FROM memory_v2_lineage_events WHERE fact_id = ?1",
+            fact_id.as_str(),
+        ),
+    ] {
+        let count = test
+            .db
+            .query_scalar_i64_with_text("inspect failed fact batch rollback", sql, id)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "{table} retained a partial batch row");
+    }
 }
 
 #[tokio::test]
@@ -1755,6 +1870,7 @@ async fn contradiction_metadata_is_bounded_and_sorted() {
     )
     .await;
     let mut expected = Vec::with_capacity(HISTORY_SIZE);
+    let mut seed_sql = String::new();
     for index in 0..HISTORY_SIZE {
         let target = FactId::derive(&application_identity(
             &owner,
@@ -1775,27 +1891,25 @@ async fn contradiction_metadata_is_bounded_and_sorted() {
         )
         .unwrap();
         let event_json = serde_json::to_string(&event).unwrap();
-        test.db
-            .execute_write(
-                "seed bounded contradiction metadata history",
-                "INSERT INTO memory_v2_lineage_events(
-                    event_id, fact_id, owner_kind, project_id,
-                    event_json, occurred_at, recorded_at
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                libsql::params![
-                    event.event_id().as_str(),
-                    source.fact_id.as_str(),
-                    "profile",
-                    "",
-                    event_json,
-                    event.occurred_at().0,
-                    event.occurred_at().0,
-                ],
-            )
-            .await
-            .unwrap();
+        writeln!(
+            seed_sql,
+            "INSERT INTO memory_v2_lineage_events(
+                event_id, fact_id, owner_kind, project_id,
+                event_json, occurred_at, recorded_at
+             ) VALUES({}, {}, 'profile', '', {}, {}, {});",
+            sqlite_text_literal(event.event_id().as_str()),
+            sqlite_text_literal(source.fact_id.as_str()),
+            sqlite_text_literal(&event_json),
+            event.occurred_at().0,
+            event.occurred_at().0,
+        )
+        .unwrap();
         expected.push(target);
     }
+    test.db
+        .execute_write_batch("seed bounded contradiction metadata history", &seed_sql)
+        .await
+        .unwrap();
     expected.sort_unstable();
 
     let response = store

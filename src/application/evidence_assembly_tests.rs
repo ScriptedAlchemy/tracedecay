@@ -10,7 +10,8 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::*;
-use crate::db::{Database, DatabaseAuthority};
+use crate::application::host_admission::HostAdmissionTestRuntimeV1;
+use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
 fn product_context() -> ProductRequestContext {
     let actor = ActorId::new("actor.evidence-test").unwrap();
@@ -184,7 +185,10 @@ async fn publication_is_atomic_replayable_and_conflict_detecting() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("project.db");
     let authority = DatabaseAuthority::acquire_test(&path, "evidence assembly test").unwrap();
-    let (database, _) = Database::initialize(&path, &authority).await.unwrap();
+    let (database, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
     let write = write_fixture(&owner, "sha256:idempotency-fixture", &[0, 1]);
     let receipt = EvidenceAssemblyPublicationReceipt::from_write(&write).unwrap();
 
@@ -225,14 +229,16 @@ async fn authorized_drilldown_expands_contribution_span_set_and_exact_members() 
     let project_path = temporary.path().join("project.db");
     let authority =
         DatabaseAuthority::acquire_test(&project_path, "evidence drilldown test").unwrap();
-    let (database, _) = Database::initialize(&project_path, &authority)
+    let (database, _) = Database::publish_test_runtime(
+        &project_path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .unwrap();
+    let session_runtime = HostAdmissionTestRuntimeV1::profile(temporary.path().join(".tracedecay"))
         .await
         .unwrap();
-    let global = Arc::new(
-        GlobalDb::open_at(&temporary.path().join("global.db"))
-            .await
-            .unwrap(),
-    );
     let write = write_fixture(&owner, "sha256:drilldown-fixture", &[4, 5, 6]);
     let contribution_id = write.contribution.contribution_id.clone();
     let span_id = write.span.span_id.clone();
@@ -249,7 +255,8 @@ async fn authorized_drilldown_expands_contribution_span_set_and_exact_members() 
     persist_write(&transaction, &write, &receipt).await.unwrap();
     transaction.commit().await.unwrap();
 
-    let service = EvidenceAssemblyService::new(database, global);
+    let service = session_runtime.evidence_assembly_service_for_test(database);
+    drop(session_runtime);
     let first_page = service
         .drilldown_contribution(&context, &contribution_id, 0, 2)
         .await

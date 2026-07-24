@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use libsql::{Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -20,8 +20,10 @@ use crate::application::session::{
     SessionRetrievalOutcome, SessionRetrievalService, SessionScopeAuthorizer,
     SessionTemporalExecutionPort, SessionTemporalQuery,
 };
+use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
 use crate::db::Database;
-use crate::global_db::GlobalDb;
+use crate::db::engine::{Executor, QueryExecutor, Rows, Value, params};
+use crate::global_db::RegisteredGlobalDb;
 use crate::query::temporal::TemporalKernelResult;
 use crate::query::temporal::context::VersionedTokenEstimator;
 
@@ -910,14 +912,386 @@ pub struct EvidenceDrilldownPage {
     pub coverage: EvidenceAssemblyCoverage,
 }
 
+/// Typed Stage-C adapter for canonical V3 evidence assemblies.
+///
+/// This is intentionally an alternate path until callers can construct the V3
+/// records directly. It accepts only a daemon-verified runtime handle and the
+/// authoritative profile identity carried by the daemon; it never infers
+/// either identity from a path, label, database, or request payload.
 #[derive(Clone)]
+pub(crate) struct RuntimeEvidenceAssemblyStore {
+    profile_id: tracedecay_domain::UserProfileId,
+    runtime: StoreRuntimeHandle,
+    authority: crate::db::DatabaseAuthority,
+}
+
+impl RuntimeEvidenceAssemblyStore {
+    pub(crate) fn new(
+        profile_id: tracedecay_domain::UserProfileId,
+        runtime: StoreRuntimeHandle,
+        authority: crate::db::DatabaseAuthority,
+    ) -> tracedecay_store::EvidenceAssemblyStoreResult<Self> {
+        let binding = runtime.binding();
+        if binding.shard_id.profile_id != profile_id
+            || authority.canonical_database_path() != runtime.locator().path()
+            || !matches!(
+                binding.shard_id.scope,
+                tracedecay_store::StoreShardScopeV1::Project { .. }
+                    | tracedecay_store::StoreShardScopeV1::ProjectSessions { .. }
+                    | tracedecay_store::StoreShardScopeV1::ProfileSessions
+            )
+        {
+            return Err(evidence_runtime_invalid(
+                "evidence runtime identity does not match the injected profile scope",
+            ));
+        }
+        Ok(Self {
+            profile_id,
+            runtime,
+            authority,
+        })
+    }
+
+    pub(crate) fn profile_id(&self) -> &tracedecay_domain::UserProfileId {
+        &self.profile_id
+    }
+
+    fn validate_owner(
+        &self,
+        owner: &tracedecay_store::EvidenceAssemblyOwnerV1,
+    ) -> tracedecay_store::EvidenceAssemblyStoreResult<()> {
+        owner.validate()?;
+        let project_matches = match &self.runtime.binding().shard_id.scope {
+            tracedecay_store::StoreShardScopeV1::Project { project_id }
+            | tracedecay_store::StoreShardScopeV1::ProjectSessions { project_id } => {
+                owner.owner.project_id() == Some(project_id)
+            }
+            tracedecay_store::StoreShardScopeV1::ProfileSessions => {
+                owner.owner.project_id().is_none()
+            }
+            _ => false,
+        };
+        if owner.owner.profile_id() != &self.profile_id || !project_matches {
+            return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable);
+        }
+        Ok(())
+    }
+
+    fn read(
+        &self,
+        operation: tracedecay_store::EvidenceAssemblyReadOperationV1,
+    ) -> tracedecay_store::EvidenceAssemblyStoreResult<tracedecay_store::EvidenceAssemblyReadResultV1>
+    {
+        match &operation {
+            tracedecay_store::EvidenceAssemblyReadOperationV1::PublicationByIdempotency {
+                owner,
+                ..
+            }
+            | tracedecay_store::EvidenceAssemblyReadOperationV1::ContributionPage {
+                owner, ..
+            } => self.validate_owner(owner)?,
+        }
+        let request = evidence_runtime_read_request(self.runtime.binding(), operation)?;
+        let probe = EvidenceRuntimeProbe::from_control(request.control());
+        let outcome = self
+            .runtime
+            .dispatch_read(request, &probe)
+            .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+        if !matches!(
+            outcome.coverage(),
+            tracedecay_store::RuntimeReadCoverageV1::Latest { .. }
+                | tracedecay_store::RuntimeReadCoverageV1::Complete { .. }
+        ) {
+            return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable);
+        }
+        let result = match outcome.value() {
+            Some(tracedecay_store::RuntimeReadResultV1::Repository {
+                result: tracedecay_store::RepositoryReadResultV1::Project(project),
+            }) => match project.as_ref() {
+                tracedecay_store::ProjectReadResultV1::EvidenceAssembly(result) => result.clone(),
+                _ => return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
+            },
+            _ => return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
+        };
+        match &result {
+            tracedecay_store::EvidenceAssemblyReadResultV1::Publication(Some(receipt)) => {
+                self.validate_owner(&receipt.owner)?;
+                receipt.validate()?;
+            }
+            tracedecay_store::EvidenceAssemblyReadResultV1::ContributionPage(Some(page)) => {
+                self.validate_owner(&page.contribution.owner)?;
+                if page.span.owner != page.contribution.owner.owner {
+                    return Err(evidence_runtime_invalid(
+                        "evidence runtime drilldown owner mismatch",
+                    ));
+                }
+                page.contribution.validate()?;
+                page.span.validate()?;
+                for occurrence in &page.occurrences {
+                    occurrence.validate()?;
+                    if occurrence.owner != page.contribution.owner.owner {
+                        return Err(evidence_runtime_invalid(
+                            "evidence runtime occurrence owner mismatch",
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(result)
+    }
+}
+
+impl tracedecay_store::EvidenceAssemblyStore for RuntimeEvidenceAssemblyStore {
+    fn publish_or_replay(
+        &self,
+        write: tracedecay_store::EvidenceAssemblyWriteV1,
+    ) -> impl std::future::Future<
+        Output = tracedecay_store::EvidenceAssemblyStoreResult<
+            tracedecay_store::EvidenceAssemblyPublicationOutcomeV1,
+        >,
+    > + Send {
+        async move {
+            write.validate()?;
+            self.validate_owner(&write.owner)?;
+            let expected = write.receipt.clone();
+            let read =
+                tracedecay_store::EvidenceAssemblyReadOperationV1::PublicationByIdempotency {
+                    owner: write.owner.clone(),
+                    idempotency_key: write.idempotency_key.clone(),
+                };
+            let request = evidence_runtime_submit_request(self.runtime.binding(), write)?;
+            let probe = Arc::new(EvidenceRuntimeProbe::from_control(request.control()));
+            let replayed = match self
+                .runtime
+                .dispatch_submit_authorized(request, probe, self.authority.clone())
+                .await
+                .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?
+            {
+                tracedecay_store::RuntimeSubmitOutcomeV1::Committed { .. }
+                | tracedecay_store::RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. } => {
+                    false
+                }
+                tracedecay_store::RuntimeSubmitOutcomeV1::ExactReplay { .. } => true,
+                tracedecay_store::RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
+                    return Err(tracedecay_store::EvidenceAssemblyStoreError::ReplayConflict);
+                }
+                _ => return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
+            };
+            let receipt = match self.read(read)? {
+                tracedecay_store::EvidenceAssemblyReadResultV1::Publication(Some(receipt))
+                    if receipt == expected =>
+                {
+                    receipt
+                }
+                tracedecay_store::EvidenceAssemblyReadResultV1::Publication(Some(_)) => {
+                    return Err(tracedecay_store::EvidenceAssemblyStoreError::ReplayConflict);
+                }
+                _ => return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
+            };
+            Ok(if replayed {
+                tracedecay_store::EvidenceAssemblyPublicationOutcomeV1::Replayed(receipt)
+            } else {
+                tracedecay_store::EvidenceAssemblyPublicationOutcomeV1::Published(receipt)
+            })
+        }
+    }
+
+    fn drilldown_contribution(
+        &self,
+        owner: &tracedecay_store::EvidenceAssemblyOwnerV1,
+        contribution_id: &tracedecay_domain::RetrieverContributionIdV1,
+        start_ordinal: u64,
+        page_size: u64,
+    ) -> impl std::future::Future<
+        Output = tracedecay_store::EvidenceAssemblyStoreResult<
+            Option<tracedecay_store::EvidenceAssemblyDrilldownPageV1>,
+        >,
+    > + Send {
+        let owner = owner.clone();
+        let contribution_id = contribution_id.clone();
+        async move {
+            match self.read(
+                tracedecay_store::EvidenceAssemblyReadOperationV1::ContributionPage {
+                    owner,
+                    contribution_id,
+                    start_ordinal,
+                    page_size,
+                },
+            )? {
+                tracedecay_store::EvidenceAssemblyReadResultV1::ContributionPage(page) => Ok(page),
+                _ => Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
+            }
+        }
+    }
+}
+
+fn evidence_runtime_submit_request(
+    binding: &tracedecay_store::StoreRuntimeBindingV1,
+    write: tracedecay_store::EvidenceAssemblyWriteV1,
+) -> tracedecay_store::EvidenceAssemblyStoreResult<tracedecay_store::RuntimeSubmitRequestV1> {
+    let command_digest = canonical_sha256(&write).map_err(evidence_runtime_invalid)?;
+    let suffix = evidence_runtime_digest_suffix(command_digest.as_str())?;
+    let idempotency_suffix =
+        evidence_runtime_digest_suffix(write.idempotency_key.as_digest().as_str())?.to_owned();
+    let admitted_at = evidence_runtime_now();
+    let admission_bytes = serde_json::to_vec(&write)
+        .map_err(evidence_runtime_invalid)?
+        .len();
+    let payload = tracedecay_store::RepositoryWritePayloadV1::EvidenceAssembly(Box::new(write));
+    let metadata = tracedecay_store::StoreOperationMetadataV1 {
+        operation_id: tracedecay_store::StoreOperationIdV1::new(format!(
+            "operation.evidence-assembly.{suffix}"
+        ))
+        .map_err(evidence_runtime_invalid)?,
+        client_id: tracedecay_store::StoreClientIdV1::new("client.evidence-assembly")
+            .map_err(evidence_runtime_invalid)?,
+        shard_id: binding.shard_id.clone(),
+        incarnation: binding.incarnation,
+        authority_epoch: binding.authority_epoch,
+        idempotency: tracedecay_store::IdempotencyIdentityV1 {
+            key: tracedecay_store::StoreIdempotencyKeyV1::new(format!(
+                "evidence-assembly.{idempotency_suffix}"
+            ))
+            .map_err(evidence_runtime_invalid)?,
+            command_digest: tracedecay_store::CommandDigestV1::new(command_digest.as_str())
+                .map_err(evidence_runtime_invalid)?,
+        },
+        durability: tracedecay_store::DurabilityClassV1::Full,
+        priority: tracedecay_store::OperationPriorityV1::Foreground,
+        admission_bytes: u64::try_from(admission_bytes).unwrap_or(u64::MAX).max(1),
+        admitted_at,
+    };
+    let compatibility = tracedecay_store::RuntimeBatchCompatibilityV1::from_operation(&metadata)
+        .map_err(evidence_runtime_invalid)?;
+    let transaction_scope = tracedecay_store::RuntimeTransactionScopeV1 {
+        transaction_id: tracedecay_store::RuntimeTransactionIdV1::new(format!(
+            "transaction.{}",
+            metadata.operation_id.as_str()
+        ))
+        .map_err(evidence_runtime_invalid)?,
+        compatibility,
+        opened_at: admitted_at,
+    };
+    tracedecay_store::RuntimeSubmitRequestV1::new(
+        tracedecay_store::RepositoryOperationEnvelopeV1 { metadata, payload },
+        transaction_scope,
+        evidence_runtime_control(suffix, admitted_at)?,
+    )
+    .map_err(evidence_runtime_invalid)
+}
+
+fn evidence_runtime_read_request(
+    binding: &tracedecay_store::StoreRuntimeBindingV1,
+    operation: tracedecay_store::EvidenceAssemblyReadOperationV1,
+) -> tracedecay_store::EvidenceAssemblyStoreResult<tracedecay_store::RuntimeReadRequestV1> {
+    let command_digest = canonical_sha256(&operation).map_err(evidence_runtime_invalid)?;
+    let suffix = evidence_runtime_digest_suffix(command_digest.as_str())?;
+    let admission_bytes = serde_json::to_vec(&operation)
+        .map_err(evidence_runtime_invalid)?
+        .len();
+    let requested_at = evidence_runtime_now();
+    tracedecay_store::RuntimeReadRequestV1::new(
+        binding.clone(),
+        tracedecay_store::ConsistencyModeV1::LatestAvailable,
+        tracedecay_store::RuntimeReadOperationV1::Repository {
+            op: tracedecay_store::RepositoryReadOperationV1::Project(
+                tracedecay_store::ProjectReadOperationV1::EvidenceAssembly(operation),
+            ),
+        },
+        tracedecay_store::OperationPriorityV1::Foreground,
+        u64::try_from(admission_bytes).unwrap_or(u64::MAX).max(1),
+        evidence_runtime_control(suffix, requested_at)?,
+    )
+    .map_err(evidence_runtime_invalid)
+}
+
+fn evidence_runtime_control(
+    suffix: &str,
+    requested_at: UtcMicros,
+) -> tracedecay_store::EvidenceAssemblyStoreResult<tracedecay_store::RuntimeRequestControlV1> {
+    Ok(tracedecay_store::RuntimeRequestControlV1 {
+        requested_at,
+        deadline: tracedecay_store::RuntimeDeadlineV1 {
+            deadline_id: tracedecay_store::RuntimeDeadlineIdV1::new(format!(
+                "deadline.evidence-assembly.{suffix}"
+            ))
+            .map_err(evidence_runtime_invalid)?,
+        },
+        cancellation: tracedecay_store::RuntimeCancellationIdentityV1 {
+            cancellation_id: tracedecay_store::RuntimeCancellationIdV1::new(format!(
+                "cancellation.evidence-assembly.{suffix}"
+            ))
+            .map_err(evidence_runtime_invalid)?,
+            generation: 1,
+        },
+    })
+}
+
+fn evidence_runtime_digest_suffix(
+    digest: &str,
+) -> tracedecay_store::EvidenceAssemblyStoreResult<&str> {
+    digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| evidence_runtime_invalid("non-SHA-256 evidence runtime digest"))
+}
+
+fn evidence_runtime_now() -> UtcMicros {
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
+}
+
+struct EvidenceRuntimeProbe {
+    cancellation: tracedecay_store::RuntimeCancellationIdentityV1,
+    deadline: tracedecay_store::RuntimeDeadlineV1,
+}
+
+impl EvidenceRuntimeProbe {
+    fn from_control(control: &tracedecay_store::RuntimeRequestControlV1) -> Self {
+        Self {
+            cancellation: control.cancellation.clone(),
+            deadline: control.deadline.clone(),
+        }
+    }
+}
+
+impl tracedecay_store::RuntimeRequestProbeV1 for EvidenceRuntimeProbe {
+    fn cancellation_identity(&self) -> &tracedecay_store::RuntimeCancellationIdentityV1 {
+        &self.cancellation
+    }
+
+    fn deadline_identity(&self) -> &tracedecay_store::RuntimeDeadlineV1 {
+        &self.deadline
+    }
+
+    fn interruption(&self) -> Option<tracedecay_store::RuntimeInterruptionV1> {
+        None
+    }
+}
+
+fn evidence_runtime_invalid(
+    error: impl std::fmt::Display,
+) -> tracedecay_store::EvidenceAssemblyStoreError {
+    tracedecay_store::EvidenceAssemblyStoreError::InvalidData(error.to_string())
+}
+
+#[derive(Clone)]
+/// V1 compatibility service retained for already-persisted evidence records.
+/// New canonical V3 publications and reads must use the daemon-owned
+/// [`RuntimeEvidenceAssemblyStore`] path above.
 pub struct EvidenceAssemblyService {
     project_database: Database,
-    session_database: Arc<GlobalDb>,
+    session_database: Arc<RegisteredGlobalDb>,
 }
 
 impl EvidenceAssemblyService {
-    pub const fn new(project_database: Database, session_database: Arc<GlobalDb>) -> Self {
+    pub(crate) const fn new(
+        project_database: Database,
+        session_database: Arc<RegisteredGlobalDb>,
+    ) -> Self {
         Self {
             project_database,
             session_database,
@@ -1106,9 +1480,8 @@ impl EvidenceAssemblyService {
         if page_size == 0 || page_size > 256 {
             return Err(EvidenceAssemblyError::Invalid("drilldown page size"));
         }
-        let mut contribution_rows = self
-            .project_database
-            .conn()
+        let project = self.project_database.engine_conn();
+        let mut contribution_rows = project
             .query(
                 "SELECT record_json FROM evidence_retriever_contributions
                  WHERE contribution_id = ?1",
@@ -1122,9 +1495,7 @@ impl EvidenceAssemblyService {
         let contribution: RetrieverContributionRecord = deserialize(&contribution_json)?;
         contribution.owner.validate_feedback_context(context)?;
 
-        let mut span_rows = self
-            .project_database
-            .conn()
+        let mut span_rows = project
             .query(
                 "SELECT record_json FROM evidence_spans WHERE span_id = ?1",
                 params![contribution.span_id.as_str()],
@@ -1144,9 +1515,7 @@ impl EvidenceAssemblyService {
         }
 
         let end = start_ordinal.saturating_add(page_size);
-        let mut member_rows = self
-            .project_database
-            .conn()
+        let mut member_rows = project
             .query(
                 "SELECT occurrence.record_json
                  FROM evidence_span_members member
@@ -1419,10 +1788,16 @@ impl EvidenceAssemblyService {
         &self,
         anchor_id: &RetrievalAnchorId,
     ) -> Result<Option<RetrievalAnchorRecordV2>, EvidenceAssemblyError> {
-        if let Some(anchor) = load_anchor(self.project_database.conn(), anchor_id.as_str()).await? {
+        let project = self.project_database.engine_conn();
+        if let Some(anchor) = load_anchor(&project, anchor_id.as_str()).await? {
             return Ok(Some(anchor));
         }
-        load_anchor(self.session_database.read_connection(), anchor_id.as_str()).await
+        let session = self
+            .session_database
+            .read_snapshot()
+            .await
+            .map_err(storage_error)?;
+        load_anchor(&session, anchor_id.as_str()).await
     }
 }
 
@@ -1596,7 +1971,7 @@ fn build_write(
 }
 
 async fn replay_receipt(
-    transaction: &Transaction,
+    transaction: &(impl Executor + Sync),
     write: &EvidenceAssemblyWrite,
 ) -> Result<Option<EvidenceAssemblyPublicationReceipt>, EvidenceAssemblyError> {
     let mut rows = transaction
@@ -1628,7 +2003,7 @@ async fn replay_receipt(
 }
 
 async fn persist_write(
-    transaction: &Transaction,
+    transaction: &(impl Executor + Sync),
     write: &EvidenceAssemblyWrite,
     receipt: &EvidenceAssemblyPublicationReceipt,
 ) -> Result<(), EvidenceAssemblyError> {
@@ -1742,7 +2117,7 @@ async fn persist_write(
 }
 
 async fn insert_span(
-    transaction: &Transaction,
+    transaction: &(impl Executor + Sync),
     write: &EvidenceAssemblyWrite,
     owner_digest: &ManifestDigest,
 ) -> Result<(), EvidenceAssemblyError> {
@@ -1809,7 +2184,7 @@ async fn insert_span(
 }
 
 async fn insert_projection_receipt(
-    transaction: &Transaction,
+    transaction: &(impl Executor + Sync),
     write: &EvidenceAssemblyWrite,
 ) -> Result<(), EvidenceAssemblyError> {
     insert_immutable_json(
@@ -1825,7 +2200,7 @@ async fn insert_projection_receipt(
 }
 
 async fn insert_contribution(
-    transaction: &Transaction,
+    transaction: &(impl Executor + Sync),
     write: &EvidenceAssemblyWrite,
     owner_digest: &ManifestDigest,
 ) -> Result<(), EvidenceAssemblyError> {
@@ -1849,7 +2224,7 @@ async fn insert_contribution(
 }
 
 async fn insert_immutable_json(
-    transaction: &Transaction,
+    transaction: &(impl Executor + Sync),
     table: &str,
     id_column: &str,
     id: &str,
@@ -1871,11 +2246,11 @@ async fn insert_immutable_json(
         placeholders.join(", ")
     );
     let mut parameters = vec![
-        libsql::Value::Text(id.to_owned()),
-        libsql::Value::Text(record_digest.to_owned()),
-        libsql::Value::Text(record_json.to_owned()),
+        Value::Text(id.to_owned()),
+        Value::Text(record_digest.to_owned()),
+        Value::Text(record_json.to_owned()),
     ];
-    parameters.extend(values.into_iter().map(libsql::Value::Text));
+    parameters.extend(values.into_iter().map(Value::Text));
     transaction
         .execute(&sql, parameters)
         .await
@@ -1897,7 +2272,7 @@ async fn insert_immutable_json(
 }
 
 async fn verify_member_ids(
-    transaction: &Transaction,
+    transaction: &(impl Executor + Sync),
     sql: &str,
     parent_id: &str,
     expected: &[&str],
@@ -1922,7 +2297,7 @@ async fn verify_member_ids(
 }
 
 async fn load_anchor(
-    connection: &libsql::Connection,
+    connection: &(impl QueryExecutor + Sync),
     anchor_id: &str,
 ) -> Result<Option<RetrievalAnchorRecordV2>, EvidenceAssemblyError> {
     let mut rows = connection
@@ -2039,7 +2414,7 @@ fn u64_from_i64(value: i64, field: &'static str) -> Result<u64, EvidenceAssembly
     u64::try_from(value).map_err(|_| EvidenceAssemblyError::Invalid(field))
 }
 
-async fn next_string(rows: &mut libsql::Rows) -> Result<Option<String>, EvidenceAssemblyError> {
+async fn next_string(rows: &mut Rows) -> Result<Option<String>, EvidenceAssemblyError> {
     rows.next()
         .await
         .map_err(storage_error)?
