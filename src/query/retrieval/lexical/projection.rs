@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
-    FixedPointScore, FreshnessCompatibilityV1, LogicalEvidenceId, RepositoryId, RetrievalAnchorId,
-    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId,
-    SourceFreshness, SourceOccurrenceId,
+    FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1, LogicalEvidenceId, RepositoryId,
+    RetrievalAnchorId, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    ScoreDomainId, SourceFreshness, SourceOccurrenceId,
 };
 
 use super::{
@@ -31,6 +31,7 @@ const ECHO_SCORE_MILLIS: u64 = 750;
 pub struct CodeLexicalProjectionMetadataV1 {
     pub generation: CodeGenerationId,
     pub repository_id: Option<RepositoryId>,
+    pub logical_paths: BTreeMap<FileOccurrenceId, String>,
     pub freshness: SourceFreshness,
     pub exact_retriever_revision: ComponentRevision,
     pub lexical_retriever_revision: ComponentRevision,
@@ -46,6 +47,15 @@ impl CodeLexicalProjectionMetadataV1 {
             repository_id
                 .validate()
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        }
+        for (file, path) in &self.logical_paths {
+            file.validate()
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            if path.is_empty() {
+                return Err(RetrievalPortError::Contract(
+                    "lexical projection logical paths must not be empty".to_owned(),
+                ));
+            }
         }
         self.freshness
             .source_namespace
@@ -74,12 +84,13 @@ impl CodeLexicalProjectionMetadataV1 {
 #[derive(Clone, Debug)]
 struct ProjectedChunkV1 {
     chunk: CodeSearchChunkV1,
+    logical_path: String,
     fields: BTreeMap<LexicalFieldV1, Vec<String>>,
     normalized_text: String,
 }
 
 impl ProjectedChunkV1 {
-    fn new(chunk: CodeSearchChunkV1) -> Self {
+    fn new(chunk: CodeSearchChunkV1, logical_path: String) -> Self {
         let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
         let mut fields: BTreeMap<LexicalFieldV1, Vec<String>> = BTreeMap::new();
         let text_field = if chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
@@ -88,6 +99,7 @@ impl ProjectedChunkV1 {
             LexicalFieldV1::BodyText
         };
         fields.insert(text_field, lexical_tokens(chunk.sanitized_text.as_str()));
+        fields.insert(LexicalFieldV1::Path, vec![normalize_lexical(&logical_path)]);
         fields.insert(
             LexicalFieldV1::Subtoken,
             chunk
@@ -135,6 +147,7 @@ impl ProjectedChunkV1 {
         }
         Self {
             chunk,
+            logical_path,
             fields,
             normalized_text,
         }
@@ -205,7 +218,17 @@ impl CodeLexicalProjectionAdapterV1 {
                     "lexical projection chunk identities must be unique".to_owned(),
                 ));
             }
-            rows.push(ProjectedChunkV1::new(chunk));
+            let logical_path = metadata
+                .logical_paths
+                .get(&chunk.anchor.file_occurrence_id)
+                .cloned()
+                .ok_or_else(|| {
+                    RetrievalPortError::Contract(format!(
+                        "lexical projection is missing the logical path for {}",
+                        chunk.anchor.file_occurrence_id
+                    ))
+                })?;
+            rows.push(ProjectedChunkV1::new(chunk, logical_path));
         }
         rows.sort_by(|left, right| left.chunk.id.cmp(&right.chunk.id));
         Ok(Self { metadata, rows })
@@ -656,6 +679,12 @@ fn exact_matches(
                 row.chunk.sanitized_text.as_str().as_bytes(),
                 &literal.original_bytes,
             );
+        }
+        if literal.field == ExactFieldV1::Path
+            && row.logical_path.as_bytes() == literal.canonical_bytes.as_slice()
+        {
+            matched = true;
+            matched_kinds.insert(ExactTechnicalTermKindV1::Path);
         }
         for term in &row.chunk.exact_terms {
             if exact_field_for_kind(term.kind()) == literal.field

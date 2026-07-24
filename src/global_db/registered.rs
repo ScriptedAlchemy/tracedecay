@@ -303,25 +303,6 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    pub(crate) async fn configured_storage_budget_finding(
-        &self,
-        context: &tracedecay_application::RequestContext,
-        retention: &crate::config::RetentionConfig,
-        store: tracedecay_application::storage::StoreKeyV1,
-        reader_wait: std::time::Duration,
-    ) -> crate::errors::Result<Option<tracedecay_application::doctor::DoctorStorageFindingV1>> {
-        let Some(budget) = retention.store_soft_budget(store.as_str())? else {
-            return Ok(None);
-        };
-        self.storage_telemetry(store, reader_wait)?
-            .over_budget_finding(context, &budget)
-            .await
-            .map(Some)
-            .map_err(|error| {
-                registered_error("evaluate registered store soft budget", error.to_string())
-            })
-    }
-
     pub(crate) fn observation_store(&self) -> GlobalDbObservationStore<'_> {
         GlobalDbObservationStore::with_runtime(&self.runtime, &self.authority)
     }

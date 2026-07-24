@@ -1781,16 +1781,20 @@ fn looks_binary(path: &Path) -> bool {
 }
 
 fn validate_historical_path(path: &str) -> Result<(), GitIntelligenceError> {
-    if path.is_empty()
-        || path.contains('\\')
-        || path.chars().any(char::is_control)
-        || path
-            .split('/')
-            .any(|component| component.is_empty() || matches!(component, "." | ".."))
-    {
+    if !is_canonical_repository_relative_path(path) {
         return Err(GitIntelligenceError::InvalidHistoricalPath(path.to_owned()));
     }
     Ok(())
+}
+
+pub(crate) fn is_canonical_repository_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && !Path::new(path).is_absolute()
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
 }
 
 /// Worktree file mode evidence (read-only metadata).

@@ -151,7 +151,7 @@ impl CodeGraphEvidenceAdapterV1 {
         request: &GraphLaneRequest,
     ) -> Result<RetrieverBatch<GraphLaneEvidence>, RetrievalPortError> {
         let edge_kinds: BTreeSet<RelationEdgeKindV1> = request.edge_kinds.iter().copied().collect();
-        let mut pairs = Vec::new();
+        let mut best_by_occurrence = BTreeMap::new();
         let mut examined = 0u64;
         for seed in &request.seed_anchors {
             let seed_symbol = seed.occurrence.symbol.as_ref().ok_or_else(|| {
@@ -164,7 +164,8 @@ impl CodeGraphEvidenceAdapterV1 {
             }
             let mut queue = VecDeque::new();
             queue.push_back((seed_symbol.clone(), Vec::<GraphPathSegmentV1>::new()));
-            let mut seen_targets = BTreeSet::new();
+            let mut best_seed_paths = BTreeMap::new();
+            best_seed_paths.insert(seed_symbol.clone(), (u64::MAX, Vec::new()));
             while let Some((current, path)) = queue.pop_front() {
                 if path.len() as u32 >= request.max_depth {
                     continue;
@@ -185,18 +186,31 @@ impl CodeGraphEvidenceAdapterV1 {
                         authority: edge.authority,
                         evidence_span: edge.evidence_span,
                     });
-                    if !seen_targets.insert(edge.to_occurrence.clone()) {
-                        continue;
-                    }
-                    let Some(binding_meta) = self.symbols.get(&edge.to_occurrence) else {
-                        continue;
-                    };
                     let weakest_authority = next_path
                         .iter()
                         .map(|segment| segment.authority)
                         .reduce(EdgeAuthorityV1::weakest)
                         .unwrap_or_else(|| panic!("path has at least one edge"));
                     let score_micros = graph_score_micros(next_path.len(), weakest_authority);
+                    let improves_seed_path = match best_seed_paths.get(&edge.to_occurrence) {
+                        None => true,
+                        Some((current_score, current_path)) => {
+                            score_micros > *current_score
+                                || (score_micros == *current_score
+                                    && canonical_path_key_from_segments(&next_path)
+                                        < canonical_path_key_from_segments(current_path))
+                        }
+                    };
+                    if !improves_seed_path {
+                        continue;
+                    }
+                    best_seed_paths.insert(
+                        edge.to_occurrence.clone(),
+                        (score_micros, next_path.clone()),
+                    );
+                    let Some(binding_meta) = self.symbols.get(&edge.to_occurrence) else {
+                        continue;
+                    };
                     let occurrence = format!("code-graph:{}", edge.to_occurrence.as_str());
                     let candidate = CompactCandidate {
                         anchor_id: retrieval_anchor(format!("anchor.{occurrence}"))?,
@@ -241,12 +255,27 @@ impl CodeGraphEvidenceAdapterV1 {
                         path: next_path.clone(),
                         weakest_authority,
                     };
-                    pairs.push((candidate, evidence));
+                    match best_by_occurrence.entry(candidate.source_occurrence_id.clone()) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert((candidate, evidence));
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            let (current_candidate, current_evidence) = entry.get();
+                            if candidate.raw_score > current_candidate.raw_score
+                                || (candidate.raw_score == current_candidate.raw_score
+                                    && canonical_path_key(&evidence)
+                                        < canonical_path_key(current_evidence))
+                            {
+                                entry.insert((candidate, evidence));
+                            }
+                        }
+                    }
                     queue.push_back((edge.to_occurrence.clone(), next_path));
                 }
             }
         }
 
+        let mut pairs: Vec<_> = best_by_occurrence.into_values().collect();
         pairs.sort_by(|left, right| {
             right.0.raw_score.cmp(&left.0.raw_score).then_with(|| {
                 left.0
@@ -276,6 +305,40 @@ impl CodeGraphEvidenceAdapterV1 {
             continuation: None,
         })
     }
+}
+
+fn canonical_path_key(
+    evidence: &GraphLaneEvidence,
+) -> Vec<(
+    &SymbolOccurrenceId,
+    &SymbolOccurrenceId,
+    RelationEdgeKindV1,
+    EdgeAuthorityV1,
+    tracedecay_domain::SourceSpan,
+)> {
+    canonical_path_key_from_segments(&evidence.path)
+}
+
+fn canonical_path_key_from_segments(
+    path: &[GraphPathSegmentV1],
+) -> Vec<(
+    &SymbolOccurrenceId,
+    &SymbolOccurrenceId,
+    RelationEdgeKindV1,
+    EdgeAuthorityV1,
+    tracedecay_domain::SourceSpan,
+)> {
+    path.iter()
+        .map(|segment| {
+            (
+                &segment.from,
+                &segment.to,
+                segment.edge_kind,
+                segment.authority,
+                segment.evidence_span,
+            )
+        })
+        .collect()
 }
 
 impl GraphEvidenceReadPort for CodeGraphEvidenceAdapterV1 {

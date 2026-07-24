@@ -38,6 +38,7 @@ use crate::code_index::production::{
 use crate::code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1, build_batch_receipt,
 };
+use crate::git_intelligence::is_canonical_repository_relative_path;
 use crate::query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
     ExactLaneRetriever,
@@ -117,6 +118,9 @@ pub struct CandidateWorkloadV1 {
 #[serde(deny_unknown_fields)]
 pub struct CorpusDocumentV1 {
     pub document_id: String,
+    /// Repository-relative identity used by production path/history lanes.
+    pub source_path: String,
+    /// Checked-in fixture path used only to read the byte-exact corpus copy.
     pub path: String,
     pub scope: String,
     pub language: String,
@@ -126,6 +130,7 @@ pub struct CorpusDocumentV1 {
 #[derive(Serialize)]
 struct CorpusContentBindingV1<'a> {
     document_id: &'a str,
+    source_path: &'a str,
     path: &'a str,
     scope: &'a str,
     language: &'a str,
@@ -422,6 +427,7 @@ pub fn compute_corpus_digest(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
 ) -> Result<String, CandidateOutputError> {
+    validate_source_bindings(repo_root, workload)?;
     let mut bindings = Vec::with_capacity(workload.corpus.len());
     for document in &workload.corpus {
         let absolute = repo_root.join(&document.path);
@@ -431,6 +437,7 @@ pub fn compute_corpus_digest(
         })?;
         bindings.push(CorpusContentBindingV1 {
             document_id: &document.document_id,
+            source_path: &document.source_path,
             path: &document.path,
             scope: &document.scope,
             language: &document.language,
@@ -439,6 +446,65 @@ pub fn compute_corpus_digest(
         });
     }
     canonical_sha256(&(CORPUS_DIGEST_DOMAIN, bindings))
+}
+
+fn validate_source_bindings(
+    repo_root: &Path,
+    workload: &CandidateWorkloadV1,
+) -> Result<(), CandidateOutputError> {
+    let repo = gix::open(repo_root).map_err(|error| {
+        CandidateOutputError::Contract(format!(
+            "open source repository {}: {error}",
+            repo_root.display()
+        ))
+    })?;
+    let oid = gix::hash::ObjectId::from_hex(workload.source_repository_commit.as_bytes()).map_err(
+        |error| CandidateOutputError::Contract(format!("invalid fixture source commit: {error}")),
+    )?;
+    let commit = repo
+        .find_object(oid)
+        .map_err(|error| {
+            CandidateOutputError::Contract(format!("resolve fixture source commit: {error}"))
+        })?
+        .try_into_commit()
+        .map_err(|error| {
+            CandidateOutputError::Contract(format!("fixture source is not a commit: {error}"))
+        })?;
+    let tree_id = commit.tree_id().map_err(|error| {
+        CandidateOutputError::Contract(format!("resolve fixture source tree: {error}"))
+    })?;
+    if tree_id.to_string() != workload.source_repository_tree {
+        return Err(CandidateOutputError::Contract(format!(
+            "fixture source tree mismatch: declared {}, resolved {tree_id}",
+            workload.source_repository_tree
+        )));
+    }
+    let tree = commit.tree().map_err(|error| {
+        CandidateOutputError::Contract(format!("open fixture source tree: {error}"))
+    })?;
+    for document in &workload.corpus {
+        let entry = tree
+            .lookup_entry_by_path(Path::new(&document.source_path))
+            .map_err(|error| {
+                CandidateOutputError::Contract(format!(
+                    "resolve corpus source_path {}: {error}",
+                    document.source_path
+                ))
+            })?
+            .ok_or_else(|| {
+                CandidateOutputError::Contract(format!(
+                    "corpus source_path is absent from the pinned tree: {}",
+                    document.source_path
+                ))
+            })?;
+        if !entry.mode().is_blob_or_symlink() {
+            return Err(CandidateOutputError::Contract(format!(
+                "corpus source_path is not a blob: {}",
+                document.source_path
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_workload_for_tuning(
@@ -458,9 +524,11 @@ pub fn validate_workload_for_tuning(
     }
     let mut document_ids = BTreeSet::new();
     let mut document_paths = BTreeSet::new();
+    let mut source_paths = BTreeSet::new();
     for document in &workload.corpus {
         if [
             document.document_id.as_str(),
+            document.source_path.as_str(),
             document.path.as_str(),
             document.scope.as_str(),
             document.language.as_str(),
@@ -483,6 +551,18 @@ pub fn validate_workload_for_tuning(
             return Err(CandidateOutputError::Contract(format!(
                 "duplicate corpus path {}",
                 document.path
+            )));
+        }
+        if !is_canonical_repository_relative_path(&document.source_path) {
+            return Err(CandidateOutputError::Contract(format!(
+                "corpus source_path must be a safe repository-relative path: {}",
+                document.source_path
+            )));
+        }
+        if !source_paths.insert(document.source_path.as_str()) {
+            return Err(CandidateOutputError::Contract(format!(
+                "duplicate corpus source_path {}",
+                document.source_path
             )));
         }
     }
@@ -869,6 +949,13 @@ fn compose_production_query(
     let metadata = CodeLexicalProjectionMetadataV1 {
         generation: generation_id.clone(),
         repository_id: Some(published.generation.snapshot().repository.clone()),
+        logical_paths: published
+            .generation
+            .snapshot()
+            .files
+            .iter()
+            .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
+            .collect(),
         freshness: freshness.clone(),
         exact_retriever_revision: id("retriever.exact.candidate.v1")?,
         lexical_retriever_revision: id("retriever.lexical.candidate.v1")?,
@@ -1127,7 +1214,7 @@ fn historical_candidates(
         .corpus
         .iter()
         .filter(|document| query.allowed_scopes.contains(&document.scope))
-        .map(|document| document.path.clone())
+        .map(|document| document.source_path.clone())
         .collect();
     let authorization = if paths.is_empty() {
         None
@@ -1169,7 +1256,7 @@ fn historical_candidates(
                 let document = published
                     .corpus
                     .iter()
-                    .find(|document| document.path == evidence.path)
+                    .find(|document| document.source_path == evidence.path)
                     .ok_or_else(|| {
                         CandidateOutputError::Contract(format!(
                             "historical evidence path {} is outside the corpus",
@@ -1259,7 +1346,7 @@ fn publish_corpus_with_scale(
             let indexable = language_registry.descriptor(&language).is_some();
             files.push(SanitizedCodeFileV1 {
                 file_occurrence_id: file_occurrence_id.clone(),
-                logical_path: format!("{}{}", document.path, copy_suffix),
+                logical_path: format!("{}{}", document.source_path, copy_suffix),
                 language: Some(language),
                 content_digest: content_digest(&bytes),
                 disposition: if indexable {
@@ -1326,12 +1413,23 @@ fn publish_corpus_with_scale(
         .build_and_publish(request, &ActiveControl)
         .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
 
+    let qualified_names: BTreeMap<_, _> = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
+        .collect();
     let mut occurrence_map = BTreeMap::new();
     for chunk in generation.chunks().chunks() {
         let Some(document) = file_to_document.get(chunk.anchor.file_occurrence_id.as_str()) else {
             continue;
         };
-        let display_anchors = display_anchors_for_chunk(chunk, document);
+        let qualified_name = chunk
+            .anchor
+            .symbol_occurrence_id
+            .as_ref()
+            .and_then(|symbol| qualified_names.get(symbol));
+        let display_anchors = display_anchors_for_chunk(chunk, document, qualified_name);
         let display = display_anchors
             .first()
             .cloned()
@@ -1378,8 +1476,12 @@ fn publish_corpus_with_scale(
 fn display_anchors_for_chunk(
     chunk: &CodeSearchChunkV1,
     document: &CorpusDocumentV1,
+    qualified_name: Option<&String>,
 ) -> Vec<String> {
     let mut anchors = BTreeSet::from([document.document_id.clone()]);
+    if let Some(qualified_name) = qualified_name {
+        anchors.insert(display_qualified_anchor(document, qualified_name));
+    }
     for term in &chunk.exact_terms {
         let term = String::from_utf8_lossy(term.canonical_bytes());
         if !term.is_empty() {
@@ -1417,6 +1519,37 @@ fn display_anchors_for_chunk(
     let mut ordered = vec![primary.clone()];
     ordered.extend(anchors.into_iter().filter(|anchor| anchor != &primary));
     ordered
+}
+
+fn display_qualified_anchor(document: &CorpusDocumentV1, qualified_name: &str) -> String {
+    let segments: Vec<_> = document.source_path.split('/').collect();
+    let module_prefix = segments
+        .iter()
+        .position(|segment| *segment == "src")
+        .map(|src| {
+            let mut modules = vec!["crate"];
+            modules.extend(segments[src + 1..].iter().copied());
+            if let Some(file) = modules.last_mut() {
+                *file = file.strip_suffix(".rs").unwrap_or(file);
+            }
+            if modules
+                .last()
+                .is_some_and(|module| matches!(*module, "lib" | "main" | "mod"))
+            {
+                modules.pop();
+            }
+            modules.join("::")
+        });
+    let local_name = module_prefix
+        .as_deref()
+        .and_then(|prefix| qualified_name.strip_prefix(prefix))
+        .and_then(|suffix| suffix.strip_prefix("::"))
+        .unwrap_or(qualified_name);
+    if local_name.is_empty() {
+        document.document_id.clone()
+    } else {
+        format!("{}::{local_name}", document.document_id)
+    }
 }
 
 fn prove_cancellation(
@@ -1872,6 +2005,19 @@ mod tests {
         let error =
             validate_workload_for_tuning(&duplicate_path).expect_err("duplicate corpus path");
         assert!(error.to_string().contains("duplicate corpus path"));
+
+        let mut duplicate_source_path = workload();
+        duplicate_source_path.corpus[1].source_path =
+            duplicate_source_path.corpus[0].source_path.clone();
+        let error = validate_workload_for_tuning(&duplicate_source_path)
+            .expect_err("duplicate source path");
+        assert!(error.to_string().contains("duplicate corpus source_path"));
+
+        let mut unsafe_source_path = workload();
+        unsafe_source_path.corpus[0].source_path = "../outside.rs".to_owned();
+        let error =
+            validate_workload_for_tuning(&unsafe_source_path).expect_err("unsafe source path");
+        assert!(error.to_string().contains("safe repository-relative path"));
     }
 
     #[test]
@@ -2020,6 +2166,56 @@ mod tests {
                 );
             }
         }
+
+        let authoritative_anchors: BTreeSet<_> = published
+            .occurrence_map
+            .values()
+            .flat_map(|entry| entry.display_anchors.iter().map(String::as_str))
+            .collect();
+        for expected in [
+            "watermark::VectorWatermark::merge_max",
+            "error::DomainError::InvalidTimeInterval",
+            "time::TimeInterval::validate",
+            "config_store::ConfigStore::write_config",
+            "coverage::RetentionClass::new",
+        ] {
+            assert!(
+                authoritative_anchors.contains(expected),
+                "missing extraction-qualified anchor {expected}"
+            );
+        }
+
+        let path_query = workload
+            .queries
+            .iter()
+            .find(|query| query.query_id == "validation-003")
+            .expect("path query");
+        let path_output =
+            compose_production_query(&published, &workload.profile_matrix[0], path_query)
+                .expect("path query composes");
+        let path_rows =
+            map_ranked_candidates(&published, &path_output).expect("path candidates map");
+        assert!(
+            path_rows
+                .iter()
+                .any(|candidate| candidate.document_id == "watermark"),
+            "snapshot logical path must retrieve the bound source document"
+        );
+
+        let history_query = workload
+            .queries
+            .iter()
+            .find(|query| query.query_id == "train-012")
+            .expect("history query");
+        let (history_status, history_rows) =
+            historical_candidates(&published, history_query).expect("history query executes");
+        assert_eq!(history_status, HistoricalQueryExecutionV1::Complete);
+        assert!(history_rows.iter().any(|candidate| {
+            candidate
+                .anchors
+                .iter()
+                .any(|anchor| anchor.contains("crates/tracedecay-domain/src/session.rs"))
+        }));
 
         for profile in &workload.profile_matrix {
             for query in &workload.queries {

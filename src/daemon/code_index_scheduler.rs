@@ -517,6 +517,13 @@ impl LatestCompleteCodeIndexV1 {
         let metadata = CodeLexicalProjectionMetadataV1 {
             generation: generation_id.clone(),
             repository_id: Some(self.generation.snapshot().repository.clone()),
+            logical_paths: self
+                .generation
+                .snapshot()
+                .files
+                .iter()
+                .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
+                .collect(),
             freshness: freshness.clone(),
             exact_retriever_revision: ComponentRevision::new("retriever.exact.daemon.v1")
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,

@@ -5,6 +5,7 @@
       "eligibility": "searchable",
       "language": "rust",
       "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/time.rs",
+      "source_path": "crates/tracedecay-domain/src/research/time.rs",
       "scope": "research"
     },
     {
@@ -12,6 +13,7 @@
       "eligibility": "searchable",
       "language": "rust",
       "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs",
+      "source_path": "crates/tracedecay-domain/src/research/watermark.rs",
       "scope": "research"
     },
     {
@@ -19,6 +21,7 @@
       "eligibility": "searchable",
       "language": "rust",
       "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/canonical.rs",
+      "source_path": "crates/tracedecay-domain/src/research/canonical.rs",
       "scope": "research"
     },
     {
@@ -26,6 +29,15 @@
       "eligibility": "searchable",
       "language": "rust",
       "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/error.rs",
+      "source_path": "crates/tracedecay-domain/src/research/error.rs",
+      "scope": "research"
+    },
+    {
+      "document_id": "coverage",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/coverage.rs",
+      "source_path": "crates/tracedecay-domain/src/research/coverage.rs",
       "scope": "research"
     },
     {
@@ -33,6 +45,7 @@
       "eligibility": "searchable",
       "language": "rust",
       "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/repository.rs",
+      "source_path": "crates/tracedecay-domain/src/repository.rs",
       "scope": "project"
     },
     {
@@ -40,6 +53,7 @@
       "eligibility": "searchable",
       "language": "rust",
       "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/integration.rs",
+      "source_path": "crates/tracedecay-domain/src/integration.rs",
       "scope": "project"
     },
     {
@@ -47,6 +61,7 @@
       "eligibility": "scope_guarded",
       "language": "rust",
       "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs",
+      "source_path": "crates/tracedecay-domain/src/session.rs",
       "scope": "session_private"
     },
     {
@@ -54,6 +69,7 @@
       "eligibility": "searchable",
       "language": "rust",
       "path": "tests/fixtures/context_eval_project/src/auth/login.rs",
+      "source_path": "tests/fixtures/context_eval_project/src/auth/login.rs",
       "scope": "context_eval"
     },
     {
@@ -61,6 +77,7 @@
       "eligibility": "searchable",
       "language": "rust",
       "path": "tests/fixtures/context_eval_project/src/storage/config_store.rs",
+      "source_path": "tests/fixtures/context_eval_project/src/storage/config_store.rs",
       "scope": "context_eval"
     },
     {
@@ -68,6 +85,7 @@
       "eligibility": "searchable",
       "language": "dockerfile",
       "path": "tests/fixtures/sample.dockerfile",
+      "source_path": "tests/fixtures/sample.dockerfile",
       "scope": "container_fixture"
     },
     {
@@ -75,6 +93,7 @@
       "eligibility": "excluded_generated_vendor_noise",
       "language": "generated_metadata",
       "path": "Cargo.lock",
+      "source_path": "Cargo.lock",
       "scope": "project"
     },
     {
@@ -82,6 +101,7 @@
       "eligibility": "unsupported",
       "language": "unsupported_fixture_extension",
       "path": "tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture",
+      "source_path": "tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture",
       "scope": "cargo_slot"
     }
   ],
@@ -446,10 +466,10 @@
       ],
       "label": {
         "anchors": [
-          "time::UtcMicros"
+          "coverage::RetentionClass::new"
         ],
-        "document_id": "time",
-        "literal": "pub struct UtcMicros"
+        "document_id": "coverage",
+        "literal": "pub fn new"
       },
       "partition": "validation",
       "query": "new",

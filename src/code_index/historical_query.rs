@@ -4,10 +4,8 @@
 //! exact/lexical/graph retrieval, and it never treats labels or expected
 //! output as source authorization.
 
-use std::collections::BTreeSet;
-use std::path::Path;
-
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use thiserror::Error;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::ContentDigest;
@@ -16,7 +14,7 @@ use tracedecay_domain::git::GitOidV1;
 use super::intake::content_digest;
 use crate::git_intelligence::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GitHistoricalBlobRequestV1, GitHistoricalBlobV1,
-    GitIntelligenceError, GitReadPort,
+    GitIntelligenceError, GitReadPort, is_canonical_repository_relative_path,
 };
 
 const MAX_COMMITS: usize = 256;
@@ -418,14 +416,7 @@ fn validate_request(
 }
 
 fn validate_path(path: &str) -> Result<(), HistoricalQueryError> {
-    if path.is_empty()
-        || path.contains('\\')
-        || path.chars().any(char::is_control)
-        || Path::new(path).is_absolute()
-        || path
-            .split('/')
-            .any(|component| component.is_empty() || matches!(component, "." | ".."))
-    {
+    if !is_canonical_repository_relative_path(path) {
         return Err(HistoricalQueryError::InvalidPath(path.to_owned()));
     }
     Ok(())

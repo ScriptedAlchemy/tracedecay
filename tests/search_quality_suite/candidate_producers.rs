@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use tracedecay::code_index::chunks::{
@@ -109,6 +109,14 @@ pub(crate) fn projection_metadata(
     CodeLexicalProjectionMetadataV1 {
         generation: generation.clone(),
         repository_id: Some(id::<RepositoryId>("repository.fixture")),
+        logical_paths: (0..=128)
+            .map(|ordinal| {
+                (
+                    id::<FileOccurrenceId>(&format!("file.{ordinal}")),
+                    format!("src/file-{ordinal}.rs"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
         freshness: freshness(compatibility),
         exact_retriever_revision: id::<ComponentRevision>("retriever.exact.v1"),
         lexical_retriever_revision: id::<ComponentRevision>("retriever.lexical.v1"),
