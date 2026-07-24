@@ -172,6 +172,47 @@ struct FeedbackCycleProgress {
     dedupe_key: Option<FeedbackDedupeKeyV1>,
 }
 
+fn admitted_progress(
+    progress: &Option<FeedbackCycleProgress>,
+) -> Result<&FeedbackCycleProgress, ApplicationContractError> {
+    progress
+        .as_ref()
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "feedback cycle admission state",
+        })
+}
+
+fn admitted_progress_mut(
+    progress: &mut Option<FeedbackCycleProgress>,
+) -> Result<&mut FeedbackCycleProgress, ApplicationContractError> {
+    progress
+        .as_mut()
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "feedback cycle admission state",
+        })
+}
+
+fn resolved_runtime(
+    progress: &FeedbackCycleProgress,
+) -> Result<&FeedbackRuntimeStateV1, ApplicationContractError> {
+    progress
+        .runtime
+        .as_ref()
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "feedback cycle runtime state",
+        })
+}
+
+fn resolved_impact_state(
+    progress: &FeedbackCycleProgress,
+) -> Result<FeedbackImpactStateV1, ApplicationContractError> {
+    progress
+        .impact_state
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "feedback cycle impact state",
+        })
+}
+
 /// One step in the feedback-cycle state machine.
 enum FeedbackCycleStage {
     ValidateAndScope,
@@ -508,7 +549,7 @@ where
                 }));
             }
         };
-        progress.as_mut().expect("admitted").runtime = Some(initial_runtime);
+        admitted_progress_mut(progress)?.runtime = Some(initial_runtime);
         Ok(FeedbackCycleStep::continue_with(
             FeedbackCycleStage::ValidateRuntime,
         ))
@@ -519,11 +560,8 @@ where
         progress: &mut Option<FeedbackCycleProgress>,
         request: &FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
-        let progress = progress.as_mut().expect("admitted");
-        let runtime = progress
-            .runtime
-            .as_ref()
-            .expect("runtime resolved before validation");
+        let progress = admitted_progress_mut(progress)?;
+        let runtime = resolved_runtime(progress)?;
         if runtime.validate_for(&request.input).is_err() {
             return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::DaemonUnavailable,
@@ -559,7 +597,7 @@ where
         request: &FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
         if request.control == FeedbackCycleControl::UserStop {
-            let runtime = progress.as_ref().expect("admitted").runtime.clone();
+            let runtime = admitted_progress(progress)?.runtime.clone();
             return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::UserStop,
                 Vec::new(),
@@ -577,7 +615,7 @@ where
         progress: &mut Option<FeedbackCycleProgress>,
         request: &FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
-        let progress = progress.as_mut().expect("runtime resolved");
+        let progress = admitted_progress_mut(progress)?;
         progress.completed_stages = vec![FeedbackEvaluationStageV1::Admission];
         if request.usage.exceeds(&request.input) {
             return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
@@ -609,11 +647,8 @@ where
         progress: &mut Option<FeedbackCycleProgress>,
         request: &FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
-        let progress = progress.as_mut().expect("runtime resolved");
-        let runtime = progress
-            .runtime
-            .as_ref()
-            .expect("runtime resolved before baselines");
+        let progress = admitted_progress_mut(progress)?;
+        let runtime = resolved_runtime(progress)?;
         let diagnostics_request = FeedbackDiagnosticsRequest {
             input: request.input.clone(),
             providers: request.providers.clone(),
@@ -655,7 +690,7 @@ where
         progress: &mut Option<FeedbackCycleProgress>,
         request: &FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
-        let progress = progress.as_mut().expect("runtime resolved");
+        let progress = admitted_progress_mut(progress)?;
         let diagnostics_request = FeedbackDiagnosticsRequest {
             input: request.input.clone(),
             providers: request.providers.clone(),
@@ -687,11 +722,8 @@ where
         request: &FeedbackCycleExecutionRequest,
         advisory: &FeedbackCycleAdvisoryV1,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
-        let progress = progress.as_mut().expect("runtime resolved");
-        let runtime = progress
-            .runtime
-            .as_ref()
-            .expect("runtime resolved before classification");
+        let progress = admitted_progress_mut(progress)?;
+        let runtime = resolved_runtime(progress)?;
         let resolved_baselines = resolve_baselines(request, runtime, &progress.baselines)?;
         progress.baseline_states = resolved_baselines
             .iter()
@@ -740,7 +772,7 @@ where
         progress: &mut Option<FeedbackCycleProgress>,
         request: &FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
-        let progress = progress.as_mut().expect("runtime resolved");
+        let progress = admitted_progress_mut(progress)?;
         match self.resolve_impact(context, &request.input).await {
             FeedbackImpactResolution::Evidence(impact, state) => {
                 progress.impact = *impact;
@@ -795,16 +827,11 @@ where
         request: &FeedbackCycleExecutionRequest,
         advisory: &FeedbackCycleAdvisoryV1,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
-        let progress = progress.as_mut().expect("runtime resolved");
-        let impact_state = progress
-            .impact_state
-            .expect("impact resolved before dedupe");
+        let progress = admitted_progress_mut(progress)?;
+        let impact_state = resolved_impact_state(progress)?;
         progress.dedupe_key = if request.input.request.durability() == FeedbackDurabilityV1::Durable
         {
-            let runtime = progress
-                .runtime
-                .as_ref()
-                .expect("runtime resolved before dedupe");
+            let runtime = resolved_runtime(progress)?;
             let evidence_identity = canonical_sha256(&(
                 "tracedecay.feedback.evidence-identity.v2",
                 runtime,
@@ -886,10 +913,8 @@ where
         progress: &mut Option<FeedbackCycleProgress>,
         request: &FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
-        let progress = progress.as_mut().expect("runtime resolved");
-        let impact_state = progress
-            .impact_state
-            .expect("impact resolved before assembly");
+        let progress = admitted_progress_mut(progress)?;
+        let impact_state = resolved_impact_state(progress)?;
         let affected_tests_state = progress
             .impact
             .as_ref()
@@ -973,7 +998,11 @@ where
                 None,
             ),
             FeedbackCycleFinishPath::AfterRuntime { runtime, .. } => {
-                let admission = &progress.expect("admitted").admission;
+                let admission = &progress
+                    .ok_or(ApplicationContractError::Inconsistent {
+                        field: "feedback cycle admission state",
+                    })?
+                    .admission;
                 self.finish_after_runtime(
                     context,
                     request,
@@ -991,7 +1020,11 @@ where
                 .await
             }
             FeedbackCycleFinishPath::AfterCheckedRuntime { runtime, .. } => {
-                let admission = &progress.expect("admitted").admission;
+                let admission = &progress
+                    .ok_or(ApplicationContractError::Inconsistent {
+                        field: "feedback cycle admission state",
+                    })?
+                    .admission;
                 self.finish_after_checked_runtime(
                     context,
                     request,
