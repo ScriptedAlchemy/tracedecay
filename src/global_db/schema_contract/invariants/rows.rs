@@ -523,8 +523,8 @@ mod tests {
 
     fn advance_values(range_start: u64) -> String {
         use tracedecay_domain::{
-            ObservationOrderingDomainV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-            ObservationSourceRangeV1, SessionId,
+            ObservationOrderingDomainV1, ObservationSourceGenerationV1,
+            ObservationSourceIdentityV1, ObservationSourceRangeV1, SessionId,
         };
 
         let source = serde_json::to_string(

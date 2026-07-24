@@ -5,6 +5,23 @@
 import { afterEach } from 'vitest';
 import { cleanup } from '@testing-library/react';
 
+// Sigma reads `WebGL2RenderingContext` at MODULE scope, so merely importing a
+// component whose module graph reaches it throws `ReferenceError` under jsdom —
+// before any test body runs, and regardless of whether that test touches the
+// canvas. jsdom ships no WebGL, so the constructor is declared here purely to
+// let the module evaluate. It is deliberately not a working implementation:
+// components probe for a real context (`hasWebGl`) and take their no-WebGL
+// path, which is the behavior jsdom should exercise anyway.
+for (const name of ['WebGLRenderingContext', 'WebGL2RenderingContext']) {
+  if (!(name in globalThis)) {
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      writable: true,
+      value: class {},
+    });
+  }
+}
+
 afterEach(() => {
   cleanup();
 });
