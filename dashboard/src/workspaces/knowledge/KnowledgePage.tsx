@@ -211,17 +211,26 @@ export function KnowledgePage() {
                         ],
                       }}
                     />
+                    {/* Date-over-value, the same shape as every other
+                     * Readout on this page, rather than one cramped line —
+                     * "MAY 8 · 3,200" beside its mirror at the opposite edge
+                     * had nowhere to go in a 224px rail and truncated into
+                     * the gap between them. */}
                     <div
                       aria-hidden
-                      className="flex items-center justify-between border-t border-edge-subtle pt-1"
+                      className="flex items-start justify-between gap-2 border-t border-edge-subtle pt-1.5"
                     >
-                      <span className="td-legend">
-                        {growth[0]!.date} · {formatCount(growth[0]!.cumulative_facts)}
-                      </span>
-                      <span className="td-legend">
-                        {growth[growth.length - 1]!.date} ·{' '}
-                        {formatCount(growth[growth.length - 1]!.cumulative_facts)}
-                      </span>
+                      <Readout
+                        label={formatShortDate(growth[0]!.date)}
+                        value={formatCount(growth[0]!.cumulative_facts)}
+                        size="sm"
+                      />
+                      <Readout
+                        label={formatShortDate(growth[growth.length - 1]!.date)}
+                        value={formatCount(growth[growth.length - 1]!.cumulative_facts)}
+                        size="sm"
+                        align="right"
+                      />
                     </div>
                   </figure>
                 ) : null}
@@ -377,6 +386,21 @@ function FactListRow({
       </span>
     </DataRow>
   );
+}
+
+/** "2026-05-08" -> "May 8". The growth caption prints a date beside a
+ * facts count in a 224px rail; the full ISO stamp alone (10 chars) leaves no
+ * room for the count next to it before the two end labels collide. The full
+ * date stays in the chart's `ariaLabel` — this is a display-only compaction,
+ * not a different value. */
+function formatShortDate(iso: string): string {
+  const date = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
 }
 
 /** One category's share of the loaded fact set, read the same way the fact
