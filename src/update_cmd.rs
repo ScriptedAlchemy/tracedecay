@@ -1188,7 +1188,10 @@ mod tests {
     fn real_install_failure_yields_partial_failure() {
         match partition_reinstall_results(vec![ok("claude"), err("cursor")]) {
             ReinstallOutcome::PartialFailure { failed } => {
-                assert_eq!(failed, vec!["cursor: config error: install failed".to_string()]);
+                assert_eq!(
+                    failed,
+                    vec!["cursor: config error: install failed".to_string()]
+                );
             }
             ReinstallOutcome::AllOk => panic!("a real install() failure must gate markers"),
         }
